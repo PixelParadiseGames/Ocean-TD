@@ -1,0 +1,44 @@
+{
+  "name": "OceanTD",
+  "tree": {
+    "$className": "DataModel",
+    "ReplicatedStorage": {
+      "OceanTD": {
+        "$path": "src/ReplicatedStorage/OceanTD",
+        "$ignoreUnknownInstances": true,
+        "RemoteEvents": {
+          "$className": "Folder",
+          "PlotAssigned": {
+            "$className": "RemoteEvent"
+          },
+          "PlotCleared": {
+            "$className": "RemoteEvent"
+          },
+          "SessionReady": {
+            "$className": "RemoteEvent"
+          }
+        }
+      }
+    },
+    "ServerScriptService": {
+      "OceanTD": {
+        "$path": "src/ServerScriptService/OceanTD",
+        "$ignoreUnknownInstances": true
+      }
+    },
+    "ServerStorage": {
+      "OceanTD": {
+        "$path": "src/ServerStorage/OceanTD",
+        "$ignoreUnknownInstances": true
+      }
+    },
+    "StarterPlayer": {
+      "StarterPlayerScripts": {
+        "OceanTD": {
+          "$path": "src/StarterPlayerScripts/OceanTD",
+          "$ignoreUnknownInstances": true
+        }
+      }
+    }
+  }
+}

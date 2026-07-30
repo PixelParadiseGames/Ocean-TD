@@ -1,0 +1,5 @@
+# Install: aftman install
+# Then: rojo serve  (sync into open Ocean TD.rbxl via Rojo Studio plugin)
+
+[tools]
+rojo = "rojo-rbx/rojo@7.7.0"

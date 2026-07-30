@@ -1,0 +1,35 @@
+---
+description: Ocean TD always-on conventions — read systems index first; protect persistence.
+globs:
+  - "**/*"
+---
+
+# Ocean TD rules
+
+## Read order
+1. `docs/PROJECT_OVERVIEW.md`
+2. `docs/SYSTEMS_INDEX.md` for the system you touch
+3. Only then open the 2–4 listed scripts
+Do not broad-scan the repo unless the index is missing — then fix the index.
+
+## Source of truth
+- Server owns place, pay, persist, plot ownership, scores.
+- Client mirrors (previews, camera, UI). No parallel authority.
+- Layout is plot-local; grid math constants must match on server and client.
+- Plots: `MasterTerrainBox` + plugin `PreviewBox_1..5` (no Arena.Center). Décor: author `MasterPlotDecor`; boot clones → `StaticPlot_N`. See `docs/STUDIO_CONTRACT.md`.
+
+## Persistence (sacred)
+- Never save while `layoutLoaded` is false.
+- Never overwrite a non-empty DataStore layout with an empty snapshot unless intentional clear.
+- DataStores: join / leave / autosave only — not per frame.
+- One persist shape: extend `PersistenceService` + `PlotTypes`; see `docs/PERSISTENCE_CONTRACT.md`.
+
+## Organization
+- One system = one owner script + named helpers.
+- Update `docs/SYSTEMS_INDEX.md` in the same change as new/renamed systems.
+- Prefer checklists in `docs/CHECKLISTS.md` for repeating work.
+- Stable logs: `[PLOT]`, `[GRID]`, `[PERSIST]`.
+
+## Edit surface
+- Match existing patterns; do not refactor adjacent systems while fixing X.
+- Update docs when behavior or ownership changes; stale docs are worse than short accurate ones.

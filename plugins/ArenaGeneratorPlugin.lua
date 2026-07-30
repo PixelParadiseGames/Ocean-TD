@@ -1,0 +1,221 @@
+-- Arena Generator Plugin (With Stash-to-Storage Fix)
+local toolbar = plugin:CreateToolbar("Arena Builder")
+
+-- Create the UI Window 
+local widgetInfo = DockWidgetPluginGuiInfo.new(Enum.InitialDockState.Float, false, false, 200, 330, 200, 330)
+local widget = plugin:CreateDockWidgetPluginGui("ArenaBuilderWidget", widgetInfo)
+widget.Title = "Arena Generator"
+
+-- Simple UI Layout
+local frame = Instance.new("Frame", widget)
+frame.Size = UDim2.new(1, 0, 1, 0)
+frame.BackgroundColor3 = Color3.fromRGB(45, 45, 45)
+
+local uilist = Instance.new("UIListLayout", frame)
+uilist.Padding = UDim.new(0, 10)
+uilist.HorizontalAlignment = Enum.HorizontalAlignment.Center
+
+local title = Instance.new("TextLabel", frame)
+title.Text = "Arena Controls"
+title.Size = UDim2.new(1, 0, 0, 30)
+title.TextColor3 = Color3.new(1, 1, 1)
+title.BackgroundTransparency = 1
+
+local plotInput = Instance.new("TextBox", frame)
+plotInput.Size = UDim2.new(0.8, 0, 0, 30)
+plotInput.Text = "6" 
+plotInput.PlaceholderText = "Number of Plots"
+
+local expansionInput = Instance.new("TextBox", frame)
+expansionInput.Size = UDim2.new(0.8, 0, 0, 30)
+expansionInput.Text = "0" 
+expansionInput.PlaceholderText = "Expansion Offset"
+
+local previewBtn = Instance.new("TextButton", frame)
+previewBtn.Size = UDim2.new(0.8, 0, 0, 40)
+previewBtn.Text = "1. Spawn/Update Previews"
+previewBtn.BackgroundColor3 = Color3.fromRGB(0, 120, 215)
+previewBtn.TextColor3 = Color3.new(1, 1, 1)
+
+local stampBtn = Instance.new("TextButton", frame)
+stampBtn.Size = UDim2.new(0.8, 0, 0, 40)
+stampBtn.Text = "2. Stamp Terrain"
+stampBtn.BackgroundColor3 = Color3.fromRGB(0, 170, 0)
+stampBtn.TextColor3 = Color3.new(1, 1, 1)
+
+local hideBtn = Instance.new("TextButton", frame)
+hideBtn.Size = UDim2.new(0.8, 0, 0, 40)
+hideBtn.Text = "3. Hide Previews"
+hideBtn.BackgroundColor3 = Color3.fromRGB(100, 100, 100)
+hideBtn.TextColor3 = Color3.new(1, 1, 1)
+
+local toggleBtn = toolbar:CreateButton("Toggle Menu", "Open Arena Tools", "rbxassetid://4458901886")
+
+-- Plugin Logic
+toggleBtn.Click:Connect(function()
+	widget.Enabled = not widget.Enabled
+end)
+
+local ServerStorage = game:GetService("ServerStorage")
+local masterBox = nil
+local previewsVisible = true
+
+-- [PREVIEW BUTTON LOGIC]
+previewBtn.MouseButton1Click:Connect(function()
+	local plots = tonumber(plotInput.Text) or 6
+	local expansionOffset = tonumber(expansionInput.Text) or 0
+
+	-- Check both Workspace and ServerStorage so we don't duplicate it if hidden
+	masterBox = workspace:FindFirstChild("MasterTerrainBox") or ServerStorage:FindFirstChild("MasterTerrainBox")
+
+	if not masterBox then
+		masterBox = Instance.new("Part")
+		masterBox.Name = "MasterTerrainBox"
+		masterBox.Size = Vector3.new(64, 32, 64)
+		masterBox.CFrame = CFrame.new(0, 16, 150) * CFrame.Angles(0, math.rad(180), 0)
+		masterBox.Anchored = true
+		masterBox.CanCollide = false
+		masterBox.CanTouch = false -- Fix for physical interactions
+		masterBox.CanQuery = false -- Fix for raycasts
+		masterBox.Color = Color3.fromRGB(0, 255, 0)
+	end
+
+	-- Always ensure the green box is visible and in the workspace when generating
+	masterBox.Parent = workspace
+	masterBox.Transparency = 0.5 
+	masterBox.Locked = false 
+	previewsVisible = true
+	hideBtn.Text = "3. Hide Previews"
+
+	local folder = workspace:FindFirstChild("TerrainPreviews") or ServerStorage:FindFirstChild("TerrainPreviews")
+	if folder then folder:Destroy() end
+	folder = Instance.new("Folder")
+	folder.Name = "TerrainPreviews"
+	folder.Parent = workspace
+
+	local angleStep = (math.pi * 2) / plots
+	local apothem = (masterBox.Size.X / 2) / math.tan(math.pi / plots)
+	local radius = apothem + (masterBox.Size.Z / 2) + expansionOffset
+	local centerCFrame = masterBox.CFrame * CFrame.new(0, 0, -radius)
+
+	for i = 1, plots - 1 do
+		local currentAngle = angleStep * i
+		local previewBox = Instance.new("Part")
+		previewBox.Name = "PreviewBox_" .. i
+		previewBox.Size = masterBox.Size
+		previewBox.CFrame = centerCFrame * CFrame.Angles(0, currentAngle, 0) * CFrame.new(0, 0, radius)
+		previewBox.Anchored = true
+		previewBox.CanCollide = false
+		previewBox.CanTouch = false -- Fix for physical interactions
+		previewBox.CanQuery = false -- Fix for raycasts
+		previewBox.Locked = true
+		previewBox.Color = Color3.fromRGB(255, 0, 0)
+		previewBox.Transparency = 0.5
+		previewBox.Parent = folder
+	end
+end)
+
+-- [STAMP TERRAIN LOGIC]
+stampBtn.MouseButton1Click:Connect(function()
+	local terrain = workspace.Terrain
+	masterBox = workspace:FindFirstChild("MasterTerrainBox")
+	local folder = workspace:FindFirstChild("TerrainPreviews")
+
+	if not masterBox or not folder then 
+		warn("Please show or spawn previews in the workspace first!") 
+		return 
+	end
+
+	print("Reading Master Plot...")
+
+	local mCFrame = masterBox.CFrame
+	local mSize = masterBox.Size
+	local mRadius = mSize.Magnitude / 2
+	local mMin = mCFrame.Position - Vector3.new(mRadius, mRadius, mRadius)
+	local mMax = mCFrame.Position + Vector3.new(mRadius, mRadius, mRadius)
+	local mRegion = Region3.new(mMin, mMax):ExpandToGrid(4)
+	local mMats, mOccs = terrain:ReadVoxels(mRegion, 4)
+	local mRegionMin = mRegion.CFrame.Position - (mRegion.Size / 2)
+
+	local function getMasterVoxel(worldPos)
+		local offset = worldPos - mRegionMin
+		local ix = math.floor(offset.X / 4) + 1
+		local iy = math.floor(offset.Y / 4) + 1
+		local iz = math.floor(offset.Z / 4) + 1
+
+		if mMats[ix] and mMats[ix][iy] and mMats[ix][iy][iz] then
+			return mMats[ix][iy][iz], mOccs[ix][iy][iz]
+		end
+		return Enum.Material.Air, 0
+	end
+
+	print("Stamping Terrain to clones. This may take a moment...")
+
+	for _, previewBox in ipairs(folder:GetChildren()) do
+		local pCFrame = previewBox.CFrame
+		local pSize = previewBox.Size
+		local pRadius = pSize.Magnitude / 2
+
+		local pMin = pCFrame.Position - Vector3.new(pRadius, pRadius, pRadius)
+		local pMax = pCFrame.Position + Vector3.new(pRadius, pRadius, pRadius)
+		local pRegion = Region3.new(pMin, pMax):ExpandToGrid(4)
+
+		local pMats, pOccs = terrain:ReadVoxels(pRegion, 4)
+		local pRegionMin = pRegion.CFrame.Position - (pRegion.Size / 2)
+		local resX, resY, resZ = pRegion.Size.X/4, pRegion.Size.Y/4, pRegion.Size.Z/4
+
+		for x = 1, resX do
+			for y = 1, resY do
+				for z = 1, resZ do
+					local voxelWorldPos = pRegionMin + Vector3.new((x-0.5)*4, (y-0.5)*4, (z-0.5)*4)
+					local localPos = pCFrame:PointToObjectSpace(voxelWorldPos)
+
+					if math.abs(localPos.X) <= pSize.X/2 and 
+						math.abs(localPos.Y) <= pSize.Y/2 and 
+						math.abs(localPos.Z) <= pSize.Z/2 then
+
+						local greenWorldPos = mCFrame:PointToWorldSpace(localPos)
+						local mat, occ = getMasterVoxel(greenWorldPos)
+
+						pMats[x][y][z] = mat
+						pOccs[x][y][z] = occ
+					end
+				end
+			end
+			if x % 5 == 0 then task.wait() end 
+		end
+		terrain:WriteVoxels(pRegion, 4, pMats, pOccs)
+	end
+	print("Terrain Stamping Complete! Your arena is ready.")
+end)
+
+-- [HIDE/SHOW PREVIEWS LOGIC]
+hideBtn.MouseButton1Click:Connect(function()
+	previewsVisible = not previewsVisible
+	hideBtn.Text = previewsVisible and "3. Hide Previews" or "3. Show Previews"
+
+	if not previewsVisible then
+		-- HIDING: Move them completely out of Workspace into ServerStorage
+		masterBox = workspace:FindFirstChild("MasterTerrainBox")
+		if masterBox then
+			masterBox.Parent = ServerStorage
+		end
+
+		local folder = workspace:FindFirstChild("TerrainPreviews")
+		if folder then
+			folder.Parent = ServerStorage
+		end
+	else
+		-- SHOWING: Bring them back to the Workspace
+		masterBox = ServerStorage:FindFirstChild("MasterTerrainBox")
+		if masterBox then
+			masterBox.Parent = workspace
+			masterBox.Locked = false
+		end
+
+		local folder = ServerStorage:FindFirstChild("TerrainPreviews")
+		if folder then
+			folder.Parent = workspace
+		end
+	end
+end)

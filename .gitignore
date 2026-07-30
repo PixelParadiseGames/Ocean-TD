@@ -1,0 +1,16 @@
+# Rojo / tooling
+*.rbxl.lock
+sourcemap.json
+OceanTD_CodeBuild.rbxlx
+tools/rojo.exe
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.tmp
+.vscode/*
+!.vscode/extensions.json
+
+# Secrets
+.env
+*.env
