@@ -1,5 +1,5 @@
 --!strict
--- In-memory occupancy for plot layouts. Phase 1: hydrate/snapshot only (no place API).
+-- In-memory occupancy for plot layouts.
 
 local PlotTypes = require(game:GetService("ReplicatedStorage"):WaitForChild("OceanTD"):WaitForChild("Shared"):WaitForChild("PlotTypes"))
 local GridMath = require(game:GetService("ReplicatedStorage"):WaitForChild("OceanTD"):WaitForChild("Shared"):WaitForChild("GridMath"))
@@ -18,9 +18,8 @@ export type CellData = {
 
 local GridService = {}
 
--- Global live grid: key -> cell (world-agnostic plot-local keys scoped per plot via compound key)
 local cells: { [string]: CellData } = {}
-local plotObjectCounts: { [string]: number } = {} -- plotId -> count
+local plotObjectCounts: { [string]: number } = {}
 
 local function log(...: any)
 	print("[GRID]", ...)
@@ -30,8 +29,8 @@ local function compoundKey(plotId: string, gx: number, gy: number, gz: number): 
 	return plotId .. ":" .. GridMath.key(gx, gy, gz)
 end
 
-local function layoutToGridKey(plotId: string, obj: LayoutObject): string
-	local gx, gy, gz = GridMath.worldToGrid(Vector3.new(obj.lx, obj.ly, obj.lz), Vector3.zero)
+local function localToKey(plotId: string, lx: number, ly: number, lz: number): string
+	local gx, gy, gz = GridMath.worldToGrid(Vector3.new(lx, ly, lz), Vector3.zero)
 	return compoundKey(plotId, gx, gy, gz)
 end
 
@@ -51,8 +50,39 @@ function GridService.getPlotCount(plotId: PlotId): number
 	return plotObjectCounts[plotId] or 0
 end
 
--- Hydrate from durable plot-local layout. Empty layout is valid.
-function GridService.hydrate(plotId: PlotId, ownerUserId: number, layout: { LayoutObject }, boundsCFrame: CFrame)
+function GridService.getCell(plotId: PlotId, lx: number, ly: number, lz: number): CellData?
+	return cells[localToKey(plotId, lx, ly, lz)]
+end
+
+function GridService.isOccupied(plotId: PlotId, lx: number, ly: number, lz: number): boolean
+	return GridService.getCell(plotId, lx, ly, lz) ~= nil
+end
+
+function GridService.tryOccupy(
+	plotId: PlotId,
+	ownerUserId: number,
+	itemId: string,
+	lx: number,
+	ly: number,
+	lz: number
+): (boolean, string?)
+	local key = localToKey(plotId, lx, ly, lz)
+	if cells[key] then
+		return false, "SpotTaken"
+	end
+	cells[key] = {
+		id = itemId,
+		lx = lx,
+		ly = ly,
+		lz = lz,
+		ownerUserId = ownerUserId,
+		plotId = plotId,
+	}
+	plotObjectCounts[plotId] = (plotObjectCounts[plotId] or 0) + 1
+	return true, nil
+end
+
+function GridService.hydrate(plotId: PlotId, ownerUserId: number, layout: { LayoutObject }, _boundsCFrame: CFrame)
 	GridService.clearPlot(plotId)
 
 	local count = 0
@@ -61,32 +91,25 @@ function GridService.hydrate(plotId: PlotId, ownerUserId: number, layout: { Layo
 			local lx = tonumber(obj.lx) or 0
 			local ly = tonumber(obj.ly) or 0
 			local lz = tonumber(obj.lz) or 0
-			local normalized: LayoutObject = {
-				id = obj.id,
-				lx = lx,
-				ly = ly,
-				lz = lz,
-			}
-			local key = layoutToGridKey(plotId, normalized)
-			cells[key] = {
-				id = normalized.id,
-				lx = lx,
-				ly = ly,
-				lz = lz,
-				ownerUserId = ownerUserId,
-				plotId = plotId,
-			}
-			count += 1
-			-- Phase 1: no visual spawn. World position available for later phases:
-			-- GridMath.plotLocalToWorld(Vector3.new(lx, ly, lz), boundsCFrame)
-			local _ = boundsCFrame
+			local ok = GridService.tryOccupy(plotId, ownerUserId, obj.id, lx, ly, lz)
+			if ok then
+				count += 1
+			end
 		end
 	end
+	-- tryOccupy increments; clearPlot zeroed — recount for accuracy
 	plotObjectCounts[plotId] = count
 	log("Hydrated", plotId, "objects=", count)
 end
 
--- Snapshot plot-local durable objects for persistence.
+function GridService.forEachCell(plotId: PlotId, fn: (CellData) -> ())
+	for _, cell in pairs(cells) do
+		if cell.plotId == plotId then
+			fn(cell)
+		end
+	end
+end
+
 function GridService.snapshot(plotId: PlotId): { LayoutObject }
 	local layout: { LayoutObject } = {}
 	for _, cell in pairs(cells) do

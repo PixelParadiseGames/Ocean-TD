@@ -9,13 +9,12 @@ Follow these when doing repeating work. Do not invent a parallel data path.
 4. Update [SYSTEMS_INDEX.md](SYSTEMS_INDEX.md) if a new owner appears.
 5. Add a failure-mode row if misuse can wipe or clobber data.
 
-## New item / coral type (from Phase 2+)
-1. Definition module / catalog id (single source).
-2. Inventory grant path (server).
-3. Place validation (server) + preview (client).
-4. Layout serialize fields (`id`, plot-local pos, extras).
-5. Visual template (minimize parts; watch replication).
-6. SYSTEMS_INDEX touch if new system/helper.
+## New backpack / catalog item (UI)
+1. Add def to `Shared/ItemCatalog.lua` (`id`, `displayName`, `icon`, `category`, `sortOrder`, `speciesId`).
+2. Add matching species to `Shared/SpeciesCatalog.lua` (diameter, colors, material, shadow/collide).
+3. Icon shows in Slot4 backpack grid automatically on rebuild; placement uses `speciesId` → CoralVisual.
+4. Update SYSTEMS_INDEX only if a new owner script appears.
+5. Persist counts later via PersistenceService + checklist “New persist field”.
 
 ## New remote
 1. Add name to `Remotes.lua` list.

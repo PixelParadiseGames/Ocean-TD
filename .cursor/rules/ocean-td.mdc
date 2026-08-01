@@ -24,11 +24,14 @@ Do not broad-scan the repo unless the index is missing — then fix the index.
 - DataStores: join / leave / autosave only — not per frame.
 - One persist shape: extend `PersistenceService` + `PlotTypes`; see `docs/PERSISTENCE_CONTRACT.md`.
 
+## UI
+- Default generated text font: `Enum.Font.FredokaOne` via `Shared/UiTheme.lua`. Use that when unsure.
+
 ## Organization
 - One system = one owner script + named helpers.
 - Update `docs/SYSTEMS_INDEX.md` in the same change as new/renamed systems.
 - Prefer checklists in `docs/CHECKLISTS.md` for repeating work.
-- Stable logs: `[PLOT]`, `[GRID]`, `[PERSIST]`.
+- Stable logs: `[PLOT]`, `[GRID]`, `[PERSIST]`, `[DECOR]`, `[INV]`.
 
 ## Edit surface
 - Match existing patterns; do not refactor adjacent systems while fixing X.

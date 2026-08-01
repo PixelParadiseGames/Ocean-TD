@@ -9,8 +9,9 @@ Ordered. Do not invent parallel data paths when a later phase lands — extend t
 - Empty layout persistence + anti-wipe
 
 ## Phase 2 — Place + inventory
-- Server-validated place/remove on rough terrain (visual position + grid occupancy)
-- Backpack / inventory counts (replicated mirrors)
+- Backpack UI (Slot4) + ItemCatalog — **live**
+- Confirm-ghost place (✓/X) + server validate/occupy/visual — **live** (infinite Brain Coral, no debit)
+- Remove coral / backpack counts (replicated mirrors)
 - Max placed cap stub (skill tree later)
 
 ## Phase 3 — Feed waves

@@ -8,15 +8,11 @@
         "$ignoreUnknownInstances": true,
         "RemoteEvents": {
           "$className": "Folder",
-          "PlotAssigned": {
-            "$className": "RemoteEvent"
-          },
-          "PlotCleared": {
-            "$className": "RemoteEvent"
-          },
-          "SessionReady": {
-            "$className": "RemoteEvent"
-          }
+          "PlotAssigned": { "$className": "RemoteEvent" },
+          "PlotCleared": { "$className": "RemoteEvent" },
+          "SessionReady": { "$className": "RemoteEvent" },
+          "PlaceResult": { "$className": "RemoteEvent" },
+          "RequestPlace": { "$className": "RemoteFunction" }
         }
       }
     },

@@ -1,0 +1,2139 @@
+--!strict
+--[[
+	Placement mode (confirm-ghost flow):
+	Aiming → ghost follows pointer; Confirming → parked ghost + ✓ / X.
+	✓ = server RequestPlace; X = cancel confirm (back to aiming) or exit.
+	Freezes avatar movement + camera while active. Infinite items (no debit).
+]]
+
+local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
+local ContextActionService = game:GetService("ContextActionService")
+local GuiService = game:GetService("GuiService")
+local Workspace = game:GetService("Workspace")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local player = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui")
+local camera = Workspace.CurrentCamera
+
+local oceanRoot = ReplicatedStorage:WaitForChild("OceanTD")
+local Remotes = require(oceanRoot:WaitForChild("Remotes"))
+local CoralVisual = require(oceanRoot:WaitForChild("Shared"):WaitForChild("CoralVisual"))
+local SpeciesCatalog = require(oceanRoot:WaitForChild("Shared"):WaitForChild("SpeciesCatalog"))
+local ItemCatalog = require(oceanRoot:WaitForChild("Shared"):WaitForChild("ItemCatalog"))
+local GridMath = require(oceanRoot:WaitForChild("Shared"):WaitForChild("GridMath"))
+local UiTheme = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiTheme"))
+local UiCircles = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiCircles"))
+
+local InventoryState = require(script.Parent:WaitForChild("InventoryState"))
+local ClientPlot = require(script.Parent:WaitForChild("ClientPlot"))
+local PlaceVfx = require(script.Parent:WaitForChild("PlaceVfx"))
+local HandOrb = require(script.Parent:WaitForChild("HandOrb"))
+
+local PlacementController = {}
+
+local MODE_OFF = "Off"
+local MODE_AIM = "Aim"
+local MODE_CONFIRM = "Confirm"
+
+local mode = MODE_OFF
+local armedItemId: string? = nil
+local ghost: BasePart? = nil
+local warnLabel: TextLabel? = nil
+local moveHintImage: ImageLabel? = nil
+local confirmGui: ScreenGui? = nil
+local checkBtn: TextButton? = nil
+local cancelBtn: TextButton? = nil
+local confirmPos: Vector3? = nil -- ground anchor under finger (actual place pos)
+local placeAnchor: Vector3? = nil
+local validSpot = false
+local rejectReason: string? = nil
+local backpackDrag = false -- pointer-driven aim from backpack pull
+local aimFingerDown = false -- world drag after tap-select (mobile/PC)
+local confirmDragging = false
+local confirmPressOrigin: Vector2? = nil -- nil while pressing ✓/X
+local chromeScreenPos: Vector2? = nil -- legacy; ✓/X now track the avatar
+local aimPinnedToCenter = false
+local aimPinnedToHand = false -- ghost starts in the right hand until the player aims
+local aimPinOrigin: Vector2? = nil
+local AIM_UNPIN_PX = 14
+local moveHintScale: UIScale? = nil
+local moveHintPulseToken = 0
+-- Gamepad: left stick aims; A places immediately (no park/confirm); B returns to list.
+local gamepadPlacement = false
+local gamepadCursor: Vector2? = nil
+local checkPromptConn: RBXScriptConnection? = nil
+local gamepadReturnCbs: { () -> () } = {}
+local GAMEPAD_STICK_DEADZONE = 0.22
+-- Precision aim: 50% of original, then another ~30% slower (980 → 343).
+local GAMEPAD_AIM_SPEED = 343 -- px/sec at full deflection
+
+-- Defined early so destroyConfirmUi / exitPlacement never hit a nil forward-ref.
+local function stopCheckPrompt()
+	if checkPromptConn then
+		checkPromptConn:Disconnect()
+		checkPromptConn = nil
+	end
+end
+
+-- Screen stack around the 2D aim point (cursor / raised touch aim), not the 3D
+-- projection — ground hits often draw below the cursor and dragged all chrome down.
+-- ✓/X above aim+ghost, move icon directly under the ghost.
+local MOVE_ICON_SIZE = 48
+local GHOST_SCREEN_RADIUS_PX = 30 -- clears the ball so chrome isn't on top of it
+local MOVE_BELOW_GHOST_PX = 4
+local BTN_ABOVE_GHOST_PX = 4
+-- Touch-only: raise ghost/plant above the finger. Mouse/gamepad aim with no offset.
+local GHOST_SCREEN_OFFSET_Y = 105
+local MOVE_ICON_IMAGE = "rbxassetid://345081302"
+local MOVE_HINT_PULSE_SPEED = 4
+local MOVE_HINT_SCALE_IN_SEC = 0.35
+local MOVE_HINT_PULSE_AMP = 0.2
+local GHOST_INVALID_COLOR = Color3.fromRGB(220, 70, 70)
+local GHOST_PULSE_SPEED = 5
+local CHECK_BRIGHT_GREEN = Color3.fromRGB(90, 255, 120)
+local CHECK_HUNTER_GREEN = Color3.fromRGB(35, 85, 45)
+local CANCEL_FLASH_RED = Color3.fromRGB(255, 70, 70)
+local DISARM_SCALE_SEC = 1
+local ARM_INTRO_SEC = 0.7
+local POST_PLACE_GHOST_DELAY = 1
+local GHOST_SCALE_IN_SEC = 0.5
+
+local ghostBaseColor: Color3? = nil
+local ghostBaseMaterial: Enum.Material? = nil
+local placeResumeToken = 0
+local postPlaceWaiting = false
+local pendingGhostScaleIn = false
+local ghostScaleConn: RBXScriptConnection? = nil
+local disarmAnimating = false
+local disarmConn: RBXScriptConnection? = nil
+local armIntroAnimating = false
+local armIntroConn: RBXScriptConnection? = nil
+-- Parallel item-switch: old ghost/UI flies home while the new one flies out.
+local outgoingConn: RBXScriptConnection? = nil
+local outgoingGhost: BasePart? = nil
+local outgoingGui: ScreenGui? = nil
+-- Optional slot targets when switching items (capture before pulse moves).
+local pendingDisarmSlotScreen: Vector2? = nil
+local pendingArmSlotScreen: Vector2? = nil
+local queuedSwitchItemId: string? = nil
+-- ✓/X press owned by confirm chrome (blocks AIM from parking the ghost on that click).
+local chromeBtnPointerDown = false
+
+-- Forward decls so confirm UI can wire before bodies are assigned.
+local onCheck: () -> ()
+local onCancel: () -> ()
+local makeConfirmUi: () -> ()
+local syncConfirmButtons: () -> ()
+local stopMoveHintAttract: () -> ()
+local startMoveHintAttract: () -> ()
+local releaseHandPin: () -> ()
+local stopArmIntro: () -> ()
+local startAimLoop: () -> ()
+local beginAim: (string, boolean?, boolean?) -> ()
+
+local savedWalkSpeed = 16
+local savedJumpPower = 50
+local savedJumpHeight = 7.2
+local savedCameraType: Enum.CameraType? = nil
+local savedCameraCFrame: CFrame? = nil
+local aimConn: RBXScriptConnection? = nil
+local inputConns: { RBXScriptConnection } = {}
+local frozen = false
+local savedTouchControlsEnabled: boolean? = nil
+local savedTouchGuiEnabled: boolean? = nil
+
+local FREEZE_ACTION = "OceanTD_PlacementFreeze"
+local DEFAULT_WALK_SPEED = 16
+local DEFAULT_JUMP_POWER = 50
+local DEFAULT_JUMP_HEIGHT = 7.2
+local CONFIRM_DRAG_PX = 28 -- ignore tiny finger jitter before moving parked ghost
+local BTN_SIZE = 60 -- tap target (visual = full button, no invisible pads)
+
+local function log(...: any)
+	print("[PLACE]", ...)
+end
+
+local function getPlayerControls(): any
+	local ok, controls = pcall(function()
+		local playerScripts = player:FindFirstChild("PlayerScripts")
+		if not playerScripts then
+			return nil
+		end
+		local playerModuleScript = playerScripts:FindFirstChild("PlayerModule")
+		if not playerModuleScript then
+			return nil
+		end
+		local playerModule = require(playerModuleScript)
+		return playerModule:GetControls()
+	end)
+	if ok then
+		return controls
+	end
+	return nil
+end
+
+local touchGuiWatch: RBXScriptConnection? = nil
+
+local function applyTouchGuiDisabled(touchGui: Instance)
+	if touchGui:IsA("ScreenGui") then
+		if savedTouchGuiEnabled == nil then
+			savedTouchGuiEnabled = touchGui.Enabled
+		end
+		touchGui.Enabled = false
+	end
+end
+
+local function setTouchControlsEnabled(enabled: boolean)
+	pcall(function()
+		if enabled then
+			if savedTouchControlsEnabled ~= nil then
+				GuiService.TouchControlsEnabled = savedTouchControlsEnabled
+				savedTouchControlsEnabled = nil
+			else
+				GuiService.TouchControlsEnabled = true
+			end
+		else
+			if savedTouchControlsEnabled == nil then
+				savedTouchControlsEnabled = GuiService.TouchControlsEnabled
+			end
+			GuiService.TouchControlsEnabled = false
+		end
+	end)
+
+	if touchGuiWatch then
+		touchGuiWatch:Disconnect()
+		touchGuiWatch = nil
+	end
+
+	local touchGui = playerGui:FindFirstChild("TouchGui")
+	if enabled then
+		if touchGui and touchGui:IsA("ScreenGui") then
+			touchGui.Enabled = if savedTouchGuiEnabled ~= nil then savedTouchGuiEnabled else true
+		end
+		savedTouchGuiEnabled = nil
+	else
+		if touchGui then
+			applyTouchGuiDisabled(touchGui)
+		end
+		-- PlayerModule can spawn TouchGui after freeze starts — keep it off while placing.
+		touchGuiWatch = playerGui.ChildAdded:Connect(function(child)
+			if child.Name == "TouchGui" then
+				applyTouchGuiDisabled(child)
+			end
+		end)
+	end
+end
+
+local function unfreeze()
+	ContextActionService:UnbindAction(FREEZE_ACTION)
+	setTouchControlsEnabled(true)
+
+	local controls = getPlayerControls()
+	if controls then
+		pcall(function()
+			controls:Enable()
+		end)
+	end
+
+	local character = player.Character
+	local hum = character and character:FindFirstChildOfClass("Humanoid")
+
+	if frozen then
+		frozen = false
+		local walk = if savedWalkSpeed > 0 then savedWalkSpeed else DEFAULT_WALK_SPEED
+		local jumpP = if savedJumpPower > 0 then savedJumpPower else DEFAULT_JUMP_POWER
+		local jumpH = if savedJumpHeight > 0 then savedJumpHeight else DEFAULT_JUMP_HEIGHT
+		if hum then
+			hum.WalkSpeed = walk
+			hum.JumpPower = jumpP
+			hum.JumpHeight = jumpH
+		end
+		local camType = savedCameraType
+		if camType == nil or camType == Enum.CameraType.Scriptable then
+			camType = Enum.CameraType.Custom
+		end
+		if camera then
+			camera.CameraType = camType
+		end
+	else
+		if hum and hum.WalkSpeed <= 0 then
+			hum.WalkSpeed = DEFAULT_WALK_SPEED
+			hum.JumpPower = DEFAULT_JUMP_POWER
+			hum.JumpHeight = DEFAULT_JUMP_HEIGHT
+		end
+		if camera and camera.CameraType == Enum.CameraType.Scriptable then
+			camera.CameraType = Enum.CameraType.Custom
+		end
+	end
+
+	savedCameraType = nil
+	savedCameraCFrame = nil
+end
+
+local function freeze()
+	-- Lock walk + camera look while armed / placing.
+	if frozen then
+		if camera and savedCameraCFrame then
+			camera.CameraType = Enum.CameraType.Scriptable
+			camera.CFrame = savedCameraCFrame
+		end
+		local character = player.Character
+		local hum = character and character:FindFirstChildOfClass("Humanoid")
+		if hum then
+			hum.WalkSpeed = 0
+			hum.JumpPower = 0
+			hum.JumpHeight = 0
+		end
+		setTouchControlsEnabled(false)
+		return
+	end
+	frozen = true
+
+	local character = player.Character
+	local hum = character and character:FindFirstChildOfClass("Humanoid")
+	if hum then
+		if hum.WalkSpeed > 0 then
+			savedWalkSpeed = hum.WalkSpeed
+		end
+		if hum.JumpPower > 0 then
+			savedJumpPower = hum.JumpPower
+		end
+		if hum.JumpHeight > 0 then
+			savedJumpHeight = hum.JumpHeight
+		end
+		hum.WalkSpeed = 0
+		hum.JumpPower = 0
+		hum.JumpHeight = 0
+	end
+
+	local controls = getPlayerControls()
+	if controls then
+		pcall(function()
+			controls:Disable()
+		end)
+	end
+	setTouchControlsEnabled(false)
+
+	if camera then
+		local currentType = camera.CameraType
+		if currentType ~= Enum.CameraType.Scriptable then
+			savedCameraType = currentType
+		else
+			savedCameraType = Enum.CameraType.Custom
+		end
+		savedCameraCFrame = camera.CFrame
+		camera.CameraType = Enum.CameraType.Scriptable
+		camera.CFrame = savedCameraCFrame
+	end
+
+	-- Keyboard only — do NOT bind Thumbstick1 (breaks mobile move after unbind).
+	ContextActionService:BindActionAtPriority(FREEZE_ACTION, function()
+		return Enum.ContextActionResult.Sink
+	end, false, Enum.ContextActionPriority.High.Value, Enum.KeyCode.W, Enum.KeyCode.A, Enum.KeyCode.S, Enum.KeyCode.D, Enum.KeyCode.Space)
+end
+
+local function getSpeciesIdForItem(itemId: string): string?
+	local item = ItemCatalog.get(itemId)
+	if item and item.speciesId then
+		return item.speciesId
+	end
+	local sp = SpeciesCatalog.getByItemId(itemId)
+	return if sp then sp.speciesId else nil
+end
+
+local function stopGhostScaleIn()
+	if ghostScaleConn then
+		ghostScaleConn:Disconnect()
+		ghostScaleConn = nil
+	end
+end
+
+local function startGhostScaleIn(part: BasePart)
+	stopGhostScaleIn()
+	local target = part.Size
+	part.Size = target * 0.05
+	local t0 = os.clock()
+	ghostScaleConn = RunService.RenderStepped:Connect(function()
+		if not part.Parent then
+			stopGhostScaleIn()
+			return
+		end
+		local u = math.clamp((os.clock() - t0) / GHOST_SCALE_IN_SEC, 0, 1)
+		local a = 1 - (1 - u) * (1 - u)
+		part.Size = target * (0.05 + 0.95 * a)
+		if u >= 1 then
+			part.Size = target
+			stopGhostScaleIn()
+		end
+	end)
+end
+
+local function clearGhost()
+	stopGhostScaleIn()
+	warnLabel = nil
+	ghostBaseColor = nil
+	ghostBaseMaterial = nil
+	if ghost then
+		ghost:Destroy()
+		ghost = nil
+	end
+	placeAnchor = nil
+end
+
+local function destroyConfirmUi()
+	if checkPromptConn then
+		checkPromptConn:Disconnect()
+		checkPromptConn = nil
+	end
+	stopMoveHintAttract()
+	if confirmGui then
+		confirmGui:Destroy()
+		confirmGui = nil
+	end
+	checkBtn = nil
+	cancelBtn = nil
+	moveHintImage = nil
+	moveHintScale = nil
+end
+
+local function isSpotTakenClient(worldPos: Vector3): boolean
+	local plot = ClientPlot.get()
+	if not plot then
+		return false
+	end
+	local localPos = GridMath.worldToPlotLocal(worldPos, plot.cframe)
+	local gx, gy, gz = GridMath.worldToGrid(localPos, Vector3.zero)
+	local root = Workspace:FindFirstChild("OceanTD_Placed")
+	local folder = root and root:FindFirstChild(plot.plotId)
+	if not folder then
+		return false
+	end
+	for _, inst in ipairs(folder:GetChildren()) do
+		if inst:IsA("BasePart") then
+			local lp = GridMath.worldToPlotLocal(inst.Position, plot.cframe)
+			local ax, ay, az = GridMath.worldToGrid(lp, Vector3.zero)
+			if ax == gx and ay == gy and az == gz then
+				return true
+			end
+		end
+	end
+	return false
+end
+
+local function raycastPointer(screenPos: Vector2): Vector3?
+	local cam = Workspace.CurrentCamera
+	if not cam then
+		return nil
+	end
+	-- screenPos must be GetMouseLocation / ScreenPoint space (full window, includes top bar).
+	local ray = cam:ScreenPointToRay(screenPos.X, screenPos.Y)
+	local params = RaycastParams.new()
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	local exclude: { Instance } = {}
+	if ghost then
+		table.insert(exclude, ghost)
+	end
+	if outgoingGhost then
+		table.insert(exclude, outgoingGhost)
+	end
+	local placed = Workspace:FindFirstChild("OceanTD_Placed")
+	if placed then
+		table.insert(exclude, placed)
+	end
+	if player.Character then
+		table.insert(exclude, player.Character)
+	end
+	params.FilterDescendantsInstances = exclude
+	local result = Workspace:Raycast(ray.Origin, ray.Direction * 800, params)
+	if result then
+		return result.Position
+	end
+	local plot = ClientPlot.get()
+	if plot then
+		local origin = plot.cframe.Position
+		local t = (origin.Y - ray.Origin.Y) / ray.Direction.Y
+		if t == t and t > 0 then
+			return ray.Origin + ray.Direction * t
+		end
+	end
+	return nil
+end
+
+-- Finger / chrome aim point (GetMouseLocation space — ignores GuiInset).
+local function getAimScreenPos(): Vector2
+	if gamepadPlacement and gamepadCursor then
+		return gamepadCursor
+	end
+	if aimPinnedToCenter then
+		local cam = Workspace.CurrentCamera
+		if cam then
+			-- Same space as GetMouseLocation / IgnoreGuiInset ScreenGui offsets (do NOT add GuiInset).
+			local vp = cam.ViewportSize
+			return Vector2.new(vp.X * 0.5, vp.Y * 0.5)
+		end
+	end
+	return UserInputService:GetMouseLocation()
+end
+
+-- Ghost + plant aim point. On touch, raise above the finger so the ghost isn't covered.
+-- Mouse / gamepad aim at the cursor with no vertical offset.
+local function getPlaceAimScreenPos(): Vector2
+	local finger = getAimScreenPos()
+	if UserInputService:GetLastInputType() == Enum.UserInputType.Touch then
+		return Vector2.new(finger.X, finger.Y - GHOST_SCREEN_OFFSET_Y)
+	end
+	return finger
+end
+
+local function resetGamepadCursor()
+	local cam = Workspace.CurrentCamera
+	if cam then
+		local inset = GuiService:GetGuiInset()
+		local vp = cam.ViewportSize
+		gamepadCursor = Vector2.new(vp.X * 0.5 + inset.X, vp.Y * 0.5 + inset.Y)
+	else
+		gamepadCursor = UserInputService:GetMouseLocation()
+	end
+end
+
+local function readThumbstick1(): Vector2
+	local ok, states = pcall(function()
+		return UserInputService:GetGamepadState(Enum.UserInputType.Gamepad1)
+	end)
+	if not ok or typeof(states) ~= "table" then
+		return Vector2.zero
+	end
+	for _, input in ipairs(states :: { InputObject }) do
+		if input.KeyCode == Enum.KeyCode.Thumbstick1 then
+			-- Stick Y is inverted vs screen Y.
+			return Vector2.new(input.Position.X, -input.Position.Y)
+		end
+	end
+	return Vector2.zero
+end
+
+local function clampGamepadCursor(pos: Vector2): Vector2
+	local cam = Workspace.CurrentCamera
+	if not cam then
+		return pos
+	end
+	local inset = GuiService:GetGuiInset()
+	local vp = cam.ViewportSize
+	local minX = inset.X + 8
+	local maxX = inset.X + vp.X - 8
+	local minY = inset.Y + 8
+	local maxY = inset.Y + vp.Y - 8
+	return Vector2.new(math.clamp(pos.X, minX, maxX), math.clamp(pos.Y, minY, maxY))
+end
+
+local function setCheckGlyphText(text: string)
+	if not checkBtn then
+		return
+	end
+	local glyph = checkBtn:FindFirstChild("Glyph")
+	if glyph and glyph:IsA("TextLabel") then
+		glyph.Text = text
+	else
+		checkBtn.Text = text
+		checkBtn.TextTransparency = 0
+	end
+end
+
+local function applyGamepadButtonLabels()
+	if not checkBtn or not cancelBtn then
+		return
+	end
+	if gamepadPlacement then
+		cancelBtn.Text = "B"
+		stopCheckPrompt()
+		local t0 = os.clock()
+		setCheckGlyphText("✓")
+		checkPromptConn = RunService.Heartbeat:Connect(function()
+			if not gamepadPlacement or not checkBtn then
+				return
+			end
+			-- Alternate ✓ and A every second.
+			local showA = (math.floor(os.clock() - t0) % 2) == 1
+			setCheckGlyphText(if showA then "A" else "✓")
+		end)
+	else
+		stopCheckPrompt()
+		cancelBtn.Text = "X"
+		setCheckGlyphText("✓")
+	end
+end
+
+local function fireGamepadReturnToList()
+	for _, cb in ipairs(gamepadReturnCbs) do
+		task.spawn(cb)
+	end
+end
+
+local function raycastForPlace(): Vector3?
+	return raycastPointer(getPlaceAimScreenPos())
+end
+
+local function evaluatePos(worldPos: Vector3): (boolean, string?)
+	if not ClientPlot.isInside(worldPos) then
+		return false, "Out Of Plot"
+	end
+	if isSpotTakenClient(worldPos) then
+		return false, "Spot Taken"
+	end
+	return true, nil
+end
+
+local function ensureWarnBillboard(parent: BasePart)
+	if warnLabel and warnLabel.Parent then
+		return
+	end
+	local bb = Instance.new("BillboardGui")
+	bb.Name = "PlaceWarn"
+	bb.Size = UDim2.fromOffset(160, 28)
+	bb.StudsOffset = Vector3.new(0, 2.2, 0)
+	bb.AlwaysOnTop = true
+	bb.Parent = parent
+	local lbl = Instance.new("TextLabel")
+	lbl.BackgroundTransparency = 0.35
+	lbl.BackgroundColor3 = Color3.fromRGB(40, 10, 10)
+	lbl.Size = UDim2.fromScale(1, 1)
+	lbl.Font = UiTheme.Font
+	lbl.TextColor3 = Color3.fromRGB(255, 220, 220)
+	lbl.TextScaled = true
+	lbl.Text = ""
+	lbl.Parent = bb
+	warnLabel = lbl
+end
+
+local function setMoveHintVisible(visible: boolean)
+	if moveHintImage then
+		moveHintImage.Visible = visible
+	end
+end
+
+stopMoveHintAttract = function()
+	moveHintPulseToken += 1
+	if moveHintScale then
+		moveHintScale.Scale = 1
+	end
+end
+
+startMoveHintAttract = function()
+	if not moveHintImage then
+		return
+	end
+	stopMoveHintAttract()
+	local token = moveHintPulseToken
+	local scale = moveHintScale
+	if not scale or scale.Parent ~= moveHintImage then
+		scale = Instance.new("UIScale")
+		scale.Name = "MoveHintScale"
+		scale.Parent = moveHintImage
+		moveHintScale = scale
+	end
+	scale.Scale = 0.05
+	moveHintImage.Visible = true
+	task.spawn(function()
+		local t0 = os.clock()
+		while token == moveHintPulseToken and scale.Parent do
+			local u = math.clamp((os.clock() - t0) / MOVE_HINT_SCALE_IN_SEC, 0, 1)
+			local a = 1 - (1 - u) * (1 - u)
+			scale.Scale = 0.05 + 0.95 * a
+			if u >= 1 then
+				break
+			end
+			RunService.RenderStepped:Wait()
+		end
+		local t1 = os.clock()
+		while token == moveHintPulseToken and scale.Parent and aimPinnedToHand and mode == MODE_AIM do
+			local wave = (math.sin((os.clock() - t1) * MOVE_HINT_PULSE_SPEED) + 1) * 0.5
+			scale.Scale = 1 + MOVE_HINT_PULSE_AMP * wave
+			RunService.RenderStepped:Wait()
+		end
+		if token == moveHintPulseToken and scale.Parent then
+			scale.Scale = 1
+		end
+	end)
+end
+
+releaseHandPin = function()
+	if aimPinnedToHand then
+		aimPinnedToHand = false
+		stopMoveHintAttract()
+	end
+end
+
+local function readGhostBaseColor(part: BasePart): Color3
+	local r = part:GetAttribute("OceanTD_GhostBaseR")
+	local g = part:GetAttribute("OceanTD_GhostBaseG")
+	local b = part:GetAttribute("OceanTD_GhostBaseB")
+	if typeof(r) == "number" and typeof(g) == "number" and typeof(b) == "number" then
+		return Color3.new(r, g, b)
+	end
+	return part.Color
+end
+
+local function updateGhostPulse()
+	if not ghost then
+		return
+	end
+	local baseMat = ghostBaseMaterial or Enum.Material.Pebble
+	local phase = (math.sin(os.clock() * GHOST_PULSE_SPEED) + 1) * 0.5
+	ghost.Material = if phase >= 0.5 then Enum.Material.Neon else baseMat
+	ghost.Transparency = 0.4
+	if validSpot then
+		ghost.Color = ghostBaseColor or ghost.Color
+	else
+		ghost.Color = GHOST_INVALID_COLOR
+	end
+	-- Match ✓ background to the ghost neon flash (bright ↔ hunter green).
+	if checkBtn and checkBtn.Visible then
+		checkBtn.BackgroundColor3 = CHECK_BRIGHT_GREEN:Lerp(CHECK_HUNTER_GREEN, phase)
+	end
+end
+
+local function updateGhostAt(anchorPos: Vector3)
+	local speciesId = armedItemId and getSpeciesIdForItem(armedItemId)
+	if not speciesId then
+		return
+	end
+	placeAnchor = anchorPos
+	if aimPinnedToHand then
+		-- Still in-hand: don't treat floating hold as an invalid plant spot.
+		validSpot = true
+		rejectReason = nil
+	else
+		validSpot, rejectReason = evaluatePos(anchorPos)
+	end
+	if not ghost then
+		ghost = CoralVisual.create(speciesId, anchorPos, { ghost = true, valid = validSpot })
+		if ghost then
+			ghost.Parent = Workspace
+			ensureWarnBillboard(ghost)
+			ghostBaseColor = readGhostBaseColor(ghost)
+			local sp = SpeciesCatalog.get(speciesId)
+			ghostBaseMaterial = if sp then sp.material else Enum.Material.Pebble
+			if pendingGhostScaleIn then
+				pendingGhostScaleIn = false
+				startGhostScaleIn(ghost)
+			end
+		end
+	else
+		ghost.CFrame = CFrame.new(anchorPos)
+		if validSpot then
+			ghost.Color = ghostBaseColor or ghost.Color
+		else
+			ghost.Color = GHOST_INVALID_COLOR
+		end
+	end
+	updateGhostPulse()
+	if warnLabel then
+		if validSpot then
+			warnLabel.Text = ""
+			warnLabel.Visible = false
+		else
+			warnLabel.Text = rejectReason or "Can't Place"
+			warnLabel.Visible = true
+		end
+	end
+	-- ✓/X + move icon appear with the ghost (not after a second tap).
+	makeConfirmUi()
+	setMoveHintVisible(true)
+	syncConfirmButtons()
+end
+
+-- Screen position above the local avatar (for ✓ / X chrome).
+local function getAvatarChromeScreenPos(): Vector2?
+	if not camera then
+		return nil
+	end
+	local character = player.Character
+	if not character then
+		return nil
+	end
+	local head = character:FindFirstChild("Head")
+	local root = character:FindFirstChild("HumanoidRootPart")
+	local part: BasePart? = nil
+	local world: Vector3
+	if head and head:IsA("BasePart") then
+		part = head
+		world = head.Position + Vector3.new(0, 1.15, 0)
+	elseif root and root:IsA("BasePart") then
+		part = root
+		world = root.Position + Vector3.new(0, 2.8, 0)
+	else
+		return nil
+	end
+	local screen, _onScreen = camera:WorldToViewportPoint(world)
+	if screen.Z <= 0 then
+		return nil
+	end
+	return Vector2.new(screen.X, screen.Y)
+end
+
+local function syncConfirmButtonsImpl()
+	if armIntroAnimating then
+		return
+	end
+	if not confirmGui or not checkBtn or not cancelBtn or not ghost then
+		return
+	end
+
+	-- Move icon tracks the ghost: live while aiming/dragging, frozen when parked in Confirm.
+	local aiming = mode == MODE_AIM or confirmDragging or aimFingerDown or backpackDrag or aimPinnedToHand
+	if aiming or not chromeScreenPos then
+		if aimPinnedToHand and ghost then
+			-- Ghost is on the hand — project the ghost itself, not the mouse.
+			if camera then
+				local sp, _ = camera:WorldToViewportPoint(ghost.Position)
+				if sp.Z > 0 then
+					chromeScreenPos = Vector2.new(sp.X, sp.Y)
+				else
+					chromeScreenPos = getPlaceAimScreenPos()
+				end
+			else
+				chromeScreenPos = getPlaceAimScreenPos()
+			end
+		else
+			chromeScreenPos = getPlaceAimScreenPos()
+		end
+	end
+	local aimX = chromeScreenPos.X
+	local aimY = chromeScreenPos.Y
+
+	if moveHintImage then
+		moveHintImage.Visible = true
+		if aimPinnedToHand then
+			-- Sit on the hand / neon seed so the player sees they can drag from there.
+			moveHintImage.AnchorPoint = Vector2.new(0.5, 0.5)
+			moveHintImage.Position = UDim2.fromOffset(aimX, aimY)
+		else
+			moveHintImage.AnchorPoint = Vector2.new(0.5, 0)
+			moveHintImage.Position = UDim2.fromOffset(aimX, aimY + GHOST_SCREEN_RADIUS_PX + MOVE_BELOW_GHOST_PX)
+		end
+	end
+
+	-- ✓ / X stay on the avatar (not the ghost).
+	local avatar = getAvatarChromeScreenPos()
+	local cx: number
+	local cy: number
+	if avatar then
+		cx = avatar.X
+		cy = avatar.Y
+	else
+		local vp = if camera then camera.ViewportSize else Vector2.new(800, 600)
+		cx = vp.X * 0.5
+		cy = vp.Y * 0.35
+	end
+
+	local btnBottom = cy
+	-- Touch/mouse: ✓ after park (Confirm). Gamepad: ✓/A while aiming (place immediately).
+	checkBtn.Visible = validSpot and (mode == MODE_CONFIRM or gamepadPlacement)
+	checkBtn.AnchorPoint = Vector2.new(1, 1)
+	checkBtn.Position = UDim2.fromOffset(cx - 6, btnBottom)
+	cancelBtn.Visible = true
+	cancelBtn.AnchorPoint = Vector2.new(0, 1)
+	cancelBtn.Position = UDim2.fromOffset(cx + 6, btnBottom)
+end
+syncConfirmButtons = syncConfirmButtonsImpl
+
+local function makeConfirmUiImpl()
+	if confirmGui and checkBtn and cancelBtn and moveHintImage then
+		applyGamepadButtonLabels()
+		return
+	end
+	destroyConfirmUi()
+	local gui = Instance.new("ScreenGui")
+	gui.Name = "OceanTD_PlaceConfirm"
+	gui.ResetOnSpawn = false
+	gui.IgnoreGuiInset = true -- match WorldToViewportPoint / GetMouseLocation
+	gui.ClipToDeviceSafeArea = false -- allow ✓/X near screen edges
+	pcall(function()
+		(gui :: any).ScreenInsets = Enum.ScreenInsets.None
+	end)
+	gui.DisplayOrder = 12000
+	gui.Parent = playerGui
+	confirmGui = gui
+
+	local move = Instance.new("ImageLabel")
+	move.Name = "MoveIcon"
+	move.BackgroundTransparency = 1
+	move.Size = UDim2.fromOffset(MOVE_ICON_SIZE, MOVE_ICON_SIZE)
+	move.Image = MOVE_ICON_IMAGE
+	move.ScaleType = Enum.ScaleType.Fit
+	move.Visible = false
+	move.ZIndex = 2
+	move.Parent = gui
+	moveHintImage = move
+
+	local function roundBtn(text: string, color: Color3, strokeLabel: boolean): TextButton
+		local b = Instance.new("TextButton")
+		b.Size = UDim2.fromOffset(BTN_SIZE, BTN_SIZE)
+		b.BackgroundColor3 = color
+		b.BackgroundTransparency = 0 -- opaque so touch reliably hits the button
+		b.Font = Enum.Font.GothamBold
+		b.Text = text
+		b.TextColor3 = Color3.new(1, 1, 1)
+		b.TextScaled = true
+		b.AutoButtonColor = true
+		b.ZIndex = 5
+		b.Parent = gui
+		UiCircles.ensure(b)
+
+		local edge = Instance.new("UIStroke")
+		edge.Name = "EdgeStroke"
+		edge.Color = Color3.new(1, 1, 1)
+		edge.Thickness = 2
+		edge.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+		edge.Parent = b
+
+		if strokeLabel then
+			local label = Instance.new("TextLabel")
+			label.Name = "Glyph"
+			label.BackgroundTransparency = 1
+			label.Size = UDim2.fromScale(1, 1)
+			label.Font = Enum.Font.GothamBold
+			label.Text = text
+			label.TextColor3 = Color3.new(1, 1, 1)
+			label.TextScaled = true
+			label.Active = false
+			label.ZIndex = b.ZIndex + 1
+			label.Parent = b
+			b.TextTransparency = 1
+			local glyphStroke = Instance.new("UIStroke")
+			glyphStroke.Name = "GlyphStroke"
+			glyphStroke.Color = Color3.new(1, 1, 1)
+			glyphStroke.Thickness = 1.5
+			glyphStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Contextual
+			glyphStroke.Parent = label
+		end
+
+		return b
+	end
+
+	checkBtn = roundBtn("✓", Color3.fromRGB(40, 180, 80), true)
+	cancelBtn = roundBtn("X", Color3.fromRGB(200, 50, 50), false)
+	applyGamepadButtonLabels()
+
+	local function markChromePointerDown()
+		chromeBtnPointerDown = true
+		aimFingerDown = false
+		confirmPressOrigin = nil
+		confirmDragging = false
+	end
+
+	-- MouseButton1Down fires on the button; also blocks ghost-aim if UIS already peeked.
+	checkBtn.MouseButton1Down:Connect(markChromePointerDown)
+	cancelBtn.MouseButton1Down:Connect(markChromePointerDown)
+	checkBtn.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			markChromePointerDown()
+		end
+	end)
+	cancelBtn.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			markChromePointerDown()
+		end
+	end)
+
+	-- MouseButton1Click is more reliable than Activated alone on touch.
+	checkBtn.MouseButton1Click:Connect(function()
+		onCheck()
+	end)
+	cancelBtn.MouseButton1Click:Connect(function()
+		onCancel()
+	end)
+end
+makeConfirmUi = makeConfirmUiImpl
+
+local function stopAimLoop()
+	if aimConn then
+		aimConn:Disconnect()
+		aimConn = nil
+	end
+end
+
+local function keepCameraFrozen()
+	if camera and savedCameraCFrame then
+		camera.CFrame = savedCameraCFrame
+	end
+end
+
+local function stopDisarmAnim()
+	if disarmConn then
+		disarmConn:Disconnect()
+		disarmConn = nil
+	end
+	disarmAnimating = false
+end
+
+local function stopOutgoingFlyback()
+	if outgoingConn then
+		outgoingConn:Disconnect()
+		outgoingConn = nil
+	end
+	if outgoingGhost then
+		outgoingGhost:Destroy()
+		outgoingGhost = nil
+	end
+	if outgoingGui then
+		outgoingGui:Destroy()
+		outgoingGui = nil
+	end
+end
+
+local function guiCenterOf(go: GuiObject): Vector2
+	local p = go.AbsolutePosition
+	local s = go.AbsoluteSize
+	return Vector2.new(p.X + s.X * 0.5, p.Y + s.Y * 0.5)
+end
+
+local function resolveDisarmTargetScreen(itemId: string?): Vector2
+	local targetScreen = pendingDisarmSlotScreen
+	pendingDisarmSlotScreen = nil
+	if not targetScreen and itemId then
+		targetScreen = InventoryState.getItemSlotScreenCenter(itemId)
+	end
+	if not targetScreen then
+		local vp = camera and camera.ViewportSize or Vector2.new(800, 600)
+		targetScreen = Vector2.new(vp.X * 0.85, vp.Y * 0.55)
+	end
+	return targetScreen
+end
+
+-- Steal ghost (+ optional move-icon clone) for parallel switch. Keeps ✓/X chrome in place.
+local function detachGhostForSwitch(): (BasePart?, ImageLabel?, ScreenGui?)
+	local g = ghost
+	ghost = nil
+	placeAnchor = nil
+	warnLabel = nil
+	ghostBaseColor = nil
+	ghostBaseMaterial = nil
+
+	local outMove: ImageLabel? = nil
+	local outGui: ScreenGui? = nil
+	if moveHintImage and moveHintImage.Parent and moveHintImage.Visible then
+		outGui = Instance.new("ScreenGui")
+		outGui.Name = "OceanTD_PlaceOutgoing"
+		outGui.ResetOnSpawn = false
+		outGui.IgnoreGuiInset = true
+		outGui.ClipToDeviceSafeArea = false
+		outGui.DisplayOrder = 11999
+		outGui.Parent = playerGui
+		outMove = moveHintImage:Clone()
+		outMove.Parent = outGui
+		moveHintImage.Visible = false
+		moveHintImage.ImageTransparency = 0
+		moveHintImage.Size = UDim2.fromOffset(MOVE_ICON_SIZE, MOVE_ICON_SIZE)
+	end
+	stopMoveHintAttract()
+
+	-- Ensure the live X stays usable and parked (not mid-flash / not flying).
+	if cancelBtn then
+		cancelBtn.BackgroundColor3 = Color3.fromRGB(200, 50, 50)
+		cancelBtn.AutoButtonColor = true
+		cancelBtn.Active = true
+		cancelBtn.Visible = true
+		cancelBtn.BackgroundTransparency = 0
+		cancelBtn.Size = UDim2.fromOffset(BTN_SIZE, BTN_SIZE)
+		local avatarNow = getAvatarChromeScreenPos()
+		if avatarNow then
+			cancelBtn.AnchorPoint = Vector2.new(0, 1)
+			cancelBtn.Position = UDim2.fromOffset(avatarNow.X + 6, avatarNow.Y)
+		end
+	end
+	if checkBtn then
+		checkBtn.Visible = false
+		checkBtn.BackgroundTransparency = 0
+		checkBtn.Active = true
+		checkBtn.Size = UDim2.fromOffset(BTN_SIZE, BTN_SIZE)
+	end
+
+	return g, outMove, outGui
+end
+
+-- Fly detached ghost + move icon into a backpack slot (✓/X stay on the live chrome).
+local function startOutgoingFlyback(
+	ghostPart: BasePart?,
+	moveRef: ImageLabel?,
+	guiRef: ScreenGui?,
+	targetScreen: Vector2,
+	worldPos: Vector3
+)
+	stopOutgoingFlyback()
+	outgoingGhost = ghostPart
+	outgoingGui = guiRef
+
+	if not ghostPart and not guiRef then
+		return
+	end
+
+	local ghostStartSize = if ghostPart then ghostPart.Size else nil
+	local ghostStartPos = if ghostPart then ghostPart.Position else nil
+	local moveStart = if moveRef then guiCenterOf(moveRef) else targetScreen
+	local moveStartSize = if moveRef then moveRef.AbsoluteSize.X else MOVE_ICON_SIZE
+
+	local endWorld = worldPos
+	if camera and ghostStartPos then
+		local ray = camera:ViewportPointToRay(targetScreen.X, targetScreen.Y)
+		endWorld = ray.Origin + ray.Direction * 4
+	end
+
+	local t0 = os.clock()
+	outgoingConn = RunService.RenderStepped:Connect(function()
+		keepCameraFrozen()
+		local u = math.clamp((os.clock() - t0) / DISARM_SCALE_SEC, 0, 1)
+		local a = 1 - (1 - u) * (1 - u)
+		local scale = math.max(1 - a, 0.02)
+
+		if moveRef and moveRef.Parent then
+			moveRef.Visible = true
+			moveRef.AnchorPoint = Vector2.new(0.5, 0.5)
+			local mpos = moveStart:Lerp(targetScreen, a)
+			local msize = moveStartSize * scale
+			moveRef.Position = UDim2.fromOffset(mpos.X, mpos.Y)
+			moveRef.Size = UDim2.fromOffset(msize, msize)
+			moveRef.ImageTransparency = a
+		end
+
+		if ghostPart and ghostPart.Parent and ghostStartSize and ghostStartPos then
+			ghostPart.Size = ghostStartSize * scale
+			ghostPart.Transparency = 0.4 + 0.55 * a
+			ghostPart.CFrame = CFrame.new(ghostStartPos:Lerp(endWorld, a))
+		end
+
+		if u >= 1 then
+			stopOutgoingFlyback()
+		end
+	end)
+end
+
+local function playDisarmOutro(thenExit: () -> ())
+	if disarmAnimating then
+		return
+	end
+	stopOutgoingFlyback()
+	if armIntroAnimating then
+		stopArmIntro()
+	end
+	-- Nothing to animate — finish immediately.
+	if not ghost and not confirmGui then
+		pendingDisarmSlotScreen = nil
+		thenExit()
+		return
+	end
+	disarmAnimating = true
+	stopAimLoop()
+	stopGhostScaleIn()
+	stopMoveHintAttract()
+
+	local itemId = armedItemId
+	local worldPos = placeAnchor or confirmPos or (ghost and ghost.Position) or Vector3.zero
+	PlaceVfx.playCancelSound(worldPos)
+
+	if cancelBtn then
+		cancelBtn.BackgroundColor3 = CANCEL_FLASH_RED
+		cancelBtn.AutoButtonColor = false
+	end
+
+	local ghostPart = ghost
+	local ghostStartSize = if ghostPart then ghostPart.Size else nil
+	local ghostStartPos = if ghostPart then ghostPart.Position else nil
+
+	local targetScreen = resolveDisarmTargetScreen(itemId)
+
+	local cancelStart = if cancelBtn then guiCenterOf(cancelBtn) else targetScreen
+	local checkStart = if checkBtn and checkBtn.Visible then guiCenterOf(checkBtn) else nil
+	local moveStart = if moveHintImage and moveHintImage.Visible then guiCenterOf(moveHintImage) else targetScreen
+	local cancelStartSize = if cancelBtn then cancelBtn.AbsoluteSize.X else BTN_SIZE
+	local checkStartSize = if checkBtn then checkBtn.AbsoluteSize.X else BTN_SIZE
+	local moveStartSize = if moveHintImage then moveHintImage.AbsoluteSize.X else MOVE_ICON_SIZE
+
+	-- Ghost flies toward a near-camera point under the item slot so it reads as UI suck-in.
+	local endWorld = worldPos
+	if camera and ghostStartPos then
+		local ray = camera:ViewportPointToRay(targetScreen.X, targetScreen.Y)
+		endWorld = ray.Origin + ray.Direction * 4
+	end
+
+	HandOrb.disarm(DISARM_SCALE_SEC)
+
+	local t0 = os.clock()
+	disarmConn = RunService.RenderStepped:Connect(function()
+		keepCameraFrozen()
+		local u = math.clamp((os.clock() - t0) / DISARM_SCALE_SEC, 0, 1)
+		local a = 1 - (1 - u) * (1 - u)
+		local scale = math.max(1 - a, 0.02)
+
+		-- Flash bright red for the first quarter, then hold bright red.
+		if cancelBtn and cancelBtn.Parent then
+			if u < 0.28 then
+				local pulse = (math.floor(os.clock() * 14) % 2) == 0
+				cancelBtn.BackgroundColor3 = if pulse then CANCEL_FLASH_RED else Color3.fromRGB(160, 15, 15)
+			else
+				cancelBtn.BackgroundColor3 = CANCEL_FLASH_RED
+			end
+			cancelBtn.Visible = true
+			cancelBtn.AnchorPoint = Vector2.new(0.5, 0.5)
+			local cpos = cancelStart:Lerp(targetScreen, a)
+			local csize = cancelStartSize * scale
+			cancelBtn.Position = UDim2.fromOffset(cpos.X, cpos.Y)
+			cancelBtn.Size = UDim2.fromOffset(csize, csize)
+		end
+
+		if checkBtn and checkBtn.Parent and checkStart then
+			checkBtn.Visible = true
+			checkBtn.AnchorPoint = Vector2.new(0.5, 0.5)
+			local cpos = checkStart:Lerp(targetScreen, a)
+			local csize = checkStartSize * scale
+			checkBtn.Position = UDim2.fromOffset(cpos.X, cpos.Y)
+			checkBtn.Size = UDim2.fromOffset(csize, csize)
+			checkBtn.BackgroundTransparency = a
+		end
+
+		if moveHintImage and moveHintImage.Parent then
+			moveHintImage.Visible = true
+			moveHintImage.AnchorPoint = Vector2.new(0.5, 0.5)
+			local mpos = (moveStart or targetScreen):Lerp(targetScreen, a)
+			local msize = moveStartSize * scale
+			moveHintImage.Position = UDim2.fromOffset(mpos.X, mpos.Y)
+			moveHintImage.Size = UDim2.fromOffset(msize, msize)
+			moveHintImage.ImageTransparency = a
+		end
+
+		if ghostPart and ghostPart.Parent and ghostStartSize and ghostStartPos then
+			ghostPart.Size = ghostStartSize * scale
+			ghostPart.Transparency = 0.4 + 0.55 * a
+			ghostPart.CFrame = CFrame.new(ghostStartPos:Lerp(endWorld, a))
+		end
+
+		if u >= 1 then
+			stopDisarmAnim()
+			thenExit()
+		end
+	end)
+end
+
+stopArmIntro = function()
+	if armIntroConn then
+		armIntroConn:Disconnect()
+		armIntroConn = nil
+	end
+	armIntroAnimating = false
+end
+
+startAimLoop = function()
+	stopAimLoop()
+	aimConn = RunService.RenderStepped:Connect(function(dt)
+		if mode ~= MODE_AIM then
+			return
+		end
+		keepCameraFrozen()
+		if postPlaceWaiting or armIntroAnimating then
+			return
+		end
+		updateGhostPulse()
+		syncConfirmButtons()
+
+		if gamepadPlacement then
+			local stick = readThumbstick1()
+			local mag = stick.Magnitude
+			if mag > GAMEPAD_STICK_DEADZONE and gamepadCursor then
+				releaseHandPin()
+				local dir = stick.Unit
+				local speed = GAMEPAD_AIM_SPEED * math.clamp((mag - GAMEPAD_STICK_DEADZONE) / (1 - GAMEPAD_STICK_DEADZONE), 0, 1)
+				gamepadCursor = clampGamepadCursor(gamepadCursor + dir * speed * dt)
+			end
+			if aimPinnedToHand then
+				local handPos = HandOrb.getHoldWorldPos()
+				if handPos then
+					updateGhostAt(handPos)
+				end
+				return
+			end
+			chromeScreenPos = nil
+			local pos = raycastForPlace()
+			if pos then
+				updateGhostAt(pos)
+			end
+			return
+		end
+
+		if backpackDrag then
+			releaseHandPin()
+			return
+		end
+		if aimFingerDown then
+			releaseHandPin()
+			local pos = raycastForPlace()
+			if pos then
+				updateGhostAt(pos)
+			end
+			return
+		end
+		if aimPinnedToHand then
+			local now = UserInputService:GetMouseLocation()
+			if aimPinOrigin and (now - aimPinOrigin).Magnitude >= AIM_UNPIN_PX then
+				releaseHandPin()
+			else
+				local handPos = HandOrb.getHoldWorldPos()
+				if handPos then
+					updateGhostAt(handPos)
+				end
+				return
+			end
+		end
+		if aimPinnedToCenter then
+			local now = UserInputService:GetMouseLocation()
+			if aimPinOrigin and (now - aimPinOrigin).Magnitude >= AIM_UNPIN_PX then
+				aimPinnedToCenter = false
+			else
+				local pos = raycastForPlace()
+				if pos then
+					updateGhostAt(pos)
+				end
+				return
+			end
+		end
+		local pos = raycastForPlace()
+		if pos then
+			updateGhostAt(pos)
+		end
+	end)
+end
+
+-- Tween ghost + move icon from the backpack item cell into the avatar's hand.
+-- keepChromePinned: leave ✓/X above the avatar (used when swapping corals).
+local function playArmIntroFromSlot(itemId: string, seedColor: Color3, onDone: () -> (), keepChromePinned: boolean?)
+	stopArmIntro()
+	armIntroAnimating = true
+	aimPinnedToHand = true
+	pendingGhostScaleIn = false
+
+	local slotScreen = pendingArmSlotScreen
+	pendingArmSlotScreen = nil
+	if not slotScreen then
+		slotScreen = InventoryState.getItemSlotScreenCenter(itemId)
+	end
+	if not slotScreen then
+		local vp = if camera then camera.ViewportSize else Vector2.new(800, 600)
+		slotScreen = Vector2.new(vp.X * 0.85, vp.Y * 0.5)
+	end
+
+	local startWorld: Vector3
+	if camera then
+		local ray = camera:ViewportPointToRay(slotScreen.X, slotScreen.Y)
+		startWorld = ray.Origin + ray.Direction * 7
+	else
+		startWorld = HandOrb.getHoldWorldPos() or Vector3.zero
+	end
+
+	HandOrb.clear()
+	updateGhostAt(startWorld)
+	local ghostPart = ghost
+	if not ghostPart then
+		armIntroAnimating = false
+		HandOrb.arm(seedColor)
+		onDone()
+		return
+	end
+
+	local fullSize = ghostPart.Size
+	ghostPart.Size = fullSize * 0.08
+	makeConfirmUi()
+	setMoveHintVisible(true)
+
+	-- Swap path: park X above avatar immediately; only ghost + move fly in.
+	if keepChromePinned and cancelBtn then
+		cancelBtn.Visible = true
+		cancelBtn.BackgroundColor3 = Color3.fromRGB(200, 50, 50)
+		cancelBtn.AutoButtonColor = true
+		cancelBtn.Active = true
+		cancelBtn.BackgroundTransparency = 0
+		cancelBtn.Size = UDim2.fromOffset(BTN_SIZE, BTN_SIZE)
+		local avatarNow = getAvatarChromeScreenPos()
+		if avatarNow then
+			cancelBtn.AnchorPoint = Vector2.new(0, 1)
+			cancelBtn.Position = UDim2.fromOffset(avatarNow.X + 6, avatarNow.Y)
+		end
+	end
+	if keepChromePinned and checkBtn then
+		checkBtn.Visible = false
+		checkBtn.Size = UDim2.fromOffset(BTN_SIZE, BTN_SIZE)
+	end
+
+	local t0 = os.clock()
+	armIntroConn = RunService.RenderStepped:Connect(function()
+		keepCameraFrozen()
+		if mode == MODE_OFF then
+			stopArmIntro()
+			return
+		end
+		local handWorld = HandOrb.getHoldWorldPos()
+		if not handWorld and player.Character then
+			local hand = player.Character:FindFirstChild("RightHand") or player.Character:FindFirstChild("Right Arm")
+			if hand and hand:IsA("BasePart") then
+				handWorld = hand.Position
+			end
+		end
+		handWorld = handWorld or startWorld
+
+		local handScreen: Vector2 = slotScreen
+		if camera then
+			local sp, _ = camera:WorldToViewportPoint(handWorld)
+			if sp.Z > 0 then
+				handScreen = Vector2.new(sp.X, sp.Y)
+			end
+		end
+		local avatarNow = getAvatarChromeScreenPos() or handScreen
+
+		local u = math.clamp((os.clock() - t0) / ARM_INTRO_SEC, 0, 1)
+		local a = 1 - (1 - u) * (1 - u)
+		local scale = 0.08 + 0.92 * a
+
+		if ghostPart.Parent then
+			ghostPart.Size = fullSize * scale
+			ghostPart.Transparency = 0.4
+			ghostPart.CFrame = CFrame.new(startWorld:Lerp(handWorld, a))
+			if ghostBaseColor then
+				ghostPart.Color = ghostBaseColor
+			end
+		end
+
+		local travel = slotScreen:Lerp(handScreen, a)
+		if moveHintImage and moveHintImage.Parent then
+			moveHintImage.Visible = true
+			moveHintImage.AnchorPoint = Vector2.new(0.5, 0.5)
+			moveHintImage.Position = UDim2.fromOffset(travel.X, travel.Y)
+			local m = MOVE_ICON_SIZE * scale
+			moveHintImage.Size = UDim2.fromOffset(m, m)
+			moveHintImage.ImageTransparency = 0
+		end
+
+		if keepChromePinned then
+			-- Keep the single X glued above the avatar while corals swap.
+			if cancelBtn and cancelBtn.Parent then
+				cancelBtn.Visible = true
+				cancelBtn.AnchorPoint = Vector2.new(0, 1)
+				cancelBtn.Size = UDim2.fromOffset(BTN_SIZE, BTN_SIZE)
+				cancelBtn.Position = UDim2.fromOffset(avatarNow.X + 6, avatarNow.Y)
+			end
+			if checkBtn and checkBtn.Parent then
+				checkBtn.Visible = false
+				checkBtn.AnchorPoint = Vector2.new(1, 1)
+				checkBtn.Size = UDim2.fromOffset(BTN_SIZE, BTN_SIZE)
+				checkBtn.Position = UDim2.fromOffset(avatarNow.X - 6, avatarNow.Y)
+			end
+		else
+			local btnTravel = slotScreen:Lerp(avatarNow, a)
+			local bsize = BTN_SIZE * math.max(scale, 0.35)
+			if cancelBtn and cancelBtn.Parent then
+				cancelBtn.Visible = true
+				cancelBtn.AnchorPoint = Vector2.new(0, 1)
+				cancelBtn.Position = UDim2.fromOffset(btnTravel.X + 6, btnTravel.Y)
+				cancelBtn.Size = UDim2.fromOffset(bsize, bsize)
+			end
+			if checkBtn and checkBtn.Parent then
+				-- ✓ stays hidden until confirm; still rides along so layout is ready.
+				checkBtn.Visible = false
+				checkBtn.AnchorPoint = Vector2.new(1, 1)
+				checkBtn.Position = UDim2.fromOffset(btnTravel.X - 6, btnTravel.Y)
+				checkBtn.Size = UDim2.fromOffset(bsize, bsize)
+			end
+		end
+
+		if u >= 1 then
+			stopArmIntro()
+			if ghostPart.Parent then
+				ghostPart.Size = fullSize
+				ghostPart.CFrame = CFrame.new(handWorld)
+			end
+			if moveHintImage then
+				moveHintImage.Size = UDim2.fromOffset(MOVE_ICON_SIZE, MOVE_ICON_SIZE)
+			end
+			if cancelBtn then
+				cancelBtn.Size = UDim2.fromOffset(BTN_SIZE, BTN_SIZE)
+			end
+			if checkBtn then
+				checkBtn.Size = UDim2.fromOffset(BTN_SIZE, BTN_SIZE)
+			end
+			local color = ghostBaseColor or seedColor
+			HandOrb.arm(color)
+			aimPinnedToHand = true
+			aimPinOrigin = UserInputService:GetMouseLocation()
+			startMoveHintAttract()
+			syncConfirmButtons()
+			onDone()
+		end
+	end)
+end
+
+beginAim = function(itemId: string, scaleIn: boolean?, keepChromePinned: boolean?)
+	postPlaceWaiting = false
+	stopArmIntro()
+	armedItemId = itemId
+	mode = MODE_AIM
+	confirmPos = nil
+	backpackDrag = false
+	aimFingerDown = false
+	confirmDragging = false
+	confirmPressOrigin = nil
+	chromeScreenPos = nil
+	aimPinnedToCenter = false
+	aimPinnedToHand = true
+	aimPinOrigin = UserInputService:GetMouseLocation()
+
+	local spId = getSpeciesIdForItem(itemId)
+	local sp = spId and SpeciesCatalog.get(spId)
+	local seedColor = if sp then sp.colorMin:Lerp(sp.colorMax, 0.5) else Color3.fromRGB(255, 220, 80)
+
+	if gamepadPlacement and not gamepadCursor then
+		resetGamepadCursor()
+	end
+
+	freeze()
+	stopAimLoop()
+
+	local postPlace = scaleIn == true
+	if postPlace then
+		-- After plant: ghost appears in-hand (no backpack-slot fly-in).
+		pendingGhostScaleIn = true
+		HandOrb.arm(seedColor)
+		local startPos = HandOrb.getHoldWorldPos() or raycastForPlace()
+		if startPos then
+			updateGhostAt(startPos)
+		end
+		if ghostBaseColor then
+			HandOrb.arm(ghostBaseColor)
+		elseif ghost then
+			HandOrb.arm(ghost.Color)
+		end
+		startMoveHintAttract()
+		startAimLoop()
+		log("Aim mode", itemId, if gamepadPlacement then "gamepad" else "pointer", "postPlace")
+		return
+	end
+
+	-- Armed from backpack: fly ghost + move from the item cell into the hand.
+	pendingGhostScaleIn = false
+	playArmIntroFromSlot(itemId, seedColor, function()
+		if gamepadPlacement then
+			local handPos = HandOrb.getHoldWorldPos()
+			if handPos and camera then
+				local spoint, _ = camera:WorldToViewportPoint(handPos)
+				if spoint.Z > 0 then
+					gamepadCursor = clampGamepadCursor(Vector2.new(spoint.X, spoint.Y))
+				end
+			end
+		end
+		startAimLoop()
+		log("Aim mode", itemId, if gamepadPlacement then "gamepad" else "pointer", "fromSlot")
+	end, keepChromePinned == true)
+end
+
+-- Drag-out from backpack: skip slot intro, aim under the finger immediately.
+local function beginAimFromDrag(itemId: string)
+	postPlaceWaiting = false
+	stopArmIntro()
+	armedItemId = itemId
+	mode = MODE_AIM
+	confirmPos = nil
+	aimFingerDown = false
+	confirmDragging = false
+	confirmPressOrigin = nil
+	chromeScreenPos = nil
+	aimPinnedToCenter = false
+	aimPinnedToHand = false
+	aimPinOrigin = nil
+	pendingGhostScaleIn = true
+
+	local spId = getSpeciesIdForItem(itemId)
+	local sp = spId and SpeciesCatalog.get(spId)
+	local seedColor = if sp then sp.colorMin:Lerp(sp.colorMax, 0.5) else Color3.fromRGB(255, 220, 80)
+	HandOrb.arm(seedColor)
+	freeze()
+	stopAimLoop()
+	local pos = raycastForPlace()
+	if pos then
+		updateGhostAt(pos)
+	end
+	if ghostBaseColor then
+		HandOrb.arm(ghostBaseColor)
+	end
+	startMoveHintAttract()
+	startAimLoop()
+	log("Aim mode", itemId, "drag")
+end
+
+local function exitPlacement(clearArmed: boolean)
+	placeResumeToken += 1
+	postPlaceWaiting = false
+	pendingGhostScaleIn = false
+	stopDisarmAnim()
+	stopOutgoingFlyback()
+	stopArmIntro()
+	stopMoveHintAttract()
+	chromeBtnPointerDown = false
+	mode = MODE_OFF
+	backpackDrag = false
+	aimFingerDown = false
+	confirmDragging = false
+	confirmPressOrigin = nil
+	chromeScreenPos = nil
+	aimPinnedToCenter = false
+	aimPinnedToHand = false
+	aimPinOrigin = nil
+	stopCheckPrompt()
+	stopAimLoop()
+	clearGhost()
+	destroyConfirmUi()
+	unfreeze()
+	confirmPos = nil
+	armedItemId = nil
+	HandOrb.clear()
+	if clearArmed then
+		pendingDisarmSlotScreen = nil
+		pendingArmSlotScreen = nil
+		queuedSwitchItemId = nil
+		gamepadPlacement = false
+		gamepadCursor = nil
+		InventoryState.clearSelection()
+	end
+	log("Placement off")
+end
+
+local function commitPlace()
+	if not armedItemId or not confirmPos or not validSpot then
+		return
+	end
+	if postPlaceWaiting or disarmAnimating or armIntroAnimating then
+		return
+	end
+	local placePos = confirmPos
+	local vfxColor = if ghost then ghost.Color else Color3.fromRGB(100, 200, 255)
+	-- Sound + hand-orb fly on ✓ immediately; don't wait for the server.
+	PlaceVfx.playSound(placePos)
+	HandOrb.flyToPlant(placePos)
+
+	local rf = Remotes.getFunction("RequestPlace")
+	local result = rf:InvokeServer(armedItemId, placePos)
+	if typeof(result) == "table" and result.ok then
+		log("Committed", armedItemId)
+		local keepId = armedItemId :: string
+		local vfxPos = (typeof(result.worldPos) == "Vector3" and result.worldPos) or placePos
+		PlaceVfx.playVisuals(vfxPos, vfxColor)
+		clearGhost()
+		destroyConfirmUi()
+		confirmPos = nil
+		-- Hold freeze for 1s, then bring the next ghost in with a scale-up.
+		postPlaceWaiting = true
+		mode = MODE_AIM
+		armedItemId = keepId
+		stopAimLoop()
+		freeze()
+		placeResumeToken += 1
+		local token = placeResumeToken
+		aimConn = RunService.RenderStepped:Connect(function()
+			if token ~= placeResumeToken or mode == MODE_OFF then
+				return
+			end
+			keepCameraFrozen()
+		end)
+		task.delay(POST_PLACE_GHOST_DELAY, function()
+			if token ~= placeResumeToken then
+				return
+			end
+			if mode == MODE_OFF or not InventoryState.isOpen() then
+				return
+			end
+			if armedItemId ~= keepId then
+				return
+			end
+			beginAim(keepId, true)
+		end)
+	else
+		local code = typeof(result) == "table" and result.errorCode or "Reject"
+		log("Place rejected", code)
+		-- Place failed: cancel fly and put orb back in hand.
+		HandOrb.clear()
+		if ghostBaseColor then
+			HandOrb.arm(ghostBaseColor)
+		elseif ghost then
+			HandOrb.arm(ghost.Color)
+		end
+		if code == "OutOfPlot" or code == "SpotTaken" then
+			rejectReason = if code == "OutOfPlot" then "Out Of Plot" else "Spot Taken"
+			validSpot = false
+			if ghost then
+				ghost.Color = GHOST_INVALID_COLOR
+			end
+			if warnLabel then
+				warnLabel.Text = rejectReason
+				warnLabel.Visible = true
+			end
+		end
+	end
+end
+
+onCheck = function()
+	if not placeAnchor or not validSpot then
+		return
+	end
+	-- Gamepad: place from Aim with one A press (no park/confirm step).
+	if gamepadPlacement then
+		if mode == MODE_OFF then
+			return
+		end
+		confirmPos = placeAnchor
+		commitPlace()
+		return
+	end
+	if mode ~= MODE_CONFIRM then
+		return
+	end
+	confirmPos = placeAnchor
+	commitPlace()
+end
+
+onCancel = function()
+	if disarmAnimating or mode == MODE_OFF then
+		return
+	end
+	if armIntroAnimating then
+		stopArmIntro()
+	end
+	if gamepadPlacement then
+		-- Deactivate coral, keep backpack open, restore D-pad list select.
+		playDisarmOutro(function()
+			gamepadPlacement = false
+			gamepadCursor = nil
+			exitPlacement(false)
+			InventoryState.clearSelection()
+			fireGamepadReturnToList()
+		end)
+		return
+	end
+	-- Pointer: exit placement (deactivate armed coral) after scale-out.
+	playDisarmOutro(function()
+		exitPlacement(true)
+	end)
+end
+
+local function enterConfirm(worldPos: Vector3)
+	mode = MODE_CONFIRM
+	backpackDrag = false
+	confirmDragging = false
+	confirmPressOrigin = nil
+	confirmPos = worldPos
+	placeAnchor = worldPos
+	chromeScreenPos = getPlaceAimScreenPos() -- freeze ✓/X + move on the aim point
+	PlaceVfx.playParkSound(worldPos)
+	updateGhostAt(worldPos)
+	stopAimLoop()
+	aimConn = RunService.RenderStepped:Connect(function()
+		if mode ~= MODE_CONFIRM then
+			return
+		end
+		keepCameraFrozen()
+		updateGhostPulse()
+		syncConfirmButtons()
+	end)
+	log("Confirm mode")
+end
+
+function PlacementController.isActive(): boolean
+	return mode ~= MODE_OFF
+end
+
+function PlacementController.isGamepadPlacement(): boolean
+	return gamepadPlacement
+end
+
+function PlacementController.setGamepadPlacement(enabled: boolean)
+	gamepadPlacement = enabled
+	if enabled then
+		if not gamepadCursor then
+			resetGamepadCursor()
+		end
+	else
+		gamepadCursor = nil
+		stopCheckPrompt()
+	end
+end
+
+function PlacementController.onGamepadReturnToList(cb: () -> ())
+	table.insert(gamepadReturnCbs, cb)
+end
+
+-- Capture backpack cell centers before the green pulse moves (disarm → old, arm → new).
+function PlacementController.setSwitchSlotScreens(disarmTo: Vector2?, armFrom: Vector2?)
+	pendingDisarmSlotScreen = disarmTo
+	pendingArmSlotScreen = armFrom
+end
+
+function PlacementController.beginForItem(itemId: string)
+	if not ClientPlot.isReady() then
+		warn("[PLACE] Plot not ready")
+		pendingDisarmSlotScreen = nil
+		pendingArmSlotScreen = nil
+		queuedSwitchItemId = nil
+		return
+	end
+	if not getSpeciesIdForItem(itemId) then
+		warn("[PLACE] No species for", itemId)
+		pendingDisarmSlotScreen = nil
+		pendingArmSlotScreen = nil
+		queuedSwitchItemId = nil
+		return
+	end
+	if disarmAnimating then
+		-- Full cancel fly-home in progress — arm this item when it finishes.
+		queuedSwitchItemId = itemId
+		pendingDisarmSlotScreen = nil
+		return
+	end
+	-- Switching corals: fly old ghost home AND new ghost out at the same time.
+	if mode ~= MODE_OFF then
+		local nextId = queuedSwitchItemId or itemId
+		queuedSwitchItemId = nil
+
+		if armIntroAnimating then
+			stopArmIntro()
+		end
+		stopAimLoop()
+		stopGhostScaleIn()
+		stopMoveHintAttract()
+
+		local worldPos = placeAnchor or confirmPos or (ghost and ghost.Position) or Vector3.zero
+		local targetScreen = resolveDisarmTargetScreen(armedItemId)
+		PlaceVfx.playCancelSound(worldPos)
+
+		local outGhost, outMove, outGui = detachGhostForSwitch()
+		startOutgoingFlyback(outGhost, outMove, outGui, targetScreen, worldPos)
+
+		confirmPos = nil
+		chromeScreenPos = nil
+		backpackDrag = false
+		aimFingerDown = false
+		confirmDragging = false
+		confirmPressOrigin = nil
+		chromeBtnPointerDown = false
+		postPlaceWaiting = false
+
+		-- Keep the same X above the avatar; only ghost + move icon crossfade.
+		beginAim(nextId, nil, true)
+		return
+	end
+	queuedSwitchItemId = nil
+	beginAim(itemId)
+end
+
+function PlacementController.cancel()
+	-- Always fly ghost + UI back into the backpack slot (X, re-click, etc.).
+	onCancel()
+end
+
+-- Drag-out from backpack (mobile) / click-drop (PC)
+function PlacementController.notifyPointerDownFromBackpack(itemId: string, _screenPos: Vector2)
+	PlacementController.setGamepadPlacement(false)
+	local function startDrag()
+		beginAimFromDrag(itemId)
+		backpackDrag = true
+		local pos = raycastForPlace()
+		if pos then
+			updateGhostAt(pos)
+		end
+	end
+	if mode ~= MODE_OFF then
+		if disarmAnimating then
+			return
+		end
+		playDisarmOutro(function()
+			exitPlacement(false)
+			startDrag()
+		end)
+		return
+	end
+	startDrag()
+end
+
+function PlacementController.notifyPointerMove(_screenPos: Vector2)
+	if mode ~= MODE_AIM then
+		return
+	end
+	local pos = raycastForPlace()
+	if pos then
+		updateGhostAt(pos)
+	end
+end
+
+function PlacementController.notifyPointerUp(_screenPos: Vector2)
+	if mode == MODE_AIM then
+		local pos = placeAnchor or raycastForPlace()
+		backpackDrag = false
+		if pos then
+			enterConfirm(pos)
+		end
+		return
+	end
+	if mode == MODE_CONFIRM then
+		confirmDragging = false
+	end
+end
+
+-- Wire selection → placement (PC tap in backpack)
+InventoryState.onSelectionChanged(function(id)
+	if id == nil then
+		-- Backpack close clears selection first; onOpenChanged owns the fly-back there.
+		if not InventoryState.isOpen() then
+			return
+		end
+		if mode ~= MODE_OFF and not disarmAnimating then
+			onCancel()
+		end
+		return
+	end
+	PlacementController.beginForItem(id)
+end)
+
+-- Closing backpack ends placement so the player can move again.
+InventoryState.onOpenChanged(function(isOpen)
+	if not isOpen then
+		if disarmAnimating then
+			return
+		end
+		if mode ~= MODE_OFF then
+			playDisarmOutro(function()
+				exitPlacement(true)
+			end)
+		else
+			exitPlacement(true)
+		end
+	end
+end)
+
+-- Screen space for hit tests: GetMouseLocation matches IgnoreGuiInset ScreenGuis.
+local function pointerScreenPos(_input: InputObject): Vector2
+	return UserInputService:GetMouseLocation()
+end
+
+local function isOverConfirmButton(screenPos: Vector2): boolean
+	if chromeBtnPointerDown then
+		return true
+	end
+	local function hit(btn: GuiObject?): boolean
+		if not btn or not btn.Visible then
+			return false
+		end
+		local p = btn.AbsolutePosition
+		local s = btn.AbsoluteSize
+		-- Pad so AIM-mode clicks on the circle edge still count (not stolen as ghost-drag).
+		local pad = 18
+		return screenPos.X >= p.X - pad
+			and screenPos.X <= p.X + s.X + pad
+			and screenPos.Y >= p.Y - pad
+			and screenPos.Y <= p.Y + s.Y + pad
+	end
+	if hit(checkBtn) or hit(cancelBtn) then
+		return true
+	end
+	-- Authoritative under-cursor check (handles pin-mode AbsolutePosition quirks).
+	if confirmGui then
+		local function underChrome(x: number, y: number): boolean
+			local ok, objs = pcall(function()
+				return playerGui:GetGuiObjectsAtPosition(x, y)
+			end)
+			if not ok or typeof(objs) ~= "table" then
+				return false
+			end
+			for _, obj in ipairs(objs) do
+				if cancelBtn and (obj == cancelBtn or obj:IsDescendantOf(cancelBtn)) then
+					return true
+				end
+				if checkBtn and checkBtn.Visible and (obj == checkBtn or obj:IsDescendantOf(checkBtn)) then
+					return true
+				end
+			end
+			return false
+		end
+		if underChrome(screenPos.X, screenPos.Y) then
+			return true
+		end
+		local inset = GuiService:GetGuiInset()
+		if inset.X ~= 0 or inset.Y ~= 0 then
+			if underChrome(screenPos.X - inset.X, screenPos.Y - inset.Y) then
+				return true
+			end
+			if underChrome(screenPos.X + inset.X, screenPos.Y + inset.Y) then
+				return true
+			end
+		end
+	end
+	return false
+end
+
+table.insert(inputConns, UserInputService.InputBegan:Connect(function(input, processed)
+	if mode == MODE_OFF then
+		return
+	end
+	if disarmAnimating then
+		return
+	end
+	if armIntroAnimating then
+		-- Allow cancel during the slot→hand fly-in; ignore aim/place.
+		if input.KeyCode == Enum.KeyCode.Escape or input.KeyCode == Enum.KeyCode.X or input.KeyCode == Enum.KeyCode.ButtonB then
+			onCancel()
+			return
+		end
+		local isMouse = input.UserInputType == Enum.UserInputType.MouseButton1
+		local isTouch = input.UserInputType == Enum.UserInputType.Touch
+		if isMouse or isTouch then
+			local screenPos = pointerScreenPos(input)
+			if isOverConfirmButton(screenPos) then
+				chromeBtnPointerDown = true
+			end
+		end
+		return
+	end
+	if postPlaceWaiting then
+		if input.KeyCode == Enum.KeyCode.Escape or input.KeyCode == Enum.KeyCode.X or input.KeyCode == Enum.KeyCode.ButtonB then
+			onCancel()
+		end
+		return
+	end
+	if input.KeyCode == Enum.KeyCode.Escape then
+		onCancel()
+		return
+	end
+
+	-- Gamepad placement: A places immediately, B returns to backpack list.
+	if gamepadPlacement then
+		if input.KeyCode == Enum.KeyCode.ButtonA then
+			onCheck()
+			return
+		end
+		if input.KeyCode == Enum.KeyCode.ButtonB then
+			onCancel()
+			return
+		end
+	elseif input.KeyCode == Enum.KeyCode.X then
+		-- Mouse/keyboard: X matches the red cancel glyph — disarm coral.
+		onCancel()
+		return
+	end
+
+	local isMouse = input.UserInputType == Enum.UserInputType.MouseButton1
+	local isTouch = input.UserInputType == Enum.UserInputType.Touch
+	if not isMouse and not isTouch then
+		return
+	end
+
+	local screenPos = pointerScreenPos(input)
+
+	-- ✓ / X own the press: never start a ghost drag (lets MouseButton1Click fire).
+	-- Must win over AIM even when `processed` is false (common on first pin-mode click).
+	if isOverConfirmButton(screenPos) then
+		confirmPressOrigin = nil
+		confirmDragging = false
+		aimFingerDown = false
+		chromeBtnPointerDown = true
+		return
+	end
+	if processed then
+		return
+	end
+
+	if mode == MODE_CONFIRM then
+		confirmPressOrigin = screenPos
+		confirmDragging = false
+		return
+	end
+
+	-- Aim: hold + slide moves ghost (tap-select then drag on mobile). Park on release.
+	if mode == MODE_AIM and not backpackDrag then
+		aimFingerDown = true
+		aimPinnedToCenter = false
+		releaseHandPin()
+		aimPinOrigin = nil
+		local pos = raycastForPlace()
+		if pos then
+			updateGhostAt(pos)
+		end
+	end
+end))
+
+table.insert(inputConns, UserInputService.InputChanged:Connect(function(input, _processed)
+	if postPlaceWaiting or mode == MODE_OFF or disarmAnimating or chromeBtnPointerDown then
+		return
+	end
+	if input.UserInputType ~= Enum.UserInputType.MouseMovement and input.UserInputType ~= Enum.UserInputType.Touch then
+		return
+	end
+	local now = pointerScreenPos(input)
+	if mode == MODE_AIM and (aimFingerDown or backpackDrag) then
+		local pos = raycastForPlace()
+		if pos then
+			updateGhostAt(pos)
+		end
+		return
+	end
+	if mode == MODE_CONFIRM and confirmPressOrigin then
+		if not confirmDragging then
+			if (now - confirmPressOrigin).Magnitude < CONFIRM_DRAG_PX then
+				return
+			end
+			confirmDragging = true
+		end
+		local pos = raycastForPlace()
+		if pos then
+			confirmPos = pos
+			updateGhostAt(pos)
+		end
+	end
+end))
+
+table.insert(inputConns, UserInputService.InputEnded:Connect(function(input, _processed)
+	if postPlaceWaiting or mode == MODE_OFF then
+		return
+	end
+	if input.UserInputType ~= Enum.UserInputType.MouseButton1 and input.UserInputType ~= Enum.UserInputType.Touch then
+		return
+	end
+	local screenPos = pointerScreenPos(input)
+	-- Cancel/check press: never park the ghost on release.
+	if chromeBtnPointerDown or isOverConfirmButton(screenPos) then
+		chromeBtnPointerDown = false
+		aimFingerDown = false
+		confirmPressOrigin = nil
+		confirmDragging = false
+		return
+	end
+	if disarmAnimating then
+		return
+	end
+	if mode == MODE_AIM and aimFingerDown then
+		aimFingerDown = false
+		if not isOverConfirmButton(screenPos) then
+			local pos = placeAnchor or raycastForPlace()
+			if pos then
+				enterConfirm(pos)
+			end
+		end
+		return
+	end
+	confirmDragging = false
+	confirmPressOrigin = nil
+end))
+
+player.CharacterAdded:Connect(function()
+	if mode ~= MODE_OFF then
+		exitPlacement(true)
+	end
+end)
+
+log("PlacementController ready")
+
+return PlacementController

@@ -24,6 +24,13 @@ See also [STUDIO_VISIBILITY.md](STUDIO_VISIBILITY.md).
 1. New player leave with empty layout — save OK (`layout=0`).
 2. (Phase 2+) Non-empty layout + empty snapshot without intentional clear → `Anti-wipe blocked`.
 
+## Place Brain Coral (Phase 2)
+1. Slot4 → backpack → tap Brain Coral (or drag out on mobile).
+2. Avatar/camera freeze; green/red ghost; “Out Of Plot” / “Spot Taken” when invalid.
+3. Click/tap world → ✓ / X confirm; ✓ places yellow–orange pebble ball (half buried, no shadow).
+4. Esc or X (from aim) exits; leave → `[PERSIST]` save; rejoin → visuals hydrate under `OceanTD_Placed`.
+5. TEMP: `TEMP_BRAIN_CORAL_SLOT_COUNT` in InventoryUI — set `0` for single catalog row.
+
 ## Failure signals
 - `Need MasterTerrainBox` → spawn previews once so master exists.
 - `No free plot` / kick → 7th joiner; expected when full.

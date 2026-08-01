@@ -36,6 +36,13 @@ Expect `[DECOR] Cloned … -> StaticPlot_N` in Output. Do not hand-duplicate dé
 Optional: `MasterPlotDecor` (required for décor clones).  
 `Workspace.Arena` optional for future mid-arena coop/PvP only.
 
+## UI templates (Workspace, not Rojo)
+| Path / asset | Used by |
+|--------------|---------|
+| `rbxassetid://345081302` | Placement confirm move hint (under coral) |
+
+Optional Studio reference: `Workspace.UI["Move Icon"]` — code uses the asset id directly.
+
 ## Reject
 - Six masters; `StaticPlot_1`; Master paths for every player; `PreviewBox_i == Plot_i`; requiring a hand-placed Arena.Center; assuming Hide deletes boxes.
 

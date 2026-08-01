@@ -13,12 +13,14 @@ local PlotService = require(Services:WaitForChild("PlotService"))
 local GridService = require(Services:WaitForChild("GridService"))
 local PersistenceService = require(Services:WaitForChild("PersistenceService"))
 local DecorReplicator = require(Services:WaitForChild("DecorReplicator"))
+local PlacementService = require(Services:WaitForChild("PlacementService"))
 
 local Constants = require(oceanRoot:WaitForChild("Shared"):WaitForChild("Constants"))
 
 Remotes.initServer()
 PersistenceService.init()
 PlotService.init()
+PlacementService.init()
 
 do
 	local poses = {}
@@ -77,6 +79,7 @@ local function onPlayerAdded(player: Player)
 	end
 
 	GridService.hydrate(payload.plotId, player.UserId, profile.layout, payload.cframe)
+	PlacementService.hydrateVisuals(payload.plotId, payload.cframe)
 	PlayerSession.markReady(player, payload.plotId)
 
 	plotAssignedRemote:FireClient(player, payload)
@@ -108,6 +111,7 @@ local function onPlayerRemoving(player: Player)
 	local plotId = PlotService.getOwnerPlotId(player)
 	if plotId then
 		GridService.clearPlot(plotId)
+		PlacementService.clearPlotVisuals(plotId)
 	end
 	PlotService.free(player)
 	plotClearedRemote:FireClient(player)
@@ -150,3 +154,11 @@ game:BindToClose(function()
 end)
 
 print("[PLOT] OceanTD server bootstrap complete")
+
+local requestPlace = Remotes.getFunction("RequestPlace")
+requestPlace.OnServerInvoke = function(player: Player, itemId: any, worldPos: any)
+	if typeof(itemId) ~= "string" or typeof(worldPos) ~= "Vector3" then
+		return { ok = false, errorCode = "BadRequest" }
+	end
+	return PlacementService.place(player, itemId, worldPos)
+end

@@ -9,9 +9,14 @@ local Remotes = {}
 local FOLDER_NAME = "RemoteEvents"
 
 local REMOTE_EVENTS = {
-	"PlotAssigned", -- server -> owner: PlotBoundsPayload
-	"PlotCleared", -- server -> owner
-	"SessionReady", -- server -> owner
+	"PlotAssigned",
+	"PlotCleared",
+	"SessionReady",
+	"PlaceResult",
+}
+
+local REMOTE_FUNCTIONS = {
+	"RequestPlace",
 }
 
 local function getRoot(): Instance
@@ -24,14 +29,13 @@ local function getFolder(): Folder
 	if folder and folder:IsA("Folder") then
 		return folder
 	end
-	-- Do not reuse a non-Folder named similarly; create the events folder.
 	folder = Instance.new("Folder")
 	folder.Name = FOLDER_NAME
 	folder.Parent = root
 	return folder
 end
 
-local function ensureRemote(folder: Folder, name: string): RemoteEvent
+local function ensureRemoteEvent(folder: Folder, name: string): RemoteEvent
 	local existing = folder:FindFirstChild(name)
 	if existing and existing:IsA("RemoteEvent") then
 		return existing
@@ -45,10 +49,27 @@ local function ensureRemote(folder: Folder, name: string): RemoteEvent
 	return re
 end
 
+local function ensureRemoteFunction(folder: Folder, name: string): RemoteFunction
+	local existing = folder:FindFirstChild(name)
+	if existing and existing:IsA("RemoteFunction") then
+		return existing
+	end
+	if existing then
+		existing:Destroy()
+	end
+	local rf = Instance.new("RemoteFunction")
+	rf.Name = name
+	rf.Parent = folder
+	return rf
+end
+
 function Remotes.initServer()
 	local folder = getFolder()
 	for _, name in ipairs(REMOTE_EVENTS) do
-		ensureRemote(folder, name)
+		ensureRemoteEvent(folder, name)
+	end
+	for _, name in ipairs(REMOTE_FUNCTIONS) do
+		ensureRemoteFunction(folder, name)
 	end
 	return folder
 end
@@ -56,10 +77,20 @@ end
 function Remotes.get(name: string): RemoteEvent
 	local folder = getFolder()
 	if RunService:IsServer() then
-		return ensureRemote(folder, name)
+		return ensureRemoteEvent(folder, name)
 	end
 	local remote = folder:WaitForChild(name, 30)
 	assert(remote and remote:IsA("RemoteEvent"), "[OceanTD] Missing remote: " .. name)
+	return remote
+end
+
+function Remotes.getFunction(name: string): RemoteFunction
+	local folder = getFolder()
+	if RunService:IsServer() then
+		return ensureRemoteFunction(folder, name)
+	end
+	local remote = folder:WaitForChild(name, 30)
+	assert(remote and remote:IsA("RemoteFunction"), "[OceanTD] Missing remote function: " .. name)
 	return remote
 end
 
