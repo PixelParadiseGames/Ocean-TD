@@ -19,6 +19,7 @@ local REMOTE_FUNCTIONS = {
 	"RequestPlace",
 	"RequestMove",
 	"RequestRecycle",
+	"RequestUndo",
 }
 
 local function getRoot(): Instance

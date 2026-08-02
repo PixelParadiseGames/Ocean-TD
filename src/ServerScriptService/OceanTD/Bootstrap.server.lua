@@ -14,6 +14,7 @@ local GridService = require(Services:WaitForChild("GridService"))
 local PersistenceService = require(Services:WaitForChild("PersistenceService"))
 local DecorReplicator = require(Services:WaitForChild("DecorReplicator"))
 local PlacementService = require(Services:WaitForChild("PlacementService"))
+local UndoService = require(Services:WaitForChild("UndoService"))
 
 local Constants = require(oceanRoot:WaitForChild("Shared"):WaitForChild("Constants"))
 
@@ -118,6 +119,7 @@ local function onPlayerRemoving(player: Player)
 
 	PersistenceService.release(player)
 	PlayerSession.remove(player)
+	UndoService.clear(player)
 end
 
 Players.PlayerAdded:Connect(onPlayerAdded)
@@ -177,4 +179,9 @@ requestRecycle.OnServerInvoke = function(player: Player, placeId: any, worldPos:
 		return { ok = false, errorCode = "BadRequest" }
 	end
 	return PlacementService.recycle(player, placeId, worldPos)
+end
+
+local requestUndo = Remotes.getFunction("RequestUndo")
+requestUndo.OnServerInvoke = function(player: Player)
+	return PlacementService.undoLast(player)
 end

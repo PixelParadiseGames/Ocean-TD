@@ -19,10 +19,13 @@ local PlotService = require(script.Parent:WaitForChild("PlotService"))
 local GridService = require(script.Parent:WaitForChild("GridService"))
 local PlayerSession = require(script.Parent:WaitForChild("PlayerSession"))
 local PersistenceService = require(script.Parent:WaitForChild("PersistenceService"))
+local UndoService = require(script.Parent:WaitForChild("UndoService"))
 
 local PlacementService = {}
 
 local ROOT_NAME = "OceanTD_Placed"
+-- While true, successful ops don't push undo (used during undo itself).
+local suppressUndoRecord = false
 
 local function log(...: any)
 	print("[PLACE]", ...)
@@ -157,6 +160,7 @@ export type PlaceResult = {
 	worldPos: Vector3?,
 	speciesId: string?,
 	itemId: string?,
+	placeId: string?,
 }
 
 function PlacementService.place(player: Player, itemId: string, worldPos: Vector3): PlaceResult
@@ -191,12 +195,28 @@ function PlacementService.place(player: Player, itemId: string, worldPos: Vector
 		return { ok = false, errorCode = "VisualFail" }
 	end
 
+	local placeIdAttr = visual:GetAttribute("OceanTD_PlaceId")
+	local placeId = if typeof(placeIdAttr) == "string" then placeIdAttr else HttpService:GenerateGUID(false)
+	visual:SetAttribute("OceanTD_PlaceId", placeId)
+	visual:SetAttribute("OceanTD_ItemId", itemId)
+	visual:SetAttribute("OceanTD_SpeciesId", species.speciesId)
+
+	if not suppressUndoRecord then
+		UndoService.push(player, {
+			kind = "place",
+			placeId = placeId,
+			itemId = itemId,
+			worldPos = worldPos,
+		})
+	end
+
 	log("Placed", itemId, "for", player.Name, "at", worldPos)
 	return {
 		ok = true,
 		worldPos = worldPos,
 		speciesId = species.speciesId,
 		itemId = itemId,
+		placeId = placeId,
 	}
 end
 
@@ -294,6 +314,16 @@ function PlacementService.move(
 	visual.CFrame = CFrame.new(toWorldPos)
 
 	local species = SpeciesCatalog.getByItemId(cell.id)
+	if not suppressUndoRecord then
+		UndoService.push(player, {
+			kind = "move",
+			placeId = resolvedPlaceId,
+			itemId = cell.id,
+			fromWorldPos = fromWorldPos,
+			toWorldPos = toWorldPos,
+		})
+	end
+
 	log("Moved", cell.id, "for", player.Name, "→", toWorldPos)
 	return {
 		ok = true,
@@ -358,6 +388,15 @@ function PlacementService.recycle(player: Player, placeId: string, worldPos: Vec
 	visual:Destroy()
 	local seedCount = PersistenceService.creditItem(player, creditedId, 1)
 
+	if not suppressUndoRecord then
+		UndoService.push(player, {
+			kind = "recycle",
+			placeId = placeId,
+			itemId = creditedId,
+			worldPos = worldPos,
+		})
+	end
+
 	log("Recycled", creditedId, "for", player.Name, "seeds=", seedCount)
 	return {
 		ok = true,
@@ -365,6 +404,98 @@ function PlacementService.recycle(player: Player, placeId: string, worldPos: Vec
 		placeId = placeId,
 		seedCount = seedCount,
 	}
+end
+
+export type UndoResult = {
+	ok: boolean,
+	errorCode: string?,
+	kind: string?,
+}
+
+local function removePlacedWithoutCredit(player: Player, placeId: string, worldPos: Vector3): boolean
+	local plotId = PlotService.getOwnerPlotId(player)
+	if not plotId then
+		return false
+	end
+	local localPos = worldToPlotLocal(plotId, worldPos)
+	if not localPos then
+		return false
+	end
+	local visual = findVisualByPlaceId(plotId, placeId) or findVisualAtGrid(plotId, worldPos)
+	local vacated = GridService.vacate(plotId, localPos.X, localPos.Y, localPos.Z)
+	if not vacated then
+		if visual then
+			visual:Destroy()
+		end
+		return false
+	end
+	if visual then
+		visual:Destroy()
+	end
+	return true
+end
+
+-- Undo last place / move / recycle for this session (does not push a new undo step).
+function PlacementService.undoLast(player: Player): UndoResult
+	if not PlayerSession.canSave(player) then
+		return { ok = false, errorCode = "NotReady" }
+	end
+	local step = UndoService.pop(player)
+	if not step then
+		return { ok = false, errorCode = "NothingToUndo" }
+	end
+
+	suppressUndoRecord = true
+	local ok = false
+	local err: string? = nil
+
+	if step.kind == "place" then
+		local worldPos = step.worldPos
+		if typeof(worldPos) == "Vector3" then
+			ok = removePlacedWithoutCredit(player, step.placeId, worldPos)
+			if not ok then
+				err = "NotFound"
+			end
+		else
+			err = "BadStep"
+		end
+	elseif step.kind == "move" then
+		local fromPos = step.fromWorldPos
+		local toPos = step.toWorldPos
+		if typeof(fromPos) == "Vector3" and typeof(toPos) == "Vector3" then
+			local result = PlacementService.move(player, step.placeId, toPos, fromPos)
+			ok = result.ok == true
+			err = result.errorCode
+		else
+			err = "BadStep"
+		end
+	elseif step.kind == "recycle" then
+		local worldPos = step.worldPos
+		if typeof(worldPos) == "Vector3" then
+			PersistenceService.debitItem(player, step.itemId, 1)
+			local result = PlacementService.place(player, step.itemId, worldPos)
+			ok = result.ok == true
+			err = result.errorCode
+			if not ok then
+				PersistenceService.creditItem(player, step.itemId, 1)
+			end
+		else
+			err = "BadStep"
+		end
+	else
+		err = "BadStep"
+	end
+
+	suppressUndoRecord = false
+
+	if ok then
+		log("Undid", step.kind, "for", player.Name, "remaining=", UndoService.count(player))
+		return { ok = true, kind = step.kind }
+	end
+
+	UndoService.push(player, step)
+	warnPlace("Undo failed", step.kind, err, "for", player.Name)
+	return { ok = false, errorCode = err or "UndoFail", kind = step.kind }
 end
 
 function PlacementService.init()

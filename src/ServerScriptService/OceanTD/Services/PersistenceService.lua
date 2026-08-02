@@ -106,6 +106,25 @@ function PersistenceService.creditItem(player: Player, itemId: string, amount: n
 	return nextCount
 end
 
+-- Debit seed count (floor at 0). Used when undoing a recycle credit.
+function PersistenceService.debitItem(player: Player, itemId: string, amount: number?): number
+	local profile = profiles[player]
+	if not profile or typeof(itemId) ~= "string" or itemId == "" then
+		return 0
+	end
+	local sub = math.max(1, math.floor(tonumber(amount) or 1))
+	local inv = profile.inventory
+	if typeof(inv) ~= "table" then
+		inv = {}
+		profile.inventory = inv
+	end
+	local cur = tonumber(inv[itemId]) or 0
+	local nextCount = math.max(0, cur - sub)
+	inv[itemId] = nextCount
+	log("Debit", itemId, "x", sub, "→", nextCount, "for", player.Name)
+	return nextCount
+end
+
 function PersistenceService.allowIntentionalClear(userId: number)
 	intentionalClear[userId] = true
 end
