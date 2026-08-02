@@ -87,6 +87,25 @@ function PersistenceService.getProfile(player: Player): PlayerProfile?
 	return profiles[player]
 end
 
+-- Credit seed count in profile.inventory[itemId] (number). Used by recycle.
+function PersistenceService.creditItem(player: Player, itemId: string, amount: number?): number
+	local profile = profiles[player]
+	if not profile or typeof(itemId) ~= "string" or itemId == "" then
+		return 0
+	end
+	local add = math.max(1, math.floor(tonumber(amount) or 1))
+	local inv = profile.inventory
+	if typeof(inv) ~= "table" then
+		inv = {}
+		profile.inventory = inv
+	end
+	local cur = tonumber(inv[itemId]) or 0
+	local nextCount = cur + add
+	inv[itemId] = nextCount
+	log("Credit", itemId, "x", add, "→", nextCount, "for", player.Name)
+	return nextCount
+end
+
 function PersistenceService.allowIntentionalClear(userId: number)
 	intentionalClear[userId] = true
 end

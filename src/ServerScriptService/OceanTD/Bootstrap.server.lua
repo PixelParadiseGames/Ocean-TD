@@ -162,3 +162,19 @@ requestPlace.OnServerInvoke = function(player: Player, itemId: any, worldPos: an
 	end
 	return PlacementService.place(player, itemId, worldPos)
 end
+
+local requestMove = Remotes.getFunction("RequestMove")
+requestMove.OnServerInvoke = function(player: Player, placeId: any, fromWorldPos: any, toWorldPos: any)
+	if typeof(placeId) ~= "string" or typeof(fromWorldPos) ~= "Vector3" or typeof(toWorldPos) ~= "Vector3" then
+		return { ok = false, errorCode = "BadRequest" }
+	end
+	return PlacementService.move(player, placeId, fromWorldPos, toWorldPos)
+end
+
+local requestRecycle = Remotes.getFunction("RequestRecycle")
+requestRecycle.OnServerInvoke = function(player: Player, placeId: any, worldPos: any)
+	if typeof(placeId) ~= "string" or typeof(worldPos) ~= "Vector3" then
+		return { ok = false, errorCode = "BadRequest" }
+	end
+	return PlacementService.recycle(player, placeId, worldPos)
+end

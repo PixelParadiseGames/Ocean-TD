@@ -85,4 +85,18 @@ function InventoryState.getItemSlotScreenCenter(itemId: string): Vector2?
 	return nil
 end
 
+-- True when the pointer is over the open backpack panel (scroll list / chrome).
+local backpackHitTest: ((Vector2) -> boolean)? = nil
+
+function InventoryState.setBackpackHitTest(provider: (Vector2) -> boolean)
+	backpackHitTest = provider
+end
+
+function InventoryState.isPointerOverBackpack(screenPos: Vector2): boolean
+	if not open or not backpackHitTest then
+		return false
+	end
+	return backpackHitTest(screenPos)
+end
+
 return InventoryState

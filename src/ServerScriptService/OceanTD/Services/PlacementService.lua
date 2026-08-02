@@ -7,6 +7,7 @@
 
 local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local HttpService = game:GetService("HttpService")
 
 local oceanShared = ReplicatedStorage:WaitForChild("OceanTD"):WaitForChild("Shared")
 local GridMath = require(oceanShared:WaitForChild("GridMath"))
@@ -17,6 +18,7 @@ local ItemCatalog = require(oceanShared:WaitForChild("ItemCatalog"))
 local PlotService = require(script.Parent:WaitForChild("PlotService"))
 local GridService = require(script.Parent:WaitForChild("GridService"))
 local PlayerSession = require(script.Parent:WaitForChild("PlayerSession"))
+local PersistenceService = require(script.Parent:WaitForChild("PersistenceService"))
 
 local PlacementService = {}
 
@@ -101,8 +103,39 @@ function PlacementService.spawnVisual(plotId: string, speciesId: string, worldPo
 	if not part then
 		return nil
 	end
+	part:SetAttribute("OceanTD_PlaceId", HttpService:GenerateGUID(false))
 	part.Parent = getPlotFolder(plotId)
 	return part
+end
+
+local function findVisualByPlaceId(plotId: string, placeId: string): BasePart?
+	local folder = getPlotFolder(plotId)
+	for _, inst in ipairs(folder:GetChildren()) do
+		if inst:IsA("BasePart") and inst:GetAttribute("OceanTD_PlaceId") == placeId then
+			return inst
+		end
+	end
+	return nil
+end
+
+local function findVisualAtGrid(plotId: string, worldPos: Vector3): BasePart?
+	local slot = PlotService.getSlot(plotId)
+	if not slot then
+		return nil
+	end
+	local localPos = GridMath.worldToPlotLocal(worldPos, slot.cframe)
+	local gx, gy, gz = GridMath.worldToGrid(localPos, Vector3.zero)
+	local folder = getPlotFolder(plotId)
+	for _, inst in ipairs(folder:GetChildren()) do
+		if inst:IsA("BasePart") then
+			local lp = GridMath.worldToPlotLocal(inst.Position, slot.cframe)
+			local ax, ay, az = GridMath.worldToGrid(lp, Vector3.zero)
+			if ax == gx and ay == gy and az == gz then
+				return inst
+			end
+		end
+	end
+	return nil
 end
 
 function PlacementService.hydrateVisuals(plotId: string, boundsCFrame: CFrame)
@@ -164,6 +197,173 @@ function PlacementService.place(player: Player, itemId: string, worldPos: Vector
 		worldPos = worldPos,
 		speciesId = species.speciesId,
 		itemId = itemId,
+	}
+end
+
+export type MoveResult = {
+	ok: boolean,
+	errorCode: string?,
+	worldPos: Vector3?,
+	speciesId: string?,
+	itemId: string?,
+	placeId: string?,
+}
+
+-- Move an existing placed coral from one plot cell to another.
+function PlacementService.move(
+	player: Player,
+	placeId: string,
+	fromWorldPos: Vector3,
+	toWorldPos: Vector3
+): MoveResult
+	if typeof(placeId) ~= "string" or placeId == "" then
+		return { ok = false, errorCode = "BadRequest" }
+	end
+	if typeof(fromWorldPos) ~= "Vector3" or typeof(toWorldPos) ~= "Vector3" then
+		return { ok = false, errorCode = "BadPosition" }
+	end
+	if not PlayerSession.canSave(player) then
+		return { ok = false, errorCode = "NotReady" }
+	end
+	local plotId = PlotService.getOwnerPlotId(player)
+	if not plotId then
+		return { ok = false, errorCode = "NoPlot" }
+	end
+	if not PlotService.isInsideOwnerPlot(player, fromWorldPos) then
+		return { ok = false, errorCode = "OutOfPlot" }
+	end
+	if not PlotService.isInsideOwnerPlot(player, toWorldPos) then
+		return { ok = false, errorCode = "OutOfPlot" }
+	end
+
+	local fromLocal = worldToPlotLocal(plotId, fromWorldPos)
+	local toLocal = worldToPlotLocal(plotId, toWorldPos)
+	if not fromLocal or not toLocal then
+		return { ok = false, errorCode = "BadPlot" }
+	end
+
+	local fromCell = GridService.getCell(plotId, fromLocal.X, fromLocal.Y, fromLocal.Z)
+	if not fromCell then
+		return { ok = false, errorCode = "NotFound" }
+	end
+	if fromCell.ownerUserId ~= player.UserId then
+		return { ok = false, errorCode = "NotOwner" }
+	end
+
+	local resolvedPlaceId = placeId
+	if resolvedPlaceId == "" then
+		resolvedPlaceId = HttpService:GenerateGUID(false)
+	end
+
+	local visual = findVisualByPlaceId(plotId, placeId)
+		or findVisualAtGrid(plotId, toWorldPos)
+		or findVisualAtGrid(plotId, fromWorldPos)
+	if not visual then
+		return { ok = false, errorCode = "NotFound" }
+	end
+	visual:SetAttribute("OceanTD_PlaceId", resolvedPlaceId)
+
+	local fgx, fgy, fgz = GridMath.worldToGrid(fromLocal, Vector3.zero)
+	local tgx, tgy, tgz = GridMath.worldToGrid(toLocal, Vector3.zero)
+	if fgx == tgx and fgy == tgy and fgz == tgz then
+		visual.CFrame = CFrame.new(toWorldPos)
+		return {
+			ok = true,
+			worldPos = toWorldPos,
+			itemId = fromCell.id,
+			placeId = resolvedPlaceId,
+		}
+	end
+
+	if GridService.isOccupied(plotId, toLocal.X, toLocal.Y, toLocal.Z) then
+		return { ok = false, errorCode = "SpotTaken" }
+	end
+
+	local vacated, cell = GridService.vacate(plotId, fromLocal.X, fromLocal.Y, fromLocal.Z)
+	if not vacated or not cell then
+		return { ok = false, errorCode = "NotFound" }
+	end
+
+	local occupied, occupyErr = GridService.tryOccupy(plotId, player.UserId, cell.id, toLocal.X, toLocal.Y, toLocal.Z)
+	if not occupied then
+		-- Roll back vacate so the coral isn't lost from the grid.
+		GridService.tryOccupy(plotId, player.UserId, cell.id, fromLocal.X, fromLocal.Y, fromLocal.Z)
+		return { ok = false, errorCode = occupyErr or "SpotTaken" }
+	end
+
+	visual.CFrame = CFrame.new(toWorldPos)
+
+	local species = SpeciesCatalog.getByItemId(cell.id)
+	log("Moved", cell.id, "for", player.Name, "→", toWorldPos)
+	return {
+		ok = true,
+		worldPos = toWorldPos,
+		speciesId = if species then species.speciesId else nil,
+		itemId = cell.id,
+		placeId = resolvedPlaceId,
+	}
+end
+
+export type RecycleResult = {
+	ok: boolean,
+	errorCode: string?,
+	itemId: string?,
+	placeId: string?,
+	seedCount: number?,
+}
+
+-- Remove a placed coral and credit one seed back to the player's inventory.
+function PlacementService.recycle(player: Player, placeId: string, worldPos: Vector3): RecycleResult
+	if typeof(placeId) ~= "string" then
+		return { ok = false, errorCode = "BadRequest" }
+	end
+	if typeof(worldPos) ~= "Vector3" then
+		return { ok = false, errorCode = "BadPosition" }
+	end
+	if not PlayerSession.canSave(player) then
+		return { ok = false, errorCode = "NotReady" }
+	end
+	local plotId = PlotService.getOwnerPlotId(player)
+	if not plotId then
+		return { ok = false, errorCode = "NoPlot" }
+	end
+	if not PlotService.isInsideOwnerPlot(player, worldPos) then
+		return { ok = false, errorCode = "OutOfPlot" }
+	end
+
+	local localPos = worldToPlotLocal(plotId, worldPos)
+	if not localPos then
+		return { ok = false, errorCode = "BadPlot" }
+	end
+
+	local cell = GridService.getCell(plotId, localPos.X, localPos.Y, localPos.Z)
+	if not cell then
+		return { ok = false, errorCode = "NotFound" }
+	end
+	if cell.ownerUserId ~= player.UserId then
+		return { ok = false, errorCode = "NotOwner" }
+	end
+
+	local visual = findVisualByPlaceId(plotId, placeId) or findVisualAtGrid(plotId, worldPos)
+	if not visual then
+		return { ok = false, errorCode = "NotFound" }
+	end
+
+	local vacated, vacatedCell = GridService.vacate(plotId, localPos.X, localPos.Y, localPos.Z)
+	if not vacated or not vacatedCell then
+		return { ok = false, errorCode = "NotFound" }
+	end
+
+	local creditedId = vacatedCell.id
+	visual:Destroy()
+	local seedCount = PersistenceService.creditItem(player, creditedId, 1)
+
+	log("Recycled", creditedId, "for", player.Name, "seeds=", seedCount)
+	return {
+		ok = true,
+		itemId = creditedId,
+		placeId = placeId,
+		seedCount = seedCount,
 	}
 end
 

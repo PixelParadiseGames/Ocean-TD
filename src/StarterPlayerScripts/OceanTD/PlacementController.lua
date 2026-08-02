@@ -43,6 +43,7 @@ local armedItemId: string? = nil
 local ghost: BasePart? = nil
 local warnLabel: TextLabel? = nil
 local moveHintImage: ImageLabel? = nil
+local moveHintBillboard: BillboardGui? = nil
 local confirmGui: ScreenGui? = nil
 local checkBtn: TextButton? = nil
 local cancelBtn: TextButton? = nil
@@ -50,6 +51,10 @@ local confirmPos: Vector3? = nil -- ground anchor under finger (actual place pos
 local placeAnchor: Vector3? = nil
 local validSpot = false
 local rejectReason: string? = nil
+-- Placed coral occupying the aimed cell — neon red/white flash while "Spot Taken".
+local blockFlashPart: BasePart? = nil
+local blockFlashBaseMaterial: Enum.Material? = nil
+local blockFlashBaseColor: Color3? = nil
 local backpackDrag = false -- pointer-driven aim from backpack pull
 local aimFingerDown = false -- world drag after tap-select (mobile/PC)
 local confirmDragging = false
@@ -129,6 +134,8 @@ local makeConfirmUi: () -> ()
 local syncConfirmButtons: () -> ()
 local stopMoveHintAttract: () -> ()
 local startMoveHintAttract: () -> ()
+local detachMoveHintToScreen: () -> ()
+local attachMoveHintToGhost: () -> ()
 local releaseHandPin: () -> ()
 local stopArmIntro: () -> ()
 local startAimLoop: () -> ()
@@ -371,11 +378,17 @@ local function startGhostScaleIn(part: BasePart)
 	end)
 end
 
+local clearBlockFlash: () -> ()
+
 local function clearGhost()
 	stopGhostScaleIn()
+	clearBlockFlash()
+	ClientPlot.setOutOfPlotFlash(false)
 	warnLabel = nil
 	ghostBaseColor = nil
 	ghostBaseMaterial = nil
+	-- Keep move icon alive (billboard may be Adorned to this ghost).
+	detachMoveHintToScreen()
 	if ghost then
 		ghost:Destroy()
 		ghost = nil
@@ -389,6 +402,10 @@ local function destroyConfirmUi()
 		checkPromptConn = nil
 	end
 	stopMoveHintAttract()
+	if moveHintBillboard then
+		moveHintBillboard:Destroy()
+		moveHintBillboard = nil
+	end
 	if confirmGui then
 		confirmGui:Destroy()
 		confirmGui = nil
@@ -399,28 +416,88 @@ local function destroyConfirmUi()
 	moveHintScale = nil
 end
 
-local function isSpotTakenClient(worldPos: Vector3): boolean
+local function findBlockingCoral(worldPos: Vector3): BasePart?
 	local plot = ClientPlot.get()
 	if not plot then
-		return false
+		return nil
 	end
 	local localPos = GridMath.worldToPlotLocal(worldPos, plot.cframe)
 	local gx, gy, gz = GridMath.worldToGrid(localPos, Vector3.zero)
 	local root = Workspace:FindFirstChild("OceanTD_Placed")
 	local folder = root and root:FindFirstChild(plot.plotId)
 	if not folder then
-		return false
+		return nil
 	end
 	for _, inst in ipairs(folder:GetChildren()) do
 		if inst:IsA("BasePart") then
 			local lp = GridMath.worldToPlotLocal(inst.Position, plot.cframe)
 			local ax, ay, az = GridMath.worldToGrid(lp, Vector3.zero)
 			if ax == gx and ay == gy and az == gz then
-				return true
+				return inst
 			end
 		end
 	end
-	return false
+	return nil
+end
+
+local function isSpotTakenClient(worldPos: Vector3): boolean
+	return findBlockingCoral(worldPos) ~= nil
+end
+
+clearBlockFlash = function()
+	if blockFlashPart and blockFlashPart.Parent then
+		if blockFlashBaseMaterial then
+			blockFlashPart.Material = blockFlashBaseMaterial
+		end
+		if blockFlashBaseColor then
+			blockFlashPart.Color = blockFlashBaseColor
+		end
+	end
+	blockFlashPart = nil
+	blockFlashBaseMaterial = nil
+	blockFlashBaseColor = nil
+end
+
+local function setBlockFlash(target: BasePart?)
+	if blockFlashPart == target then
+		return
+	end
+	clearBlockFlash()
+	if not target or not target.Parent then
+		return
+	end
+	-- Clear backpack hover neon first so we don't save Neon as the restore base.
+	pcall(function()
+		local Relocate = require(script.Parent:WaitForChild("RelocateController"))
+		if typeof(Relocate.clearHoverHighlight) == "function" then
+			Relocate.clearHoverHighlight()
+		end
+	end)
+	blockFlashPart = target
+	blockFlashBaseMaterial = target.Material
+	blockFlashBaseColor = target.Color
+	target.Material = Enum.Material.Neon
+end
+
+local function updateBlockFlash()
+	if not blockFlashPart or not blockFlashPart.Parent then
+		if blockFlashPart then
+			clearBlockFlash()
+		end
+		return
+	end
+	-- Alternate bright white ↔ red neon.
+	local pulse = (math.sin(os.clock() * 12) + 1) * 0.5
+	blockFlashPart.Material = Enum.Material.Neon
+	blockFlashPart.Color = Color3.new(1, 1, 1):Lerp(Color3.fromRGB(255, 45, 45), pulse)
+end
+
+local function syncBlockFlashForAim(worldPos: Vector3?)
+	if aimPinnedToHand or not worldPos or validSpot or rejectReason ~= "Spot Taken" then
+		clearBlockFlash()
+		return
+	end
+	setBlockFlash(findBlockingCoral(worldPos))
 end
 
 local function raycastPointer(screenPos: Vector2): Vector3?
@@ -614,6 +691,67 @@ local function setMoveHintVisible(visible: boolean)
 	end
 end
 
+-- Screen-space mode for backpack fly in/out tweens.
+detachMoveHintToScreen = function()
+	if not moveHintImage then
+		if moveHintBillboard then
+			moveHintBillboard:Destroy()
+			moveHintBillboard = nil
+		end
+		return
+	end
+	if confirmGui and moveHintImage.Parent ~= confirmGui then
+		-- Park at the ghost's screen center so tweens start from the right place.
+		if camera and ghost and ghost.Parent then
+			local sp, _ = camera:WorldToViewportPoint(ghost.Position)
+			if sp.Z > 0 then
+				moveHintImage.Position = UDim2.fromOffset(sp.X, sp.Y)
+			end
+		end
+		moveHintImage.AnchorPoint = Vector2.new(0.5, 0.5)
+		moveHintImage.Size = UDim2.fromOffset(MOVE_ICON_SIZE, MOVE_ICON_SIZE)
+		moveHintImage.Parent = confirmGui
+	end
+	if moveHintBillboard then
+		moveHintBillboard:Destroy()
+		moveHintBillboard = nil
+	end
+end
+
+-- World-anchored mode: stays centered on the ghost on every device (no GuiInset drift).
+attachMoveHintToGhost = function()
+	if not moveHintImage or not ghost or not ghost.Parent then
+		return
+	end
+	if moveHintBillboard and moveHintBillboard.Parent and moveHintBillboard.Adornee == ghost then
+		moveHintImage.Visible = true
+		if moveHintImage.Parent ~= moveHintBillboard then
+			moveHintImage.Parent = moveHintBillboard
+		end
+		return
+	end
+	if moveHintBillboard then
+		moveHintBillboard:Destroy()
+		moveHintBillboard = nil
+	end
+	local bb = Instance.new("BillboardGui")
+	bb.Name = "OceanTD_MoveHintBillboard"
+	bb.AlwaysOnTop = true
+	bb.Active = false
+	bb.LightInfluence = 0
+	bb.Size = UDim2.fromOffset(MOVE_ICON_SIZE, MOVE_ICON_SIZE)
+	bb.StudsOffset = Vector3.zero
+	bb.MaxDistance = 2000
+	bb.Adornee = ghost
+	bb.Parent = playerGui
+	moveHintImage.AnchorPoint = Vector2.new(0.5, 0.5)
+	moveHintImage.Position = UDim2.fromScale(0.5, 0.5)
+	moveHintImage.Size = UDim2.fromScale(1, 1)
+	moveHintImage.Visible = true
+	moveHintImage.Parent = bb
+	moveHintBillboard = bb
+end
+
 stopMoveHintAttract = function()
 	moveHintPulseToken += 1
 	if moveHintScale then
@@ -730,6 +868,8 @@ local function updateGhostAt(anchorPos: Vector3)
 		end
 	end
 	updateGhostPulse()
+	syncBlockFlashForAim(anchorPos)
+	ClientPlot.setOutOfPlotFlash(not aimPinnedToHand and rejectReason == "Out Of Plot")
 	if warnLabel then
 		if validSpot then
 			warnLabel.Text = ""
@@ -806,14 +946,8 @@ local function syncConfirmButtonsImpl()
 
 	if moveHintImage then
 		moveHintImage.Visible = true
-		if aimPinnedToHand then
-			-- Sit on the hand / neon seed so the player sees they can drag from there.
-			moveHintImage.AnchorPoint = Vector2.new(0.5, 0.5)
-			moveHintImage.Position = UDim2.fromOffset(aimX, aimY)
-		else
-			moveHintImage.AnchorPoint = Vector2.new(0.5, 0)
-			moveHintImage.Position = UDim2.fromOffset(aimX, aimY + GHOST_SCREEN_RADIUS_PX + MOVE_BELOW_GHOST_PX)
-		end
+		-- Billboard tracks the ghost center in world space (fixes mobile ScreenGui inset drift).
+		attachMoveHintToGhost()
 	end
 
 	-- ✓ / X stay on the avatar (not the ghost).
@@ -1006,6 +1140,7 @@ end
 
 -- Steal ghost (+ optional move-icon clone) for parallel switch. Keeps ✓/X chrome in place.
 local function detachGhostForSwitch(): (BasePart?, ImageLabel?, ScreenGui?)
+	detachMoveHintToScreen()
 	local g = ghost
 	ghost = nil
 	placeAnchor = nil
@@ -1119,6 +1254,7 @@ local function playDisarmOutro(thenExit: () -> ())
 	if armIntroAnimating then
 		stopArmIntro()
 	end
+	detachMoveHintToScreen()
 	-- Nothing to animate — finish immediately.
 	if not ghost and not confirmGui then
 		pendingDisarmSlotScreen = nil
@@ -1236,6 +1372,7 @@ startAimLoop = function()
 			return
 		end
 		updateGhostPulse()
+		updateBlockFlash()
 		syncConfirmButtons()
 
 		if gamepadPlacement then
@@ -1312,6 +1449,7 @@ local function playArmIntroFromSlot(itemId: string, seedColor: Color3, onDone: (
 	armIntroAnimating = true
 	aimPinnedToHand = true
 	pendingGhostScaleIn = false
+	detachMoveHintToScreen()
 
 	local slotScreen = pendingArmSlotScreen
 	pendingArmSlotScreen = nil
@@ -1674,6 +1812,10 @@ local function commitPlace()
 				warnLabel.Text = rejectReason
 				warnLabel.Visible = true
 			end
+			ClientPlot.setOutOfPlotFlash(code == "OutOfPlot")
+			if code == "SpotTaken" and placePos then
+				syncBlockFlashForAim(placePos)
+			end
 		end
 	end
 end
@@ -1739,6 +1881,7 @@ local function enterConfirm(worldPos: Vector3)
 		end
 		keepCameraFrozen()
 		updateGhostPulse()
+		updateBlockFlash()
 		syncConfirmButtons()
 	end)
 	log("Confirm mode")
@@ -1789,6 +1932,7 @@ function PlacementController.beginForItem(itemId: string)
 		queuedSwitchItemId = nil
 		return
 	end
+	-- Selecting a backpack coral cancels relocate (RelocateController listens to selection too).
 	if disarmAnimating then
 		-- Full cancel fly-home in progress — arm this item when it finishes.
 		queuedSwitchItemId = itemId
@@ -1834,6 +1978,17 @@ end
 function PlacementController.cancel()
 	-- Always fly ghost + UI back into the backpack slot (X, re-click, etc.).
 	onCancel()
+end
+
+-- Instant exit (no disarm outro) — used when picking a placed coral to relocate.
+function PlacementController.forceExit()
+	if mode == MODE_OFF and not disarmAnimating then
+		return
+	end
+	stopDisarmAnim()
+	stopOutgoingFlyback()
+	stopArmIntro()
+	exitPlacement(true)
 end
 
 -- Drag-out from backpack (mobile) / click-drop (PC)
@@ -2040,6 +2195,13 @@ table.insert(inputConns, UserInputService.InputBegan:Connect(function(input, pro
 		confirmDragging = false
 		aimFingerDown = false
 		chromeBtnPointerDown = true
+		return
+	end
+	-- Touches on the open backpack list must not aim/park the ghost under the panel.
+	if InventoryState.isPointerOverBackpack(screenPos) then
+		confirmPressOrigin = nil
+		confirmDragging = false
+		aimFingerDown = false
 		return
 	end
 	if processed then

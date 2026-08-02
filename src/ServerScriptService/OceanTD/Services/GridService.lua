@@ -82,6 +82,17 @@ function GridService.tryOccupy(
 	return true, nil
 end
 
+function GridService.vacate(plotId: PlotId, lx: number, ly: number, lz: number): (boolean, CellData?)
+	local key = localToKey(plotId, lx, ly, lz)
+	local cell = cells[key]
+	if not cell then
+		return false, nil
+	end
+	cells[key] = nil
+	plotObjectCounts[plotId] = math.max(0, (plotObjectCounts[plotId] or 0) - 1)
+	return true, cell
+end
+
 function GridService.hydrate(plotId: PlotId, ownerUserId: number, layout: { LayoutObject }, _boundsCFrame: CFrame)
 	GridService.clearPlot(plotId)
 

@@ -23,6 +23,7 @@ local UiCircles = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiCircl
 local UiTheme = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiTheme"))
 local InventoryState = require(script.Parent:WaitForChild("InventoryState"))
 local PlacementController = require(script.Parent:WaitForChild("PlacementController"))
+local RelocateController = require(script.Parent:WaitForChild("RelocateController"))
 local LocalShovel = require(script.Parent:WaitForChild("LocalShovel"))
 local HandOrb = require(script.Parent:WaitForChild("HandOrb"))
 
@@ -239,17 +240,18 @@ UiCircles.forceOnDescendants(slot4)
 passthroughDecor(slot4, slotButton)
 disarmTouchBlockingOverlays(mainHUD, slot4)
 
--- QuickbarHelp.Slot4 — shortcut badge (Y / Q). Visual only; never eats Slot4 clicks.
+-- QuickbarHelp.Slot4 — shortcut badge (Y / Q). Click/tap opens backpack like Slot4.
 local quickbarHelp = mainHUD:FindFirstChild("QuickbarHelp")
 local helpSlot4: GuiObject? = nil
 local helpLetter: TextLabel? = nil
+local helpHitButton: GuiButton? = nil
 if quickbarHelp then
 	local hs = quickbarHelp:FindFirstChild("Slot4")
 	if hs and hs:IsA("GuiObject") then
 		helpSlot4 = hs
-		helpSlot4.Active = false
+		helpSlot4.Active = true
 		for _, d in ipairs(helpSlot4:GetDescendants()) do
-			if d:IsA("GuiObject") then
+			if d:IsA("GuiObject") and d.Name ~= "_OceanTD_HelpHit" then
 				d.Active = false
 			end
 		end
@@ -278,6 +280,23 @@ if quickbarHelp then
 			pad.PaddingRight = UDim.new(0.15, 0)
 			pad.Parent = letter
 			helpLetter = letter
+		end
+		local existingHit = helpSlot4:FindFirstChild("_OceanTD_HelpHit")
+		if existingHit and existingHit:IsA("GuiButton") then
+			helpHitButton = existingHit
+		else
+			if existingHit then
+				existingHit:Destroy()
+			end
+			local hit = Instance.new("ImageButton")
+			hit.Name = "_OceanTD_HelpHit"
+			hit.BackgroundTransparency = 1
+			hit.Image = ""
+			hit.AutoButtonColor = false
+			hit.Size = UDim2.fromScale(1, 1)
+			hit.ZIndex = helpSlot4.ZIndex + 10
+			hit.Parent = helpSlot4
+			helpHitButton = hit
 		end
 		UiCircles.ensure(helpSlot4)
 	end
@@ -344,11 +363,45 @@ closeXStroke.Enabled = false
 
 local closeXPulseConn: RBXScriptConnection? = nil
 local closeLabelCycleConn: RBXScriptConnection? = nil
+local closedIdleConn: RBXScriptConnection? = nil
+local SLOT_IDLE_PERIOD = 1 -- shovel graphic ↔ "BUILD"
+
+local buildLabel = circle:FindFirstChild("_OceanTD_BuildLabel") :: TextLabel?
+if not buildLabel then
+	buildLabel = Instance.new("TextLabel")
+	buildLabel.Name = "_OceanTD_BuildLabel"
+	buildLabel.BackgroundTransparency = 1
+	buildLabel.Size = UDim2.fromScale(1, 1)
+	buildLabel.Font = Enum.Font.GothamBold
+	buildLabel.Text = "BUILD"
+	buildLabel.TextColor3 = Color3.new(1, 1, 1)
+	buildLabel.TextScaled = true
+	buildLabel.Visible = false
+	buildLabel.ZIndex = circle.ZIndex + 2
+	buildLabel.Active = false
+	buildLabel.Parent = circle
+	local pad = Instance.new("UIPadding")
+	pad.PaddingTop = UDim.new(0.22, 0)
+	pad.PaddingBottom = UDim.new(0.22, 0)
+	pad.PaddingLeft = UDim.new(0.08, 0)
+	pad.PaddingRight = UDim.new(0.08, 0)
+	pad.Parent = buildLabel
+end
 
 local function stopCloseLabelCycle()
 	if closeLabelCycleConn then
 		closeLabelCycleConn:Disconnect()
 		closeLabelCycleConn = nil
+	end
+end
+
+local function stopClosedIdleCycle()
+	if closedIdleConn then
+		closedIdleConn:Disconnect()
+		closedIdleConn = nil
+	end
+	if buildLabel then
+		buildLabel.Visible = false
 	end
 end
 
@@ -375,6 +428,40 @@ local function startCloseXPulse()
 	end)
 end
 
+local function applyClosedIdleFrame(showBuild: boolean)
+	if showBuild then
+		if circle:IsA("ImageLabel") or circle:IsA("ImageButton") then
+			(circle :: any).Image = ""
+		end
+		circle.BackgroundColor3 = Color3.new(0, 0, 0)
+		circle.BackgroundTransparency = 0
+		buildLabel.Visible = true
+		closeX.Visible = false
+	else
+		if circle:IsA("ImageLabel") or circle:IsA("ImageButton") then
+			(circle :: any).Image = originalCircleImage
+		end
+		circle.BackgroundColor3 = originalCircleBg
+		circle.BackgroundTransparency = originalCircleBgTrans
+		buildLabel.Visible = false
+		closeX.Visible = false
+	end
+end
+
+local function startClosedIdleCycle()
+	stopClosedIdleCycle()
+	local t0 = os.clock()
+	applyClosedIdleFrame(false) -- shovel first
+	closedIdleConn = RunService.Heartbeat:Connect(function()
+		if InventoryState.isOpen() then
+			return
+		end
+		-- 0s shovel, 1s BUILD, repeat
+		local showBuild = (math.floor((os.clock() - t0) / SLOT_IDLE_PERIOD) % 2) == 1
+		applyClosedIdleFrame(showBuild)
+	end)
+end
+
 local function applySlotClosedChrome()
 	stopCloseXPulse()
 	stopCloseLabelCycle()
@@ -383,18 +470,16 @@ local function applySlotClosedChrome()
 	closedStroke.Thickness = 3
 	closeX.Visible = false
 	closeX.Text = "X"
-	if circle:IsA("ImageLabel") or circle:IsA("ImageButton") then
-		(circle :: any).Image = originalCircleImage
-	end
-	circle.BackgroundColor3 = originalCircleBg
-	circle.BackgroundTransparency = originalCircleBgTrans
+	startClosedIdleCycle()
 end
 
 local function applySlotOpenChrome()
+	stopClosedIdleCycle()
 	closedStroke.Enabled = true
 	closedStroke.Color = Color3.new(1, 1, 1)
 	closedStroke.Thickness = 2
 	closeX.Visible = true
+	buildLabel.Visible = false
 	-- Letter set by refreshShortcutHints (Y / Q / X).
 	closeX.Text = "X"
 	if circle:IsA("ImageLabel") or circle:IsA("ImageButton") then
@@ -535,9 +620,18 @@ local gamepadFocusIndex = 1
 local GRID_COLS = 3
 local FOCUS_STROKE_BASE = 3
 local FOCUS_STROKE_PEAK = FOCUS_STROKE_BASE * 3 -- pulse grows to 3x thickness
+local MOVE_ICON_IMAGE = "rbxassetid://345081302"
+local GAMEPAD_INTRO_SCROLL_SEC = 1
+local GAMEPAD_INTRO_HOLD_SEC = 1
 
 local pulsedLabel: TextLabel? = nil
 local LABEL_IDLE_COLOR = Color3.fromRGB(200, 220, 240)
+local gamepadIntroConn: RBXScriptConnection? = nil
+local gamepadIntroActive = false
+local gamepadDpadPromptUntil = 0 -- show move icon + "D-Pad" until this clock time
+local focusPromptRoot: Frame? = nil
+local focusPromptMove: ImageLabel? = nil
+local focusPromptGlyph: TextLabel? = nil
 
 local function stopPulse()
 	if pulseConn then
@@ -601,6 +695,9 @@ local function clearFocusOutlines()
 		focusPulseConn = nil
 	end
 	focusPulseStroke = nil
+	focusPromptRoot = nil
+	focusPromptMove = nil
+	focusPromptGlyph = nil
 	for _, b in ipairs(itemButtons) do
 		local icon = b:FindFirstChild("Circle")
 		local focus = icon and icon:FindFirstChild("_FocusOutline")
@@ -608,7 +705,122 @@ local function clearFocusOutlines()
 			focus.Enabled = false
 			focus.Thickness = FOCUS_STROKE_BASE
 		end
+		local prompt = b:FindFirstChild("_GamepadPrompt")
+		if prompt and prompt:IsA("GuiObject") then
+			prompt.Visible = false
+		end
+		-- Legacy A label (child of btn or Circle).
+		local aPrompt = b:FindFirstChild("_GamepadA")
+		if aPrompt then
+			aPrompt:Destroy()
+		end
+		local iconA = icon and icon:FindFirstChild("_GamepadA")
+		if iconA then
+			iconA:Destroy()
+		end
 	end
+end
+
+local function isDpadPromptActive(): boolean
+	return gamepadIntroActive or os.clock() < gamepadDpadPromptUntil
+end
+
+local function applyFocusPromptMode()
+	if not focusPromptRoot or not focusPromptGlyph then
+		return
+	end
+	if isDpadPromptActive() then
+		if focusPromptMove then
+			focusPromptMove.Visible = true
+		end
+		focusPromptGlyph.Text = "D-Pad"
+		focusPromptGlyph.TextColor3 = Color3.new(0, 0, 0)
+		focusPromptGlyph.Size = UDim2.fromScale(0.72, 0.22)
+		local stroke = focusPromptGlyph:FindFirstChild("Outline")
+		if stroke and stroke:IsA("UIStroke") then
+			stroke.Enabled = false
+		end
+	else
+		if focusPromptMove then
+			focusPromptMove.Visible = false
+		end
+		focusPromptGlyph.Text = "A"
+		focusPromptGlyph.TextColor3 = Color3.new(1, 1, 1)
+		focusPromptGlyph.Size = UDim2.fromScale(0.42, 0.42)
+		local stroke = focusPromptGlyph:FindFirstChild("Outline")
+		if stroke and stroke:IsA("UIStroke") then
+			stroke.Enabled = true
+		end
+	end
+end
+
+local function ensureGamepadPrompt(btn: GuiButton, icon: GuiObject): Frame
+	local existing = btn:FindFirstChild("_GamepadPrompt")
+	if existing and existing:IsA("Frame") then
+		focusPromptRoot = existing
+		local move = existing:FindFirstChild("MoveIcon")
+		local glyph = existing:FindFirstChild("Glyph")
+		focusPromptMove = if move and move:IsA("ImageLabel") then move else nil
+		focusPromptGlyph = if glyph and glyph:IsA("TextLabel") then glyph else nil
+		return existing
+	end
+
+	-- Sibling of Circle so the coral ImageLabel can't cover the prompt.
+	local root = Instance.new("Frame")
+	root.Name = "_GamepadPrompt"
+	root.BackgroundTransparency = 1
+	root.AnchorPoint = Vector2.new(0.5, 0.5)
+	root.Position = UDim2.new(0.5, 0, 0, 2)
+	root.Size = UDim2.fromOffset(40, 40)
+	root.ZIndex = math.max(icon.ZIndex, btn.ZIndex) + 20
+	root.Visible = false
+	root.Parent = btn
+
+	local move = Instance.new("ImageLabel")
+	move.Name = "MoveIcon"
+	move.BackgroundTransparency = 1
+	move.AnchorPoint = Vector2.new(0.5, 0.5)
+	move.Position = UDim2.fromScale(0.5, 0.5)
+	move.Size = UDim2.fromScale(1, 1)
+	move.Image = MOVE_ICON_IMAGE
+	move.ScaleType = Enum.ScaleType.Fit
+	move.Visible = false
+	move.ZIndex = root.ZIndex
+	move.Parent = root
+
+	local glyph = Instance.new("TextLabel")
+	glyph.Name = "Glyph"
+	glyph.BackgroundTransparency = 1
+	glyph.AnchorPoint = Vector2.new(0.5, 0.5)
+	glyph.Position = UDim2.fromScale(0.5, 0.5)
+	glyph.Size = UDim2.fromScale(0.85, 0.45)
+	glyph.Font = Enum.Font.GothamBold
+	glyph.Text = "A"
+	glyph.TextColor3 = Color3.new(1, 1, 1)
+	glyph.TextScaled = true
+	glyph.ZIndex = root.ZIndex + 1
+	glyph.Parent = root
+	local edge = Instance.new("UIStroke")
+	edge.Name = "Outline"
+	edge.Color = Color3.new(0, 0, 0)
+	edge.Thickness = 2
+	edge.Parent = glyph
+
+	local function syncOverIcon()
+		local h = icon.AbsoluteSize.Y
+		if h < 1 then
+			return
+		end
+		root.Position = UDim2.new(0.5, 0, 0, 2 + h * 0.5)
+		root.Size = UDim2.fromOffset(h, h)
+	end
+	icon:GetPropertyChangedSignal("AbsoluteSize"):Connect(syncOverIcon)
+	task.defer(syncOverIcon)
+
+	focusPromptRoot = root
+	focusPromptMove = move
+	focusPromptGlyph = glyph
+	return root
 end
 
 local function setFocusOutline(btn: GuiButton?)
@@ -625,6 +837,9 @@ local function setFocusOutline(btn: GuiButton?)
 	focus.Enabled = true
 	focus.Transparency = 0
 	focusPulseStroke = focus
+	local prompt = ensureGamepadPrompt(btn, icon)
+	prompt.Visible = true
+	applyFocusPromptMode()
 	local t0 = os.clock()
 	focusPulseConn = RunService.RenderStepped:Connect(function()
 		if focusPulseStroke ~= focus or not focus.Enabled then
@@ -633,6 +848,112 @@ local function setFocusOutline(btn: GuiButton?)
 		local wave = (math.sin((os.clock() - t0) * 5) + 1) * 0.5 -- 0..1
 		focus.Thickness = FOCUS_STROKE_BASE + (FOCUS_STROKE_PEAK - FOCUS_STROKE_BASE) * wave
 		focus.Transparency = 0.05 + wave * 0.2
+		applyFocusPromptMode()
+	end)
+end
+
+local function stopGamepadOpenIntro()
+	if gamepadIntroConn then
+		gamepadIntroConn:Disconnect()
+		gamepadIntroConn = nil
+	end
+	gamepadIntroActive = false
+end
+
+local function bottomLeftListIndex(): number
+	local n = #itemButtons
+	if n <= 0 then
+		return 1
+	end
+	-- Last row, first column (leftmost cell of the bottom row).
+	return math.floor((n - 1) / GRID_COLS) * GRID_COLS + 1
+end
+
+local function startGamepadOpenIntro()
+	stopGamepadOpenIntro()
+	if #itemButtons == 0 then
+		return
+	end
+	gamepadIntroActive = true
+	local bottomIdx = bottomLeftListIndex()
+	-- Left column from bottom → top (simulates D-pad Up through the list).
+	local path: { number } = {}
+	local idx = bottomIdx
+	while idx >= 1 do
+		table.insert(path, idx)
+		idx -= GRID_COLS
+	end
+	if #path == 0 then
+		table.insert(path, 1)
+	end
+	gamepadFocusIndex = path[1]
+	gamepadDpadPromptUntil = os.clock() + GAMEPAD_INTRO_SCROLL_SEC + GAMEPAD_INTRO_HOLD_SEC
+
+	-- Wait a frame so canvas/window sizes are valid after open layout.
+	task.defer(function()
+		if not gamepadSelectActive or not gamepadIntroActive then
+			return
+		end
+		local windowY = scroll.AbsoluteWindowSize.Y
+		if windowY < 1 then
+			windowY = scroll.AbsoluteSize.Y
+		end
+		local maxY = math.max(0, scroll.AbsoluteCanvasSize.Y - windowY)
+		scroll.CanvasPosition = Vector2.new(0, maxY)
+		local startBtn = itemButtons[path[1]]
+		if startBtn then
+			setFocusOutline(startBtn)
+		end
+
+		local startY = maxY
+		local endY = 0
+		local t0 = os.clock()
+		local lastPathStep = 1
+		gamepadDpadPromptUntil = t0 + GAMEPAD_INTRO_SCROLL_SEC + GAMEPAD_INTRO_HOLD_SEC
+
+		gamepadIntroConn = RunService.RenderStepped:Connect(function()
+			if not gamepadSelectActive then
+				stopGamepadOpenIntro()
+				return
+			end
+			local elapsed = os.clock() - t0
+			if elapsed < GAMEPAD_INTRO_SCROLL_SEC then
+				local u = math.clamp(elapsed / GAMEPAD_INTRO_SCROLL_SEC, 0, 1)
+				local a = 1 - (1 - u) * (1 - u)
+				scroll.CanvasPosition = Vector2.new(0, startY + (endY - startY) * a)
+
+				-- Step highlight through each left-column slot in sync with scroll progress.
+				local steps = #path
+				local step = if steps <= 1 then 1 else math.clamp(math.floor(a * (steps - 1) + 0.0001) + 1, 1, steps)
+				if step ~= lastPathStep then
+					lastPathStep = step
+					local focusIdx = path[step]
+					gamepadFocusIndex = focusIdx
+					local btn = itemButtons[focusIdx]
+					if btn then
+						setFocusOutline(btn)
+					end
+				end
+			else
+				scroll.CanvasPosition = Vector2.new(0, 0)
+				if gamepadFocusIndex ~= 1 or lastPathStep ~= #path then
+					lastPathStep = #path
+					gamepadFocusIndex = 1
+					local first = itemButtons[1]
+					if first then
+						setFocusOutline(first)
+					end
+				end
+				if elapsed >= GAMEPAD_INTRO_SCROLL_SEC + GAMEPAD_INTRO_HOLD_SEC then
+					stopGamepadOpenIntro()
+					gamepadDpadPromptUntil = 0
+					local first = itemButtons[1]
+					if first and gamepadSelectActive then
+						setFocusOutline(first)
+					end
+				end
+			end
+		end)
 	end)
 end
 
@@ -686,7 +1007,11 @@ local function refreshHelpSlotBadge()
 		return
 	end
 	helpSlot4.Visible = true
-	helpSlot4.Active = false
+	helpSlot4.Active = true
+	if helpHitButton then
+		helpHitButton.Active = true
+		helpHitButton.Visible = true
+	end
 	if helpSlot4:IsA("ImageLabel") or helpSlot4:IsA("ImageButton") then
 		(helpSlot4 :: any).Image = ""
 	end
@@ -741,6 +1066,9 @@ local function setGamepadFocus(index: number)
 	if #itemButtons == 0 then
 		return
 	end
+	if gamepadIntroActive then
+		return
+	end
 	gamepadFocusIndex = math.clamp(index, 1, #itemButtons)
 	local btn = itemButtons[gamepadFocusIndex]
 	-- White focus outline while browsing; green pulse only after arming.
@@ -752,6 +1080,8 @@ end
 local function disableGamepadSelect()
 	openWithGamepadPending = false
 	gamepadSelectActive = false
+	stopGamepadOpenIntro()
+	gamepadDpadPromptUntil = 0
 	-- Never leave GuiService selection active — that steals the left stick from movement.
 	GuiService.SelectedObject = nil
 	clearFocusOutlines()
@@ -763,6 +1093,9 @@ local function disableGamepadSelect()
 end
 
 local function activateGamepadFocusedItem()
+	if gamepadIntroActive then
+		return
+	end
 	local btn = itemButtons[gamepadFocusIndex]
 	if not btn then
 		return
@@ -783,7 +1116,7 @@ local function activateGamepadFocusedItem()
 	refreshGamepadCloseLabel()
 end
 
-local function enableGamepadSelect()
+local function enableGamepadSelect(withOpenIntro: boolean?)
 	if #itemButtons == 0 then
 		return
 	end
@@ -794,9 +1127,15 @@ local function enableGamepadSelect()
 	for _, btn in ipairs(itemButtons) do
 		btn.Selectable = false
 	end
-	setGamepadFocus(1)
+	if withOpenIntro then
+		startGamepadOpenIntro()
+	else
+		stopGamepadOpenIntro()
+		gamepadDpadPromptUntil = 0
+		setGamepadFocus(1)
+	end
 	refreshGamepadCloseLabel()
-	log("Gamepad select on — D-pad list, stick moves player")
+	log("Gamepad select on — D-pad list, stick moves player", if withOpenIntro then "intro" else "focus1")
 end
 
 local function makeItemButton(def, layoutOrder: number, instanceSuffix: string?): ImageButton
@@ -1012,6 +1351,29 @@ InventoryState.setItemSlotScreenPosProvider(function(itemId: string): Vector2?
 	return Vector2.new(pos.X + size.X * 0.5, pos.Y + size.Y * 0.5)
 end)
 
+-- Placement ignores world-aim when the finger is on the open backpack panel.
+InventoryState.setBackpackHitTest(function(screenPos: Vector2): boolean
+	if not host.Visible or not panel.Parent then
+		return false
+	end
+	local function inPanel(pos: Vector2): boolean
+		local p = panel.AbsolutePosition
+		local s = panel.AbsoluteSize
+		return pos.X >= p.X and pos.X <= p.X + s.X and pos.Y >= p.Y and pos.Y <= p.Y + s.Y
+	end
+	if inPanel(screenPos) then
+		return true
+	end
+	-- GetMouseLocation is inset-inclusive; AbsolutePosition often is not.
+	local inset = GuiService:GetGuiInset()
+	if inset.X ~= 0 or inset.Y ~= 0 then
+		if inPanel(Vector2.new(screenPos.X - inset.X, screenPos.Y - inset.Y)) then
+			return true
+		end
+	end
+	return false
+end)
+
 ----------------------------------------------------------------
 -- Open / close
 ----------------------------------------------------------------
@@ -1095,7 +1457,7 @@ InventoryState.onOpenChanged(function(isOpen)
 		task.spawn(function()
 			playOpen()
 			if openWithGamepadPending then
-				enableGamepadSelect()
+				enableGamepadSelect(true)
 			end
 			refreshGamepadCloseLabel()
 		end)
@@ -1161,14 +1523,21 @@ slotButton.Activated:Connect(function()
 	toggleFromUser(false)
 end)
 
+-- Help circle (Y / Q) — same toggle as Slot4; gamepad badge uses gamepad open path.
+if helpHitButton then
+	helpHitButton.Activated:Connect(function()
+		toggleFromUser(getShortcutMode() == "gamepad")
+	end)
+end
+
 UserInputService.InputBegan:Connect(function(input, gameProcessed)
 	if input.KeyCode == Enum.KeyCode.ButtonY then
 		toggleFromUser(true)
 		return
 	end
-	-- B closes backpack when in list select (placement owns B while ghost is active).
+	-- B closes backpack when in list select (placement/relocate own B while active).
 	if input.KeyCode == Enum.KeyCode.ButtonB then
-		if PlacementController.isActive() then
+		if PlacementController.isActive() or RelocateController.isActive() then
 			return
 		end
 		if InventoryState.isOpen() and (gamepadSelectActive or openWithGamepadPending) then
@@ -1178,7 +1547,7 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
 	end
 
 	-- D-pad browses list; A arms coral. Left stick is free for walking until placement freezes.
-	if gamepadSelectActive and not PlacementController.isActive() then
+	if gamepadSelectActive and not PlacementController.isActive() and not RelocateController.isActive() then
 		if input.KeyCode == Enum.KeyCode.DPadLeft then
 			setGamepadFocus(gamepadFocusIndex - 1)
 			return

@@ -17,6 +17,8 @@ local REMOTE_EVENTS = {
 
 local REMOTE_FUNCTIONS = {
 	"RequestPlace",
+	"RequestMove",
+	"RequestRecycle",
 }
 
 local function getRoot(): Instance
