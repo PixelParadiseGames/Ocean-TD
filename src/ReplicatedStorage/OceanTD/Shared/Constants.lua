@@ -22,9 +22,14 @@ local Constants = {
 	PREVIEW_BOX_PREFIX = "PreviewBox_",
 
 	DATASTORE_NAME = "OceanTD_Player_v1",
-	PROFILE_VERSION = 1,
+	PROFILE_VERSION = 2,
 
 	AUTOSAVE_INTERVAL_SEC = 60,
+
+	-- Four named plot presets; autosave writes the active slot.
+	PLOT_SAVE_SLOT_COUNT = 4,
+	-- New players start with this many BrainCoral seeds in inventory (not on plot).
+	STARTING_BRAIN_CORAL_SEEDS = 50,
 }
 
 return Constants

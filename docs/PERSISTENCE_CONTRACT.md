@@ -10,16 +10,27 @@ Sacred and tiny. Species, UI, and shop do **not** belong here.
 ## Profile shape
 ```lua
 {
-  version = 1,
+  version = 2,
   currencies = { sandDollars = 0, gold = 0 },
-  inventory = {},
+  inventory = { BrainCoral = 50 }, -- seeds not currently on the live plot
   skillTree = {},
-  layout = { -- array of plot-local durable objects; {} OK for new players
-    { id = "CoralCommon_A", lx = 0, ly = 0, lz = 0 },
+  layout = { -- mirror of active plot-save slot (compat + hydrate)
+    { id = "BrainCoral", lx = 0, ly = 0, lz = 0 },
+  },
+  plotSaves = {
+    activeIndex = 1, -- autosave / leave write this slot
+    slots = {
+      { name = "Present 1", saved = true, layout = { ... } },
+      { name = "Present 2", saved = false, layout = {} },
+      { name = "Present 3", saved = false, layout = {} },
+      { name = "Present 4", saved = false, layout = {} },
+    },
   },
 }
 ```
 Session-only flags (`layoutLoaded`) are **never** stored.
+
+Pre-`plotSaves` profiles migrate: existing `layout` → slot 1, `activeIndex = 1`.
 
 ## Grid keys
 - Cell size: `4` studs (`GridMath.CELL_SIZE`).
@@ -41,9 +52,10 @@ Session-only flags (`layoutLoaded`) are **never** stored.
 **Never save until step 4.**
 
 ## When saves run
-- Player leave
-- Autosave (~60s), ready sessions only
+- Player leave → active plot-save slot
+- Autosave (~60s), ready sessions only → active slot
 - `BindToClose`
+- Manual Slot1 SAVE → chosen slot (layout only); LOAD/NEW switches `activeIndex` and wipes session undo
 
 ## Anti-wipe
 Refuse to overwrite a **non-empty** stored `layout` with an empty snapshot unless `PersistenceService.allowIntentionalClear(userId)` was set for that write.

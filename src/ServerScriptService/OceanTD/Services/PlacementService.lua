@@ -1,8 +1,8 @@
 --!strict
 --[[
 	Server place authority.
-	Order: validate session/plot → CanPlace (in bounds, empty cell) → grid occupy → visual.
-	No inventory debit yet (infinite test mode).
+	Order: validate session/plot → seed debit → CanPlace → grid occupy → visual.
+	Clear / recycle credit seeds back; load swaps credit then debit for the new layout.
 ]]
 
 local Workspace = game:GetService("Workspace")
@@ -20,6 +20,13 @@ local GridService = require(script.Parent:WaitForChild("GridService"))
 local PlayerSession = require(script.Parent:WaitForChild("PlayerSession"))
 local PersistenceService = require(script.Parent:WaitForChild("PersistenceService"))
 local UndoService = require(script.Parent:WaitForChild("UndoService"))
+
+type LayoutObject = {
+	id: string,
+	lx: number,
+	ly: number,
+	lz: number,
+}
 
 local PlacementService = {}
 
@@ -163,7 +170,9 @@ export type PlaceResult = {
 	placeId: string?,
 }
 
-function PlacementService.place(player: Player, itemId: string, worldPos: Vector3): PlaceResult
+-- consumeSeed: player places debit inventory. Internal hydrate/load can pass false.
+function PlacementService.place(player: Player, itemId: string, worldPos: Vector3, consumeSeed: boolean?): PlaceResult
+	local shouldConsume = consumeSeed ~= false
 	local item = ItemCatalog.get(itemId)
 	if not item then
 		return { ok = false, errorCode = "UnknownItem" }
@@ -183,15 +192,29 @@ function PlacementService.place(player: Player, itemId: string, worldPos: Vector
 		return { ok = false, errorCode = "BadPlot" }
 	end
 
+	if shouldConsume then
+		local debited = select(1, PersistenceService.tryDebitItem(player, itemId, 1))
+		if not debited then
+			return { ok = false, errorCode = "NoSeeds" }
+		end
+	end
+
 	-- Snap visual to ray hit pos (client sends terrain hit); occupancy uses plot-local grid.
 	local occupied, occupyErr = GridService.tryOccupy(plotId, player.UserId, itemId, localPos.X, localPos.Y, localPos.Z)
 	if not occupied then
+		if shouldConsume then
+			PersistenceService.creditItem(player, itemId, 1)
+		end
 		return { ok = false, errorCode = occupyErr or "SpotTaken" }
 	end
 
 	local visual = PlacementService.spawnVisual(plotId, species.speciesId, worldPos, nil)
 	if not visual then
-		warnPlace("Visual spawn failed after occupy — layout still has cell")
+		warnPlace("Visual spawn failed after occupy — rolling back cell")
+		GridService.vacate(plotId, localPos.X, localPos.Y, localPos.Z)
+		if shouldConsume then
+			PersistenceService.creditItem(player, itemId, 1)
+		end
 		return { ok = false, errorCode = "VisualFail" }
 	end
 
@@ -210,7 +233,7 @@ function PlacementService.place(player: Player, itemId: string, worldPos: Vector
 		})
 	end
 
-	log("Placed", itemId, "for", player.Name, "at", worldPos)
+	log("Placed", itemId, "for", player.Name, "at", worldPos, "consume=", shouldConsume)
 	return {
 		ok = true,
 		worldPos = worldPos,
@@ -406,13 +429,169 @@ function PlacementService.recycle(player: Player, placeId: string, worldPos: Vec
 	}
 end
 
+export type ClearPlotEntry = {
+	placeId: string,
+	itemId: string,
+	worldPos: Vector3,
+}
+
+export type ClearPlotResult = {
+	ok: boolean,
+	errorCode: string?,
+	count: number?,
+	entries: { ClearPlotEntry }?,
+	credits: { [string]: number }?,
+}
+
+-- Remove every placed coral on the owner's plot and credit seeds back (full refund).
+-- allowEmpty: success with count=0 (used by plot-save load/NEW).
+-- recordUndo: false for load swaps (undo stack is wiped instead).
+function PlacementService.clearPlot(player: Player, allowEmpty: boolean?, recordUndo: boolean?): ClearPlotResult
+	local shouldRecordUndo = recordUndo ~= false
+	if not PlayerSession.canSave(player) then
+		return { ok = false, errorCode = "NotReady" }
+	end
+	local plotId = PlotService.getOwnerPlotId(player)
+	if not plotId then
+		return { ok = false, errorCode = "NoPlot" }
+	end
+	local slot = PlotService.getSlot(plotId)
+	if not slot then
+		return { ok = false, errorCode = "BadPlot" }
+	end
+
+	local pending: { ClearPlotEntry } = {}
+	GridService.forEachCell(plotId, function(cell)
+		if cell.ownerUserId ~= player.UserId then
+			return
+		end
+		local worldPos = GridMath.plotLocalToWorld(Vector3.new(cell.lx, cell.ly, cell.lz), slot.cframe)
+		local visual = findVisualAtGrid(plotId, worldPos)
+		local placeIdAttr = if visual then visual:GetAttribute("OceanTD_PlaceId") else nil
+		local placeId = if typeof(placeIdAttr) == "string" then placeIdAttr else HttpService:GenerateGUID(false)
+		-- Prefer live visual position for VFX / undo restore accuracy.
+		if visual then
+			worldPos = visual.Position
+		end
+		table.insert(pending, {
+			placeId = placeId,
+			itemId = cell.id,
+			worldPos = worldPos,
+		})
+	end)
+
+	if #pending == 0 then
+		if allowEmpty then
+			PersistenceService.allowIntentionalClear(player.UserId)
+			return { ok = true, count = 0, entries = {}, credits = {} }
+		end
+		return { ok = false, errorCode = "Empty" }
+	end
+
+	PersistenceService.allowIntentionalClear(player.UserId)
+
+	local entries: { ClearPlotEntry } = {}
+	local credits: { [string]: number } = {}
+	for _, entry in ipairs(pending) do
+		local localPos = worldToPlotLocal(plotId, entry.worldPos)
+		if not localPos then
+			continue
+		end
+		local visual = findVisualByPlaceId(plotId, entry.placeId) or findVisualAtGrid(plotId, entry.worldPos)
+		local vacated, vacatedCell = GridService.vacate(plotId, localPos.X, localPos.Y, localPos.Z)
+		if not vacated or not vacatedCell then
+			continue
+		end
+		if visual then
+			visual:Destroy()
+		end
+		local creditedId = vacatedCell.id
+		PersistenceService.creditItem(player, creditedId, 1)
+		credits[creditedId] = (credits[creditedId] or 0) + 1
+		table.insert(entries, {
+			placeId = entry.placeId,
+			itemId = creditedId,
+			worldPos = entry.worldPos,
+		})
+	end
+
+	if #entries == 0 then
+		if allowEmpty then
+			return { ok = true, count = 0, entries = {}, credits = {} }
+		end
+		return { ok = false, errorCode = "Empty" }
+	end
+
+	if shouldRecordUndo and not suppressUndoRecord then
+		UndoService.push(player, {
+			kind = "clearPlot",
+			placeId = "clearPlot",
+			itemId = "clearPlot",
+			entries = entries,
+		})
+	end
+
+	log("Cleared plot", plotId, "for", player.Name, "count=", #entries)
+	return {
+		ok = true,
+		count = #entries,
+		entries = entries,
+		credits = credits,
+	}
+end
+
+export type ApplyLayoutResult = {
+	ok: boolean,
+	errorCode: string?,
+	placed: number?,
+}
+
+-- Wipe live plot (credit seeds, no undo) then place layout objects (debit seeds).
+function PlacementService.applyLayout(player: Player, layout: { LayoutObject }): ApplyLayoutResult
+	if not PlayerSession.canSave(player) then
+		return { ok = false, errorCode = "NotReady" }
+	end
+	local plotId = PlotService.getOwnerPlotId(player)
+	if not plotId then
+		return { ok = false, errorCode = "NoPlot" }
+	end
+	local slot = PlotService.getSlot(plotId)
+	if not slot then
+		return { ok = false, errorCode = "BadPlot" }
+	end
+
+	local cleared = PlacementService.clearPlot(player, true, false)
+	if not cleared.ok then
+		return { ok = false, errorCode = cleared.errorCode or "ClearFail" }
+	end
+
+	suppressUndoRecord = true
+	local placed = 0
+	for _, obj in ipairs(layout) do
+		if typeof(obj) ~= "table" or typeof(obj.id) ~= "string" then
+			continue
+		end
+		local worldPos = GridMath.plotLocalToWorld(Vector3.new(obj.lx, obj.ly, obj.lz), slot.cframe)
+		local result = PlacementService.place(player, obj.id, worldPos, true)
+		if result.ok then
+			placed += 1
+		else
+			warnPlace("applyLayout place failed", obj.id, result.errorCode)
+		end
+	end
+	suppressUndoRecord = false
+
+	log("Applied layout for", player.Name, "placed=", placed, "/", #layout)
+	return { ok = true, placed = placed }
+end
+
 export type UndoResult = {
 	ok: boolean,
 	errorCode: string?,
 	kind: string?,
 }
 
-local function removePlacedWithoutCredit(player: Player, placeId: string, worldPos: Vector3): boolean
+local function removePlacedAndCredit(player: Player, placeId: string, itemId: string, worldPos: Vector3): boolean
 	local plotId = PlotService.getOwnerPlotId(player)
 	if not plotId then
 		return false
@@ -422,7 +601,7 @@ local function removePlacedWithoutCredit(player: Player, placeId: string, worldP
 		return false
 	end
 	local visual = findVisualByPlaceId(plotId, placeId) or findVisualAtGrid(plotId, worldPos)
-	local vacated = GridService.vacate(plotId, localPos.X, localPos.Y, localPos.Z)
+	local vacated, vacatedCell = GridService.vacate(plotId, localPos.X, localPos.Y, localPos.Z)
 	if not vacated then
 		if visual then
 			visual:Destroy()
@@ -432,10 +611,12 @@ local function removePlacedWithoutCredit(player: Player, placeId: string, worldP
 	if visual then
 		visual:Destroy()
 	end
+	local creditedId = if vacatedCell then vacatedCell.id else itemId
+	PersistenceService.creditItem(player, creditedId, 1)
 	return true
 end
 
--- Undo last place / move / recycle for this session (does not push a new undo step).
+-- Undo last place / move / recycle / clearPlot for this session (does not push a new undo step).
 function PlacementService.undoLast(player: Player): UndoResult
 	if not PlayerSession.canSave(player) then
 		return { ok = false, errorCode = "NotReady" }
@@ -452,7 +633,7 @@ function PlacementService.undoLast(player: Player): UndoResult
 	if step.kind == "place" then
 		local worldPos = step.worldPos
 		if typeof(worldPos) == "Vector3" then
-			ok = removePlacedWithoutCredit(player, step.placeId, worldPos)
+			ok = removePlacedAndCredit(player, step.placeId, step.itemId, worldPos)
 			if not ok then
 				err = "NotFound"
 			end
@@ -470,17 +651,48 @@ function PlacementService.undoLast(player: Player): UndoResult
 			err = "BadStep"
 		end
 	elseif step.kind == "recycle" then
+		-- Recycle credited a seed; place consumes it again.
 		local worldPos = step.worldPos
 		if typeof(worldPos) == "Vector3" then
-			PersistenceService.debitItem(player, step.itemId, 1)
-			local result = PlacementService.place(player, step.itemId, worldPos)
+			local result = PlacementService.place(player, step.itemId, worldPos, true)
 			ok = result.ok == true
 			err = result.errorCode
-			if not ok then
-				PersistenceService.creditItem(player, step.itemId, 1)
-			end
 		else
 			err = "BadStep"
+		end
+	elseif step.kind == "clearPlot" then
+		local entries = step.entries
+		if typeof(entries) ~= "table" or #entries == 0 then
+			err = "BadStep"
+		else
+			local restored = 0
+			local remaining: { ClearPlotEntry } = {}
+			for _, entry in ipairs(entries) do
+				if typeof(entry.itemId) ~= "string" or typeof(entry.worldPos) ~= "Vector3" then
+					table.insert(remaining, entry)
+					continue
+				end
+				local result = PlacementService.place(player, entry.itemId, entry.worldPos, true)
+				if result.ok then
+					restored += 1
+				else
+					table.insert(remaining, entry)
+				end
+			end
+			if restored > 0 then
+				ok = true
+				-- Partial restore: push leftover entries so another undo can finish.
+				if #remaining > 0 then
+					UndoService.push(player, {
+						kind = "clearPlot",
+						placeId = "clearPlot",
+						itemId = "clearPlot",
+						entries = remaining,
+					})
+				end
+			else
+				err = "UndoFail"
+			end
 		end
 	else
 		err = "BadStep"

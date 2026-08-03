@@ -16,6 +16,17 @@ export type LayoutObject = {
 	lz: number,
 }
 
+export type PlotSaveSlot = {
+	name: string,
+	saved: boolean, -- false → UI shows NEW instead of LOAD
+	layout: { LayoutObject },
+}
+
+export type PlotSaves = {
+	activeIndex: number, -- 1 .. PLOT_SAVE_SLOT_COUNT
+	slots: { PlotSaveSlot },
+}
+
 export type PlayerProfile = {
 	version: number,
 	currencies: {
@@ -24,12 +35,33 @@ export type PlayerProfile = {
 	},
 	inventory: { [string]: any },
 	skillTree: { [string]: any },
-	layout: { LayoutObject },
+	layout: { LayoutObject }, -- mirror of active plot-save slot (compat + hydrate)
+	plotSaves: PlotSaves,
 }
 
 local Constants = require(script.Parent.Constants)
 
 local PlotTypes = {}
+
+function PlotTypes.defaultSlotName(index: number): string
+	return "Present " .. tostring(index)
+end
+
+function PlotTypes.defaultPlotSaves(): PlotSaves
+	local slots: { PlotSaveSlot } = {}
+	for i = 1, Constants.PLOT_SAVE_SLOT_COUNT do
+		table.insert(slots, {
+			name = PlotTypes.defaultSlotName(i),
+			-- Slot 1 is the live default preset from the start.
+			saved = i == 1,
+			layout = {},
+		})
+	end
+	return {
+		activeIndex = 1,
+		slots = slots,
+	}
+end
 
 function PlotTypes.defaultProfile(): PlayerProfile
 	return {
@@ -38,9 +70,12 @@ function PlotTypes.defaultProfile(): PlayerProfile
 			sandDollars = 0,
 			gold = 0,
 		},
-		inventory = {},
+		inventory = {
+			BrainCoral = Constants.STARTING_BRAIN_CORAL_SEEDS,
+		},
 		skillTree = {},
 		layout = {},
+		plotSaves = PlotTypes.defaultPlotSaves(),
 	}
 end
 

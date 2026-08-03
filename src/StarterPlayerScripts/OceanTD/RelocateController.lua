@@ -27,6 +27,7 @@ local InventoryState = require(script.Parent:WaitForChild("InventoryState"))
 local ClientPlot = require(script.Parent:WaitForChild("ClientPlot"))
 local PlaceVfx = require(script.Parent:WaitForChild("PlaceVfx"))
 local PlacementController = require(script.Parent:WaitForChild("PlacementController"))
+local SelectRing = require(script.Parent:WaitForChild("SelectRing"))
 
 local RelocateController = {}
 
@@ -37,6 +38,9 @@ local MOVE_ICON_SIZE = 48
 local MOVE_ICON_IMAGE = "rbxassetid://345081302"
 local RECYCLE_ICON_IMAGE = "rbxassetid://75091344292202"
 local GHOST_INVALID_COLOR = Color3.fromRGB(220, 70, 70)
+-- Raycast above the cursor so the coral center (+ move icon) sits under the mouse.
+-- (Terrain hit is below the ball center on screen; +Y offset made this worse.)
+local AIM_VISUAL_CENTER_OFFSET_Y = 56
 -- Softer greens (less neon-bright).
 local REC_GREEN = Color3.fromRGB(48, 145, 70)
 local REC_GREEN_DIM = Color3.fromRGB(28, 88, 44)
@@ -46,6 +50,7 @@ local REC_SLIDE_SEC = 0.3
 local REC_FLY_SEC = 0.55
 local INTRO_SEC = 0.35
 local REVERT_SEC = 0.4
+local IDLE_CLOSE_DELAY_SEC = 3 -- gamepad: delay before showing idle close (B)
 local DRAG_PX = 28
 local GHOST_SCREEN_OFFSET_Y = 105
 local FREEZE_ACTION = "OceanTD_RelocateFreeze"
@@ -60,6 +65,7 @@ local introAnimating = false
 local gamepadRelocate = false
 local gamepadCursor: Vector2? = nil
 local gamepadChromeT0 = 0
+local relocateShownAt = 0
 local part: BasePart? = nil
 local originPos: Vector3? = nil
 local placeId = ""
@@ -115,6 +121,9 @@ local hoverHintBb: BillboardGui? = nil
 local hoverHintBadge: Frame? = nil
 local hoverHintMove: Frame? = nil
 local hoverHintT0 = 0
+
+-- White grow/shrink ring so players can see the interactive coral (hover + move tool).
+local selectRing = SelectRing.new()
 
 -- Click pick: press may be marked processed by GUI; confirm on release too.
 local pendingPick: BasePart? = nil
@@ -207,12 +216,8 @@ end
 local function setTouchControlsEnabled(enabled: boolean)
 	pcall(function()
 		if enabled then
-			if savedTouchControlsEnabled ~= nil then
-				GuiService.TouchControlsEnabled = savedTouchControlsEnabled
-				savedTouchControlsEnabled = nil
-			else
-				GuiService.TouchControlsEnabled = true
-			end
+			GuiService.TouchControlsEnabled = true
+			savedTouchControlsEnabled = nil
 		else
 			if savedTouchControlsEnabled == nil then
 				savedTouchControlsEnabled = GuiService.TouchControlsEnabled
@@ -220,6 +225,12 @@ local function setTouchControlsEnabled(enabled: boolean)
 			GuiService.TouchControlsEnabled = false
 		end
 	end)
+	local touchGui = playerGui:FindFirstChild("TouchGui")
+	if enabled then
+		if touchGui and touchGui:IsA("ScreenGui") then
+			touchGui.Enabled = true
+		end
+	end
 end
 
 local function clearJumpUnlockWatch()
@@ -368,10 +379,14 @@ end
 
 local function aimScreenPos(): Vector2
 	local finger = pointerScreenPos()
+	if gamepadRelocate and gamepadCursor then
+		return Vector2.new(gamepadCursor.X, gamepadCursor.Y - AIM_VISUAL_CENTER_OFFSET_Y)
+	end
 	if UserInputService:GetLastInputType() == Enum.UserInputType.Touch then
 		return Vector2.new(finger.X, finger.Y - GHOST_SCREEN_OFFSET_Y)
 	end
-	return finger
+	-- Mouse: aim above the cursor so the ball center lands on it.
+	return Vector2.new(finger.X, finger.Y - AIM_VISUAL_CENTER_OFFSET_Y)
 end
 
 local function worldToScreen(world: Vector3): Vector2?
@@ -421,7 +436,7 @@ local function makeUi()
 		b.Size = UDim2.fromOffset(sizePx, sizePx)
 		b.BackgroundColor3 = color
 		b.BackgroundTransparency = 0
-		b.Font = Enum.Font.GothamBold
+		b.Font = UiTheme.Font
 		b.Text = text
 		b.TextColor3 = Color3.new(1, 1, 1)
 		b.TextScaled = true
@@ -430,6 +445,12 @@ local function makeUi()
 		b.ZIndex = 5
 		b.Parent = g
 		UiCircles.ensure(b)
+		local pad = Instance.new("UIPadding")
+		pad.PaddingTop = UDim.new(0.12, 0)
+		pad.PaddingBottom = UDim.new(0.12, 0)
+		pad.PaddingLeft = UDim.new(0.06, 0)
+		pad.PaddingRight = UDim.new(0.06, 0)
+		pad.Parent = b
 		local edge = Instance.new("UIStroke")
 		edge.Color = Color3.new(1, 1, 1)
 		edge.Thickness = 2
@@ -463,7 +484,7 @@ local function makeUi()
 	plus.AnchorPoint = Vector2.new(0.5, 0.5)
 	plus.Position = UDim2.fromScale(0.5, 0.5)
 	plus.Size = UDim2.fromScale(0.9, 0.9)
-	plus.Font = Enum.Font.GothamBold
+	plus.Font = UiTheme.Font
 	plus.Text = "+1"
 	plus.TextColor3 = Color3.new(1, 1, 1)
 	plus.TextScaled = true
@@ -863,7 +884,7 @@ local function ensureHoverHint(adornee: BasePart)
 	local lbl = Instance.new("TextLabel")
 	lbl.BackgroundTransparency = 1
 	lbl.Size = UDim2.fromScale(1, 1)
-	lbl.Font = Enum.Font.GothamBold
+	lbl.Font = UiTheme.Font
 	lbl.Text = "R1"
 	lbl.TextColor3 = Color3.new(1, 1, 1)
 	lbl.TextScaled = true
@@ -910,6 +931,10 @@ end
 
 local function clearHover()
 	destroyHoverHint()
+	-- Don't tear down the relocate ring while the move tool owns the coral.
+	if SelectRing.getAdornee(selectRing) == hoverPart then
+		SelectRing.destroy(selectRing)
+	end
 	if hoverPart and hoverPart.Parent then
 		if hoverBaseMaterial then
 			hoverPart.Material = hoverBaseMaterial
@@ -939,6 +964,7 @@ local function setHover(target: BasePart?)
 	hoverBaseMaterial = target.Material
 	hoverBaseColor = target.Color
 	target.Material = Enum.Material.Neon
+	SelectRing.ensure(selectRing, target, playerGui)
 end
 
 local function updateHoverFlash()
@@ -949,6 +975,7 @@ local function updateHoverFlash()
 	local pulse = 0.5 + 0.5 * math.sin(os.clock() * 9)
 	hoverPart.Material = Enum.Material.Neon
 	hoverPart.Color = hoverBaseColor:Lerp(Color3.new(1, 1, 1), 0.12 + 0.28 * pulse)
+	SelectRing.pulse(selectRing)
 end
 
 local function stopHoverLoop()
@@ -1004,68 +1031,91 @@ local function syncChrome()
 		end
 	end
 
-	cancelBtn.Visible = true
-	cancelBtn.AnchorPoint = Vector2.new(0, 1)
-	cancelBtn.Position = UDim2.fromOffset(cx + 6, cy)
+	-- Idle close (exit tool): keyboard/mouse instantly; gamepad after 3s.
+	-- After a move / recycle confirm: always show cancel for that action.
+	local idleCloseReady = (not gamepadRelocate) or ((os.clock() - relocateShownAt) >= IDLE_CLOSE_DELAY_SEC)
+	local showIdleClose = (not hasMoved) and (not recyclePending) and idleCloseReady
+	local showCancel = hasMoved or recyclePending or showIdleClose
+	cancelBtn.Visible = showCancel
 	cancelBtn.Size = UDim2.fromOffset(BTN_SIZE, BTN_SIZE)
-	cancelBtn.Text = if gamepadRelocate then "B" else "X"
+	local tipLetter = if gamepadRelocate then "B" else "X"
+	local showWord = (math.floor((os.clock() - gamepadChromeT0) / HOVER_HINT_PERIOD) % 2) == 1
+	if hasMoved or recyclePending then
+		-- Right side: cancel the pending move / recycle.
+		cancelBtn.AnchorPoint = Vector2.new(0, 1)
+		cancelBtn.Position = UDim2.fromOffset(cx + 6, cy)
+		cancelBtn.Text = if showWord then "CANCEL" else tipLetter
+		cancelBtn.TextStrokeColor3 = if showWord then Color3.fromRGB(60, 15, 18) else Color3.new(1, 1, 1)
+		cancelBtn.TextStrokeTransparency = 0
+	else
+		-- Idle close: left of coral (recycle stays on the right).
+		cancelBtn.AnchorPoint = Vector2.new(1, 1)
+		cancelBtn.Position = UDim2.fromOffset(cx - 6, cy)
+		cancelBtn.Text = if showWord then "CLOSE" else tipLetter
+		cancelBtn.TextStrokeColor3 = if showWord then Color3.fromRGB(60, 15, 18) else Color3.new(1, 1, 1)
+		cancelBtn.TextStrokeTransparency = 0
+	end
 
 	-- ✓ for move confirm, or for recycle confirm.
 	checkBtn.Visible = (hasMoved and validSpot) or recyclePending
 	checkBtn.AnchorPoint = Vector2.new(1, 1)
 	checkBtn.Position = UDim2.fromOffset(cx - 6, cy)
 	checkBtn.Size = UDim2.fromOffset(BTN_SIZE, BTN_SIZE)
-	if gamepadRelocate and checkBtn.Visible then
-		-- Alternate ✓ and A like placement confirm.
-		local showA = (math.floor((os.clock() - gamepadChromeT0) / HOVER_HINT_PERIOD) % 2) == 1
-		checkBtn.Text = if showA then "A" else "✓"
-	else
-		checkBtn.Text = "✓"
+	if checkBtn.Visible then
+		local label = if showWord then "CONFIRM" else "✓"
+		checkBtn.Text = label
+		checkBtn.TextStrokeColor3 = if showWord then Color3.fromRGB(12, 55, 25) else Color3.new(1, 1, 1)
+		checkBtn.TextStrokeTransparency = 0
 	end
 
 	if recycleBtn then
-		recycleBtn.Visible = true
-		recycleBtn.AnchorPoint = Vector2.new(0.5, 1)
-		recycleBtn.Size = UDim2.fromOffset(REC_BTN_SIZE, REC_BTN_SIZE)
-		-- Idle: above X. Recycle confirm: slide left to center above ✓ + X pair.
-		local aboveX = cx + 6 + BTN_SIZE * 0.5
-		local abovePair = cx -- midpoint between ✓ right-edge and X left-edge centers
-		local recX = aboveX + (abovePair - aboveX) * recycleSlideU
-		local xTop = cy - BTN_SIZE
-		recycleBtn.Position = UDim2.fromOffset(recX, xTop - REC_GAP_PX)
+		-- Hide recycle while dragging a move; show again after confirm, or during recycle confirm.
+		local showRecycle = (not hasMoved) or recyclePending
+		recycleBtn.Visible = showRecycle
+		if showRecycle then
+			recycleBtn.AnchorPoint = Vector2.new(0.5, 1)
+			recycleBtn.Size = UDim2.fromOffset(REC_BTN_SIZE, REC_BTN_SIZE)
+			-- Idle (not moved): recycle sits where X will appear. Recycle confirm: above ✓/X pair.
+			local aboveX = cx + 6 + BTN_SIZE * 0.5
+			local abovePair = cx
+			local idleRecX = aboveX
+			local idleRecY = cy
+			local movedRecX = aboveX + (abovePair - aboveX) * recycleSlideU
+			local movedRecY = cy - BTN_SIZE - REC_GAP_PX
+			local recX = if recyclePending then movedRecX else idleRecX
+			local recY = if recyclePending then movedRecY else idleRecY
+			recycleBtn.Position = UDim2.fromOffset(recX, recY)
 
-		if recyclePending then
-			local age = os.clock() - recycleSlideT0
-			local pulse = (math.floor(age * REC_FLASH_HZ) % 2) == 0
-			recycleBtn.BackgroundColor3 = if pulse then REC_GREEN else REC_GREEN_DIM
-			-- Alternate recycle logo (1s) then white "+1" (1s), from confirm start.
-			local showPlus = (math.floor(age / REC_LABEL_PERIOD) % 2) == 1
-			if recycleIcon then
-				recycleIcon.Visible = not showPlus
-			end
-			if recyclePlus then
-				recyclePlus.Text = "+1"
-				recyclePlus.Visible = showPlus
-			end
-		elseif gamepadRelocate then
-			recycleBtn.BackgroundColor3 = REC_GREEN
-			-- Alternate recycle logo (1s) then "L1" (1s).
-			local showL1 = (math.floor((os.clock() - gamepadChromeT0) / HOVER_HINT_PERIOD) % 2) == 1
-			if recycleIcon then
-				recycleIcon.Visible = not showL1
-			end
-			if recyclePlus then
-				recyclePlus.Text = "L1"
-				recyclePlus.Visible = showL1
-			end
-		else
-			recycleBtn.BackgroundColor3 = REC_GREEN
-			if recycleIcon then
-				recycleIcon.Visible = true
-			end
-			if recyclePlus then
-				recyclePlus.Text = "+1"
-				recyclePlus.Visible = false
+			if recyclePending then
+				local age = os.clock() - recycleSlideT0
+				local pulse = (math.floor(age * REC_FLASH_HZ) % 2) == 0
+				recycleBtn.BackgroundColor3 = if pulse then REC_GREEN else REC_GREEN_DIM
+				local showPlus = (math.floor(age / REC_LABEL_PERIOD) % 2) == 1
+				if recycleIcon then
+					recycleIcon.Visible = not showPlus
+				end
+				if recyclePlus then
+					recyclePlus.Text = "+1"
+					recyclePlus.Visible = showPlus
+				end
+			else
+				recycleBtn.BackgroundColor3 = REC_GREEN
+				-- icon → L1 → COLLECT (1s each)
+				local phase = math.floor((os.clock() - gamepadChromeT0) / HOVER_HINT_PERIOD) % 3
+				if recycleIcon then
+					recycleIcon.Visible = phase == 0
+				end
+				if recyclePlus then
+					if phase == 1 then
+						recyclePlus.Text = "L1"
+						recyclePlus.Visible = true
+					elseif phase == 2 then
+						recyclePlus.Text = "COLLECT"
+						recyclePlus.Visible = true
+					else
+						recyclePlus.Visible = false
+					end
+				end
 			end
 		end
 	end
@@ -1126,6 +1176,8 @@ local function updateRelocateFlash()
 		blockPart.Material = Enum.Material.Neon
 		blockPart.Color = Color3.fromRGB(255, 45, 45)
 	end
+	SelectRing.ensure(selectRing, part, playerGui)
+	SelectRing.pulse(selectRing)
 end
 
 local function stopLoop()
@@ -1156,7 +1208,7 @@ local function startLoop()
 				local dir = stick.Unit
 				local speed = GAMEPAD_AIM_SPEED * math.clamp((mag - GAMEPAD_STICK_DEADZONE) / (1 - GAMEPAD_STICK_DEADZONE), 0, 1)
 				gamepadCursor = clampGamepadCursor(gamepadCursor + dir * speed * dt)
-				local pos = raycastTerrain(gamepadCursor)
+				local pos = raycastTerrain(aimScreenPos())
 				if pos then
 					updateAt(pos)
 				end
@@ -1167,17 +1219,14 @@ local function startLoop()
 end
 
 local function playIntro(fromScreen: Vector2)
-	if not cancelBtn or not moveIcon or not moveBillboard then
+	if not moveIcon or not moveBillboard then
 		return
 	end
 	introAnimating = true
-	cancelBtn.Visible = true
-	cancelBtn.AnchorPoint = Vector2.new(0.5, 0.5)
-	cancelBtn.Position = UDim2.fromOffset(fromScreen.X, fromScreen.Y)
-	cancelBtn.Size = UDim2.fromOffset(BTN_SIZE, BTN_SIZE)
-	local cancelScale = Instance.new("UIScale")
-	cancelScale.Scale = 0.05
-	cancelScale.Parent = cancelBtn
+	-- Cancel stays hidden until the coral actually moves.
+	if cancelBtn then
+		cancelBtn.Visible = false
+	end
 	local moveScale = moveIcon:FindFirstChild("IntroScale")
 	if moveScale and moveScale:IsA("UIScale") then
 		moveScale.Scale = 0.05
@@ -1197,7 +1246,7 @@ local function playIntro(fromScreen: Vector2)
 	local t0 = os.clock()
 	local conn: RBXScriptConnection
 	conn = RunService.RenderStepped:Connect(function()
-		if not active or not cancelBtn then
+		if not active then
 			conn:Disconnect()
 			introAnimating = false
 			return
@@ -1205,9 +1254,6 @@ local function playIntro(fromScreen: Vector2)
 		keepCameraFrozen()
 		local u = math.clamp((os.clock() - t0) / INTRO_SEC, 0, 1)
 		local a = 1 - (1 - u) * (1 - u)
-		if cancelScale.Parent then
-			cancelScale.Scale = 0.05 + 0.95 * a
-		end
 		if moveScale and moveScale.Parent then
 			moveScale.Scale = 0.05 + 0.95 * a
 		end
@@ -1215,31 +1261,17 @@ local function playIntro(fromScreen: Vector2)
 			recScale.Scale = 0.05 + 0.95 * a
 		end
 		local screen = if part then worldToScreen(part.Position) else fromScreen
-		if screen and cancelBtn then
-			-- End center matches syncChrome: AnchorPoint (0,1) at (cx+6, cy).
-			local cx = screen.X
-			local cy = screen.Y - 52
-			local endCenter = Vector2.new(cx + 6 + BTN_SIZE * 0.5, cy - BTN_SIZE * 0.5)
-			local pos = fromScreen:Lerp(endCenter, a)
-			cancelBtn.AnchorPoint = Vector2.new(0.5, 0.5)
-			cancelBtn.Position = UDim2.fromOffset(pos.X, pos.Y)
-		end
 		if screen and recycleBtn then
 			local cx = screen.X
 			local cy = screen.Y - 52
-			local xCenter = cx + 6 + BTN_SIZE * 0.5
-			local xTop = cy - BTN_SIZE
-			-- End center matches syncChrome: AnchorPoint (0.5,1) at (xCenter, xTop - gap).
-			local recEnd = Vector2.new(xCenter, xTop - REC_GAP_PX - REC_BTN_SIZE * 0.5)
+			-- End: recycle where X will sit (right of coral).
+			local recEnd = Vector2.new(cx + 6 + BTN_SIZE * 0.5, cy - REC_BTN_SIZE * 0.5)
 			local rpos = fromScreen:Lerp(recEnd, a)
 			recycleBtn.AnchorPoint = Vector2.new(0.5, 0.5)
 			recycleBtn.Position = UDim2.fromOffset(rpos.X, rpos.Y)
 		end
 		if u >= 1 then
 			conn:Disconnect()
-			if cancelScale.Parent then
-				cancelScale:Destroy()
-			end
 			if moveScale and moveScale.Parent then
 				moveScale.Scale = 1
 			end
@@ -1256,6 +1288,7 @@ local function clearState()
 	clearBlockHighlight()
 	ClientPlot.setOutOfPlotFlash(false)
 	restorePartLook(part)
+	SelectRing.destroy(selectRing)
 	if warnLabel then
 		local bb = warnLabel.Parent
 		warnLabel = nil
@@ -1535,12 +1568,21 @@ function RelocateController.commit()
 			part.CFrame = CFrame.new(finalPos)
 			if typeof(result.placeId) == "string" and result.placeId ~= "" then
 				part:SetAttribute("OceanTD_PlaceId", result.placeId)
+				placeId = result.placeId
 			elseif placeId ~= "" then
 				part:SetAttribute("OceanTD_PlaceId", placeId)
 			end
+			-- Stay on this coral: reset move state so recycle returns until the next drag.
+			originPos = finalPos
 		end
 		PlaceVfx.playVisuals(toPos, baseColor or Color3.fromRGB(100, 200, 255))
-		clearState()
+		hasMoved = false
+		validSpot = true
+		rejectReason = nil
+		busy = false
+		recycleSlideU = 0
+		recycleSlideActive = false
+		syncChrome()
 		log("Saved move")
 	else
 		local code = typeof(result) == "table" and result.errorCode or "Reject"
@@ -1557,6 +1599,9 @@ function RelocateController.begin(target: BasePart)
 	end
 	-- Armed placement owns the pointer — don't steal into move/recycle.
 	if PlacementController.isActive() then
+		return
+	end
+	if InventoryState.isBuildModalBlocking() then
 		return
 	end
 	if active then
@@ -1584,6 +1629,7 @@ function RelocateController.begin(target: BasePart)
 	active = true
 	gamepadRelocate = isUsingGamepad()
 	gamepadChromeT0 = os.clock()
+	relocateShownAt = os.clock()
 	pendingPick = nil
 	pendingPickScreen = nil
 	part = target
@@ -1611,6 +1657,7 @@ function RelocateController.begin(target: BasePart)
 	end
 
 	target.Material = Enum.Material.Neon
+	SelectRing.ensure(selectRing, target, playerGui)
 	freeze()
 	makeUi()
 	if cancelBtn then

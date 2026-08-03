@@ -31,6 +31,7 @@ local InventoryState = require(script.Parent:WaitForChild("InventoryState"))
 local ClientPlot = require(script.Parent:WaitForChild("ClientPlot"))
 local PlaceVfx = require(script.Parent:WaitForChild("PlaceVfx"))
 local HandOrb = require(script.Parent:WaitForChild("HandOrb"))
+local SelectRing = require(script.Parent:WaitForChild("SelectRing"))
 
 local PlacementController = {}
 
@@ -90,8 +91,10 @@ local MOVE_ICON_SIZE = 48
 local GHOST_SCREEN_RADIUS_PX = 30 -- clears the ball so chrome isn't on top of it
 local MOVE_BELOW_GHOST_PX = 4
 local BTN_ABOVE_GHOST_PX = 4
--- Touch-only: raise ghost/plant above the finger. Mouse/gamepad aim with no offset.
+-- Touch-only: raise ghost/plant above the finger.
 local GHOST_SCREEN_OFFSET_Y = 105
+-- Mouse/gamepad: match relocate — aim above cursor so ball + move icon center on it.
+local AIM_VISUAL_CENTER_OFFSET_Y = 56
 local MOVE_ICON_IMAGE = "rbxassetid://345081302"
 local MOVE_HINT_PULSE_SPEED = 4
 local MOVE_HINT_SCALE_IN_SEC = 0.35
@@ -108,6 +111,7 @@ local GHOST_SCALE_IN_SEC = 0.5
 
 local ghostBaseColor: Color3? = nil
 local ghostBaseMaterial: Enum.Material? = nil
+local placeSelectRing = SelectRing.new()
 local placeResumeToken = 0
 local postPlaceWaiting = false
 local pendingGhostScaleIn = false
@@ -196,12 +200,9 @@ end
 local function setTouchControlsEnabled(enabled: boolean)
 	pcall(function()
 		if enabled then
-			if savedTouchControlsEnabled ~= nil then
-				GuiService.TouchControlsEnabled = savedTouchControlsEnabled
-				savedTouchControlsEnabled = nil
-			else
-				GuiService.TouchControlsEnabled = true
-			end
+			-- Always re-enable; restoring a stale `false` left jump/touch missing on mobile.
+			GuiService.TouchControlsEnabled = true
+			savedTouchControlsEnabled = nil
 		else
 			if savedTouchControlsEnabled == nil then
 				savedTouchControlsEnabled = GuiService.TouchControlsEnabled
@@ -215,17 +216,36 @@ local function setTouchControlsEnabled(enabled: boolean)
 		touchGuiWatch = nil
 	end
 
-	local touchGui = playerGui:FindFirstChild("TouchGui")
-	if enabled then
-		if touchGui and touchGui:IsA("ScreenGui") then
-			touchGui.Enabled = if savedTouchGuiEnabled ~= nil then savedTouchGuiEnabled else true
+	local function enableTouchGui(gui: Instance)
+		if gui:IsA("ScreenGui") then
+			gui.Enabled = true
 		end
+	end
+
+	if enabled then
 		savedTouchGuiEnabled = nil
+		for _, child in ipairs(playerGui:GetChildren()) do
+			if child.Name == "TouchGui" then
+				enableTouchGui(child)
+			end
+		end
+		-- PlayerModule may recreate TouchGui a frame later after Enable().
+		touchGuiWatch = playerGui.ChildAdded:Connect(function(child)
+			if child.Name == "TouchGui" then
+				enableTouchGui(child)
+			end
+		end)
+		task.delay(1, function()
+			if touchGuiWatch then
+				touchGuiWatch:Disconnect()
+				touchGuiWatch = nil
+			end
+		end)
 	else
+		local touchGui = playerGui:FindFirstChild("TouchGui")
 		if touchGui then
 			applyTouchGuiDisabled(touchGui)
 		end
-		-- PlayerModule can spawn TouchGui after freeze starts — keep it off while placing.
 		touchGuiWatch = playerGui.ChildAdded:Connect(function(child)
 			if child.Name == "TouchGui" then
 				applyTouchGuiDisabled(child)
@@ -387,6 +407,7 @@ local function clearGhost()
 	warnLabel = nil
 	ghostBaseColor = nil
 	ghostBaseMaterial = nil
+	SelectRing.destroy(placeSelectRing)
 	-- Keep move icon alive (billboard may be Adorned to this ghost).
 	detachMoveHintToScreen()
 	if ghost then
@@ -556,13 +577,13 @@ local function getAimScreenPos(): Vector2
 end
 
 -- Ghost + plant aim point. On touch, raise above the finger so the ghost isn't covered.
--- Mouse / gamepad aim at the cursor with no vertical offset.
+-- Mouse / gamepad: same offset as relocate (ball center + move icon under the cursor).
 local function getPlaceAimScreenPos(): Vector2
 	local finger = getAimScreenPos()
 	if UserInputService:GetLastInputType() == Enum.UserInputType.Touch then
 		return Vector2.new(finger.X, finger.Y - GHOST_SCREEN_OFFSET_Y)
 	end
-	return finger
+	return Vector2.new(finger.X, finger.Y - AIM_VISUAL_CENTER_OFFSET_Y)
 end
 
 local function resetGamepadCursor()
@@ -611,11 +632,22 @@ local function setCheckGlyphText(text: string)
 		return
 	end
 	local glyph = checkBtn:FindFirstChild("Glyph")
+	local strokeColor = if text == "CONFIRM"
+		then Color3.fromRGB(12, 55, 25)
+		else Color3.new(1, 1, 1)
 	if glyph and glyph:IsA("TextLabel") then
 		glyph.Text = text
+		glyph.TextStrokeColor3 = strokeColor
+		glyph.TextStrokeTransparency = 0
+		local glyphStroke = glyph:FindFirstChild("GlyphStroke")
+		if glyphStroke and glyphStroke:IsA("UIStroke") then
+			glyphStroke.Color = strokeColor
+		end
 	else
 		checkBtn.Text = text
 		checkBtn.TextTransparency = 0
+		checkBtn.TextStrokeColor3 = strokeColor
+		checkBtn.TextStrokeTransparency = 0
 	end
 end
 
@@ -623,24 +655,9 @@ local function applyGamepadButtonLabels()
 	if not checkBtn or not cancelBtn then
 		return
 	end
-	if gamepadPlacement then
-		cancelBtn.Text = "B"
-		stopCheckPrompt()
-		local t0 = os.clock()
-		setCheckGlyphText("✓")
-		checkPromptConn = RunService.Heartbeat:Connect(function()
-			if not gamepadPlacement or not checkBtn then
-				return
-			end
-			-- Alternate ✓ and A every second.
-			local showA = (math.floor(os.clock() - t0) % 2) == 1
-			setCheckGlyphText(if showA then "A" else "✓")
-		end)
-	else
-		stopCheckPrompt()
-		cancelBtn.Text = "X"
-		setCheckGlyphText("✓")
-	end
+	-- Label cycling (✓/CONFIRM, X/CANCEL) is owned by syncConfirmButtons.
+	stopCheckPrompt()
+	setCheckGlyphText("✓")
 end
 
 local function fireGamepadReturnToList()
@@ -831,6 +848,8 @@ local function updateGhostPulse()
 	if checkBtn and checkBtn.Visible then
 		checkBtn.BackgroundColor3 = CHECK_BRIGHT_GREEN:Lerp(CHECK_HUNTER_GREEN, phase)
 	end
+	SelectRing.ensure(placeSelectRing, ghost, playerGui)
+	SelectRing.pulse(placeSelectRing)
 end
 
 local function updateGhostAt(anchorPos: Vector3)
@@ -964,13 +983,21 @@ local function syncConfirmButtonsImpl()
 	end
 
 	local btnBottom = cy
-	-- Touch/mouse: ✓ after park (Confirm). Gamepad: ✓/A while aiming (place immediately).
+	-- Touch/mouse: ✓ after park (Confirm). Gamepad: ✓ while aiming (place immediately).
 	checkBtn.Visible = validSpot and (mode == MODE_CONFIRM or gamepadPlacement)
 	checkBtn.AnchorPoint = Vector2.new(1, 1)
 	checkBtn.Position = UDim2.fromOffset(cx - 6, btnBottom)
 	cancelBtn.Visible = true
 	cancelBtn.AnchorPoint = Vector2.new(0, 1)
 	cancelBtn.Position = UDim2.fromOffset(cx + 6, btnBottom)
+	-- Cycle labels 1s each: X ↔ CANCEL, ✓ ↔ CONFIRM.
+	local showWord = (math.floor(os.clock()) % 2) == 1
+	cancelBtn.Text = if showWord then "CANCEL" else "X"
+	cancelBtn.TextStrokeColor3 = if showWord then Color3.fromRGB(60, 15, 18) else Color3.new(1, 1, 1)
+	cancelBtn.TextStrokeTransparency = 0
+	if checkBtn.Visible then
+		setCheckGlyphText(if showWord then "CONFIRM" else "✓")
+	end
 end
 syncConfirmButtons = syncConfirmButtonsImpl
 
@@ -1008,7 +1035,7 @@ local function makeConfirmUiImpl()
 		b.Size = UDim2.fromOffset(BTN_SIZE, BTN_SIZE)
 		b.BackgroundColor3 = color
 		b.BackgroundTransparency = 0 -- opaque so touch reliably hits the button
-		b.Font = Enum.Font.GothamBold
+		b.Font = UiTheme.Font
 		b.Text = text
 		b.TextColor3 = Color3.new(1, 1, 1)
 		b.TextScaled = true
@@ -1016,6 +1043,12 @@ local function makeConfirmUiImpl()
 		b.ZIndex = 5
 		b.Parent = gui
 		UiCircles.ensure(b)
+		local pad = Instance.new("UIPadding")
+		pad.PaddingTop = UDim.new(0.12, 0)
+		pad.PaddingBottom = UDim.new(0.12, 0)
+		pad.PaddingLeft = UDim.new(0.06, 0)
+		pad.PaddingRight = UDim.new(0.06, 0)
+		pad.Parent = b
 
 		local edge = Instance.new("UIStroke")
 		edge.Name = "EdgeStroke"
@@ -1029,7 +1062,7 @@ local function makeConfirmUiImpl()
 			label.Name = "Glyph"
 			label.BackgroundTransparency = 1
 			label.Size = UDim2.fromScale(1, 1)
-			label.Font = Enum.Font.GothamBold
+			label.Font = UiTheme.Font
 			label.Text = text
 			label.TextColor3 = Color3.new(1, 1, 1)
 			label.TextScaled = true
@@ -1918,6 +1951,12 @@ function PlacementController.setSwitchSlotScreens(disarmTo: Vector2?, armFrom: V
 end
 
 function PlacementController.beginForItem(itemId: string)
+	if InventoryState.isBuildModalBlocking() then
+		pendingDisarmSlotScreen = nil
+		pendingArmSlotScreen = nil
+		queuedSwitchItemId = nil
+		return
+	end
 	if not ClientPlot.isReady() then
 		warn("[PLACE] Plot not ready")
 		pendingDisarmSlotScreen = nil

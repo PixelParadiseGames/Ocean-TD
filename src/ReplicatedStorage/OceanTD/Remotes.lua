@@ -20,6 +20,11 @@ local REMOTE_FUNCTIONS = {
 	"RequestMove",
 	"RequestRecycle",
 	"RequestUndo",
+	"RequestClearPlot",
+	"RequestGetPlotSaves",
+	"RequestSavePlotSlot",
+	"RequestLoadPlotSlot",
+	"RequestRenamePlotSave",
 }
 
 local function getRoot(): Instance

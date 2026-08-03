@@ -1,18 +1,25 @@
 --!strict
 --[[
-	Session-only undo stack for build ops (place / move / recycle).
+	Session-only undo stack for build ops (place / move / recycle / clearPlot).
 	Max 10 steps. Cleared on leave — never persisted.
 ]]
 
 local UndoService = {}
 
+export type ClearPlotEntry = {
+	placeId: string,
+	itemId: string,
+	worldPos: Vector3,
+}
+
 export type UndoStep = {
-	kind: string, -- "place" | "move" | "recycle"
+	kind: string, -- "place" | "move" | "recycle" | "clearPlot"
 	placeId: string,
 	itemId: string,
 	worldPos: Vector3?, -- place / recycle position
 	fromWorldPos: Vector3?, -- move origin
 	toWorldPos: Vector3?, -- move destination
+	entries: { ClearPlotEntry }?, -- clearPlot compound
 }
 
 local MAX_STEPS = 10
@@ -32,7 +39,14 @@ local function getStack(player: Player): { UndoStep }
 end
 
 function UndoService.push(player: Player, step: UndoStep)
-	if typeof(step.kind) ~= "string" or typeof(step.itemId) ~= "string" then
+	if typeof(step.kind) ~= "string" then
+		return
+	end
+	if step.kind == "clearPlot" then
+		if typeof(step.entries) ~= "table" or #step.entries == 0 then
+			return
+		end
+	elseif typeof(step.itemId) ~= "string" then
 		return
 	end
 	local s = getStack(player)

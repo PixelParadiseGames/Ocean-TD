@@ -13,8 +13,6 @@ local GuiService = game:GetService("GuiService")
 local StarterGui = game:GetService("StarterGui")
 local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local SoundService = game:GetService("SoundService")
-local ContentProvider = game:GetService("ContentProvider")
 
 local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
@@ -28,13 +26,14 @@ local PlacementController = require(script.Parent:WaitForChild("PlacementControl
 local RelocateController = require(script.Parent:WaitForChild("RelocateController"))
 local LocalShovel = require(script.Parent:WaitForChild("LocalShovel"))
 local HandOrb = require(script.Parent:WaitForChild("HandOrb"))
-local Remotes = require(oceanRoot:WaitForChild("Remotes"))
+local ClearPlotSlot = require(script.Parent:WaitForChild("ClearPlotSlot"))
+local UndoSlot = require(script.Parent:WaitForChild("UndoSlot"))
+local SavePlotSlot = require(script.Parent:WaitForChild("SavePlotSlot"))
 
 local TWEEN_OPEN = TweenInfo.new(0.28, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
 local TWEEN_CLOSE = TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
 local RED = Color3.fromRGB(220, 50, 55)
 local DARK_RED = Color3.fromRGB(120, 10, 20)
-local ORANGE = Color3.fromRGB(230, 120, 40)
 local GREEN = Color3.fromRGB(40, 220, 110)
 local PANEL_WIDTH_SCALE = 0.33
 local SLOT4_GAP_PX = 8
@@ -63,18 +62,6 @@ local function findQuickbarSlot4(mainHUD: Instance): GuiObject
 	local slot4 = quickbar:WaitForChild("Slot4", 30)
 	assert(slot4 and slot4:IsA("GuiObject"), "[INV] MainHUD.Quickbar.Slot4 missing")
 	return slot4 :: GuiObject
-end
-
-local function findQuickbarSlot3(mainHUD: Instance): GuiObject?
-	local quickbar = mainHUD:FindFirstChild("Quickbar")
-	if not quickbar then
-		return nil
-	end
-	local slot3 = quickbar:FindFirstChild("Slot3")
-	if slot3 and slot3:IsA("GuiObject") then
-		return slot3
-	end
-	return nil
 end
 
 local function rectsOverlap(aPos: Vector2, aSize: Vector2, bPos: Vector2, bSize: Vector2): boolean
@@ -160,12 +147,14 @@ local function ensureSlot4GuiButton(slot: GuiObject): GuiButton
 	if slot:IsA("GuiButton") then
 		slot.Active = true
 		slot.Visible = true
+		slot.Selectable = false
 		return slot
 	end
 
 	local existing = slot:FindFirstChild("_OceanTD_Hit")
 	if existing and existing:IsA("GuiButton") then
 		existing.Active = true
+		existing.Selectable = false
 		existing.Size = UDim2.fromScale(1, 1)
 		existing.ZIndex = 100
 		return existing
@@ -256,69 +245,6 @@ UiCircles.forceOnDescendants(slot4)
 passthroughDecor(slot4, slotButton)
 disarmTouchBlockingOverlays(mainHUD, slot4)
 
--- Slot3 = session undo (place / move / recycle). Visible only while backpack is open.
-local slot3 = findQuickbarSlot3(mainHUD)
-local slot3Button: GuiButton? = nil
-local slot3Circle: GuiObject? = nil
-local slot3Stroke: UIStroke? = nil
-local slot3UndoLabel: TextLabel? = nil
-local slot3IdleConn: RBXScriptConnection? = nil
-local slot3OriginalImage = ""
-local slot3OriginalBg = Color3.fromRGB(20, 30, 45)
-local slot3OriginalBgTrans = 0.15
-local slot3HomePos: UDim2? = nil
-local helpSlot3HomePos: UDim2? = nil
-local slot3SlideToken = 0
-local slot3PressToken = 0
-local SLOT3_SLIDE_PX = 88 -- toward backpack (right) so they emerge from behind the panel
-local SLOT3_SLIDE_IN = TweenInfo.new(0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
-local SLOT3_SLIDE_OUT = TweenInfo.new(0.22, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
-if slot3 then
-	slot3HomePos = slot3.Position
-	slot3Button = ensureSlot4GuiButton(slot3)
-	passthroughDecor(slot3, slot3Button)
-	slot3Circle = ensureCircle(slot3)
-	UiCircles.forceOnDescendants(slot3)
-	if slot3Circle:IsA("ImageLabel") or slot3Circle:IsA("ImageButton") then
-		slot3OriginalImage = (slot3Circle :: any).Image
-	end
-	slot3OriginalBg = slot3Circle.BackgroundColor3
-	slot3OriginalBgTrans = slot3Circle.BackgroundTransparency
-	slot3Stroke = ensureStroke(slot3Circle, "_OceanTD_UndoRing", Color3.new(1, 1, 1), 2)
-	slot3Stroke.Enabled = false
-
-	local existingUndo = slot3Circle:FindFirstChild("_OceanTD_UndoLabel")
-	if existingUndo and existingUndo:IsA("TextLabel") then
-		slot3UndoLabel = existingUndo
-	else
-		if existingUndo then
-			existingUndo:Destroy()
-		end
-		local lbl = Instance.new("TextLabel")
-		lbl.Name = "_OceanTD_UndoLabel"
-		lbl.BackgroundTransparency = 1
-		lbl.Size = UDim2.fromScale(1, 1)
-		lbl.Font = Enum.Font.GothamBold
-		lbl.Text = "UNDO"
-		lbl.TextColor3 = Color3.new(1, 1, 1)
-		lbl.TextScaled = true
-		lbl.Visible = false
-		lbl.ZIndex = slot3Circle.ZIndex + 2
-		lbl.Active = false
-		lbl.Parent = slot3Circle
-		local pad = Instance.new("UIPadding")
-		pad.PaddingTop = UDim.new(0.22, 0)
-		pad.PaddingBottom = UDim.new(0.22, 0)
-		pad.PaddingLeft = UDim.new(0.08, 0)
-		pad.PaddingRight = UDim.new(0.08, 0)
-		pad.Parent = lbl
-		slot3UndoLabel = lbl
-	end
-	slot3.Visible = false
-	log("Slot3 undo button ready")
-else
-	warn("[INV] MainHUD.Quickbar.Slot3 missing — undo button unavailable")
-end
 
 -- QuickbarHelp.Slot4 — shortcut badge (Y / Q). Click/tap opens backpack like Slot4.
 local quickbarHelp = mainHUD:FindFirstChild("QuickbarHelp")
@@ -382,50 +308,6 @@ if quickbarHelp then
 	end
 end
 
--- QuickbarHelp.Slot3 — undo shortcut badge (Z / L2). Orange; only while backpack open.
-local helpSlot3: GuiObject? = nil
-local helpSlot3Letter: TextLabel? = nil
-if quickbarHelp then
-	local hs3 = quickbarHelp:FindFirstChild("Slot3")
-	if hs3 and hs3:IsA("GuiObject") then
-		helpSlot3 = hs3
-		helpSlot3.Active = false
-		helpSlot3.Visible = false
-		for _, d in ipairs(helpSlot3:GetDescendants()) do
-			if d:IsA("GuiObject") then
-				d.Active = false
-			end
-		end
-		local existingLetter = helpSlot3:FindFirstChild("_OceanTD_HelpLetter")
-		if existingLetter and existingLetter:IsA("TextLabel") then
-			helpSlot3Letter = existingLetter
-		else
-			if existingLetter then
-				existingLetter:Destroy()
-			end
-			local letter = Instance.new("TextLabel")
-			letter.Name = "_OceanTD_HelpLetter"
-			letter.BackgroundTransparency = 1
-			letter.Size = UDim2.fromScale(1, 1)
-			letter.Font = UiTheme.Font
-			letter.Text = "Z"
-			letter.TextColor3 = Color3.new(1, 1, 1)
-			letter.TextScaled = true
-			letter.Active = false
-			letter.ZIndex = helpSlot3.ZIndex + 5
-			letter.Parent = helpSlot3
-			local pad = Instance.new("UIPadding")
-			pad.PaddingTop = UDim.new(0.15, 0)
-			pad.PaddingBottom = UDim.new(0.15, 0)
-			pad.PaddingLeft = UDim.new(0.15, 0)
-			pad.PaddingRight = UDim.new(0.15, 0)
-			pad.Parent = letter
-			helpSlot3Letter = letter
-		end
-		UiCircles.ensure(helpSlot3)
-		helpSlot3HomePos = helpSlot3.Position
-	end
-end
 
 -- Re-run after layout settles (mobile rescale) and if Studio adds QuickbarHelp later.
 task.defer(function()
@@ -489,7 +371,7 @@ closeXStroke.Enabled = false
 local closeXPulseConn: RBXScriptConnection? = nil
 local closeLabelCycleConn: RBXScriptConnection? = nil
 local closedIdleConn: RBXScriptConnection? = nil
-local SLOT_IDLE_PERIOD = 2 -- shovel graphic ↔ "BUILD" / undo icon ↔ "UNDO"
+local SLOT_IDLE_PERIOD = 2 -- shovel / BUILD and undo / UNDO idle cycle
 
 local buildLabel = circle:FindFirstChild("_OceanTD_BuildLabel") :: TextLabel?
 if not buildLabel then
@@ -497,7 +379,7 @@ if not buildLabel then
 	buildLabel.Name = "_OceanTD_BuildLabel"
 	buildLabel.BackgroundTransparency = 1
 	buildLabel.Size = UDim2.fromScale(1, 1)
-	buildLabel.Font = Enum.Font.GothamBold
+	buildLabel.Font = UiTheme.Font
 	buildLabel.Text = "BUILD"
 	buildLabel.TextColor3 = Color3.new(1, 1, 1)
 	buildLabel.TextScaled = true
@@ -919,7 +801,7 @@ local function ensureGamepadPrompt(btn: GuiButton, icon: GuiObject): Frame
 	glyph.AnchorPoint = Vector2.new(0.5, 0.5)
 	glyph.Position = UDim2.fromScale(0.5, 0.5)
 	glyph.Size = UDim2.fromScale(0.85, 0.45)
-	glyph.Font = Enum.Font.GothamBold
+	glyph.Font = UiTheme.Font
 	glyph.Text = "A"
 	glyph.TextColor3 = Color3.new(1, 1, 1)
 	glyph.TextScaled = true
@@ -1148,334 +1030,72 @@ local function refreshHelpSlotBadge()
 	helpLetter.Visible = true
 end
 
-local function styleSlot3HelpBadge(): boolean
-	if not helpSlot3 or not helpSlot3Letter then
-		return false
-	end
-	local mode = getShortcutMode()
-	if mode == "touch" then
-		return false
-	end
-	if helpSlot3:IsA("ImageLabel") or helpSlot3:IsA("ImageButton") then
-		(helpSlot3 :: any).Image = ""
-	end
-	helpSlot3.BackgroundColor3 = ORANGE
-	helpSlot3.BackgroundTransparency = 0
-	helpSlot3.Active = false
-	UiCircles.ensure(helpSlot3)
-	helpSlot3Letter.Text = if mode == "gamepad" then "L2" else "Z"
-	helpSlot3Letter.TextColor3 = Color3.new(1, 1, 1)
-	helpSlot3Letter.Visible = true
-	return true
-end
 
-local function refreshSlot3HelpBadge()
-	-- Visibility is owned by slide in/out; this only refreshes glyph while already shown.
-	if not helpSlot3 or not helpSlot3.Visible then
-		return
-	end
-	if not styleSlot3HelpBadge() then
-		helpSlot3.Visible = false
-	end
-end
-
-local function stopSlot3IdleCycle()
-	if slot3IdleConn then
-		slot3IdleConn:Disconnect()
-		slot3IdleConn = nil
-	end
-	if slot3UndoLabel then
-		slot3UndoLabel.Visible = false
-	end
-end
-
-local function applySlot3IdleFrame(showUndoText: boolean)
-	if not slot3Circle then
-		return
-	end
-	if showUndoText then
-		if slot3Circle:IsA("ImageLabel") or slot3Circle:IsA("ImageButton") then
-			(slot3Circle :: any).Image = ""
-		end
-		slot3Circle.BackgroundColor3 = Color3.new(0, 0, 0)
-		slot3Circle.BackgroundTransparency = 0
-		if slot3UndoLabel then
-			slot3UndoLabel.Visible = true
-		end
-	else
-		if slot3Circle:IsA("ImageLabel") or slot3Circle:IsA("ImageButton") then
-			(slot3Circle :: any).Image = slot3OriginalImage
-		end
-		slot3Circle.BackgroundColor3 = slot3OriginalBg
-		slot3Circle.BackgroundTransparency = slot3OriginalBgTrans
-		if slot3UndoLabel then
-			slot3UndoLabel.Visible = false
-		end
-	end
-end
-
-local function startSlot3IdleCycle()
-	if not slot3 or not slot3Circle then
-		return
-	end
-	stopSlot3IdleCycle()
-	if slot3Stroke then
-		slot3Stroke.Enabled = true
-		slot3Stroke.Color = Color3.new(1, 1, 1)
-		slot3Stroke.Thickness = 2
-	end
-	UiCircles.ensure(slot3Circle)
-	local t0 = os.clock()
-	applySlot3IdleFrame(false) -- undo icon first
-	slot3IdleConn = RunService.Heartbeat:Connect(function()
-		if not InventoryState.isOpen() or not slot3 or not slot3.Visible then
-			return
-		end
-		local showUndoText = (math.floor((os.clock() - t0) / SLOT_IDLE_PERIOD) % 2) == 1
-		applySlot3IdleFrame(showUndoText)
-	end)
-end
-
-local function slot3HiddenPos(home: UDim2): UDim2
-	-- Offset toward the backpack (right) so the control starts/ends behind the panel.
-	return home + UDim2.fromOffset(SLOT3_SLIDE_PX, 0)
-end
-
-local function playSlot3Reveal()
-	if not slot3 or not slot3HomePos then
-		return
-	end
-	slot3SlideToken += 1
-	local token = slot3SlideToken
-	local home = slot3HomePos
-	local hidden = slot3HiddenPos(home)
-
-	slot3.Position = hidden
-	slot3.Visible = true
-	if slot3Stroke then
-		slot3Stroke.Enabled = true
-		slot3Stroke.Color = Color3.new(1, 1, 1)
-		slot3Stroke.Thickness = 2
-	end
-	startSlot3IdleCycle()
-
-	local showHelp = styleSlot3HelpBadge()
-	if showHelp and helpSlot3 and helpSlot3HomePos then
-		helpSlot3.Position = slot3HiddenPos(helpSlot3HomePos)
-		helpSlot3.Visible = true
-		TweenService:Create(helpSlot3, SLOT3_SLIDE_IN, { Position = helpSlot3HomePos }):Play()
-	elseif helpSlot3 then
-		helpSlot3.Visible = false
-	end
-
-	local tw = TweenService:Create(slot3, SLOT3_SLIDE_IN, { Position = home })
-	tw:Play()
-	tw.Completed:Wait()
-	if token ~= slot3SlideToken then
-		return
-	end
-	slot3.Position = home
-	if showHelp and helpSlot3 and helpSlot3HomePos then
-		helpSlot3.Position = helpSlot3HomePos
-	end
-end
-
-local function playSlot3Hide()
-	if not slot3 or not slot3HomePos then
-		return
-	end
-	slot3SlideToken += 1
-	local token = slot3SlideToken
-	local home = slot3HomePos
-	local hidden = slot3HiddenPos(home)
-
-	stopSlot3IdleCycle()
-	slot3PressToken += 1 -- cancel in-flight undo press flash
-	if not slot3.Visible then
-		if helpSlot3 then
-			helpSlot3.Visible = false
-			if helpSlot3HomePos then
-				helpSlot3.Position = helpSlot3HomePos
+-- Slot1 / Slot2 / Slot3 live in SavePlotSlot / ClearPlotSlot / UndoSlot (Luau 200-local limit).
+local focusBackpackAfterSaveClose: (() -> ())? = nil
+local clearBackpackFocusForSave: (() -> ())? = nil
+local function mountSideSlots()
+	local depsShared = {
+		mainHUD = mainHUD,
+		ensureButton = ensureSlot4GuiButton,
+		passthroughDecor = passthroughDecor,
+		ensureCircle = ensureCircle,
+		ensureStroke = ensureStroke,
+		getShortcutMode = getShortcutMode,
+		getIdlePeriod = function()
+			return SLOT_IDLE_PERIOD
+		end,
+		log = log,
+	}
+	UndoSlot.mount(depsShared)
+	ClearPlotSlot.mount({
+		mainHUD = mainHUD,
+		playerGui = playerGui :: PlayerGui,
+		ensureButton = ensureSlot4GuiButton,
+		passthroughDecor = passthroughDecor,
+		ensureCircle = ensureCircle,
+		ensureStroke = ensureStroke,
+		getShortcutMode = getShortcutMode,
+		getIdlePeriod = function()
+			return SLOT_IDLE_PERIOD
+		end,
+		red = RED,
+		green = GREEN,
+		log = log,
+	})
+	SavePlotSlot.mount({
+		mainHUD = mainHUD,
+		playerGui = playerGui :: PlayerGui,
+		ensureButton = ensureSlot4GuiButton,
+		passthroughDecor = passthroughDecor,
+		ensureCircle = ensureCircle,
+		ensureStroke = ensureStroke,
+		getShortcutMode = getShortcutMode,
+		getIdlePeriod = function()
+			return SLOT_IDLE_PERIOD
+		end,
+		onClosedWithGamepad = function()
+			if focusBackpackAfterSaveClose then
+				focusBackpackAfterSaveClose()
 			end
-		end
-		slot3.Position = home
-		if slot3Stroke then
-			slot3Stroke.Enabled = false
-		end
-		return
-	end
-
-	slot3.Position = home
-	local tw = TweenService:Create(slot3, SLOT3_SLIDE_OUT, { Position = hidden })
-	tw:Play()
-	if helpSlot3 and helpSlot3.Visible and helpSlot3HomePos then
-		helpSlot3.Position = helpSlot3HomePos
-		TweenService:Create(helpSlot3, SLOT3_SLIDE_OUT, { Position = slot3HiddenPos(helpSlot3HomePos) }):Play()
-	end
-	tw.Completed:Wait()
-	if token ~= slot3SlideToken then
-		return
-	end
-	slot3.Visible = false
-	slot3.Position = home
-	if slot3Stroke then
-		slot3Stroke.Enabled = false
-	end
-	if helpSlot3 then
-		helpSlot3.Visible = false
-		if helpSlot3HomePos then
-			helpSlot3.Position = helpSlot3HomePos
-		end
-	end
-end
-
-local function syncSlot3Visibility()
-	-- Instant sync for boot / edge cases (no tween).
-	if InventoryState.isOpen() then
-		if slot3 and slot3HomePos then
-			slot3.Position = slot3HomePos
-			slot3.Visible = true
-			startSlot3IdleCycle()
-		end
-		if styleSlot3HelpBadge() and helpSlot3 and helpSlot3HomePos then
-			helpSlot3.Position = helpSlot3HomePos
-			helpSlot3.Visible = true
-		elseif helpSlot3 then
-			helpSlot3.Visible = false
-		end
-	else
-		stopSlot3IdleCycle()
-		if slot3 and slot3HomePos then
-			slot3.Visible = false
-			slot3.Position = slot3HomePos
-		end
-		if slot3Stroke then
-			slot3Stroke.Enabled = false
-		end
-		if helpSlot3 then
-			helpSlot3.Visible = false
-			if helpSlot3HomePos then
-				helpSlot3.Position = helpSlot3HomePos
+		end,
+		onOpenedWithGamepad = function()
+			if clearBackpackFocusForSave then
+				clearBackpackFocusForSave()
 			end
-		end
-	end
+		end,
+		log = log,
+	})
 end
-
-local UNDO_SOUND_ID = "rbxassetid://17612245730"
-local UNDO_STREAK_WINDOW = 3
-local UNDO_PITCH_MIN = 0.9
-local UNDO_PITCH_MAX = 1.55
-local UNDO_PITCH_STEP = 0.07
-local UNDO_FLASH_HOLD = 1
-local UNDO_FLASH_FADE = 0.35
-local UNDO_GLOW = Color3.fromRGB(255, 140, 40)
-
-local undoSoundTemplate = Instance.new("Sound")
-undoSoundTemplate.Name = "OceanTD_UndoSound"
-undoSoundTemplate.SoundId = UNDO_SOUND_ID
-undoSoundTemplate.Volume = 0.9
-undoSoundTemplate.Parent = SoundService
-task.defer(function()
-	pcall(function()
-		ContentProvider:PreloadAsync({ undoSoundTemplate })
-	end)
-end)
-
-local undoLastPressAt = 0
-local undoPitchStreak = 0
-
-local function playUndoSound()
-	local now = os.clock()
-	if now - undoLastPressAt <= UNDO_STREAK_WINDOW then
-		undoPitchStreak += 1
-	else
-		undoPitchStreak = 0
-	end
-	undoLastPressAt = now
-
-	local base = UNDO_PITCH_MIN + math.random() * (1.15 - UNDO_PITCH_MIN)
-	local pitch = math.clamp(base + undoPitchStreak * UNDO_PITCH_STEP, UNDO_PITCH_MIN, UNDO_PITCH_MAX)
-
-	local sound = undoSoundTemplate:Clone()
-	sound.PlaybackSpeed = pitch
-	sound.Parent = SoundService
-	sound:Play()
-	sound.Ended:Once(function()
-		sound:Destroy()
-	end)
-	task.delay(4, function()
-		if sound.Parent then
-			sound:Destroy()
-		end
-	end)
-end
-
-local function playSlot3UndoPressFeedback()
-	if not slot3Circle then
-		return
-	end
-	slot3PressToken += 1
-	local token = slot3PressToken
-	stopSlot3IdleCycle()
-
-	if slot3Circle:IsA("ImageLabel") or slot3Circle:IsA("ImageButton") then
-		(slot3Circle :: any).Image = ""
-	end
-	slot3Circle.BackgroundColor3 = UNDO_GLOW
-	slot3Circle.BackgroundTransparency = 0
-	if slot3UndoLabel then
-		slot3UndoLabel.TextColor3 = Color3.new(1, 1, 1)
-		slot3UndoLabel.Visible = true
-	end
-
-	task.delay(UNDO_FLASH_HOLD, function()
-		if token ~= slot3PressToken or not slot3Circle then
-			return
-		end
-		local fade = TweenService:Create(slot3Circle, TweenInfo.new(UNDO_FLASH_FADE, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
-			BackgroundColor3 = Color3.new(0, 0, 0),
-		})
-		fade:Play()
-		fade.Completed:Wait()
-		if token ~= slot3PressToken then
-			return
-		end
-		if InventoryState.isOpen() and slot3 and slot3.Visible then
-			startSlot3IdleCycle()
-		end
-	end)
-end
-
-local undoBusy = false
-local function requestUndo()
-	if not InventoryState.isOpen() then
-		return
-	end
-	playUndoSound()
-	playSlot3UndoPressFeedback()
-	if undoBusy then
-		return
-	end
-	undoBusy = true
-	if RelocateController.isActive() then
-		RelocateController.cancel(true)
-	end
-	local ok, result = pcall(function()
-		return Remotes.getFunction("RequestUndo"):InvokeServer()
-	end)
-	undoBusy = false
-	if ok and typeof(result) == "table" and result.ok then
-		log("Undo", result.kind)
-	else
-		local code = if ok and typeof(result) == "table" then result.errorCode else "Fail"
-		log("Undo rejected", code)
-	end
-end
+mountSideSlots()
 
 local function refreshGamepadCloseLabel()
 	stopCloseLabelCycle()
 	refreshHelpSlotBadge()
-	refreshSlot3HelpBadge()
+	UndoSlot.refreshHelpBadge()
+	ClearPlotSlot.refreshHelpBadge()
+	SavePlotSlot.refreshHelpBadge()
+	ClearPlotSlot.layoutConfirmIfActive()
 	if not closeX.Visible then
 		closeX.Text = "X"
 		return
@@ -1546,6 +1166,9 @@ local function activateGamepadFocusedItem()
 	if gamepadIntroActive then
 		return
 	end
+	if InventoryState.isBuildModalBlocking() then
+		return
+	end
 	local btn = itemButtons[gamepadFocusIndex]
 	if not btn then
 		return
@@ -1586,6 +1209,17 @@ local function enableGamepadSelect(withOpenIntro: boolean?)
 	end
 	refreshGamepadCloseLabel()
 	log("Gamepad select on — D-pad list, stick moves player", if withOpenIntro then "intro" else "focus1")
+end
+
+focusBackpackAfterSaveClose = function()
+	if InventoryState.isOpen() then
+		enableGamepadSelect(false)
+	end
+end
+
+clearBackpackFocusForSave = function()
+	clearFocusOutlines()
+	GuiService.SelectedObject = nil
 end
 
 local function makeItemButton(def, layoutOrder: number, instanceSuffix: string?): ImageButton
@@ -1715,6 +1349,9 @@ local function makeItemButton(def, layoutOrder: number, instanceSuffix: string?)
 				return
 			end
 			-- Tap: select / toggle pulse + start placement aim
+			if InventoryState.isBuildModalBlocking() then
+				return
+			end
 			local cur = InventoryState.getSelectedId()
 			if cur == def.id and pulsedStroke == stroke then
 				clearAllPulses()
@@ -1741,7 +1378,8 @@ local function makeItemButton(def, layoutOrder: number, instanceSuffix: string?)
 				InventoryState.setSelected(def.id, true)
 			else
 				InventoryState.setSelected(def.id)
-			end		end)
+			end
+		end)
 	end)
 
 	table.insert(itemButtons, btn)
@@ -1798,6 +1436,15 @@ InventoryState.setItemSlotScreenPosProvider(function(itemId: string): Vector2?
 	end
 	local pos = btn.AbsolutePosition
 	local size = btn.AbsoluteSize
+	return Vector2.new(pos.X + size.X * 0.5, pos.Y + size.Y * 0.5)
+end)
+
+InventoryState.setScrollCenterProvider(function(): Vector2?
+	if not scroll.Parent then
+		return nil
+	end
+	local pos = scroll.AbsolutePosition
+	local size = scroll.AbsoluteSize
 	return Vector2.new(pos.X + size.X * 0.5, pos.Y + size.Y * 0.5)
 end)
 
@@ -1905,8 +1552,10 @@ end
 InventoryState.onOpenChanged(function(isOpen)
 	if isOpen then
 		task.spawn(function()
-			-- Reveal Slot3 as the backpack opens so it slides out from behind the panel.
-			task.spawn(playSlot3Reveal)
+			-- Reveal Slot1/2/3 as the backpack opens so they slide out from behind the panel.
+			task.spawn(SavePlotSlot.playReveal)
+			task.spawn(ClearPlotSlot.playReveal)
+			task.spawn(UndoSlot.playReveal)
 			playOpen()
 			if openWithGamepadPending then
 				enableGamepadSelect(true)
@@ -1916,12 +1565,18 @@ InventoryState.onOpenChanged(function(isOpen)
 	else
 		unequipBackpackShovel()
 		disableGamepadSelect()
+		ClearPlotSlot.hideConfirm()
+		SavePlotSlot.hide()
 		task.spawn(function()
-			-- Slide Slot3 back behind the backpack while the panel closes.
-			task.spawn(playSlot3Hide)
+			-- Slide Slot1/2/3 back behind the backpack while the panel closes.
+			task.spawn(SavePlotSlot.playHide)
+			task.spawn(ClearPlotSlot.playHide)
+			task.spawn(UndoSlot.playHide)
 			playClose()
 			refreshHelpSlotBadge()
-			refreshSlot3HelpBadge()
+			UndoSlot.refreshHelpBadge()
+			ClearPlotSlot.refreshHelpBadge()
+			SavePlotSlot.refreshHelpBadge()
 		end)
 	end
 end)
@@ -1985,21 +1640,52 @@ if helpHitButton then
 	end)
 end
 
-if slot3Button then
-	slot3Button.Activated:Connect(function()
-		requestUndo()
-	end)
-end
-
 UserInputService.InputBegan:Connect(function(input, gameProcessed)
 	if input.KeyCode == Enum.KeyCode.ButtonY then
 		toggleFromUser(true)
 		return
 	end
+	-- Save plots: A/Enter confirm overwrite; B/Esc close overwrite or main UI.
+	if SavePlotSlot.isOpen() then
+		if input.KeyCode == Enum.KeyCode.ButtonA or input.KeyCode == Enum.KeyCode.Return then
+			if SavePlotSlot.handleConfirmInput() then
+				return
+			end
+		end
+		if input.KeyCode == Enum.KeyCode.ButtonB or input.KeyCode == Enum.KeyCode.Escape then
+			SavePlotSlot.handleCancelInput()
+			return
+		end
+	end
+	-- Clear plot confirm: A / Enter activates selected button; B / Esc cancels.
+	if ClearPlotSlot.isConfirmActive() then
+		if input.KeyCode == Enum.KeyCode.ButtonA or input.KeyCode == Enum.KeyCode.Return then
+			ClearPlotSlot.handlePrimaryConfirm()
+			return
+		end
+		if input.KeyCode == Enum.KeyCode.ButtonB or input.KeyCode == Enum.KeyCode.Escape then
+			ClearPlotSlot.cancelConfirm()
+			return
+		end
+	end
+	-- Save plots arm: V (keyboard) / L3 (gamepad) while backpack open.
+	if input.KeyCode == Enum.KeyCode.V or input.KeyCode == Enum.KeyCode.ButtonL3 then
+		if InventoryState.isOpen() then
+			SavePlotSlot.toggle()
+			return
+		end
+	end
+	-- Clear plot arm: C (keyboard) / R3 (gamepad) while backpack open.
+	if input.KeyCode == Enum.KeyCode.C or input.KeyCode == Enum.KeyCode.ButtonR3 then
+		if InventoryState.isOpen() and not SavePlotSlot.isOpen() then
+			ClearPlotSlot.beginConfirm()
+			return
+		end
+	end
 	-- Undo: Z (keyboard) / L2 (gamepad) while backpack open.
 	if input.KeyCode == Enum.KeyCode.Z or input.KeyCode == Enum.KeyCode.ButtonL2 then
-		if InventoryState.isOpen() then
-			requestUndo()
+		if InventoryState.isOpen() and not SavePlotSlot.isOpen() then
+			UndoSlot.requestUndo()
 			return
 		end
 	end
@@ -2008,14 +1694,23 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
 		if PlacementController.isActive() or RelocateController.isActive() then
 			return
 		end
+		if SavePlotSlot.isOpen() then
+			SavePlotSlot.hide()
+			return
+		end
 		if InventoryState.isOpen() and (gamepadSelectActive or openWithGamepadPending) then
 			toggleFromUser(true)
 			return
 		end
 	end
 
-	-- D-pad browses list; A arms coral. Left stick is free for walking until placement freezes.
-	if gamepadSelectActive and not PlacementController.isActive() and not RelocateController.isActive() then
+	-- D-pad browses backpack list only when save-plots modal is closed.
+	if gamepadSelectActive
+		and not PlacementController.isActive()
+		and not RelocateController.isActive()
+		and not InventoryState.isBuildModalBlocking()
+		and not SavePlotSlot.isOpen()
+	then
 		if input.KeyCode == Enum.KeyCode.DPadLeft then
 			setGamepadFocus(gamepadFocusIndex - 1)
 			return
@@ -2045,12 +1740,15 @@ end)
 player.CharacterRemoving:Connect(function()
 	unequipBackpackShovel()
 	HandOrb.clear()
+	ClearPlotSlot.onCharacterRemoving()
 end)
 
 applySlotClosedChrome()
 refreshHelpSlotBadge()
-syncSlot3Visibility()
+UndoSlot.syncVisibility()
+ClearPlotSlot.syncVisibility()
+SavePlotSlot.syncVisibility()
 UserInputService.LastInputTypeChanged:Connect(function()
 	refreshGamepadCloseLabel()
 end)
-log("Backpack UI ready — shortcuts: Y/Q backpack; Z/L2 undo; help badges hidden on touch")
+log("Backpack UI ready — shortcuts: Y/Q backpack; Z/L2 undo; C/R3 clear plot; help badges hidden on touch")

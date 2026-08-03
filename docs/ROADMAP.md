@@ -10,8 +10,8 @@ Ordered. Do not invent parallel data paths when a later phase lands — extend t
 
 ## Phase 2 — Place + inventory
 - Backpack UI (Slot4) + ItemCatalog — **live**
-- Confirm-ghost place (✓/X) + server validate/occupy/visual — **live** (infinite Brain Coral, no debit)
-- Remove coral / backpack counts (replicated mirrors) — recycle + session undo (Slot3 / Z / L2) **live**; inventory debit on place still open
+- Confirm-ghost place (✓/X) + server validate/occupy/visual — **live** (place debits seeds)
+- Remove coral / backpack counts (replicated mirrors) — recycle + session undo (Slot3 / Z / L2) **live**; clear plot (Slot2 / C / R3, full seed refund, one undo step) **live**; save plots (Slot1 / V / L3, 4 presets, active-slot autosave) **live**; client inventory count mirrors still open
 - Max placed cap stub (skill tree later)
 
 ## Phase 3 — Feed waves

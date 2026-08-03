@@ -85,6 +85,71 @@ function InventoryState.getItemSlotScreenCenter(itemId: string): Vector2?
 	return nil
 end
 
+-- Center of the open backpack scroll list (Clear Plot orb fly target).
+local scrollCenterProvider: (() -> Vector2?)? = nil
+
+function InventoryState.setScrollCenterProvider(provider: () -> Vector2?)
+	scrollCenterProvider = provider
+end
+
+function InventoryState.getScrollCenter(): Vector2?
+	if scrollCenterProvider then
+		return scrollCenterProvider()
+	end
+	return nil
+end
+
+-- Slot2 clear-plot confirm / VFX gates place + relocate.
+local clearPlotConfirming = false
+local clearPlotBusy = false
+local savePlotsOpen = false
+local savePlotsBusy = false
+
+function InventoryState.setClearPlotConfirming(value: boolean)
+	clearPlotConfirming = value == true
+end
+
+function InventoryState.isClearPlotConfirming(): boolean
+	return clearPlotConfirming
+end
+
+function InventoryState.setClearPlotBusy(value: boolean)
+	clearPlotBusy = value == true
+end
+
+function InventoryState.isClearPlotBusy(): boolean
+	return clearPlotBusy
+end
+
+function InventoryState.isClearPlotBlocking(): boolean
+	return clearPlotConfirming or clearPlotBusy
+end
+
+function InventoryState.setSavePlotsOpen(value: boolean)
+	savePlotsOpen = value == true
+end
+
+function InventoryState.isSavePlotsOpen(): boolean
+	return savePlotsOpen
+end
+
+function InventoryState.setSavePlotsBusy(value: boolean)
+	savePlotsBusy = value == true
+end
+
+function InventoryState.isSavePlotsBusy(): boolean
+	return savePlotsBusy
+end
+
+function InventoryState.isSavePlotsBlocking(): boolean
+	return savePlotsOpen or savePlotsBusy
+end
+
+-- Clear-plot or save-plots modal — blocks place / relocate / gamepad arm.
+function InventoryState.isBuildModalBlocking(): boolean
+	return InventoryState.isClearPlotBlocking() or InventoryState.isSavePlotsBlocking()
+end
+
 -- True when the pointer is over the open backpack panel (scroll list / chrome).
 local backpackHitTest: ((Vector2) -> boolean)? = nil
 

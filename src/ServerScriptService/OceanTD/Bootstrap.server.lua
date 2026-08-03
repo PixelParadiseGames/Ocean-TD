@@ -15,6 +15,7 @@ local PersistenceService = require(Services:WaitForChild("PersistenceService"))
 local DecorReplicator = require(Services:WaitForChild("DecorReplicator"))
 local PlacementService = require(Services:WaitForChild("PlacementService"))
 local UndoService = require(Services:WaitForChild("UndoService"))
+local PlotSaveService = require(Services:WaitForChild("PlotSaveService"))
 
 local Constants = require(oceanRoot:WaitForChild("Shared"):WaitForChild("Constants"))
 
@@ -22,6 +23,7 @@ Remotes.initServer()
 PersistenceService.init()
 PlotService.init()
 PlacementService.init()
+PlotSaveService.init()
 
 do
 	local poses = {}
@@ -184,4 +186,38 @@ end
 local requestUndo = Remotes.getFunction("RequestUndo")
 requestUndo.OnServerInvoke = function(player: Player)
 	return PlacementService.undoLast(player)
+end
+
+local requestClearPlot = Remotes.getFunction("RequestClearPlot")
+requestClearPlot.OnServerInvoke = function(player: Player)
+	return PlacementService.clearPlot(player)
+end
+
+local requestGetPlotSaves = Remotes.getFunction("RequestGetPlotSaves")
+requestGetPlotSaves.OnServerInvoke = function(player: Player)
+	return PlotSaveService.getClientState(player)
+end
+
+local requestSavePlotSlot = Remotes.getFunction("RequestSavePlotSlot")
+requestSavePlotSlot.OnServerInvoke = function(player: Player, slotIndex: any)
+	if typeof(slotIndex) ~= "number" then
+		return { ok = false, errorCode = "BadRequest" }
+	end
+	return PlotSaveService.saveSlot(player, slotIndex)
+end
+
+local requestLoadPlotSlot = Remotes.getFunction("RequestLoadPlotSlot")
+requestLoadPlotSlot.OnServerInvoke = function(player: Player, slotIndex: any)
+	if typeof(slotIndex) ~= "number" then
+		return { ok = false, errorCode = "BadRequest" }
+	end
+	return PlotSaveService.loadSlot(player, slotIndex)
+end
+
+local requestRenamePlotSave = Remotes.getFunction("RequestRenamePlotSave")
+requestRenamePlotSave.OnServerInvoke = function(player: Player, slotIndex: any, name: any)
+	if typeof(slotIndex) ~= "number" or typeof(name) ~= "string" then
+		return { ok = false, errorCode = "BadRequest" }
+	end
+	return PlotSaveService.renameSlot(player, slotIndex, name)
 end
