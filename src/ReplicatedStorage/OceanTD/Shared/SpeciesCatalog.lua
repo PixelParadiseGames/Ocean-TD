@@ -10,6 +10,9 @@ export type SpeciesDef = {
 	colorMax: Color3,
 	castShadow: boolean,
 	canCollide: boolean,
+	-- Client wave combat (optional; defaults applied by WaveSim).
+	reloadSec: number?,
+	foodFill: number?,
 }
 
 local SpeciesCatalog = {}
@@ -25,6 +28,8 @@ local BY_ID: { [string]: SpeciesDef } = {
 		colorMax = Color3.fromRGB(255, 188, 33), -- #ffbc21
 		castShadow = false,
 		canCollide = false,
+		reloadSec = 2,
+		foodFill = 1,
 	},
 }
 

@@ -4,8 +4,10 @@
 	2x2 preset grid; SAVE / LOAD|NEW; overwrite confirm; L3 / V (no touch help).
 ]]
 
+local ContentProvider = game:GetService("ContentProvider")
 local GuiService = game:GetService("GuiService")
 local RunService = game:GetService("RunService")
+local SoundService = game:GetService("SoundService")
 local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
 local Workspace = game:GetService("Workspace")
@@ -32,9 +34,39 @@ local SAVE_RED = Color3.fromRGB(200, 45, 55)
 local CONFIRM_GREEN = Color3.fromRGB(40, 180, 80)
 local LOAD_ORANGE = Color3.fromRGB(230, 120, 40)
 local SAVE_ICON = "rbxassetid://135557862832703"
+local OVERWRITE_SOUND_ID = "rbxassetid://138913815716094"
+local LOAD_SOUND_ID = "rbxassetid://95811011280020"
+local CLOSE_SOUND_ID = "rbxassetid://123373842476302"
+local LOAD_DROP_SPAN_SEC = 3
+local LOAD_DROP_HEIGHT = 70 -- 14 * 5
+local LOAD_DROP_TWEEN = TweenInfo.new(0.4, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 local PANEL_W = 600
 local PANEL_H = 440
 local BTN_TEXT = Color3.new(1, 1, 1)
+
+local overwriteSound = Instance.new("Sound")
+overwriteSound.Name = "OceanTD_OverwriteSound"
+overwriteSound.SoundId = OVERWRITE_SOUND_ID
+overwriteSound.Volume = 0.95
+overwriteSound.Parent = SoundService
+
+local loadSound = Instance.new("Sound")
+loadSound.Name = "OceanTD_LoadPlotSound"
+loadSound.SoundId = LOAD_SOUND_ID
+loadSound.Volume = 0.95
+loadSound.Parent = SoundService
+
+local closeSound = Instance.new("Sound")
+closeSound.Name = "OceanTD_SavePlotsCloseSound"
+closeSound.SoundId = CLOSE_SOUND_ID
+closeSound.Volume = 0.95
+closeSound.Parent = SoundService
+
+task.defer(function()
+	pcall(function()
+		ContentProvider:PreloadAsync({ overwriteSound, loadSound, closeSound })
+	end)
+end)
 
 export type Deps = {
 	mainHUD: ScreenGui,
@@ -338,6 +370,34 @@ local function clearList(list: ScrollingFrame)
 	end
 end
 
+local function playOneShot(template: Sound)
+	local snd = template:Clone()
+	snd.Parent = SoundService
+	snd:Play()
+	local ttl = math.max(1.5, (snd.TimeLength > 0 and snd.TimeLength or 2) + 0.5)
+	task.delay(ttl, function()
+		if snd.Parent then
+			snd:Destroy()
+		end
+	end)
+end
+
+local function playOverwriteSound()
+	playOneShot(overwriteSound)
+end
+
+local function playLoadSound()
+	playOneShot(loadSound)
+end
+
+local function playCloseSound()
+	playOneShot(closeSound)
+end
+
+local function setPartHiddenLocal(part: BasePart, hidden: boolean)
+	part.LocalTransparencyModifier = if hidden then 1 else 0
+end
+
 local function gatherOwnedPlotParts(): { BasePart }
 	local parts: { BasePart } = {}
 	local seen: { [BasePart]: boolean } = {}
@@ -377,6 +437,48 @@ local function gatherOwnedPlotParts(): { BasePart }
 		end
 	end
 	return parts
+end
+
+local function playLoadDropIn(expectedCount: number?)
+	task.spawn(function()
+		local want = if typeof(expectedCount) == "number" then math.max(0, math.floor(expectedCount)) else nil
+		local parts: { BasePart } = {}
+		local deadline = os.clock() + 0.75
+		while os.clock() < deadline do
+			parts = gatherOwnedPlotParts()
+			if want == nil then
+				break
+			end
+			if want == 0 then
+				return
+			end
+			if #parts >= want then
+				break
+			end
+			RunService.Heartbeat:Wait()
+		end
+		if #parts == 0 then
+			return
+		end
+		local rng = Random.new()
+		for _, part in ipairs(parts) do
+			if not part.Parent then
+				continue
+			end
+			local finalCF = part.CFrame
+			local lift = LOAD_DROP_HEIGHT + part.Size.Y * 0.5
+			part.CFrame = finalCF + Vector3.new(0, lift, 0)
+			setPartHiddenLocal(part, true)
+			local delaySec = rng:NextNumber(0, LOAD_DROP_SPAN_SEC)
+			task.delay(delaySec, function()
+				if not part.Parent then
+					return
+				end
+				setPartHiddenLocal(part, false)
+				TweenService:Create(part, LOAD_DROP_TWEEN, { CFrame = finalCF }):Play()
+			end)
+		end
+	end)
 end
 
 local function resolveItemId(part: BasePart): string
@@ -701,6 +803,7 @@ local function requestSave(slotIndex: number)
 	if not card then
 		return
 	end
+	playOverwriteSound()
 	-- Overwrite confirm when target already has a saved preset.
 	local needsConfirm = card.loadBtn.Text == "LOAD"
 	if needsConfirm then
@@ -722,7 +825,11 @@ local function doLoad(slotIndex: number)
 	busy = false
 	InventoryState.setSavePlotsBusy(false)
 	if ok and typeof(result) == "table" and result.ok then
+		playLoadSound()
 		applyState(result)
+		local placed = tonumber(result.placed)
+		playLoadDropIn(placed)
+		SavePlotSlot.hide()
 		deps.log("Loaded plot slot", slotIndex)
 	else
 		local code = if ok and typeof(result) == "table" then result.errorCode else "Fail"
@@ -865,10 +972,12 @@ ensureOverwriteUi = function()
 
 	confirm.Activated:Connect(function()
 		local idx = overwriteTargetIndex
+		playOverwriteSound()
 		hideOverwrite()
 		doSave(idx)
 	end)
 	cancel.Activated:Connect(function()
+		playOverwriteSound()
 		hideOverwrite()
 	end)
 end
@@ -1013,6 +1122,7 @@ local function ensureSaveUi()
 				return
 			end
 			if overwriteOpen then
+				playOverwriteSound()
 				hideOverwrite()
 				return
 			end
@@ -1076,6 +1186,7 @@ local function ensureSaveUi()
 	closeCorner.CornerRadius = UDim.new(0, 8)
 	closeCorner.Parent = closeBtn
 	closeBtn.Activated:Connect(function()
+		playCloseSound()
 		SavePlotSlot.hide()
 	end)
 
@@ -1279,6 +1390,7 @@ function SavePlotSlot.handleConfirmInput(): boolean
 	if overwriteOpen then
 		if overwriteConfirm then
 			local idx = overwriteTargetIndex
+			playOverwriteSound()
 			hideOverwrite()
 			doSave(idx)
 		end
@@ -1292,9 +1404,11 @@ function SavePlotSlot.handleCancelInput(): boolean
 		return false
 	end
 	if overwriteOpen then
+		playOverwriteSound()
 		hideOverwrite()
 		return true
 	end
+	playCloseSound()
 	SavePlotSlot.hide()
 	return true
 end

@@ -15,10 +15,10 @@ Ordered. Do not invent parallel data paths when a later phase lands — extend t
 - Max placed cap stub (skill tree later)
 
 ## Phase 3 — Feed waves
-- Player-triggered waves on **own** plot only
-- Path through reef; satiety from nearby coral/sponge/critter nutrition
-- Full at route end → success / continue; hungry → fail pressure
-- Reward $D; no per-frame remotes for agents (batch / owner-only)
+- **Live (client prototype):** Slot5 start/stop, `WaveRoute.A` Tang waves, local coral food, reef health, summary UI
+- Player-triggered waves on **own** plot only (solo client sim; server authority later)
+- Path through reef; satiety from nearby coral nutrition; empty bars at exit damage reef
+- Reward $D later; no per-frame remotes for agents (batch / owner-only)
 
 ## Phase 4 — RNG rolls
 - Roll / autoroll for common → rare coral types

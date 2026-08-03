@@ -29,6 +29,7 @@ local HandOrb = require(script.Parent:WaitForChild("HandOrb"))
 local ClearPlotSlot = require(script.Parent:WaitForChild("ClearPlotSlot"))
 local UndoSlot = require(script.Parent:WaitForChild("UndoSlot"))
 local SavePlotSlot = require(script.Parent:WaitForChild("SavePlotSlot"))
+local WaveSlot = require(script.Parent:WaitForChild("WaveSlot"))
 
 local TWEEN_OPEN = TweenInfo.new(0.28, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
 local TWEEN_CLOSE = TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
@@ -1086,6 +1087,16 @@ local function mountSideSlots()
 		end,
 		log = log,
 	})
+	WaveSlot.mount({
+		mainHUD = mainHUD,
+		playerGui = playerGui :: PlayerGui,
+		ensureButton = ensureSlot4GuiButton,
+		passthroughDecor = passthroughDecor,
+		ensureCircle = ensureCircle,
+		ensureStroke = ensureStroke,
+		getShortcutMode = getShortcutMode,
+		log = log,
+	})
 end
 mountSideSlots()
 
@@ -1095,6 +1106,7 @@ local function refreshGamepadCloseLabel()
 	UndoSlot.refreshHelpBadge()
 	ClearPlotSlot.refreshHelpBadge()
 	SavePlotSlot.refreshHelpBadge()
+	WaveSlot.refreshHelpBadge()
 	ClearPlotSlot.layoutConfirmIfActive()
 	if not closeX.Visible then
 		closeX.Text = "X"
@@ -1577,6 +1589,7 @@ InventoryState.onOpenChanged(function(isOpen)
 			UndoSlot.refreshHelpBadge()
 			ClearPlotSlot.refreshHelpBadge()
 			SavePlotSlot.refreshHelpBadge()
+			WaveSlot.refreshHelpBadge()
 		end)
 	end
 end)
@@ -1688,6 +1701,17 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
 			UndoSlot.requestUndo()
 			return
 		end
+	end
+	-- Waves: R (keyboard) / ButtonX (gamepad Square). Always available when summary closed.
+	if input.KeyCode == Enum.KeyCode.R or input.KeyCode == Enum.KeyCode.ButtonX then
+		if gameProcessed then
+			return
+		end
+		if WaveSlot.isSummaryOpen() or SavePlotSlot.isOpen() or ClearPlotSlot.isConfirmActive() then
+			return
+		end
+		WaveSlot.toggle()
+		return
 	end
 	-- B closes backpack when in list select (placement/relocate own B while active).
 	if input.KeyCode == Enum.KeyCode.ButtonB then
