@@ -17,6 +17,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local oceanRoot = ReplicatedStorage:WaitForChild("OceanTD")
 local UiCircles = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiCircles"))
 local UiTheme = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiTheme"))
+local UiIdleCycle = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiIdleCycle"))
 
 local InventoryState = require(script.Parent:WaitForChild("InventoryState"))
 local WaveSim = require(script.Parent:WaitForChild("WaveSim"))
@@ -57,7 +58,7 @@ local slot6Button: GuiButton? = nil
 local slot6Circle: GuiObject? = nil
 local slot6Stroke: UIStroke? = nil
 local skipLabel: TextLabel? = nil
-local idleConn: RBXScriptConnection? = nil
+local idleStop: UiIdleCycle.StopFn? = nil
 local originalImage = ""
 local originalBg = Color3.fromRGB(20, 30, 45)
 local originalBgTrans = 0.15
@@ -165,9 +166,9 @@ local function playWhiteFlash()
 end
 
 local function stopIdleCycle()
-	if idleConn then
-		idleConn:Disconnect()
-		idleConn = nil
+	if idleStop then
+		idleStop()
+		idleStop = nil
 	end
 	if skipLabel then
 		skipLabel.Visible = false
@@ -212,15 +213,10 @@ local function startIdleCycle()
 		slot6Stroke.Thickness = 2
 	end
 	UiCircles.ensure(slot6Circle)
-	local t0 = os.clock()
-	applyIdleFrame(false)
-	idleConn = RunService.Heartbeat:Connect(function()
-		if not revealed or not slot6 or not slot6.Visible or confirmActive then
-			return
-		end
-		local phase = (os.clock() - t0) % (IDLE_HALF_SEC * 2)
-		applyIdleFrame(phase >= IDLE_HALF_SEC)
-	end)
+	-- Opposite phase of Slot4/1/3 so SKIP text doesn't land with BUILD/SAVE/UNDO.
+	idleStop = UiIdleCycle.subscribeSharedToggle(IDLE_HALF_SEC, applyIdleFrame, function()
+		return revealed and slot6 ~= nil and slot6.Visible and not confirmActive
+	end, true)
 end
 
 local function styleHelpBadge(): boolean
@@ -244,10 +240,28 @@ local function styleHelpBadge(): boolean
 	return true
 end
 
+local function setSlot6Interactable(on: boolean)
+	if slot6Button then
+		slot6Button.Selectable = false
+		slot6Button.Active = on
+	end
+	if slot6 then
+		slot6.Selectable = false
+		if slot6:IsA("GuiButton") then
+			(slot6 :: GuiButton).Active = on
+		end
+	end
+	if helpHit then
+		helpHit.Selectable = false
+		helpHit.Active = on and helpHit.Visible
+	end
+end
+
 function SkipWaveSlot.refreshHelpBadge()
 	if not helpSlot then
 		return
 	end
+	local backpackOpen = InventoryState.isOpen()
 	if revealed and styleHelpBadge() then
 		helpSlot.Visible = true
 		if helpHomePos then
@@ -255,7 +269,8 @@ function SkipWaveSlot.refreshHelpBadge()
 		end
 		if helpHit then
 			helpHit.Visible = true
-			helpHit.Active = true
+			helpHit.Selectable = false
+			helpHit.Active = not backpackOpen
 		end
 	else
 		helpSlot.Visible = false
@@ -647,6 +662,8 @@ function SkipWaveSlot.playReveal()
 		helpSlot.Position = helpHomePos
 		helpSlot.ZIndex = helpHomeZ
 	end
+	SkipWaveSlot.refreshHelpBadge()
+	setSlot6Interactable(not InventoryState.isOpen())
 end
 
 function SkipWaveSlot.playHide()
@@ -771,6 +788,7 @@ function SkipWaveSlot.mount(d: Deps)
 			skipLabel = lbl
 		end
 		slot6.Visible = false
+		slot6Button.Selectable = false
 		slot6Button.Activated:Connect(function()
 			SkipWaveSlot.beginConfirm()
 		end)
@@ -791,10 +809,12 @@ function SkipWaveSlot.mount(d: Deps)
 			helpHomePos = hs.Position
 			helpHomeZ = hs.ZIndex
 			helpSlot.Active = false
+			helpSlot.Selectable = false
 			helpSlot.Visible = false
 			for _, desc in ipairs(helpSlot:GetDescendants()) do
 				if desc:IsA("GuiObject") and desc.Name ~= "_OceanTD_HelpHit" then
 					desc.Active = false
+					desc.Selectable = false
 				end
 			end
 			local existingLetter = helpSlot:FindFirstChild("_OceanTD_HelpLetter")
@@ -833,11 +853,18 @@ function SkipWaveSlot.mount(d: Deps)
 				btn.Parent = helpSlot
 				helpHit = btn
 			end
+			helpHit.Selectable = false
 			helpHit.Activated:Connect(function()
 				SkipWaveSlot.beginConfirm()
 			end)
 		end
 	end
+
+	setSlot6Interactable(not InventoryState.isOpen())
+	InventoryState.onOpenChanged(function(isOpen)
+		setSlot6Interactable(not isOpen)
+		SkipWaveSlot.refreshHelpBadge()
+	end)
 
 	if hudUnsub then
 		hudUnsub()

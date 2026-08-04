@@ -4,7 +4,6 @@
 ]]
 
 local ContentProvider = game:GetService("ContentProvider")
-local RunService = game:GetService("RunService")
 local SoundService = game:GetService("SoundService")
 local TweenService = game:GetService("TweenService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -12,6 +11,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local oceanRoot = ReplicatedStorage:WaitForChild("OceanTD")
 local UiCircles = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiCircles"))
 local UiTheme = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiTheme"))
+local UiIdleCycle = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiIdleCycle"))
 local Remotes = require(oceanRoot:WaitForChild("Remotes"))
 
 local InventoryState = require(script.Parent:WaitForChild("InventoryState"))
@@ -49,7 +49,7 @@ local slot3Button: GuiButton? = nil
 local slot3Circle: GuiObject? = nil
 local slot3Stroke: UIStroke? = nil
 local slot3UndoLabel: TextLabel? = nil
-local slot3IdleConn: RBXScriptConnection? = nil
+local slot3IdleStop: UiIdleCycle.StopFn? = nil
 local slot3OriginalImage = ""
 local slot3OriginalBg = Color3.fromRGB(20, 30, 45)
 local slot3OriginalBgTrans = 0.15
@@ -75,9 +75,9 @@ task.defer(function()
 end)
 
 local function stopSlot3IdleCycle()
-	if slot3IdleConn then
-		slot3IdleConn:Disconnect()
-		slot3IdleConn = nil
+	if slot3IdleStop then
+		slot3IdleStop()
+		slot3IdleStop = nil
 	end
 	if slot3UndoLabel then
 		slot3UndoLabel.Visible = false
@@ -120,14 +120,8 @@ local function startSlot3IdleCycle()
 		slot3Stroke.Thickness = 2
 	end
 	UiCircles.ensure(slot3Circle)
-	local t0 = os.clock()
-	applySlot3IdleFrame(false)
-	slot3IdleConn = RunService.Heartbeat:Connect(function()
-		if not InventoryState.isOpen() or not slot3 or not slot3.Visible then
-			return
-		end
-		local showUndoText = (math.floor((os.clock() - t0) / deps.getIdlePeriod()) % 2) == 1
-		applySlot3IdleFrame(showUndoText)
+	slot3IdleStop = UiIdleCycle.subscribeSharedToggle(deps.getIdlePeriod(), applySlot3IdleFrame, function()
+		return InventoryState.isOpen() and slot3 ~= nil and slot3.Visible
 	end)
 end
 

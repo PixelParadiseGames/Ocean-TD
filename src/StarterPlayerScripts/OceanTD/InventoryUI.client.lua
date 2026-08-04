@@ -21,6 +21,7 @@ local oceanRoot = ReplicatedStorage:WaitForChild("OceanTD")
 local ItemCatalog = require(oceanRoot:WaitForChild("Shared"):WaitForChild("ItemCatalog"))
 local UiCircles = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiCircles"))
 local UiTheme = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiTheme"))
+local UiIdleCycle = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiIdleCycle"))
 local InventoryState = require(script.Parent:WaitForChild("InventoryState"))
 local PlacementController = require(script.Parent:WaitForChild("PlacementController"))
 local RelocateController = require(script.Parent:WaitForChild("RelocateController"))
@@ -371,9 +372,9 @@ closeXStroke.Thickness = 2
 closeXStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Contextual
 closeXStroke.Enabled = false
 
-local closeXPulseConn: RBXScriptConnection? = nil
-local closeLabelCycleConn: RBXScriptConnection? = nil
-local closedIdleConn: RBXScriptConnection? = nil
+local closeXPulseTween: Tween? = nil
+local closeLabelStop: UiIdleCycle.StopFn? = nil
+local closedIdleStop: UiIdleCycle.StopFn? = nil
 local SLOT_IDLE_PERIOD = 2 -- shovel / BUILD and undo / UNDO idle cycle
 
 local buildLabel = circle:FindFirstChild("_OceanTD_BuildLabel") :: TextLabel?
@@ -399,16 +400,16 @@ if not buildLabel then
 end
 
 local function stopCloseLabelCycle()
-	if closeLabelCycleConn then
-		closeLabelCycleConn:Disconnect()
-		closeLabelCycleConn = nil
+	if closeLabelStop then
+		closeLabelStop()
+		closeLabelStop = nil
 	end
 end
 
 local function stopClosedIdleCycle()
-	if closedIdleConn then
-		closedIdleConn:Disconnect()
-		closedIdleConn = nil
+	if closedIdleStop then
+		closedIdleStop()
+		closedIdleStop = nil
 	end
 	if buildLabel then
 		buildLabel.Visible = false
@@ -416,9 +417,9 @@ local function stopClosedIdleCycle()
 end
 
 local function stopCloseXPulse()
-	if closeXPulseConn then
-		closeXPulseConn:Disconnect()
-		closeXPulseConn = nil
+	if closeXPulseTween then
+		closeXPulseTween:Cancel()
+		closeXPulseTween = nil
 	end
 	closeXStroke.Enabled = false
 	closeXStroke.Transparency = 0
@@ -429,13 +430,15 @@ local function startCloseXPulse()
 	stopCloseXPulse()
 	closeXStroke.Enabled = true
 	closeXStroke.Color = DARK_RED
-	local t0 = os.clock()
-	closeXPulseConn = RunService.RenderStepped:Connect(function()
-		local wave = (math.sin((os.clock() - t0) * 6) + 1) * 0.5
-		-- Max thickness ~7 (was ~3.5) — twice as thick at peak.
-		closeXStroke.Thickness = 1.5 + wave * 5.5
-		closeXStroke.Transparency = 0.05 + wave * 0.35
-	end)
+	closeXStroke.Thickness = 1.5
+	closeXStroke.Transparency = 0.05
+	-- Engine tween loop (~0.55s half-cycle) — no per-frame Lua.
+	local info = TweenInfo.new(0.55, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true)
+	closeXPulseTween = TweenService:Create(closeXStroke, info, {
+		Thickness = 7,
+		Transparency = 0.4,
+	})
+	closeXPulseTween:Play()
 end
 
 local function applyClosedIdleFrame(showBuild: boolean)
@@ -460,15 +463,8 @@ end
 
 local function startClosedIdleCycle()
 	stopClosedIdleCycle()
-	local t0 = os.clock()
-	applyClosedIdleFrame(false) -- shovel first
-	closedIdleConn = RunService.Heartbeat:Connect(function()
-		if InventoryState.isOpen() then
-			return
-		end
-		-- 0s shovel, 2s BUILD, repeat
-		local showBuild = (math.floor((os.clock() - t0) / SLOT_IDLE_PERIOD) % 2) == 1
-		applyClosedIdleFrame(showBuild)
+	closedIdleStop = UiIdleCycle.subscribeSharedToggle(SLOT_IDLE_PERIOD, applyClosedIdleFrame, function()
+		return not InventoryState.isOpen()
 	end)
 end
 
@@ -1137,16 +1133,12 @@ local function refreshGamepadCloseLabel()
 		return
 	end
 	local letter = if mode == "gamepad" then "Y" else "Q"
-	-- Cycle: shortcut letter for 1s, then "CLOSE" for 2s.
-	local t0 = os.clock()
-	closeX.Text = letter
-	closeLabelCycleConn = RunService.Heartbeat:Connect(function()
-		if not closeX.Visible then
-			stopCloseLabelCycle()
-			return
-		end
-		local phase = (os.clock() - t0) % 3
-		closeX.Text = if phase < 1 then letter else "CLOSE"
+	-- Same shared 2s clock as Slot1/3/4: letter with graphics, CLOSE with text labels.
+	stopCloseLabelCycle()
+	closeLabelStop = UiIdleCycle.subscribeSharedToggle(SLOT_IDLE_PERIOD, function(showClose)
+		closeX.Text = if showClose then "CLOSE" else letter
+	end, function()
+		return closeX.Visible and InventoryState.isOpen()
 	end)
 end
 
@@ -1750,12 +1742,13 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
 			return
 		end
 	end
-	-- Waves: R (keyboard) / ButtonX (gamepad Square). Always available when summary closed.
+	-- Waves: R (keyboard) / ButtonX (gamepad Square). Closed backpack only (Slot5 inert while open).
 	if input.KeyCode == Enum.KeyCode.R or input.KeyCode == Enum.KeyCode.ButtonX then
 		if gameProcessed then
 			return
 		end
-		if WaveSlot.isSummaryOpen()
+		if InventoryState.isOpen()
+			or WaveSlot.isSummaryOpen()
 			or SavePlotSlot.isOpen()
 			or ClearPlotSlot.isConfirmActive()
 			or SkipWaveSlot.isConfirmActive()

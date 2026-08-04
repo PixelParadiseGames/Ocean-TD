@@ -15,6 +15,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local oceanRoot = ReplicatedStorage:WaitForChild("OceanTD")
 local UiCircles = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiCircles"))
 local UiTheme = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiTheme"))
+local UiIdleCycle = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiIdleCycle"))
 local ItemCatalog = require(oceanRoot:WaitForChild("Shared"):WaitForChild("ItemCatalog"))
 local Remotes = require(oceanRoot:WaitForChild("Remotes"))
 
@@ -59,7 +60,7 @@ local slot2Button: GuiButton? = nil
 local slot2Circle: GuiObject? = nil
 local slot2Stroke: UIStroke? = nil
 local slot2ClearLabel: TextLabel? = nil
-local slot2IdleConn: RBXScriptConnection? = nil
+local slot2IdleStop: UiIdleCycle.StopFn? = nil
 local slot2OriginalImage = ""
 local slot2OriginalBg = Color3.fromRGB(20, 30, 45)
 local slot2OriginalBgTrans = 0.15
@@ -96,9 +97,9 @@ task.defer(function()
 end)
 
 local function stopSlot2IdleCycle()
-	if slot2IdleConn then
-		slot2IdleConn:Disconnect()
-		slot2IdleConn = nil
+	if slot2IdleStop then
+		slot2IdleStop()
+		slot2IdleStop = nil
 	end
 	if slot2ClearLabel then
 		slot2ClearLabel.Visible = false
@@ -143,18 +144,14 @@ local function startSlot2IdleCycle()
 		slot2Stroke.Thickness = 2
 	end
 	UiCircles.ensure(slot2Circle)
-	local t0 = os.clock()
-	applySlot2IdleFrame(false)
-	slot2IdleConn = RunService.Heartbeat:Connect(function()
-		if not InventoryState.isOpen() or not slot2 or not slot2.Visible then
-			return
-		end
-		if clearConfirmActive or InventoryState.isClearPlotBusy() then
-			return
-		end
-		local showClearText = (math.floor((os.clock() - t0) / deps.getIdlePeriod()) % 2) == 1
-		applySlot2IdleFrame(showClearText)
-	end)
+	-- Opposite phase of Slot1/3/4 so CLEAR text doesn't land with SAVE/UNDO/BUILD.
+	slot2IdleStop = UiIdleCycle.subscribeSharedToggle(deps.getIdlePeriod(), applySlot2IdleFrame, function()
+		return InventoryState.isOpen()
+			and slot2 ~= nil
+			and slot2.Visible
+			and not clearConfirmActive
+			and not InventoryState.isClearPlotBusy()
+	end, true)
 end
 
 local function styleSlot2HelpBadge(): boolean

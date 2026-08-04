@@ -33,7 +33,7 @@ Update this file in the **same change** when you add or rename a system. If inde
 | PlacementController | Live | `src/StarterPlayerScripts/OceanTD/PlacementController.lua` | ClientPlot, CoralVisual, InventoryState | Confirm-ghost ✓/X; freeze avatar/camera |
 | ClearPlotVfx | Live | `src/StarterPlayerScripts/OceanTD/ClearPlotVfx.lua` | InventoryState scroll center | Local clear FX: light, green wave, hand +N, fly to backpack |
 | PlacementBootstrap | Live | `src/StarterPlayerScripts/OceanTD/PlacementBootstrap.client.lua` | PlacementController | Requires controller on client boot |
-| UiTheme | Live | `src/ReplicatedStorage/OceanTD/Shared/UiTheme.lua` | — | Default font FredokaOne for generated UI text |
+| UiIdleCycle | Live | `src/ReplicatedStorage/OceanTD/Shared/UiIdleCycle.lua` | — | Shared delay+dirty idle toggles / sequences (slots, close label) |
 | ForceLandscape | Live | `src/StarterPlayerScripts/OceanTD/ForceLandscape.client.lua` | — | Landscape only; no portrait mobile |
 | Remove coral | Live | PlacementService.recycle + RelocateController | GridService, UndoService | Recycle credits seed; Slot3/Z/L2 undoes |
 | Clear plot | Live | PlacementService.clearPlot + InventoryUI Slot2 | ClearPlotVfx, UndoService | Full seed refund; Slot2/C/R3 + ✓/X; one undo step |

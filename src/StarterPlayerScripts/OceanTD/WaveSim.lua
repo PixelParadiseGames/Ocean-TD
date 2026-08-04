@@ -18,6 +18,7 @@ local CoralVisual = require(oceanRoot:WaitForChild("Shared"):WaitForChild("Coral
 
 local ClientPlot = require(script.Parent:WaitForChild("ClientPlot"))
 local WaveEndVfx = require(script.Parent:WaitForChild("WaveEndVfx"))
+local WaveStartVfx = require(script.Parent:WaitForChild("WaveStartVfx"))
 
 local WaveSim = {}
 
@@ -41,17 +42,16 @@ local HASH_CELL = 30
 local DEFAULT_FOOD_FILL = 1
 local WAVE1_COUNT = 6
 local WAVE_COUNT_STEP = 4
-local WAVE_COUNT_MAX = 40
 local REEF_START_HEALTH = 10
 local TANG_HUNGER = 4
 local FOOD_RADIUS = 0.65
 local AMMO_RADIUS = 0.75
-local HUNGER_BAR_PX_W = 40
-local HUNGER_BAR_STRIP_H = 6
-local HUNGER_EMOJI_SIZE = HUNGER_BAR_STRIP_H * 3 -- 18px; outside & in front of the bar
-local HUNGER_BAR_GAP = 3
+local HUNGER_BAR_PX_W = 40 * 0.8
+local HUNGER_BAR_STRIP_H = 6 * 0.8
+local HUNGER_EMOJI_SIZE = HUNGER_BAR_STRIP_H * 3 -- outside & in front of the bar
+local HUNGER_BAR_GAP = 3 * 0.8
 local HUNGER_BAR_PX_H = HUNGER_EMOJI_SIZE
-local HUNGER_BAR_HEIGHT = 2.85 -- studs above fish
+local HUNGER_BAR_HEIGHT = 2.85 * 0.8 -- studs above fish
 local HUNGER_BAR_MAX_DIST = 220 -- LOD hide distance when not in danger
 local HUNGER_BAR_DANGER_MAX_DIST = 0 -- 0 = no distance cull while flashing red
 local HAPPY_EMOJIS = { "😊", "😄", "😁", "😆", "🥰", "😍", "💖", "🤩" }
@@ -66,7 +66,7 @@ local FEED_PITCH_STEP = 0.06
 local ARROW_SPEED_MULT = 4 -- GreenArrows travel this × fish speed
 local ARROW_LEAD_SEC = 1 -- fish spawn this long after arrows start
 local ARROW_SOUND_ID = "rbxassetid://1845466760"
-local ARROW_COUNT = 11
+local ARROW_COUNT = 15 -- was 11; +4 sets so the path train lasts longer
 local ARROW_WP_SPACING = 2 -- start each set this many waypoints apart
 local ARROW_SPIN_RAD_PER_SEC = 2.2 -- slow corkscrew roll
 -- Flat carpet was backwards; yaw 180 fixes facing. Roll 90 stands it up like a fence
@@ -77,7 +77,7 @@ local WAVE_LABEL_SCALE = Vector2.new(14 * 1.15, 5 * 1.15) -- studs; +15% vs orig
 local WAVE_LABEL_HEIGHT = 4
 local PATH_BEAD_SPEED_MULT = 2 -- green spheres × fish speed
 local PATH_BEAD_SPACING = 20
-local PATH_BEAD_ACTIVE_SEC = 15 -- was 10; +5s visible
+local PATH_BEAD_ACTIVE_SEC = 13 -- visible before fade; was 15 (−2s)
 local PATH_BEAD_FADE_SEC = 1.25
 local PATH_BEAD_DIAMETER = 1.1
 local PATH_BEAD_PULSE_MIN = 0.55 -- shrink/grow scale range
@@ -90,6 +90,8 @@ local TANG_YAW = math.rad(-90)
 local TANG_PITCH = 0
 local TANG_ROLL = 0
 local TURN_RATE = 14 -- higher = snappier yaw toward path tangent
+-- Soften G1 breaks between independent quadratic segments (lateral offset snaps without this).
+local TANGENT_BLEND_STUDS = 5
 
 local feedSound = Instance.new("Sound")
 feedSound.Name = "OceanTD_FeedHit"
@@ -129,6 +131,8 @@ type PathSegment = {
 	w1: Vector3,
 	length: number,
 	cumStart: number,
+	inTang: Vector3, -- unit tangent at t=0
+	outTang: Vector3, -- unit tangent at t=1
 }
 
 type PathData = {
@@ -364,6 +368,20 @@ local function quadBezierTangent(w0: Vector3, c: Vector3, w1: Vector3, t: number
 	return d.Unit
 end
 
+-- Stable unit blend; avoids collapse when adjacent tangents are nearly opposite.
+local function blendUnitTangents(a: Vector3, b: Vector3, u: number): Vector3
+	local t = math.clamp(u, 0, 1)
+	t = t * t * (3 - 2 * t) -- smoothstep
+	if a:Dot(b) < -0.92 then
+		return if t < 0.5 then a else b
+	end
+	local v = a:Lerp(b, t)
+	if v.Magnitude < 1e-5 then
+		return if t < 0.5 then a else b
+	end
+	return v.Unit
+end
+
 local function findIndexedPart(folder: Instance, prefix: string, index: number): BasePart?
 	local name = prefix .. tostring(index)
 	local inst = folder:FindFirstChild(name)
@@ -443,6 +461,8 @@ local function buildPath(): PathData?
 			w1 = w1,
 			length = length,
 			cumStart = total,
+			inTang = quadBezierTangent(w0, c, w1, 0),
+			outTang = quadBezierTangent(w0, c, w1, 1),
 		})
 		total += length
 	end
@@ -479,8 +499,18 @@ local function samplePath(path: PathData, dist: number): (Vector3, Vector3)
 		end
 	end
 	local seg = segs[lo]
-	local t = math.clamp((d - seg.cumStart) / seg.length, 0, 1)
-	return quadBezier(seg.w0, seg.c, seg.w1, t), quadBezierTangent(seg.w0, seg.c, seg.w1, t)
+	local t = if seg.length > 1e-5 then math.clamp((d - seg.cumStart) / seg.length, 0, 1) else 0
+	local pos = quadBezier(seg.w0, seg.c, seg.w1, t)
+	local tang = quadBezierTangent(seg.w0, seg.c, seg.w1, t)
+
+	-- Independent W/C quads are only G0 at waypoints — blend heading into the next
+	-- segment so lateral school offsets don't snap when the tangent jumps.
+	local toEnd = seg.cumStart + seg.length - d
+	if toEnd < TANGENT_BLEND_STUDS and lo < #segs then
+		local blend = 1 - math.clamp(toEnd / TANGENT_BLEND_STUDS, 0, 1)
+		tang = blendUnitTangents(tang, segs[lo + 1].inTang, blend)
+	end
+	return pos, tang
 end
 
 -- 1-based segment index along the route (W_i → W_{i+1}).
@@ -1511,7 +1541,7 @@ local function spawnOneFish(spawnIndex: number)
 end
 
 local function waveFishCount(wave: number): number
-	return math.min(WAVE_COUNT_MAX, WAVE1_COUNT + (wave - 1) * WAVE_COUNT_STEP)
+	return WAVE1_COUNT + (wave - 1) * WAVE_COUNT_STEP
 end
 
 local function beginWave(wave: number)
@@ -1524,6 +1554,10 @@ local function beginWave(wave: number)
 	spawnDelay = ARROW_LEAD_SEC
 	-- Session start: arm all corals. Later waves: keep reload state; only pick up new places.
 	syncCorals(wave == 1)
+	local path = pathData
+	if path and #path.segments > 0 then
+		WaveStartVfx.play(wave, path.segments[1].w0)
+	end
 	notifyHud()
 end
 
@@ -1708,6 +1742,7 @@ local function hardCleanup()
 	waveSpawning = false
 	destroyArrowPreview()
 	destroyPathBeads()
+	WaveStartVfx.cancel()
 end
 
 -- Wipe current wave entities without scoring hearts / fishFed, then start the next wave.

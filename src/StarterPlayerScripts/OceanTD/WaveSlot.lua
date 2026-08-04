@@ -4,6 +4,7 @@
 	Shortcuts: R (keyboard) / ButtonX (gamepad). Help badge green; hidden on touch.
 ]]
 
+local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local GuiService = game:GetService("GuiService")
@@ -14,6 +15,7 @@ local oceanRoot = ReplicatedStorage:WaitForChild("OceanTD")
 local UiCircles = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiCircles"))
 local UiTheme = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiTheme"))
 
+local InventoryState = require(script.Parent:WaitForChild("InventoryState"))
 local WaveSim = require(script.Parent:WaitForChild("WaveSim"))
 
 local WaveSlot = {}
@@ -24,6 +26,8 @@ local HELP_GREEN = Color3.fromRGB(40, 180, 80)
 local FINISH_GREEN = Color3.fromRGB(40, 180, 80)
 local CONFETTI_COUNT = 40
 local CONFETTI_LIFE = 2.4
+-- Shift camera subject up so the avatar sits ~20% lower on screen during waves.
+local WAVE_CAM_SCREEN_SHIFT = 0.2
 
 export type Deps = {
 	mainHUD: ScreenGui,
@@ -56,6 +60,8 @@ local finishBtn: TextButton? = nil
 local prevGuiSelected: GuiObject? = nil
 local confettiConn: RBXScriptConnection? = nil
 local confettiToken = 0
+local waveCamConn: RBXScriptConnection? = nil
+local waveCamCharConn: RBXScriptConnection? = nil
 
 local function isUsingGamepad(): boolean
 	local t = UserInputService:GetLastInputType()
@@ -63,6 +69,59 @@ local function isUsingGamepad(): boolean
 		or t == Enum.UserInputType.Gamepad2
 		or t == Enum.UserInputType.Gamepad3
 		or t == Enum.UserInputType.Gamepad4
+end
+
+local function clearWaveCameraOffset()
+	local char = Players.LocalPlayer.Character
+	local hum = char and char:FindFirstChildOfClass("Humanoid")
+	if hum then
+		hum.CameraOffset = Vector3.zero
+	end
+end
+
+local function applyWaveCameraOffset()
+	local char = Players.LocalPlayer.Character
+	local hum = char and char:FindFirstChildOfClass("Humanoid")
+	if not hum then
+		return
+	end
+	local cam = Workspace.CurrentCamera
+	if not cam then
+		hum.CameraOffset = Vector3.new(0, 3, 0)
+		return
+	end
+	local dist = (cam.CFrame.Position - cam.Focus.Position).Magnitude
+	if dist < 1 then
+		dist = 12.5
+	end
+	local halfH = dist * math.tan(math.rad(cam.FieldOfView) * 0.5)
+	-- 20% of full vertical view in studs at the focus distance.
+	hum.CameraOffset = Vector3.new(0, halfH * (WAVE_CAM_SCREEN_SHIFT * 2), 0)
+end
+
+local function setWaveCameraActive(on: boolean)
+	if on then
+		if waveCamConn then
+			return
+		end
+		waveCamConn = RunService.RenderStepped:Connect(applyWaveCameraOffset)
+		if not waveCamCharConn then
+			waveCamCharConn = Players.LocalPlayer.CharacterAdded:Connect(function()
+				task.defer(applyWaveCameraOffset)
+			end)
+		end
+		applyWaveCameraOffset()
+		return
+	end
+	if waveCamConn then
+		waveCamConn:Disconnect()
+		waveCamConn = nil
+	end
+	if waveCamCharConn then
+		waveCamCharConn:Disconnect()
+		waveCamCharConn = nil
+	end
+	clearWaveCameraOffset()
 end
 
 local function applyIcon(running: boolean)
@@ -95,15 +154,35 @@ local function styleHelpBadge(): boolean
 	return true
 end
 
+local function setSlot5Interactable(on: boolean)
+	if slot5Button then
+		slot5Button.Selectable = false
+		slot5Button.Active = on
+	end
+	if slot5 then
+		slot5.Selectable = false
+		if slot5:IsA("GuiButton") then
+			(slot5 :: GuiButton).Active = on
+		end
+	end
+	if helpHit then
+		helpHit.Selectable = false
+		helpHit.Active = on and helpHit.Visible
+	end
+end
+
 function WaveSlot.refreshHelpBadge()
 	if not helpSlot5 then
 		return
 	end
+	local backpackOpen = InventoryState.isOpen()
 	if styleHelpBadge() then
 		helpSlot5.Visible = true
 		if helpHit then
 			helpHit.Visible = true
-			helpHit.Active = true
+			helpHit.Selectable = false
+			-- Badge stays visible as a hint, but never clickable while backpack is open.
+			helpHit.Active = not backpackOpen
 		end
 	else
 		helpSlot5.Visible = false
@@ -195,8 +274,10 @@ local function updateHud(snap: WaveSim.HudSnapshot)
 	ensureHud()
 	if not snap.running then
 		setHudVisible(false)
+		setWaveCameraActive(false)
 		return
 	end
+	setWaveCameraActive(true)
 	setHudVisible(true)
 	if hudWave then
 		hudWave.Text = "🌊Wave" .. tostring(snap.wave)
@@ -448,6 +529,10 @@ local function toggleWaves()
 	if summaryOpen then
 		return
 	end
+	-- Don't start/stop from Slot5 while backpack chrome is up (accidental focus/clicks).
+	if InventoryState.isOpen() then
+		return
+	end
 	if WaveSim.isRunning() then
 		WaveSim.stop()
 		deps.log("Waves stopped")
@@ -482,6 +567,7 @@ function WaveSlot.mount(d: Deps)
 		UiCircles.forceOnDescendants(slot5)
 		applyIcon(false)
 		d.ensureStroke(slot5Circle, "_OceanTD_WaveRing", Color3.new(1, 1, 1), 2).Enabled = false
+		slot5Button.Selectable = false
 		slot5Button.Activated:Connect(function()
 			toggleWaves()
 		end)
@@ -496,9 +582,11 @@ function WaveSlot.mount(d: Deps)
 		if hs and hs:IsA("GuiObject") then
 			helpSlot5 = hs
 			helpSlot5.Active = false
+			helpSlot5.Selectable = false
 			for _, desc in ipairs(helpSlot5:GetDescendants()) do
 				if desc:IsA("GuiObject") then
 					desc.Active = false
+					desc.Selectable = false
 				end
 			end
 			local existingLetter = helpSlot5:FindFirstChild("_OceanTD_HelpLetter")
@@ -541,6 +629,7 @@ function WaveSlot.mount(d: Deps)
 				btn.Parent = helpSlot5
 				helpHit = btn
 			end
+			helpHit.Selectable = false
 			helpHit.Activated:Connect(function()
 				toggleWaves()
 			end)
@@ -549,9 +638,15 @@ function WaveSlot.mount(d: Deps)
 
 	WaveSlot.refreshHelpBadge()
 	ensureHud()
+	setSlot5Interactable(not InventoryState.isOpen())
+	InventoryState.onOpenChanged(function(isOpen)
+		setSlot5Interactable(not isOpen)
+		WaveSlot.refreshHelpBadge()
+	end)
 
 	WaveSim.onHud(updateHud)
 	WaveSim.onStopped(function(summary)
+		setWaveCameraActive(false)
 		applyIcon(false)
 		if not summaryOpen then
 			showSummary(summary)

@@ -17,11 +17,13 @@ local REEF_TICK_PITCH_START = 1.2
 local REEF_TICK_PITCH_STEP = 0.09
 local REEF_TICK_PITCH_MIN = 0.45
 local REEF_TICK_GAP = 0.07
-local HEART_LOSS_MAX_STUDS = 100 * 1.4
+local HEART_LOSS_MAX_STUDS = 100 * 1.4 -- happy exit base size
+local HEART_LOSS_END_SCALE = 3 -- broken heart grows to 3× this max
 local HEART_FALL_STUDS = 360
 local HEART_FALL_SEC = 2.55
 local HEART_LIGHT_RANGE = 50
 local HEART_LIGHT_BRIGHTNESS = 0.9
+local HEART_GUI_ORDER = 2600 -- above happy-exit billboards
 local HAPPY_EXIT_SEC = 1.4
 local HAPPY_EXIT_START_SCALE = 0.6 -- 40% smaller at spawn
 local HAPPY_EXIT_FAN_STUDS = 18 -- lateral spread at arrival
@@ -107,14 +109,25 @@ local function pulseReefHeartLoss(at: Vector3)
 	anchor.CFrame = CFrame.new(startPos)
 	anchor.Parent = folder
 
-	local bb = Instance.new("BillboardGui")
-	bb.Name = "BrokenHeart"
-	bb.Adornee = anchor
-	bb.AlwaysOnTop = true
-	bb.LightInfluence = 0
-	bb.MaxDistance = 2000
-	bb.Size = UDim2.fromScale(HEART_LOSS_MAX_STUDS, HEART_LOSS_MAX_STUDS)
-	bb.Parent = anchor
+	-- ScreenGui so broken hearts draw above happy-exit world billboards.
+	local playerGui = Players.LocalPlayer:FindFirstChildOfClass("PlayerGui")
+	local sg = Instance.new("ScreenGui")
+	sg.Name = "OceanTD_HeartLossGui"
+	sg.ResetOnSpawn = false
+	sg.IgnoreGuiInset = true
+	sg.DisplayOrder = HEART_GUI_ORDER
+	sg.Parent = playerGui or folder
+
+	local holder = Instance.new("Frame")
+	holder.Name = "Heart"
+	holder.AnchorPoint = Vector2.new(0.5, 0.5)
+	holder.BackgroundTransparency = 1
+	holder.Size = UDim2.fromOffset(8, 8)
+	holder.Parent = sg
+
+	local scale = Instance.new("UIScale")
+	scale.Scale = 1
+	scale.Parent = holder
 
 	local lbl = Instance.new("TextLabel")
 	lbl.BackgroundTransparency = 1
@@ -125,7 +138,7 @@ local function pulseReefHeartLoss(at: Vector3)
 	lbl.TextScaled = true
 	lbl.TextStrokeTransparency = 0.35
 	lbl.TextStrokeColor3 = Color3.fromRGB(80, 0, 10)
-	lbl.Parent = bb
+	lbl.Parent = holder
 
 	local worldHeart = WaveEndVfx.getEndHeartPart()
 	endHeartAnimToken += 1
@@ -134,7 +147,6 @@ local function pulseReefHeartLoss(at: Vector3)
 		worldHeart.Color = END_HEART_RED
 	end
 
-	-- Red shine from EndPoint / heart while the broken heart falls.
 	local lightHost = worldHeart or anchor
 	local light = Instance.new("PointLight")
 	light.Name = "OceanTD_HeartLossLight"
@@ -144,12 +156,34 @@ local function pulseReefHeartLoss(at: Vector3)
 	light.Shadows = false
 	light.Parent = lightHost
 
+	local function studsToPx(worldPos: Vector3, studs: number): number
+		local cam = Workspace.CurrentCamera
+		if not cam then
+			return studs * 2
+		end
+		local dist = math.max(1, (cam.CFrame.Position - worldPos).Magnitude)
+		local halfFov = math.rad(cam.FieldOfView) * 0.5
+		local vp = cam.ViewportSize
+		return studs / dist * (vp.Y * 0.5) / math.tan(halfFov)
+	end
+
 	local t0 = os.clock()
 	local conn: RBXScriptConnection
 	conn = RunService.RenderStepped:Connect(function()
 		local u = math.clamp((os.clock() - t0) / HEART_FALL_SEC, 0, 1)
 		local ease = u * u
-		anchor.CFrame = CFrame.new(startPos - Vector3.new(0, HEART_FALL_STUDS * ease, 0))
+		local worldPos = startPos - Vector3.new(0, HEART_FALL_STUDS * ease, 0)
+		anchor.CFrame = CFrame.new(worldPos)
+
+		local cam = Workspace.CurrentCamera
+		if cam then
+			local sp, onScreen = cam:WorldToViewportPoint(worldPos)
+			holder.Visible = onScreen and sp.Z > 0
+			holder.Position = UDim2.fromOffset(sp.X, sp.Y)
+			local px = studsToPx(worldPos, HEART_LOSS_MAX_STUDS)
+			holder.Size = UDim2.fromOffset(math.max(8, px), math.max(8, px))
+		end
+		scale.Scale = 1 + (HEART_LOSS_END_SCALE - 1) * ease
 		lbl.TextTransparency = u
 		lbl.TextStrokeTransparency = 0.35 + 0.65 * u
 		light.Brightness = HEART_LIGHT_BRIGHTNESS * (1 - u)
@@ -160,6 +194,9 @@ local function pulseReefHeartLoss(at: Vector3)
 			conn:Disconnect()
 			if light.Parent then
 				light:Destroy()
+			end
+			if sg.Parent then
+				sg:Destroy()
 			end
 			if anchor.Parent then
 				anchor:Destroy()

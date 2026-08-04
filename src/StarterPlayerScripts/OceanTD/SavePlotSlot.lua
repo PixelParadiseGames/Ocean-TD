@@ -16,6 +16,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local oceanRoot = ReplicatedStorage:WaitForChild("OceanTD")
 local UiCircles = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiCircles"))
 local UiTheme = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiTheme"))
+local UiIdleCycle = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiIdleCycle"))
 local ItemCatalog = require(oceanRoot:WaitForChild("Shared"):WaitForChild("ItemCatalog"))
 local Remotes = require(oceanRoot:WaitForChild("Remotes"))
 
@@ -98,7 +99,7 @@ local slot1Button: GuiButton? = nil
 local slot1Circle: GuiObject? = nil
 local slot1Stroke: UIStroke? = nil
 local slot1SaveLabel: TextLabel? = nil
-local slot1IdleConn: RBXScriptConnection? = nil
+local slot1IdleStop: UiIdleCycle.StopFn? = nil
 local slot1OriginalImage = ""
 local slot1OriginalBg = Color3.fromRGB(20, 30, 45)
 local slot1OriginalBgTrans = 0.15
@@ -131,9 +132,9 @@ local overwriteTargetIndex = 1
 local pendingCounts: { { itemId: string, count: number, displayName: string, icon: string } } = {}
 
 local function stopSlot1IdleCycle()
-	if slot1IdleConn then
-		slot1IdleConn:Disconnect()
-		slot1IdleConn = nil
+	if slot1IdleStop then
+		slot1IdleStop()
+		slot1IdleStop = nil
 	end
 	if slot1SaveLabel then
 		slot1SaveLabel.Visible = false
@@ -178,17 +179,13 @@ local function startSlot1IdleCycle()
 		slot1Stroke.Thickness = 2
 	end
 	UiCircles.ensure(slot1Circle)
-	local t0 = os.clock()
-	applySlot1IdleFrame(false)
-	slot1IdleConn = RunService.Heartbeat:Connect(function()
-		if not InventoryState.isOpen() or not slot1 or not slot1.Visible then
-			return
-		end
-		if uiOpen or busy or InventoryState.isSavePlotsBusy() then
-			return
-		end
-		local showSaveText = (math.floor((os.clock() - t0) / deps.getIdlePeriod()) % 2) == 1
-		applySlot1IdleFrame(showSaveText)
+	slot1IdleStop = UiIdleCycle.subscribeSharedToggle(deps.getIdlePeriod(), applySlot1IdleFrame, function()
+		return InventoryState.isOpen()
+			and slot1 ~= nil
+			and slot1.Visible
+			and not uiOpen
+			and not busy
+			and not InventoryState.isSavePlotsBusy()
 	end)
 end
 
