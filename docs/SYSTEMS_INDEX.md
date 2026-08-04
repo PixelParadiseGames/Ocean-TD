@@ -17,12 +17,13 @@ Update this file in the **same change** when you add or rename a system. If inde
 | PlayerSession | Live | `.../Services/PlayerSession.lua` | — | `layoutLoaded` gate for saves |
 | Remotes | Live | `src/ReplicatedStorage/OceanTD/Remotes.lua` | `RemoteEvents` folder (not named Remotes — avoids ModuleScript name clash) | `PlotAssigned`, `PlotCleared`, `SessionReady`, `RequestPlace` / `RequestMove` / `RequestRecycle` / `RequestUndo` / `RequestClearPlot` / `RequestGetPlotSaves` / `RequestSavePlotSlot` / `RequestLoadPlotSlot` / `RequestRenamePlotSave` (RF) |
 | GridMath | Live | `src/ReplicatedStorage/OceanTD/Shared/GridMath.lua` | `Constants` | Cell size 4; plot-local helpers |
-| InventoryUI | Live | `src/StarterPlayerScripts/OceanTD/InventoryUI.client.lua` | `InventoryState`, `PlacementController`, `SavePlotSlot`, `ClearPlotSlot`, `UndoSlot`, `WaveSlot`, ItemCatalog, UiCircles | Slot4 backpack; mounts Slot1–3 + Slot5 waves; drag-scroll; drag-out place |
+| InventoryUI | Live | `src/StarterPlayerScripts/OceanTD/InventoryUI.client.lua` | `InventoryState`, `PlacementController`, `SavePlotSlot`, `ClearPlotSlot`, `UndoSlot`, `WaveSlot`, `SkipWaveSlot`, ItemCatalog, UiCircles | Slot4 backpack; mounts Slot1–3 + Slot5–6 waves; drag-scroll; drag-out place |
 | SavePlotSlot | Live | `src/StarterPlayerScripts/OceanTD/SavePlotSlot.lua` | InventoryState, Remotes | Slot1 save UI / 2×2 presets / L3·V; blue `#0073ed` help |
 | ClearPlotSlot | Live | `src/StarterPlayerScripts/OceanTD/ClearPlotSlot.lua` | ClearPlotVfx, InventoryState | Slot2 clear-plot UI / confirm / shortcuts |
-| UndoSlot | Live | `src/StarterPlayerScripts/OceanTD/UndoSlot.lua` | Remotes RequestUndo | Slot3 undo UI / cycle / Z/L2 |
+| UndoSlot | Live | `src/StarterPlayerScripts/OceanTD/UndoSlot.lua` | Remotes RequestUndo | Slot3 undo UI / cycle / Z/L2 while backpack open |
 | WaveSlot | Live | `src/StarterPlayerScripts/OceanTD/WaveSlot.lua` | WaveSim | Slot5 start/stop waves; R/ButtonX; green help; summary + confetti |
-| WaveSim | Live | `src/StarterPlayerScripts/OceanTD/WaveSim.lua` | ClientPlot, SpeciesCatalog | Client-only feed waves; bezier route; coral food; reef health |
+| SkipWaveSlot | Live | `src/StarterPlayerScripts/OceanTD/SkipWaveSlot.lua` | WaveSim, InventoryState | Slot6 skip (slides under Slot5); Z/L2 when backpack closed; confirm popup |
+| WaveSign | Live | `src/StarterPlayerScripts/OceanTD/WaveSign.lua` | WaveSim, ClientPlot, Persistence highestWave | Plot “Current Wave Sign”: live Wave N / idle all-time high |
 | InventoryState | Live | `src/StarterPlayerScripts/OceanTD/InventoryState.lua` | ItemCatalog | Open + selected; clear-plot + save-plots modal gates |
 | ItemCatalog | Live | `src/ReplicatedStorage/OceanTD/Shared/ItemCatalog.lua` | SpeciesCatalog via `speciesId` | BrainCoral first; register new items here |
 | SpeciesCatalog | Live | `src/ReplicatedStorage/OceanTD/Shared/SpeciesCatalog.lua` | — | Visual/place rules (diameter, color range, material) |
@@ -37,7 +38,7 @@ Update this file in the **same change** when you add or rename a system. If inde
 | Remove coral | Live | PlacementService.recycle + RelocateController | GridService, UndoService | Recycle credits seed; Slot3/Z/L2 undoes |
 | Clear plot | Live | PlacementService.clearPlot + InventoryUI Slot2 | ClearPlotVfx, UndoService | Full seed refund; Slot2/C/R3 + ✓/X; one undo step |
 | Save plots | Live | PlotSaveService + SavePlotSlot | Persistence plotSaves | 4 presets; active slot autosave; SAVE overwrite confirm; LOAD/NEW; wipe undo on load |
-| Feed waves | Live | WaveSlot + WaveSim | WaveRoute.A, ReplicatedStorage.Fish.Tang, ReplicatedStorage.GreenArrows | Client-only solo; Slot5; Tang waves; green path preview; brain food; reef health |
+| Feed waves | Live | WaveSlot + SkipWaveSlot + WaveSim | WaveRoute.A, ReplicatedStorage.Fish.Tang, ReplicatedStorage.GreenArrows | Client-only solo; Slot5 start/stop; Slot6 skip; Tang waves; green path preview; brain food; reef health |
 | RNG coral rolls | Planned | — | — | Common → rare weights |
 | Shop / Robux | Planned | — | — | Server grant only |
 | Skill tree | Planned | — | — | Persist unlocks; server enforces caps |

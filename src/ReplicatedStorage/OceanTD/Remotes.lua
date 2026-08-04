@@ -13,6 +13,7 @@ local REMOTE_EVENTS = {
 	"PlotCleared",
 	"SessionReady",
 	"PlaceResult",
+	"ReportHighestWave",
 }
 
 local REMOTE_FUNCTIONS = {

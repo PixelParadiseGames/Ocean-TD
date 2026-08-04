@@ -17,6 +17,7 @@ local ClientPlot = {}
 
 local mirrored: MirroredPlot? = nil
 local ready = false
+local changed = Instance.new("BindableEvent")
 
 -- Local-only hollow red plastic outline (floor + 4 walls) — visible from inside the plot.
 local flashFolder: Folder? = nil
@@ -126,12 +127,14 @@ function ClientPlot.set(payload: MirroredPlot)
 	if flashActive then
 		ensureOutOfPlotFlash()
 	end
+	changed:Fire(mirrored)
 end
 
 function ClientPlot.clear()
 	mirrored = nil
 	ready = false
 	destroyOutOfPlotFlash()
+	changed:Fire(nil)
 end
 
 function ClientPlot.markReady()
@@ -144,6 +147,10 @@ end
 
 function ClientPlot.isReady(): boolean
 	return ready
+end
+
+function ClientPlot.onChanged(cb: (MirroredPlot?) -> ()): RBXScriptConnection
+	return changed.Event:Connect(cb)
 end
 
 function ClientPlot.isInside(worldPos: Vector3): boolean

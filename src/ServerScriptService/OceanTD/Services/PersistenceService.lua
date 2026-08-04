@@ -207,6 +207,8 @@ local function sanitizeProfile(raw: any): PlayerProfile
 	if active then
 		profile.layout = cloneLayout(active.layout)
 	end
+	local hw = tonumber(raw.highestWave)
+	profile.highestWave = if hw and hw > 0 then math.floor(hw) else 0
 	profile.version = math.max(profile.version, Constants.PROFILE_VERSION)
 	return profile
 end
@@ -235,6 +237,35 @@ end
 
 function PersistenceService.getProfile(player: Player): PlayerProfile?
 	return profiles[player]
+end
+
+function PersistenceService.getHighestWave(player: Player): number
+	local profile = profiles[player]
+	if not profile then
+		return 0
+	end
+	return profile.highestWave or 0
+end
+
+-- Returns true if the stored high score increased.
+function PersistenceService.reportHighestWave(player: Player, wave: number): boolean
+	local profile = profiles[player]
+	if not profile then
+		return false
+	end
+	local w = math.max(0, math.floor(tonumber(wave) or 0))
+	if w <= (profile.highestWave or 0) then
+		return false
+	end
+	profile.highestWave = w
+	player:SetAttribute(Constants.HIGHEST_WAVE_ATTR, w)
+	return true
+end
+
+function PersistenceService.syncHighestWaveAttribute(player: Player)
+	local profile = profiles[player]
+	local w = if profile then (profile.highestWave or 0) else 0
+	player:SetAttribute(Constants.HIGHEST_WAVE_ATTR, w)
 end
 
 function PersistenceService.getActiveSlotIndex(player: Player): number
@@ -471,6 +502,7 @@ function PersistenceService.save(player: Player, layoutOverride: { LayoutObject 
 			activeIndex = profile.plotSaves.activeIndex,
 			slots = slotsOut,
 		},
+		highestWave = profile.highestWave or 0,
 	}
 
 	local saved = false

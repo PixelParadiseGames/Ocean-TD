@@ -30,6 +30,8 @@ local ClearPlotSlot = require(script.Parent:WaitForChild("ClearPlotSlot"))
 local UndoSlot = require(script.Parent:WaitForChild("UndoSlot"))
 local SavePlotSlot = require(script.Parent:WaitForChild("SavePlotSlot"))
 local WaveSlot = require(script.Parent:WaitForChild("WaveSlot"))
+local SkipWaveSlot = require(script.Parent:WaitForChild("SkipWaveSlot"))
+local WaveSign = require(script.Parent:WaitForChild("WaveSign"))
 
 local TWEEN_OPEN = TweenInfo.new(0.28, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
 local TWEEN_CLOSE = TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
@@ -1097,8 +1099,24 @@ local function mountSideSlots()
 		getShortcutMode = getShortcutMode,
 		log = log,
 	})
+	SkipWaveSlot.mount({
+		mainHUD = mainHUD,
+		playerGui = playerGui :: PlayerGui,
+		ensureButton = ensureSlot4GuiButton,
+		passthroughDecor = passthroughDecor,
+		ensureCircle = ensureCircle,
+		ensureStroke = ensureStroke,
+		getShortcutMode = getShortcutMode,
+		isWaveSummaryOpen = WaveSlot.isSummaryOpen,
+		isSavePlotsOpen = SavePlotSlot.isOpen,
+		isClearConfirmActive = ClearPlotSlot.isConfirmActive,
+		red = RED,
+		green = GREEN,
+		log = log,
+	})
 end
 mountSideSlots()
+WaveSign.mount()
 
 local function refreshGamepadCloseLabel()
 	stopCloseLabelCycle()
@@ -1107,6 +1125,7 @@ local function refreshGamepadCloseLabel()
 	ClearPlotSlot.refreshHelpBadge()
 	SavePlotSlot.refreshHelpBadge()
 	WaveSlot.refreshHelpBadge()
+	SkipWaveSlot.refreshHelpBadge()
 	ClearPlotSlot.layoutConfirmIfActive()
 	if not closeX.Visible then
 		closeX.Text = "X"
@@ -1563,6 +1582,9 @@ end
 
 InventoryState.onOpenChanged(function(isOpen)
 	if isOpen then
+		if SkipWaveSlot.isConfirmActive() then
+			SkipWaveSlot.cancelConfirm()
+		end
 		task.spawn(function()
 			-- Reveal Slot1/2/3 as the backpack opens so they slide out from behind the panel.
 			task.spawn(SavePlotSlot.playReveal)
@@ -1590,6 +1612,7 @@ InventoryState.onOpenChanged(function(isOpen)
 			ClearPlotSlot.refreshHelpBadge()
 			SavePlotSlot.refreshHelpBadge()
 			WaveSlot.refreshHelpBadge()
+			SkipWaveSlot.refreshHelpBadge()
 		end)
 	end
 end)
@@ -1691,6 +1714,17 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
 			return
 		end
 	end
+	-- Skip wave confirm: A / Enter / B / Esc (backpack must stay closed).
+	if SkipWaveSlot.isConfirmActive() then
+		if input.KeyCode == Enum.KeyCode.ButtonA or input.KeyCode == Enum.KeyCode.Return then
+			SkipWaveSlot.handlePrimaryConfirm()
+			return
+		end
+		if input.KeyCode == Enum.KeyCode.ButtonB or input.KeyCode == Enum.KeyCode.Escape then
+			SkipWaveSlot.cancelConfirm()
+			return
+		end
+	end
 	-- Save plots arm: V (keyboard) / L3 (gamepad) while backpack open.
 	if input.KeyCode == Enum.KeyCode.V or input.KeyCode == Enum.KeyCode.ButtonL3 then
 		if InventoryState.isOpen() then
@@ -1705,10 +1739,14 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
 			return
 		end
 	end
-	-- Undo: Z (keyboard) / L2 (gamepad) while backpack open.
+	-- Undo while backpack open; Skip Wave while closed (Z / L2).
 	if input.KeyCode == Enum.KeyCode.Z or input.KeyCode == Enum.KeyCode.ButtonL2 then
 		if InventoryState.isOpen() and not SavePlotSlot.isOpen() then
 			UndoSlot.requestUndo()
+			return
+		end
+		if not InventoryState.isOpen() then
+			SkipWaveSlot.beginConfirm()
 			return
 		end
 	end
@@ -1717,7 +1755,11 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
 		if gameProcessed then
 			return
 		end
-		if WaveSlot.isSummaryOpen() or SavePlotSlot.isOpen() or ClearPlotSlot.isConfirmActive() then
+		if WaveSlot.isSummaryOpen()
+			or SavePlotSlot.isOpen()
+			or ClearPlotSlot.isConfirmActive()
+			or SkipWaveSlot.isConfirmActive()
+		then
 			return
 		end
 		WaveSlot.toggle()
@@ -1775,6 +1817,9 @@ player.CharacterRemoving:Connect(function()
 	unequipBackpackShovel()
 	HandOrb.clear()
 	ClearPlotSlot.onCharacterRemoving()
+	if SkipWaveSlot.isConfirmActive() then
+		SkipWaveSlot.cancelConfirm()
+	end
 end)
 
 applySlotClosedChrome()
@@ -1785,4 +1830,4 @@ SavePlotSlot.syncVisibility()
 UserInputService.LastInputTypeChanged:Connect(function()
 	refreshGamepadCloseLabel()
 end)
-log("Backpack UI ready — shortcuts: Y/Q backpack; Z/L2 undo; C/R3 clear plot; help badges hidden on touch")
+log("Backpack UI ready — shortcuts: Y/Q backpack; Z/L2 undo (open) / skip wave (closed); C/R3 clear; R/X waves")

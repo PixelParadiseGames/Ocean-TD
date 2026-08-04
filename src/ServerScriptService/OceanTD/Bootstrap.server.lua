@@ -84,6 +84,7 @@ local function onPlayerAdded(player: Player)
 	GridService.hydrate(payload.plotId, player.UserId, profile.layout, payload.cframe)
 	PlacementService.hydrateVisuals(payload.plotId, payload.cframe)
 	PlayerSession.markReady(player, payload.plotId)
+	PersistenceService.syncHighestWaveAttribute(player)
 
 	plotAssignedRemote:FireClient(player, payload)
 	sessionReadyRemote:FireClient(player)
@@ -221,3 +222,13 @@ requestRenamePlotSave.OnServerInvoke = function(player: Player, slotIndex: any, 
 	end
 	return PlotSaveService.renameSlot(player, slotIndex, name)
 end
+
+local reportHighestWave = Remotes.get("ReportHighestWave")
+reportHighestWave.OnServerEvent:Connect(function(player: Player, wave: any)
+	if typeof(wave) ~= "number" then
+		return
+	end
+	-- Cap absurd client values.
+	local w = math.clamp(math.floor(wave), 0, 100000)
+	PersistenceService.reportHighestWave(player, w)
+end)

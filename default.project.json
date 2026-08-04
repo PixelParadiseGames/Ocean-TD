@@ -12,6 +12,7 @@
           "PlotCleared": { "$className": "RemoteEvent" },
           "SessionReady": { "$className": "RemoteEvent" },
           "PlaceResult": { "$className": "RemoteEvent" },
+          "ReportHighestWave": { "$className": "RemoteEvent" },
           "RequestPlace": { "$className": "RemoteFunction" }
         }
       }

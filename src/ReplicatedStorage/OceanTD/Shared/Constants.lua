@@ -24,9 +24,12 @@ local Constants = {
 	PREVIEW_BOX_PREFIX = "PreviewBox_",
 
 	DATASTORE_NAME = "OceanTD_Player_v1",
-	PROFILE_VERSION = 2,
+	PROFILE_VERSION = 3,
 
 	AUTOSAVE_INTERVAL_SEC = 60,
+
+	HIGHEST_WAVE_ATTR = "OceanTD_HighestWave",
+	CURRENT_WAVE_SIGN_NAME = "Current Wave Sign",
 
 	-- Four named plot presets; autosave writes the active slot.
 	PLOT_SAVE_SLOT_COUNT = 4,

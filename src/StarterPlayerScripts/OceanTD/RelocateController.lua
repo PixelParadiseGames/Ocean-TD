@@ -80,6 +80,7 @@ local warnLabel: TextLabel? = nil
 -- Recycle confirm: flash recycle btn + show ✓; ✓ removes coral and credits a seed.
 local recyclePending = false
 local recycleFlying = false
+local uiSession = 0 -- bumps when UI is destroyed / new begin; recycle-fly callbacks check this
 local recycleSlideU = 0 -- 0 = above X, 1 = centered above ✓+X
 local recycleSlideT0 = 0
 local recycleSlideActive = false
@@ -402,6 +403,7 @@ local function worldToScreen(world: Vector3): Vector2?
 end
 
 local function destroyUi()
+	uiSession += 1
 	if moveBillboard then
 		moveBillboard:Destroy()
 		moveBillboard = nil
@@ -1036,7 +1038,8 @@ local function syncChrome()
 	end
 	local screen = worldToScreen(part.Position)
 	if not screen then
-		return
+		-- Behind camera / off-screen — still show chrome near pointer so the tool isn't blank.
+		screen = pointerScreenPos()
 	end
 	local cx = screen.X
 	local cy = screen.Y - 52
@@ -1244,7 +1247,9 @@ local function startLoop()
 end
 
 local function playIntro(fromScreen: Vector2)
-	if not moveIcon or not moveBillboard then
+	if not recycleBtn then
+		introAnimating = false
+		syncChrome()
 		return
 	end
 	introAnimating = true
@@ -1252,21 +1257,19 @@ local function playIntro(fromScreen: Vector2)
 	if cancelBtn then
 		cancelBtn.Visible = false
 	end
-	local moveScale = moveIcon:FindFirstChild("IntroScale")
+	local moveScale = if moveIcon then moveIcon:FindFirstChild("IntroScale") else nil
 	if moveScale and moveScale:IsA("UIScale") then
 		moveScale.Scale = 0.05
 	end
 	local recScale: UIScale? = nil
-	if recycleBtn then
-		recycleBtn.Visible = true
-		recycleBtn.AnchorPoint = Vector2.new(0.5, 0.5)
-		recycleBtn.Position = UDim2.fromOffset(fromScreen.X, fromScreen.Y)
-		recycleBtn.Size = UDim2.fromOffset(REC_BTN_SIZE, REC_BTN_SIZE)
-		recycleBtn.BackgroundColor3 = REC_GREEN
-		recScale = Instance.new("UIScale")
-		recScale.Scale = 0.05
-		recScale.Parent = recycleBtn
-	end
+	recycleBtn.Visible = true
+	recycleBtn.AnchorPoint = Vector2.new(0.5, 0.5)
+	recycleBtn.Position = UDim2.fromOffset(fromScreen.X, fromScreen.Y)
+	recycleBtn.Size = UDim2.fromOffset(REC_BTN_SIZE, REC_BTN_SIZE)
+	recycleBtn.BackgroundColor3 = REC_GREEN
+	recScale = Instance.new("UIScale")
+	recScale.Scale = 0.05
+	recScale.Parent = recycleBtn
 
 	local t0 = os.clock()
 	local conn: RBXScriptConnection
@@ -1286,7 +1289,10 @@ local function playIntro(fromScreen: Vector2)
 			recScale.Scale = 0.05 + 0.95 * a
 		end
 		local screen = if part then worldToScreen(part.Position) else fromScreen
-		if screen and recycleBtn then
+		if not screen then
+			screen = fromScreen
+		end
+		if recycleBtn then
 			local cx = screen.X
 			local cy = screen.Y - 52
 			-- End: recycle where X will sit (right of coral).
@@ -1435,6 +1441,7 @@ local function flyRecycleToBackpack(creditedItemId: string, onDone: () -> ())
 		onDone()
 		return
 	end
+	local session = uiSession
 	recycleFlying = true
 	if checkBtn then
 		checkBtn.Visible = false
@@ -1474,6 +1481,12 @@ local function flyRecycleToBackpack(creditedItemId: string, onDone: () -> ())
 	local t0 = os.clock()
 	local conn: RBXScriptConnection
 	conn = RunService.RenderStepped:Connect(function()
+		-- Aborted: a new relocate began (or UI was torn down).
+		if session ~= uiSession or not recycleFlying then
+			conn:Disconnect()
+			onDone()
+			return
+		end
 		-- Player is already unfrozen — do not re-lock camera during the fly.
 		local u = math.clamp((os.clock() - t0) / REC_FLY_SEC, 0, 1)
 		local a = 1 - (1 - u) * (1 - u)
@@ -1537,8 +1550,12 @@ local function commitRecycle()
 		gamepadCursor = nil
 		unfreeze()
 		flyRecycleToBackpack(creditedId, function()
-			destroyUi()
 			recycleFlying = false
+			-- A new relocate may have started mid-fly — don't wipe its chrome.
+			if active then
+				return
+			end
+			destroyUi()
 			recycleSlideU = 0
 			recycleSlideActive = false
 			originPos = nil
@@ -1619,6 +1636,15 @@ function RelocateController.commit()
 end
 
 function RelocateController.begin(target: BasePart)
+	-- Recover from stuck recycle-fly / intro so mid-wave picks always get chrome.
+	if recycleFlying or introAnimating then
+		recycleFlying = false
+		introAnimating = false
+		if not active then
+			busy = false
+			destroyUi()
+		end
+	end
 	if busy then
 		return
 	end
@@ -1669,6 +1695,7 @@ function RelocateController.begin(target: BasePart)
 	rejectReason = nil
 	recyclePending = false
 	recycleFlying = false
+	introAnimating = false
 	recycleSlideU = 0
 	recycleSlideActive = false
 	local existingId = target:GetAttribute("OceanTD_PlaceId")
@@ -1695,6 +1722,10 @@ function RelocateController.begin(target: BasePart)
 	syncWarnLabel()
 	playIntro(screen)
 	startLoop()
+	-- Ensure chrome appears even if intro early-outs (missing move icon).
+	if not introAnimating then
+		syncChrome()
+	end
 	log("Begin", itemId, if gamepadRelocate then "gamepad" else "pointer")
 end
 

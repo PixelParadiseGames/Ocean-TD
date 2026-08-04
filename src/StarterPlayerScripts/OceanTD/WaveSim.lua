@@ -4,7 +4,6 @@
 	Optimized: path samples once, spatial hash for coral↔fish, 10 Hz targeting, pooled FX.
 ]]
 
-local Players = game:GetService("Players")
 local ContentProvider = game:GetService("ContentProvider")
 local RunService = game:GetService("RunService")
 local SoundService = game:GetService("SoundService")
@@ -18,6 +17,7 @@ local UiTheme = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiTheme")
 local CoralVisual = require(oceanRoot:WaitForChild("Shared"):WaitForChild("CoralVisual"))
 
 local ClientPlot = require(script.Parent:WaitForChild("ClientPlot"))
+local WaveEndVfx = require(script.Parent:WaitForChild("WaveEndVfx"))
 
 local WaveSim = {}
 
@@ -59,17 +59,10 @@ local HAPPY_FLASH_ON = 2
 local HAPPY_FLASH_OFF = 3
 local FILL_GREEN = Color3.fromRGB(40, 255, 90)
 local DANGER_RED = Color3.fromRGB(255, 45, 55)
-local REEF_TICK_SOUND_ID = "rbxassetid://128707491647978"
-local REEF_TICK_PITCH_START = 1.2
-local REEF_TICK_PITCH_STEP = 0.09
-local REEF_TICK_PITCH_MIN = 0.45
-local REEF_TICK_GAP = 0.07
 local FEED_SOUND_ID = "rbxassetid://139487580236703"
 local FEED_PITCH_MIN = 0.82
 local FEED_PITCH_MAX = 1.28
 local FEED_PITCH_STEP = 0.06
-local HEART_LOSS_MAX_STUDS = 100
-local HEART_LOSS_PULSE_SEC = 0.55
 local ARROW_SPEED_MULT = 4 -- GreenArrows travel this × fish speed
 local ARROW_LEAD_SEC = 1 -- fish spawn this long after arrows start
 local ARROW_SOUND_ID = "rbxassetid://1845466760"
@@ -92,17 +85,11 @@ local PATH_BEAD_PULSE_MAX = 3.0 -- 3× base diameter at peak
 local PATH_BEAD_PULSE_DIST = 0.22 -- rad per stud along path
 local PATH_BEAD_PULSE_TIME = 3.2 -- rad per second
 local PATH_BEAD_GREEN = Color3.fromRGB(40, 255, 90)
--- Tang facing: lookAt + fixed yaw (same idea as GreenArrows). −90 was nose-back; +180° → 90°.
-local TANG_YAW = math.rad(90)
+-- Tang facing: lookAt + fixed yaw (same idea as GreenArrows). +90° had the wrong face leading.
+local TANG_YAW = math.rad(-90)
 local TANG_PITCH = 0
 local TANG_ROLL = 0
 local TURN_RATE = 14 -- higher = snappier yaw toward path tangent
-
-local reefTickSound = Instance.new("Sound")
-reefTickSound.Name = "OceanTD_ReefTick"
-reefTickSound.SoundId = REEF_TICK_SOUND_ID
-reefTickSound.Volume = 0.95
-reefTickSound.Parent = SoundService
 
 local feedSound = Instance.new("Sound")
 feedSound.Name = "OceanTD_FeedHit"
@@ -118,7 +105,7 @@ arrowSound.Parent = SoundService
 
 task.defer(function()
 	pcall(function()
-		ContentProvider:PreloadAsync({ reefTickSound, feedSound, arrowSound })
+		ContentProvider:PreloadAsync({ feedSound, arrowSound })
 	end)
 end)
 
@@ -254,7 +241,6 @@ local arrowsWarned = false
 local hudListeners: { (HudSnapshot) -> () } = {}
 local stopListeners: { (Summary) -> () } = {}
 local fishRng = Random.new()
-local reefTickStreak = 0
 local feedPitchCursor = FEED_PITCH_MIN
 
 local function fishWorldOffset(agent: FishAgent, pos: Vector3, tang: Vector3): Vector3
@@ -358,6 +344,8 @@ local function ensureFolder(): Folder
 	folder = f
 	return f
 end
+
+WaveEndVfx.bind(ensureFolder)
 
 local function quadBezier(w0: Vector3, c: Vector3, w1: Vector3, t: number): Vector3
 	local u = 1 - t
@@ -1110,87 +1098,6 @@ local function playFeedSound()
 	end)
 end
 
-local function pulseReefHeartLoss(at: Vector3)
-	local folder = ensureFolder()
-	local anchor = Instance.new("Part")
-	anchor.Name = "OceanTD_HeartLoss"
-	anchor.Anchored = true
-	anchor.CanCollide = false
-	anchor.CanQuery = false
-	anchor.CanTouch = false
-	anchor.CastShadow = false
-	anchor.Transparency = 1
-	anchor.Size = Vector3.new(1, 1, 1)
-	-- Billboard grows in studs around the final waypoint.
-	anchor.CFrame = CFrame.new(at + Vector3.new(0, 2, 0))
-	anchor.Parent = folder
-
-	local bb = Instance.new("BillboardGui")
-	bb.Name = "HeartPulse"
-	bb.Adornee = anchor
-	bb.AlwaysOnTop = true
-	bb.LightInfluence = 0
-	bb.MaxDistance = 2000
-	bb.Size = UDim2.fromScale(0.01, 0.01)
-	bb.Parent = anchor
-
-	local lbl = Instance.new("TextLabel")
-	lbl.BackgroundTransparency = 1
-	lbl.Size = UDim2.fromScale(1, 1)
-	lbl.Font = Enum.Font.SourceSansBold
-	lbl.Text = "❤️"
-	lbl.TextColor3 = Color3.fromRGB(255, 35, 55)
-	lbl.TextScaled = true
-	lbl.TextStrokeTransparency = 0.35
-	lbl.TextStrokeColor3 = Color3.fromRGB(80, 0, 10)
-	lbl.Parent = bb
-
-	local t0 = os.clock()
-	local conn: RBXScriptConnection
-	conn = RunService.RenderStepped:Connect(function()
-		local u = (os.clock() - t0) / HEART_LOSS_PULSE_SEC
-		if u >= 1 or not anchor.Parent then
-			conn:Disconnect()
-			if anchor.Parent then
-				anchor:Destroy()
-			end
-			return
-		end
-		-- Scale up to max then back down.
-		local s = math.sin(u * math.pi) * HEART_LOSS_MAX_STUDS
-		bb.Size = UDim2.fromScale(math.max(0.01, s), math.max(0.01, s))
-		lbl.TextTransparency = u * 0.35
-	end)
-end
-
-local function playReefHealthTicks(amount: number)
-	if amount <= 0 then
-		return
-	end
-	local endPos = if pathData then pathData.endPos else nil
-	for i = 1, amount do
-		local pitch = math.max(REEF_TICK_PITCH_MIN, REEF_TICK_PITCH_START - reefTickStreak * REEF_TICK_PITCH_STEP)
-		reefTickStreak += 1
-		local delaySec = (i - 1) * REEF_TICK_GAP
-		task.delay(delaySec, function()
-			local snd = reefTickSound:Clone()
-			snd.PlaybackSpeed = pitch
-			snd.Volume = 0.95
-			snd.Parent = SoundService
-			snd:Play()
-			local ttl = math.max(1.2, (snd.TimeLength > 0 and snd.TimeLength or 1) + 0.4)
-			task.delay(ttl, function()
-				if snd.Parent then
-					snd:Destroy()
-				end
-			end)
-			if endPos then
-				pulseReefHeartLoss(endPos)
-			end
-		end)
-	end
-end
-
 local function startHappyFlash(agent: FishAgent)
 	agent.pulseToken += 1
 	agent.dangerToken += 1
@@ -1483,9 +1390,24 @@ local function finishFish(agent: FishAgent)
 	if empty > 0 then
 		local dealt = math.min(empty, reefHealth)
 		reefHealth = math.max(0, reefHealth - empty)
-		playReefHealthTicks(dealt)
+		local endPos = if pathData then pathData.endPos else nil
+		WaveEndVfx.playReefHealthTicks(dealt, endPos)
 	else
 		fishFed += 1
+		local emoji = agent.happyLabel.Text
+		if emoji == "" then
+			emoji = HAPPY_EMOJIS[1]
+		end
+		local endPos = if pathData then pathData.endPos else nil
+		if not endPos then
+			local heart = WaveEndVfx.getEndHeartPart()
+			if heart then
+				endPos = heart.Position
+			end
+		end
+		if endPos then
+			WaveEndVfx.pulseHappyExit(emoji, endPos)
+		end
 	end
 	destroyFish(agent)
 	notifyHud()
@@ -1788,6 +1710,31 @@ local function hardCleanup()
 	destroyPathBeads()
 end
 
+-- Wipe current wave entities without scoring hearts / fishFed, then start the next wave.
+local function clearActiveWaveEntities()
+	for _, shot in ipairs(activeShots) do
+		if shot.part.Parent then
+			releaseFoodPart(shot.part)
+		end
+		shot.alive = false
+		local coral = shot.coral
+		clearShotTarget(shot)
+		coral.busy = false
+		if not coral.ammo and not coral.growing then
+			startAmmoGrow(coral)
+		end
+	end
+	table.clear(activeShots)
+	for _, f in ipairs(fishList) do
+		destroyFish(f)
+	end
+	table.clear(fishList)
+	spawnQueue = 0
+	waveSpawning = false
+	destroyArrowPreview()
+	destroyPathBeads()
+end
+
 local function disconnectMove()
 	if moveConn then
 		moveConn:Disconnect()
@@ -1797,6 +1744,26 @@ end
 
 function WaveSim.isRunning(): boolean
 	return running
+end
+
+function WaveSim.getHudSnapshot(): HudSnapshot
+	return {
+		wave = waveIndex,
+		reefHealth = reefHealth,
+		elapsedSec = if running then math.max(0, os.clock() - startedAt) else 0,
+		running = running,
+	}
+end
+
+function WaveSim.skipToNextWave(): boolean
+	if not running then
+		return false
+	end
+	clearActiveWaveEntities()
+	beginWave(waveIndex + 1)
+	notifyHud()
+	flushHud()
+	return true
 end
 
 function WaveSim.onHud(cb: (HudSnapshot) -> ()): () -> ()
@@ -1854,7 +1821,7 @@ function WaveSim.start(): boolean
 	waveIndex = 0
 	reefHealth = REEF_START_HEALTH
 	fishFed = 0
-	reefTickStreak = 0
+	WaveEndVfx.resetStreak()
 	feedPitchCursor = FEED_PITCH_MIN
 	startedAt = os.clock()
 	combatAcc = 0
@@ -1928,7 +1895,6 @@ function WaveSim.formatClock(sec: number): string
 end
 
 -- Silence unused.
-local _ = Players
 local _ = hashKey
 
 return WaveSim

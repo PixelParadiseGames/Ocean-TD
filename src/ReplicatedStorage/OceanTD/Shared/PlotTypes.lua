@@ -37,6 +37,7 @@ export type PlayerProfile = {
 	skillTree: { [string]: any },
 	layout: { LayoutObject }, -- mirror of active plot-save slot (compat + hydrate)
 	plotSaves: PlotSaves,
+	highestWave: number, -- all-time best wave reached (permanent)
 }
 
 local Constants = require(script.Parent.Constants)
@@ -76,6 +77,7 @@ function PlotTypes.defaultProfile(): PlayerProfile
 		skillTree = {},
 		layout = {},
 		plotSaves = PlotTypes.defaultPlotSaves(),
+		highestWave = 0,
 	}
 end
 
