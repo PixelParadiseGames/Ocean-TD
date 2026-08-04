@@ -12,6 +12,8 @@ local Constants = {
 	CENTER_FOLDER_NAME = "Center",
 	BOUNDS_NAME = "Bounds",
 	SPAWN_NAME = "Spawn",
+	-- Plot1 authored start; remapped into each assigned plot's local frame.
+	PLOT1_START_POINT_NAME = "Plot 1 Start Point",
 
 	-- Plugin contract: place MasterTerrainBox → Spawn/Update Previews
 	MASTER_TERRAIN_NAME = "MasterTerrainBox",

@@ -125,14 +125,22 @@ local function resolveSpawnCFrame(plotCf: CFrame, size: Vector3): CFrame
 		return fallback
 	end
 
-	local masterDecor = Workspace:FindFirstChild(Constants.MASTER_DECOR_NAME)
-	local spawnPart = findBasePart(masterDecor, Constants.SPAWN_NAME)
+	-- Prefer Workspace "Plot 1 Start Point"; remap into this plot's frame (not the raw Plot1 spot).
+	local spawnPart: BasePart? = nil
+	local wsStart = Workspace:FindFirstChild(Constants.PLOT1_START_POINT_NAME)
+	if wsStart and wsStart:IsA("BasePart") then
+		spawnPart = wsStart
+	end
 	if not spawnPart then
-		spawnPart = findBasePart(masterDecor, "Plot1 Spawn Point")
+		local masterDecor = Workspace:FindFirstChild(Constants.MASTER_DECOR_NAME)
+		spawnPart = findBasePart(masterDecor, Constants.SPAWN_NAME)
+			or findBasePart(masterDecor, "Plot1 Spawn Point")
+			or findBasePart(masterDecor, Constants.PLOT1_START_POINT_NAME)
 	end
 	if not spawnPart then
 		local master = PlotService.getMasterTerrain()
 		spawnPart = findBasePart(master, Constants.SPAWN_NAME)
+			or findBasePart(master, Constants.PLOT1_START_POINT_NAME)
 	end
 	if not spawnPart then
 		return fallback
@@ -375,9 +383,28 @@ function PlotService.teleportToPlot(player: Player)
 		return
 	end
 	local hrp = character:FindFirstChild("HumanoidRootPart")
-	if hrp and hrp:IsA("BasePart") then
-		hrp.CFrame = payload.spawnCFrame :: CFrame
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	if not (hrp and hrp:IsA("BasePart")) then
+		return
 	end
+	local spawnCf = payload.spawnCFrame :: CFrame
+	-- Start point parts are often laid flat; keep position + yaw only so the avatar stands upright.
+	local flatLook = Vector3.new(spawnCf.LookVector.X, 0, spawnCf.LookVector.Z)
+	if flatLook.Magnitude < 1e-3 then
+		local flatRight = Vector3.new(spawnCf.RightVector.X, 0, spawnCf.RightVector.Z)
+		if flatRight.Magnitude > 1e-3 then
+			flatLook = Vector3.new(-flatRight.Z, 0, flatRight.X)
+		else
+			flatLook = Vector3.new(0, 0, -1)
+		end
+	else
+		flatLook = flatLook.Unit
+	end
+	local hip = if humanoid then math.max(2.5, humanoid.HipHeight + 1.5) else 3
+	local pos = spawnCf.Position + Vector3.new(0, hip, 0)
+	hrp.CFrame = CFrame.lookAt(pos, pos + flatLook, Vector3.yAxis)
+	hrp.AssemblyLinearVelocity = Vector3.zero
+	hrp.AssemblyAngularVelocity = Vector3.zero
 end
 
 function PlotService.free(player: Player)

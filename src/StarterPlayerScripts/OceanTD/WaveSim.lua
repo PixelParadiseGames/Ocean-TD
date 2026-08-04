@@ -73,30 +73,30 @@ local HEART_LOSS_PULSE_SEC = 0.55
 local ARROW_SPEED_MULT = 4 -- GreenArrows travel this × fish speed
 local ARROW_LEAD_SEC = 1 -- fish spawn this long after arrows start
 local ARROW_SOUND_ID = "rbxassetid://1845466760"
-local ARROW_COUNT = 7
+local ARROW_COUNT = 11
 local ARROW_WP_SPACING = 2 -- start each set this many waypoints apart
 local ARROW_SPIN_RAD_PER_SEC = 2.2 -- slow corkscrew roll
 -- Flat carpet was backwards; yaw 180 fixes facing. Roll 90 stands it up like a fence
 -- (pitch ±90 was tipping the tips straight down).
 local ARROW_YAW = math.rad(180)
 local ARROW_ROLL = math.rad(90)
-local WAVE_LABEL_SCALE = Vector2.new(14, 5) -- studs (BillboardGui)
+local WAVE_LABEL_SCALE = Vector2.new(14 * 1.15, 5 * 1.15) -- studs; +15% vs original
 local WAVE_LABEL_HEIGHT = 4
 local PATH_BEAD_SPEED_MULT = 2 -- green spheres × fish speed
 local PATH_BEAD_SPACING = 20
-local PATH_BEAD_ACTIVE_SEC = 10
+local PATH_BEAD_ACTIVE_SEC = 15 -- was 10; +5s visible
 local PATH_BEAD_FADE_SEC = 1.25
 local PATH_BEAD_DIAMETER = 1.1
+local PATH_BEAD_PULSE_MIN = 0.55 -- shrink/grow scale range
+local PATH_BEAD_PULSE_MAX = 3.0 -- 3× base diameter at peak
+local PATH_BEAD_PULSE_DIST = 0.22 -- rad per stud along path
+local PATH_BEAD_PULSE_TIME = 3.2 -- rad per second
 local PATH_BEAD_GREEN = Color3.fromRGB(40, 255, 90)
-
-local LEAD_NAMES = {
-	"Mouth", "mouth", "Lead", "Front", "Nose", "Forward", "Face", "Heading", "Leading",
-	"Head", "Snout", "Jaw", "Beak", "Tip", "Bill",
-}
-local BODY_NAMES = { "Body", "body", "Torso", "torso", "Root", "Main", "Hull", "HumanoidRootPart" }
-local TAIL_NAMES = { "Tail", "tail", "Caudal", "Rear", "Back" }
+-- Tang facing: lookAt + fixed yaw (same idea as GreenArrows). −90 was nose-back; +180° → 90°.
+local TANG_YAW = math.rad(90)
+local TANG_PITCH = 0
+local TANG_ROLL = 0
 local TURN_RATE = 14 -- higher = snappier yaw toward path tangent
-local facingWarned = false
 
 local reefTickSound = Instance.new("Sound")
 reefTickSound.Name = "OceanTD_ReefTick"
@@ -181,7 +181,6 @@ type FishAgent = {
 	dangerActive: boolean,
 	smoothTang: Vector3,
 	lastWorld: Vector3,
-	mouthLocal: Vector3, -- model-space mouth direction (unit)
 	incomingFood: number, -- >0 means a homing orb is already locked onto this fish
 }
 
@@ -703,7 +702,7 @@ local function createWavePathLabel(text: string, pos: Vector3, parent: Instance)
 	local lbl = Instance.new("TextLabel")
 	lbl.BackgroundTransparency = 1
 	lbl.Size = UDim2.fromScale(1, 1)
-	lbl.Font = UiTheme.Font
+	lbl.Font = UiTheme.Font -- FredokaOne (project default)
 	lbl.Text = text
 	lbl.TextColor3 = Color3.fromRGB(40, 255, 120)
 	lbl.TextScaled = true
@@ -725,7 +724,7 @@ local function startWaveArrowPreview()
 	local folderFx = ensureFolder()
 	local waveText = "Wave " .. tostring(math.max(1, waveIndex))
 
-	-- 7 arrow sets at W1, W3, W5... ; "Wave N" labels on the waypoints between them.
+	-- 11 arrow sets at W1, W3, W5... ; "Wave N" labels between them + after last.
 	if tmpl then
 		for i = 1, ARROW_COUNT do
 			local wpIndex = 1 + (i - 1) * ARROW_WP_SPACING
@@ -760,6 +759,25 @@ local function startWaveArrowPreview()
 			dist = startDist,
 			alive = true,
 		})
+	end
+
+	-- Extra "Wave N" after the last green-arrow set.
+	do
+		local lastArrowWp = 1 + (ARROW_COUNT - 1) * ARROW_WP_SPACING
+		local afterWp = lastArrowWp + 1
+		local startDist = waypointStartDist(path, afterWp)
+		if startDist >= path.totalLen - 0.05 then
+			startDist = math.max(0, path.totalLen - 0.5)
+		end
+		if startDist < path.totalLen - 0.05 then
+			local pos = samplePath(path, startDist)
+			local part = createWavePathLabel(waveText, pos, folderFx)
+			table.insert(wavePathLabels, {
+				part = part,
+				dist = startDist,
+				alive = true,
+			})
+		end
 	end
 end
 
@@ -877,21 +895,26 @@ local function tickPathBeads(dt: number)
 			destroyPathBeads()
 			return
 		end
-		local transparency = math.clamp(fadeU, 0, 1)
-		for _, bead in ipairs(pathBeads) do
-			bead.part.Transparency = transparency
-		end
 	end
 
 	local speed = FISH_SPEED * PATH_BEAD_SPEED_MULT
 	local len = path.totalLen
+	local now = os.clock()
+	local fadeMul = if pathBeadsFading
+		then 1 - math.clamp((age - PATH_BEAD_ACTIVE_SEC) / PATH_BEAD_FADE_SEC, 0, 1)
+		else 1
 	for _, bead in ipairs(pathBeads) do
 		if not bead.part.Parent then
 			continue
 		end
 		bead.dist = (bead.dist + speed * dt) % len
 		local pos = samplePath(path, bead.dist)
+		local wave = 0.5 + 0.5 * math.sin(bead.dist * PATH_BEAD_PULSE_DIST + now * PATH_BEAD_PULSE_TIME)
+		local scale = PATH_BEAD_PULSE_MIN + (PATH_BEAD_PULSE_MAX - PATH_BEAD_PULSE_MIN) * wave
+		local diam = PATH_BEAD_DIAMETER * scale
+		bead.part.Size = Vector3.new(diam, diam, diam)
 		bead.part.CFrame = CFrame.new(pos)
+		bead.part.Transparency = 1 - fadeMul
 	end
 end
 
@@ -921,12 +944,9 @@ local function setFishCFrame(agent: FishAgent, pos: Vector3, pathTang: Vector3, 
 	end
 	agent.smoothTang = move
 
-	local mouth = agent.mouthLocal
-	if mouth.Magnitude < 1e-5 then
-		mouth = Vector3.new(0, 0, -1)
-	end
-	-- lookAt maps -Z → swimDir; offset maps mouthLocal → -Z so mouth leads.
-	local desired = CFrame.lookAt(pos, pos + move, Vector3.yAxis) * CFrame.lookAt(Vector3.zero, mouth):Inverse()
+	-- Same as GreenArrows: look along swim dir, then fixed authored yaw/pitch/roll.
+	local desired = CFrame.lookAt(pos, pos + move, Vector3.yAxis)
+		* CFrame.Angles(TANG_PITCH, TANG_YAW, TANG_ROLL)
 
 	local model = agent.model
 	if model:IsA("Model") then
@@ -943,134 +963,6 @@ local function setFishCFrame(agent: FishAgent, pos: Vector3, pathTang: Vector3, 
 			end
 		end
 	end
-end
-
-local function findNamedPart(inst: Instance, names: { string }): BasePart?
-	for _, name in ipairs(names) do
-		local p = inst:FindFirstChild(name, true)
-		if p and p:IsA("BasePart") then
-			return p
-		end
-	end
-	-- Case-insensitive fallback (Studio renames / capitalization).
-	local lowerSet: { [string]: boolean } = {}
-	for _, name in ipairs(names) do
-		lowerSet[string.lower(name)] = true
-	end
-	for _, d in ipairs(inst:GetDescendants()) do
-		if d:IsA("BasePart") and lowerSet[string.lower(d.Name)] then
-			return d
-		end
-	end
-	return nil
-end
-
-local function findNamedAttachment(inst: Instance, names: { string }): Attachment?
-	local lowerSet: { [string]: boolean } = {}
-	for _, name in ipairs(names) do
-		lowerSet[string.lower(name)] = true
-	end
-	for _, d in ipairs(inst:GetDescendants()) do
-		if d:IsA("Attachment") and lowerSet[string.lower(d.Name)] then
-			return d
-		end
-	end
-	return nil
-end
-
--- Returns model-space unit vector from body → mouth (direction the mouth points).
-local function computeMouthLocal(model: Instance, root: BasePart): Vector3
-	local pivot = if model:IsA("Model") then model:GetPivot() else root.CFrame
-	local mouth = findNamedPart(model, LEAD_NAMES)
-	local body = findNamedPart(model, BODY_NAMES)
-	local tail = findNamedPart(model, TAIL_NAMES)
-
-	local worldDir: Vector3? = nil
-	local usedMarkers = false
-
-	-- Explicit lead marker attribute wins.
-	for _, d in ipairs(model:GetDescendants()) do
-		if d:IsA("BasePart") and d:GetAttribute("OceanTD_Lead") == true then
-			worldDir = d.Position - pivot.Position
-			usedMarkers = true
-			break
-		end
-	end
-
-	if not worldDir then
-		if mouth and body then
-			worldDir = mouth.Position - body.Position
-			usedMarkers = true
-		elseif mouth and tail then
-			worldDir = mouth.Position - tail.Position
-			usedMarkers = true
-		elseif mouth then
-			worldDir = mouth.Position - pivot.Position
-			usedMarkers = true
-		elseif body and tail then
-			-- No head: swim away from the tail through the body.
-			worldDir = body.Position - tail.Position
-			usedMarkers = true
-		else
-			local leadAtt = findNamedAttachment(model, LEAD_NAMES)
-			if leadAtt then
-				worldDir = leadAtt.WorldPosition - pivot.Position
-				usedMarkers = true
-			end
-		end
-	end
-
-	-- No named markers: use PrimaryPart / root LookVector (mesh authored facing).
-	if not worldDir or worldDir.Magnitude < 1e-3 then
-		worldDir = root.CFrame.LookVector
-	end
-
-	-- Last resort: furthest BasePart from pivot along LookVector ≈ mouth tip.
-	if (not usedMarkers) and worldDir and worldDir.Magnitude > 1e-3 then
-		local axis = worldDir.Unit
-		local bestPart: BasePart? = nil
-		local bestDot = -math.huge
-		for _, d in ipairs(model:GetDescendants()) do
-			if d:IsA("BasePart") then
-				local rel = d.Position - pivot.Position
-				local dot = rel:Dot(axis)
-				if dot > bestDot then
-					bestDot = dot
-					bestPart = d
-				end
-			end
-		end
-		if bestPart and bestDot > 0.05 then
-			worldDir = bestPart.Position - pivot.Position
-		end
-	end
-
-	if not usedMarkers and not facingWarned then
-		facingWarned = true
-		local names: { string } = {}
-		for _, d in ipairs(model:GetDescendants()) do
-			if d:IsA("BasePart") or d:IsA("Attachment") then
-				table.insert(names, d.ClassName .. ":" .. d.Name)
-			end
-		end
-		if #names == 0 and model:IsA("BasePart") then
-			table.insert(names, model.ClassName .. ":" .. model.Name)
-		end
-		warn(
-			"[WAVE] Tang has no Mouth/Body (or Head/Tail) markers — using LookVector. "
-				.. "Rename lead→Mouth / rear→Body (or set OceanTD_Lead=true). Parts: "
-				.. table.concat(names, ", ")
-		)
-	end
-
-	if not worldDir or worldDir.Magnitude < 1e-3 then
-		return Vector3.new(0, 0, -1)
-	end
-	local localDir = pivot:VectorToObjectSpace(worldDir)
-	if localDir.Magnitude < 1e-3 then
-		return Vector3.new(0, 0, -1)
-	end
-	return localDir.Unit
 end
 
 local function makeHungerBillboard(adornee: BasePart): (BillboardGui, Frame, Frame, TextLabel, TextLabel, UIScale)
@@ -1643,7 +1535,6 @@ local function spawnOneFish(spawnIndex: number)
 	local speedPhase = fishRng:NextNumber(0, math.pi * 2)
 	local speedFreq = fishRng:NextNumber(0.22, 0.55) -- slow surge/coast over the wave
 	local pos, tang = samplePath(path, 0)
-	local mouthLocal = computeMouthLocal(clone, root)
 	local agent: FishAgent = {
 		id = nextFishId,
 		root = root,
@@ -1674,7 +1565,6 @@ local function spawnOneFish(spawnIndex: number)
 		dangerActive = false,
 		smoothTang = tang.Magnitude > 1e-5 and tang.Unit or Vector3.new(0, 0, -1),
 		lastWorld = pos,
-		mouthLocal = mouthLocal,
 		incomingFood = 0,
 	}
 	nextFishId += 1
