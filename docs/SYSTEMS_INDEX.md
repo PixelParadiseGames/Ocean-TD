@@ -37,7 +37,7 @@ Update this file in the **same change** when you add or rename a system. If inde
 | Remove coral | Live | PlacementService.recycle + RelocateController | GridService, UndoService | Recycle credits seed; Slot3/Z/L2 undoes |
 | Clear plot | Live | PlacementService.clearPlot + InventoryUI Slot2 | ClearPlotVfx, UndoService | Full seed refund; Slot2/C/R3 + ✓/X; one undo step |
 | Save plots | Live | PlotSaveService + SavePlotSlot | Persistence plotSaves | 4 presets; active slot autosave; SAVE overwrite confirm; LOAD/NEW; wipe undo on load |
-| Feed waves | Live | WaveSlot + WaveSim | WaveRoute.A, ReplicatedStorage.Fish.Tang | Client-only solo; Slot5; Tang waves; brain food; reef health |
+| Feed waves | Live | WaveSlot + WaveSim | WaveRoute.A, ReplicatedStorage.Fish.Tang, ReplicatedStorage.GreenArrows | Client-only solo; Slot5; Tang waves; green path preview; brain food; reef health |
 | RNG coral rolls | Planned | — | — | Common → rare weights |
 | Shop / Robux | Planned | — | — | Server grant only |
 | Skill tree | Planned | — | — | Persist unlocks; server enforces caps |

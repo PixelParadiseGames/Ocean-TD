@@ -1658,6 +1658,16 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
 		toggleFromUser(true)
 		return
 	end
+	-- Wave summary FINISH: A / Enter dismisses when selected / open.
+	if WaveSlot.isSummaryOpen() then
+		if input.KeyCode == Enum.KeyCode.ButtonA
+			or input.KeyCode == Enum.KeyCode.Return
+			or input.KeyCode == Enum.KeyCode.KeypadEnter
+		then
+			WaveSlot.dismissSummary()
+			return
+		end
+	end
 	-- Save plots: A/Enter confirm overwrite; B/Esc close overwrite or main UI.
 	if SavePlotSlot.isOpen() then
 		if input.KeyCode == Enum.KeyCode.ButtonA or input.KeyCode == Enum.KeyCode.Return then

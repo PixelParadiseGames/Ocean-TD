@@ -22,6 +22,7 @@ local Remotes = require(oceanRoot:WaitForChild("Remotes"))
 local GridMath = require(oceanRoot:WaitForChild("Shared"):WaitForChild("GridMath"))
 local UiCircles = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiCircles"))
 local UiTheme = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiTheme"))
+local CoralVisual = require(oceanRoot:WaitForChild("Shared"):WaitForChild("CoralVisual"))
 
 local InventoryState = require(script.Parent:WaitForChild("InventoryState"))
 local ClientPlot = require(script.Parent:WaitForChild("ClientPlot"))
@@ -616,19 +617,13 @@ local function setBlockHighlight(target: BasePart?)
 	end
 	-- If hover neon is on this coral, restore first so we don't save Neon as the base.
 	if hoverPart == target then
-		if hoverBaseMaterial then
-			target.Material = hoverBaseMaterial
-		end
-		if hoverBaseColor then
-			target.Color = hoverBaseColor
-		end
-		hoverPart = nil
-		hoverBaseMaterial = nil
-		hoverBaseColor = nil
+		clearHover()
 	end
+	local restMat, restColor = CoralVisual.readRestLook(target)
+	CoralVisual.applyRestLook(target)
 	blockPart = target
-	blockBaseMaterial = target.Material
-	blockBaseColor = target.Color
+	blockBaseMaterial = restMat
+	blockBaseColor = restColor
 	-- Solid red neon — stationary blocker (does not flash).
 	target.Material = Enum.Material.Neon
 	target.Color = Color3.fromRGB(255, 45, 45)
@@ -704,6 +699,14 @@ end
 
 local function isPlacedCoralPart(inst: Instance): BasePart?
 	if not inst:IsA("BasePart") then
+		return nil
+	end
+	-- Ignore local wave FX (food orbs / ammo) if they ever share a folder.
+	local n = inst.Name
+	if n == "OceanTD_CoralAmmo" or n == "OceanTD_FoodOrb" or string.find(n, "Tang_", 1, true) == 1 then
+		return nil
+	end
+	if typeof(inst:GetAttribute("OceanTD_GhostBaseR")) == "number" then
 		return nil
 	end
 	if typeof(inst:GetAttribute("OceanTD_ItemId")) == "string" or typeof(inst:GetAttribute("OceanTD_SpeciesId")) == "string" then
@@ -936,12 +939,16 @@ local function clearHover()
 		SelectRing.destroy(selectRing)
 	end
 	if hoverPart and hoverPart.Parent then
-		if hoverBaseMaterial then
+		-- Prefer stored rest look so a failed prior capture can't leave Neon stuck.
+		if hoverBaseMaterial and hoverBaseColor then
 			hoverPart.Material = hoverBaseMaterial
-		end
-		if hoverBaseColor then
 			hoverPart.Color = hoverBaseColor
+		else
+			CoralVisual.applyRestLook(hoverPart)
 		end
+	elseif hoverPart then
+		-- Part was destroyed while highlighted — still drop SelectRing if needed.
+		SelectRing.destroy(selectRing)
 	end
 	hoverPart = nil
 	hoverBaseMaterial = nil
@@ -960,9 +967,15 @@ local function setHover(target: BasePart?)
 	if blockPart == target then
 		return
 	end
+	-- Skip wave ammo / food if mis-picked.
+	if not isPlacedCoralPart(target) then
+		return
+	end
 	hoverPart = target
-	hoverBaseMaterial = target.Material
-	hoverBaseColor = target.Color
+	-- Always restore from rest attributes (never capture mid-pulse Neon as base).
+	local restMat, restColor = CoralVisual.readRestLook(target)
+	hoverBaseMaterial = restMat
+	hoverBaseColor = restColor
 	target.Material = Enum.Material.Neon
 	SelectRing.ensure(selectRing, target, playerGui)
 end
@@ -991,19 +1004,26 @@ local function startHoverLoop()
 		return
 	end
 	hoverConn = RunService.RenderStepped:Connect(function()
-		if active or busy or not InventoryState.isOpen() or PlacementController.isActive() then
+		if active or busy or not InventoryState.isOpen() or PlacementController.isActive()
+			or InventoryState.isBuildModalBlocking()
+		then
 			clearHover()
 			return
 		end
+		-- Waves run local neon ammo FX; still allow pick, but always clear cleanly when nothing hit.
 		local screenPos = hoverPickScreenPos()
 		if not isUsingGamepad() and InventoryState.isPointerOverBackpack(screenPos) then
 			clearHover()
 			return
 		end
 		local hit = pickPlacedCoral(screenPos)
-		setHover(hit)
-		updateHoverFlash()
-		updateHoverHint()
+		if hit then
+			setHover(hit)
+			updateHoverFlash()
+			updateHoverHint()
+		else
+			clearHover()
+		end
 	end)
 end
 
@@ -1062,7 +1082,12 @@ local function syncChrome()
 	checkBtn.Position = UDim2.fromOffset(cx - 6, cy)
 	checkBtn.Size = UDim2.fromOffset(BTN_SIZE, BTN_SIZE)
 	if checkBtn.Visible then
-		local label = if showWord then "CONFIRM" else "✓"
+		local confirmWord = if isUsingGamepad() then "A" else "Enter"
+		-- Touch has no keyboard tip — keep CONFIRM.
+		if UserInputService:GetLastInputType() == Enum.UserInputType.Touch then
+			confirmWord = "CONFIRM"
+		end
+		local label = if showWord then confirmWord else "✓"
 		checkBtn.Text = label
 		checkBtn.TextStrokeColor3 = if showWord then Color3.fromRGB(12, 55, 25) else Color3.new(1, 1, 1)
 		checkBtn.TextStrokeTransparency = 0
@@ -1100,14 +1125,14 @@ local function syncChrome()
 				end
 			else
 				recycleBtn.BackgroundColor3 = REC_GREEN
-				-- icon → L1 → COLLECT (1s each)
+				-- icon → shortcut → COLLECT (1s each)
 				local phase = math.floor((os.clock() - gamepadChromeT0) / HOVER_HINT_PERIOD) % 3
 				if recycleIcon then
 					recycleIcon.Visible = phase == 0
 				end
 				if recyclePlus then
 					if phase == 1 then
-						recyclePlus.Text = "L1"
+						recyclePlus.Text = if isUsingGamepad() then "L1" else "Del"
 						recyclePlus.Visible = true
 					elseif phase == 2 then
 						recyclePlus.Text = "COLLECT"
@@ -1149,11 +1174,11 @@ local function restorePartLook(p: BasePart?)
 	if not p or not p.Parent then
 		return
 	end
-	if baseMaterial then
+	if baseMaterial and baseColor then
 		p.Material = baseMaterial
-	end
-	if baseColor then
 		p.Color = baseColor
+	else
+		CoralVisual.applyRestLook(p)
 	end
 end
 
@@ -1625,6 +1650,8 @@ function RelocateController.begin(target: BasePart)
 
 	-- Restore hover neon so we capture the real coral color/material.
 	clearHover()
+	local restMat, restColor = CoralVisual.readRestLook(target)
+	CoralVisual.applyRestLook(target)
 
 	active = true
 	gamepadRelocate = isUsingGamepad()
@@ -1635,8 +1662,8 @@ function RelocateController.begin(target: BasePart)
 	part = target
 	originPos = target.Position
 	itemId = iid
-	baseColor = target.Color
-	baseMaterial = target.Material
+	baseColor = restColor
+	baseMaterial = restMat
 	hasMoved = false
 	validSpot = true
 	rejectReason = nil
@@ -1724,8 +1751,12 @@ table.insert(inputConns, UserInputService.InputBegan:Connect(function(input, pro
 			RelocateController.commit()
 			return
 		end
-		-- L1 / LB → recycle confirm (same as tapping the recycle button).
-		if input.KeyCode == Enum.KeyCode.ButtonL1 then
+		if input.KeyCode == Enum.KeyCode.Return or input.KeyCode == Enum.KeyCode.KeypadEnter then
+			RelocateController.commit()
+			return
+		end
+		-- L1 / LB / Delete → recycle confirm (same as tapping the recycle button).
+		if input.KeyCode == Enum.KeyCode.ButtonL1 or input.KeyCode == Enum.KeyCode.Delete then
 			RelocateController.beginRecycleConfirm()
 			return
 		end

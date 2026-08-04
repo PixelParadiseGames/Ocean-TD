@@ -9,6 +9,15 @@ local oceanRoot = ReplicatedStorage:WaitForChild("OceanTD")
 local Remotes = require(oceanRoot:WaitForChild("Remotes"))
 local ClientPlot = require(script.Parent:WaitForChild("ClientPlot"))
 
+-- Scroll-wheel zoom-out: 25% further than the place / engine max.
+do
+	local base = player.CameraMaxZoomDistance
+	if base <= 0 or base ~= base then
+		base = 128
+	end
+	player.CameraMaxZoomDistance = base * 1.25
+end
+
 local plotAssigned = Remotes.get("PlotAssigned")
 local plotCleared = Remotes.get("PlotCleared")
 local sessionReady = Remotes.get("SessionReady")

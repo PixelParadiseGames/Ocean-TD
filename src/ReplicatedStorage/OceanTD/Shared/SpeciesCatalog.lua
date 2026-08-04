@@ -28,7 +28,7 @@ local BY_ID: { [string]: SpeciesDef } = {
 		colorMax = Color3.fromRGB(255, 188, 33), -- #ffbc21
 		castShadow = false,
 		canCollide = false,
-		reloadSec = 2,
+		reloadSec = 3, -- 50% slower than original 2s
 		foodFill = 1,
 	},
 }

@@ -46,15 +46,62 @@ function CoralVisual.create(speciesId: string, worldPos: Vector3, opts: VisualOp
 		part:SetAttribute("OceanTD_GhostBaseG", baseColor.G)
 		part:SetAttribute("OceanTD_GhostBaseB", baseColor.B)
 	else
-		part.Color = opts.color or SpeciesCatalog.randomColor(def)
+		local color = opts.color or SpeciesCatalog.randomColor(def)
+		part.Color = color
 		part.Transparency = 0
 		part.Material = def.material
 		applyPartFlags(part, def.castShadow, def.canCollide)
+		-- Rest look for hover/relocate restore (avoids stuck Neon after build selection).
+		part:SetAttribute("OceanTD_RestR", color.R)
+		part:SetAttribute("OceanTD_RestG", color.G)
+		part:SetAttribute("OceanTD_RestB", color.B)
+		part:SetAttribute("OceanTD_RestMaterial", def.material.Name)
 	end
 
 	part:SetAttribute("OceanTD_SpeciesId", def.speciesId)
 	part:SetAttribute("OceanTD_ItemId", def.itemId)
 	return part
+end
+
+--- Read stored rest look, or capture/write it if missing (and not mid-neon flash).
+function CoralVisual.readRestLook(part: BasePart): (Enum.Material, Color3)
+	local r = part:GetAttribute("OceanTD_RestR")
+	local g = part:GetAttribute("OceanTD_RestG")
+	local b = part:GetAttribute("OceanTD_RestB")
+	local matName = part:GetAttribute("OceanTD_RestMaterial")
+	if typeof(r) == "number" and typeof(g) == "number" and typeof(b) == "number" then
+		local mat = Enum.Material.Pebble
+		if typeof(matName) == "string" then
+			local ok, resolved = pcall(function()
+				return (Enum.Material :: any)[matName]
+			end)
+			if ok and typeof(resolved) == "EnumItem" then
+				mat = resolved :: Enum.Material
+			end
+		end
+		return mat, Color3.new(r, g, b)
+	end
+
+	local speciesId = part:GetAttribute("OceanTD_SpeciesId")
+	local def = if typeof(speciesId) == "string" then SpeciesCatalog.get(speciesId) else nil
+	local mat = if def then def.material else Enum.Material.Pebble
+	local color = part.Color
+
+	-- Don't persist a mid-flash Neon frame as the rest look.
+	if part.Material ~= Enum.Material.Neon then
+		mat = part.Material
+		part:SetAttribute("OceanTD_RestR", color.R)
+		part:SetAttribute("OceanTD_RestG", color.G)
+		part:SetAttribute("OceanTD_RestB", color.B)
+		part:SetAttribute("OceanTD_RestMaterial", mat.Name)
+	end
+	return mat, color
+end
+
+function CoralVisual.applyRestLook(part: BasePart)
+	local mat, color = CoralVisual.readRestLook(part)
+	part.Material = mat
+	part.Color = color
 end
 
 return CoralVisual

@@ -6,6 +6,7 @@
 
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
+local GuiService = game:GetService("GuiService")
 local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
@@ -51,8 +52,18 @@ local hudLayoutConn: RBXScriptConnection? = nil
 
 local summaryGui: ScreenGui? = nil
 local summaryOpen = false
+local finishBtn: TextButton? = nil
+local prevGuiSelected: GuiObject? = nil
 local confettiConn: RBXScriptConnection? = nil
 local confettiToken = 0
+
+local function isUsingGamepad(): boolean
+	local t = UserInputService:GetLastInputType()
+	return t == Enum.UserInputType.Gamepad1
+		or t == Enum.UserInputType.Gamepad2
+		or t == Enum.UserInputType.Gamepad3
+		or t == Enum.UserInputType.Gamepad4
+end
 
 local function applyIcon(running: boolean)
 	if not slot5Circle then
@@ -292,6 +303,17 @@ local function hideSummary()
 	if summaryGui then
 		summaryGui.Enabled = false
 	end
+	local sel = GuiService.SelectedObject
+	if finishBtn and sel == finishBtn then
+		GuiService.SelectedObject = prevGuiSelected
+	end
+	prevGuiSelected = nil
+end
+
+function WaveSlot.dismissSummary()
+	if summaryOpen then
+		hideSummary()
+	end
 end
 
 local function showSummary(summary: WaveSim.Summary)
@@ -377,6 +399,7 @@ local function showSummary(summary: WaveSim.Summary)
 		finish.TextColor3 = Color3.new(1, 1, 1)
 		finish.TextSize = 22
 		finish.AutoButtonColor = true
+		finish.Selectable = true
 		finish.ZIndex = 4
 		finish.Parent = panel
 		local fc = Instance.new("UICorner")
@@ -385,6 +408,7 @@ local function showSummary(summary: WaveSim.Summary)
 		finish.Activated:Connect(function()
 			hideSummary()
 		end)
+		finishBtn = finish
 	end
 
 	local g = summaryGui :: ScreenGui
@@ -404,6 +428,19 @@ local function showSummary(summary: WaveSim.Summary)
 			lasted.Text = WaveSim.formatClock(summary.elapsedSec)
 		end
 		playConfetti(panel)
+	end
+
+	-- Joystick: select FINISH so A activates it immediately.
+	if not finishBtn and panel then
+		local found = panel:FindFirstChild("Finish")
+		if found and found:IsA("TextButton") then
+			finishBtn = found
+			finishBtn.Selectable = true
+		end
+	end
+	if isUsingGamepad() and finishBtn then
+		prevGuiSelected = GuiService.SelectedObject
+		GuiService.SelectedObject = finishBtn
 	end
 end
 

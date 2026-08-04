@@ -41,5 +41,5 @@ Décor: `MasterPlotDecor` (plot 1) + `StaticPlot_2..6`. Mapping: Master→Plot1,
 Smoke: [SMOKE_TEST.md](SMOKE_TEST.md).
 
 ## Phase
-**Phase 1 (current):** plot assign + empty layout persistence + docs.  
+**Phase 3 (current):** client feed-wave prototype on Slot5; Phase 1–2 groundwork + place/inventory largely live.
 Later phases: [ROADMAP.md](ROADMAP.md).

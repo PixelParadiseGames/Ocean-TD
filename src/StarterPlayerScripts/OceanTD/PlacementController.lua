@@ -494,9 +494,11 @@ local function setBlockFlash(target: BasePart?)
 			Relocate.clearHoverHighlight()
 		end
 	end)
+	local restMat, restColor = CoralVisual.readRestLook(target)
+	CoralVisual.applyRestLook(target)
 	blockFlashPart = target
-	blockFlashBaseMaterial = target.Material
-	blockFlashBaseColor = target.Color
+	blockFlashBaseMaterial = restMat
+	blockFlashBaseColor = restColor
 	target.Material = Enum.Material.Neon
 end
 
@@ -632,7 +634,8 @@ local function setCheckGlyphText(text: string)
 		return
 	end
 	local glyph = checkBtn:FindFirstChild("Glyph")
-	local strokeColor = if text == "CONFIRM"
+	local isWord = text == "CONFIRM" or text == "Enter" or text == "A"
+	local strokeColor = if isWord
 		then Color3.fromRGB(12, 55, 25)
 		else Color3.new(1, 1, 1)
 	if glyph and glyph:IsA("TextLabel") then
@@ -990,13 +993,25 @@ local function syncConfirmButtonsImpl()
 	cancelBtn.Visible = true
 	cancelBtn.AnchorPoint = Vector2.new(0, 1)
 	cancelBtn.Position = UDim2.fromOffset(cx + 6, btnBottom)
-	-- Cycle labels 1s each: X ↔ CANCEL, ✓ ↔ CONFIRM.
+	-- Cycle labels 1s each: X ↔ CANCEL, ✓ ↔ Enter/A/CONFIRM.
 	local showWord = (math.floor(os.clock()) % 2) == 1
 	cancelBtn.Text = if showWord then "CANCEL" else "X"
 	cancelBtn.TextStrokeColor3 = if showWord then Color3.fromRGB(60, 15, 18) else Color3.new(1, 1, 1)
 	cancelBtn.TextStrokeTransparency = 0
 	if checkBtn.Visible then
-		setCheckGlyphText(if showWord then "CONFIRM" else "✓")
+		local confirmWord = "CONFIRM"
+		local last = UserInputService:GetLastInputType()
+		if last == Enum.UserInputType.Gamepad1
+			or last == Enum.UserInputType.Gamepad2
+			or last == Enum.UserInputType.Gamepad3
+			or last == Enum.UserInputType.Gamepad4
+			or gamepadPlacement
+		then
+			confirmWord = "A"
+		elseif last ~= Enum.UserInputType.Touch then
+			confirmWord = "Enter"
+		end
+		setCheckGlyphText(if showWord then confirmWord else "✓")
 	end
 end
 syncConfirmButtons = syncConfirmButtonsImpl
@@ -2213,6 +2228,12 @@ table.insert(inputConns, UserInputService.InputBegan:Connect(function(input, pro
 			onCancel()
 			return
 		end
+	elseif input.KeyCode == Enum.KeyCode.Return or input.KeyCode == Enum.KeyCode.KeypadEnter then
+		-- Keyboard: Enter matches the confirm shortcut tip.
+		if mode == MODE_CONFIRM then
+			onCheck()
+		end
+		return
 	elseif input.KeyCode == Enum.KeyCode.X then
 		-- Mouse/keyboard: X matches the red cancel glyph — disarm coral.
 		onCancel()

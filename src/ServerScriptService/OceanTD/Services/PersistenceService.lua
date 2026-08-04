@@ -27,12 +27,45 @@ local function warnPersist(...: any)
 	warn("[PERSIST]", ...)
 end
 
+local function isTransientDataStoreError(err: any): boolean
+	local msg = string.lower(tostring(err))
+	return string.find(msg, "502", 1, true) ~= nil
+		or string.find(msg, "internal server", 1, true) ~= nil
+		or string.find(msg, "internalserver", 1, true) ~= nil
+		or string.find(msg, "timeout", 1, true) ~= nil
+		or string.find(msg, "throttl", 1, true) ~= nil
+		or string.find(msg, "429", 1, true) ~= nil
+		or string.find(msg, "busy", 1, true) ~= nil
+end
+
 local function getStore(): DataStore
 	if store then
 		return store
 	end
 	store = DataStoreService:GetDataStore(Constants.DATASTORE_NAME)
 	return store :: DataStore
+end
+
+-- Studio / cloud blips (502) are common; retry a few times before failing the save/load.
+local function withDataStoreRetry(label: string, userId: number, fn: () -> any): (boolean, any)
+	local attempts = 4
+	local delaySec = 0.4
+	local lastErr: any = nil
+	for attempt = 1, attempts do
+		local ok, result = pcall(fn)
+		if ok then
+			return true, result
+		end
+		lastErr = result
+		if attempt < attempts and isTransientDataStoreError(result) then
+			warnPersist(label, "transient fail for", userId, "attempt", attempt, "/", attempts, result)
+			task.wait(delaySec)
+			delaySec = math.min(delaySec * 2, 3)
+		else
+			break
+		end
+	end
+	return false, tostring(lastErr)
 end
 
 local function keyFor(userId: number): string
@@ -353,7 +386,7 @@ function PersistenceService.load(player: Player): PlayerProfile
 	local userId = player.UserId
 	local profile = PlotTypes.defaultProfile()
 
-	local ok, result = pcall(function()
+	local ok, result = withDataStoreRetry("GetAsync", userId, function()
 		return getStore():GetAsync(keyFor(userId))
 	end)
 
@@ -443,7 +476,7 @@ function PersistenceService.save(player: Player, layoutOverride: { LayoutObject 
 	local saved = false
 	local blocked = false
 
-	local ok, err = pcall(function()
+	local ok, err = withDataStoreRetry("UpdateAsync", userId, function()
 		getStore():UpdateAsync(keyFor(userId), function(old)
 			local oldProfile = sanitizeProfile(old)
 			local newCount = layoutCount(toWrite.layout)

@@ -2,19 +2,19 @@
 
 Ordered. Do not invent parallel data paths when a later phase lands — extend the owner in [SYSTEMS_INDEX.md](SYSTEMS_INDEX.md).
 
-## Phase 1 — Groundwork (current)
+## Phase 1 — Groundwork ✅
 - Rojo scaffold into existing `Ocean TD.rbxl`
 - Docs + Cursor rules
 - 6-slot plot assign + client bounds mirror
 - Empty layout persistence + anti-wipe
 
-## Phase 2 — Place + inventory
+## Phase 2 — Place + inventory ✅ (mostly)
 - Backpack UI (Slot4) + ItemCatalog — **live**
 - Confirm-ghost place (✓/X) + server validate/occupy/visual — **live** (place debits seeds)
 - Remove coral / backpack counts (replicated mirrors) — recycle + session undo (Slot3 / Z / L2) **live**; clear plot (Slot2 / C / R3, full seed refund, one undo step) **live**; save plots (Slot1 / V / L3, 4 presets, active-slot autosave) **live**; client inventory count mirrors still open
 - Max placed cap stub (skill tree later)
 
-## Phase 3 — Feed waves
+## Phase 3 — Feed waves ← **current**
 - **Live (client prototype):** Slot5 start/stop, `WaveRoute.A` Tang waves, local coral food, reef health, summary UI
 - Player-triggered waves on **own** plot only (solo client sim; server authority later)
 - Path through reef; satiety from nearby coral nutrition; empty bars at exit damage reef
