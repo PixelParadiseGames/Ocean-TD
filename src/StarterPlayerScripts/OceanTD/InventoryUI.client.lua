@@ -22,6 +22,7 @@ local ItemCatalog = require(oceanRoot:WaitForChild("Shared"):WaitForChild("ItemC
 local UiCircles = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiCircles"))
 local UiTheme = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiTheme"))
 local UiIdleCycle = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiIdleCycle"))
+local UiHaptics = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiHaptics"))
 local InventoryState = require(script.Parent:WaitForChild("InventoryState"))
 local PlacementController = require(script.Parent:WaitForChild("PlacementController"))
 local RelocateController = require(script.Parent:WaitForChild("RelocateController"))
@@ -1093,6 +1094,8 @@ local function mountSideSlots()
 		ensureCircle = ensureCircle,
 		ensureStroke = ensureStroke,
 		getShortcutMode = getShortcutMode,
+		red = RED,
+		green = GREEN,
 		log = log,
 	})
 	SkipWaveSlot.mount({
@@ -1519,6 +1522,7 @@ local function playOpen()
 		return
 	end
 	animating = true
+	UiHaptics.rampOpen(1)
 	host.Visible = true
 	applySlotOpenChrome()
 	equipBackpackShovel()
@@ -1549,6 +1553,7 @@ local function playClose()
 		return
 	end
 	animating = true
+	UiHaptics.rampClose(1)
 	unequipBackpackShovel()
 	local center = slotCenterLocal()
 	local right, top, width, height = dockRect()
@@ -1576,6 +1581,9 @@ InventoryState.onOpenChanged(function(isOpen)
 	if isOpen then
 		if SkipWaveSlot.isConfirmActive() then
 			SkipWaveSlot.cancelConfirm()
+		end
+		if WaveSlot.isStopConfirmActive() then
+			WaveSlot.cancelStopConfirm()
 		end
 		task.spawn(function()
 			-- Reveal Slot1/2/3 as the backpack opens so they slide out from behind the panel.
@@ -1717,6 +1725,29 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
 			return
 		end
 	end
+	-- Stop waves confirm: A / Enter / B / Esc.
+	if WaveSlot.isStopConfirmActive() then
+		if input.KeyCode == Enum.KeyCode.ButtonA
+			or input.KeyCode == Enum.KeyCode.Return
+			or input.KeyCode == Enum.KeyCode.KeypadEnter
+		then
+			WaveSlot.handleStopPrimaryConfirm()
+			return
+		end
+		if input.KeyCode == Enum.KeyCode.ButtonB or input.KeyCode == Enum.KeyCode.Escape then
+			WaveSlot.cancelStopConfirm()
+			return
+		end
+	end
+	-- Finish wave early: Enter (keyboard) / R2 (gamepad); backpack must be closed.
+	if input.KeyCode == Enum.KeyCode.Return
+		or input.KeyCode == Enum.KeyCode.KeypadEnter
+		or input.KeyCode == Enum.KeyCode.ButtonR2
+	then
+		if WaveSlot.tryFinishFromShortcut() then
+			return
+		end
+	end
 	-- Save plots arm: V (keyboard) / L3 (gamepad) while backpack open.
 	if input.KeyCode == Enum.KeyCode.V or input.KeyCode == Enum.KeyCode.ButtonL3 then
 		if InventoryState.isOpen() then
@@ -1752,6 +1783,7 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
 			or SavePlotSlot.isOpen()
 			or ClearPlotSlot.isConfirmActive()
 			or SkipWaveSlot.isConfirmActive()
+			or WaveSlot.isStopConfirmActive()
 		then
 			return
 		end
@@ -1812,6 +1844,9 @@ player.CharacterRemoving:Connect(function()
 	ClearPlotSlot.onCharacterRemoving()
 	if SkipWaveSlot.isConfirmActive() then
 		SkipWaveSlot.cancelConfirm()
+	end
+	if WaveSlot.isStopConfirmActive() then
+		WaveSlot.cancelStopConfirm()
 	end
 end)
 

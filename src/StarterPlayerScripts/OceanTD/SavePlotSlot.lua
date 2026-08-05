@@ -19,6 +19,7 @@ local UiTheme = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiTheme")
 local UiIdleCycle = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiIdleCycle"))
 local ItemCatalog = require(oceanRoot:WaitForChild("Shared"):WaitForChild("ItemCatalog"))
 local Remotes = require(oceanRoot:WaitForChild("Remotes"))
+local UiHaptics = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiHaptics"))
 
 local InventoryState = require(script.Parent:WaitForChild("InventoryState"))
 local PlacementController = require(script.Parent:WaitForChild("PlacementController"))
@@ -969,6 +970,7 @@ ensureOverwriteUi = function()
 
 	confirm.Activated:Connect(function()
 		local idx = overwriteTargetIndex
+		UiHaptics.pulseShort()
 		playOverwriteSound()
 		hideOverwrite()
 		doSave(idx)
@@ -1387,6 +1389,7 @@ function SavePlotSlot.handleConfirmInput(): boolean
 	if overwriteOpen then
 		if overwriteConfirm then
 			local idx = overwriteTargetIndex
+			UiHaptics.pulseShort()
 			playOverwriteSound()
 			hideOverwrite()
 			doSave(idx)

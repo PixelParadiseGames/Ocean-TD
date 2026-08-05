@@ -2,7 +2,7 @@
 --[[
 	Slot6 Skip Wave — slides out from under Slot5 while waves run.
 	Shortcuts: Z (keyboard) / L2 (gamepad) when backpack is closed.
-	Help badge green like Slot2; hidden on touch.
+	Help badge orange; hidden on touch. Click / shortcut opens confirm popup.
 ]]
 
 local ContentProvider = game:GetService("ContentProvider")
@@ -18,6 +18,7 @@ local oceanRoot = ReplicatedStorage:WaitForChild("OceanTD")
 local UiCircles = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiCircles"))
 local UiTheme = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiTheme"))
 local UiIdleCycle = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiIdleCycle"))
+local UiHaptics = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiHaptics"))
 
 local InventoryState = require(script.Parent:WaitForChild("InventoryState"))
 local WaveSim = require(script.Parent:WaitForChild("WaveSim"))
@@ -27,8 +28,8 @@ local SkipWaveSlot = {}
 local SLIDE_IN = TweenInfo.new(0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 local SLIDE_OUT = TweenInfo.new(0.22, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
 local IDLE_HALF_SEC = 2
-local HELP_GREEN = Color3.fromRGB(40, 220, 110)
-local SKIP_GLOW = Color3.fromRGB(40, 220, 90)
+local HELP_ORANGE = Color3.fromRGB(255, 140, 40)
+local SKIP_GLOW = Color3.fromRGB(255, 150, 50)
 local PANEL_W = 420
 local PANEL_H = 220
 local SCALE_IN = TweenInfo.new(0.28, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
@@ -230,7 +231,7 @@ local function styleHelpBadge(): boolean
 	if helpSlot:IsA("ImageLabel") or helpSlot:IsA("ImageButton") then
 		(helpSlot :: any).Image = ""
 	end
-	helpSlot.BackgroundColor3 = HELP_GREEN
+	helpSlot.BackgroundColor3 = HELP_ORANGE
 	helpSlot.BackgroundTransparency = 0
 	helpSlot.Active = false
 	UiCircles.ensure(helpSlot)
@@ -541,6 +542,7 @@ function SkipWaveSlot.commit()
 		return
 	end
 	SkipWaveSlot.hideConfirm()
+	UiHaptics.pulseShort()
 	playWhiteFlash()
 	local snd = confirmSound:Clone()
 	snd.Parent = SoundService
@@ -606,7 +608,7 @@ function SkipWaveSlot.beginConfirm()
 				return
 			end
 			local wave = (math.sin((os.clock() - t0) * 7) + 1) * 0.5
-			confirmTitle.TextColor3 = Color3.new(1, 1, 1):Lerp(HELP_GREEN, wave)
+			confirmTitle.TextColor3 = Color3.new(1, 1, 1):Lerp(HELP_ORANGE, wave)
 		end)
 	end
 	if isUsingGamepad() and confirmCheck then

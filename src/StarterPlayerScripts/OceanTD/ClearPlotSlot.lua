@@ -18,6 +18,7 @@ local UiTheme = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiTheme")
 local UiIdleCycle = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiIdleCycle"))
 local ItemCatalog = require(oceanRoot:WaitForChild("Shared"):WaitForChild("ItemCatalog"))
 local Remotes = require(oceanRoot:WaitForChild("Remotes"))
+local UiHaptics = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiHaptics"))
 
 local InventoryState = require(script.Parent:WaitForChild("InventoryState"))
 local PlacementController = require(script.Parent:WaitForChild("PlacementController"))
@@ -694,6 +695,7 @@ function ClearPlotSlot.commit()
 	end
 
 	ClearPlotSlot.hideConfirm()
+	UiHaptics.pulseShort()
 	local liveParts = gatherOwnedPlotParts()
 	local parts: { BasePart } = {}
 	local cam = Workspace.CurrentCamera

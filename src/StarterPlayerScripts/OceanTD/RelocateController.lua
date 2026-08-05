@@ -23,6 +23,7 @@ local GridMath = require(oceanRoot:WaitForChild("Shared"):WaitForChild("GridMath
 local UiCircles = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiCircles"))
 local UiTheme = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiTheme"))
 local CoralVisual = require(oceanRoot:WaitForChild("Shared"):WaitForChild("CoralVisual"))
+local UiHaptics = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiHaptics"))
 
 local InventoryState = require(script.Parent:WaitForChild("InventoryState"))
 local ClientPlot = require(script.Parent:WaitForChild("ClientPlot"))
@@ -1515,6 +1516,7 @@ local function commitRecycle()
 	if not part or not originPos or not itemId then
 		return
 	end
+	UiHaptics.pulseShort()
 	local fromPos = originPos
 	local id = placeId
 	local p = part
@@ -1605,6 +1607,7 @@ function RelocateController.commit()
 	local rf = Remotes.getFunction("RequestMove")
 	local result = rf:InvokeServer(id, fromPos, toPos)
 	if typeof(result) == "table" and result.ok then
+		UiHaptics.pulseShort()
 		if part and part.Parent then
 			local finalPos = if typeof(result.worldPos) == "Vector3" then result.worldPos else toPos
 			part.CFrame = CFrame.new(finalPos)

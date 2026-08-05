@@ -26,6 +26,7 @@ local ItemCatalog = require(oceanRoot:WaitForChild("Shared"):WaitForChild("ItemC
 local GridMath = require(oceanRoot:WaitForChild("Shared"):WaitForChild("GridMath"))
 local UiTheme = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiTheme"))
 local UiCircles = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiCircles"))
+local UiHaptics = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiHaptics"))
 
 local InventoryState = require(script.Parent:WaitForChild("InventoryState"))
 local ClientPlot = require(script.Parent:WaitForChild("ClientPlot"))
@@ -1808,6 +1809,7 @@ local function commitPlace()
 	local result = rf:InvokeServer(armedItemId, placePos)
 	if typeof(result) == "table" and result.ok then
 		log("Committed", armedItemId)
+		UiHaptics.rampOpen(1)
 		local keepId = armedItemId :: string
 		local vfxPos = (typeof(result.worldPos) == "Vector3" and result.worldPos) or placePos
 		PlaceVfx.playVisuals(vfxPos, vfxColor)
