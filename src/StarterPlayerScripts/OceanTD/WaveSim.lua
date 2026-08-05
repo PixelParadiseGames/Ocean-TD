@@ -23,90 +23,18 @@ local WaveStartVfx = require(script.Parent:WaitForChild("WaveStartVfx"))
 
 local WaveSim = {}
 
-local FISH_SPEED = 16 -- 20 * 0.8
-local FISH_SPEED_VAR = 0.15 -- ±15% smooth speed variation
--- Idea B: predict fish path-offset meet; food eases there (current sway). O(1)/shot.
-local FOOD_FIRE_LEAD_SEC = 1 -- release this much earlier so the float can be slower
-local FOOD_RISE_MIN = 2.15 -- was 1.15 (+ lead)
-local FOOD_RISE_MAX = 2.65 -- was 1.65 (+ lead)
-local FOOD_FRONT_LEAD = 2.4 -- meet at mouth, ahead along path tangent
-local FOOD_EAT_RADIUS_SQ = 49 -- 7^2 forgiveness vs prediction error
-local FOOD_EAT_Y = 5.5
-local FOOD_SWAY_AMP = 1.6 -- lateral "current" at mid-flight (studs)
-local DEFAULT_RELOAD = 3 -- matches BrainCoral (50% slower than original 2s)
-local TARGET_RANGE = 50 -- was 30; +20 studs
-local TARGET_RANGE_SQ = TARGET_RANGE * TARGET_RANGE
--- Path-bucket targeting: corals only see fish in an arrival window along the route.
-local PATH_BUCKET_SIZE = 10 -- studs of path length per bucket
-local PATH_TARGET_LEAD_MAX = FISH_SPEED * FOOD_RISE_MAX + 12 -- fish this far before coral
-local PATH_TARGET_PAST = 8 -- slightly past coral still eligible
-local PATH_PROJECT_STEP = 4 -- studs between samples when projecting coral→path
-local COMBAT_HZ = 10
-local COMBAT_DT = 1 / COMBAT_HZ
-local PATH_SAMPLE_STEP = 1.5
-local STAGGER_SEC = 0.4
-local LATERAL_SPREAD = 7.5 -- base left/right spread across the school
-local VERT_SPREAD = 2.8 -- base height spread
-local BOB_AMP_MIN = 2.5
-local BOB_AMP_MAX = 5.0 -- slow vertical wander
-local WANDER_AMP_MIN = 3.5
-local WANDER_AMP_MAX = 7.25
-local HASH_CELL = 30
-local DEFAULT_FOOD_FILL = 1
-local WAVE1_COUNT = 6
-local WAVE_COUNT_STEP = 4
-local REEF_START_HEALTH = 10
-local TANG_HUNGER = 4
-local TANG_HUNGER_EARLY = 2 -- waves 1–10
-local EARLY_HUNGER_WAVE_MAX = 10
-local FOOD_RADIUS = 0.65
-local AMMO_RADIUS = 0.75
-local HUNGER_BAR_PX_W = 40 * 0.8
-local HUNGER_BAR_STRIP_H = 6 * 0.8
-local HUNGER_EMOJI_SIZE = HUNGER_BAR_STRIP_H * 3 -- outside & in front of the bar
-local HUNGER_BAR_GAP = 3 * 0.8
-local HUNGER_BAR_PX_H = HUNGER_EMOJI_SIZE
-local HUNGER_BAR_HEIGHT = 2.85 * 0.8 -- studs above fish
-local HUNGER_BAR_MAX_DIST = 220 -- LOD hide distance when not in danger
-local HUNGER_BAR_DANGER_MAX_DIST = 0 -- 0 = no distance cull while flashing red
-local HAPPY_EMOJIS = { "😊", "😄", "😁", "😆", "🥰", "😍", "💖", "🤩" }
-local HAPPY_FLASH_ON = 2
-local HAPPY_FLASH_OFF = 3
-local FILL_GREEN = Color3.fromRGB(40, 255, 90)
-local DANGER_RED = Color3.fromRGB(255, 45, 55)
-local FEED_SOUND_ID = "rbxassetid://139487580236703"
-local FEED_PITCH_MIN = 0.82
-local FEED_PITCH_MAX = 1.28
-local FEED_PITCH_STEP = 0.06
-local ARROW_SPEED_MULT = 4 -- GreenArrows travel this × fish speed
-local ARROW_LEAD_SEC = 1 -- fish spawn this long after arrows start
-local ARROW_SOUND_ID = "rbxassetid://1845466760"
-local ARROW_PATH_SPACING = 16 -- studs along path between arrow sets (full route)
-local ARROW_LABEL_EVERY = 4 -- "Wave N" on every Nth arrow set
-local ARROW_SPIN_RAD_PER_SEC = 2.2 -- slow corkscrew roll
--- Flat carpet was backwards; yaw 180 fixes facing. Roll 90 stands it up like a fence
--- (pitch ±90 was tipping the tips straight down).
-local ARROW_YAW = math.rad(180)
-local ARROW_ROLL = math.rad(90)
-local WAVE_LABEL_SCALE = Vector2.new(14 * 1.15, 5 * 1.15) -- studs; +15% vs original
-local WAVE_LABEL_HEIGHT = 4
--- Tang facing: lookAt + fixed yaw (same idea as GreenArrows). +90° had the wrong face leading.
-local TANG_YAW = math.rad(-90)
-local TANG_PITCH = 0
-local TANG_ROLL = 0
-local TURN_RATE = 14 -- higher = snappier yaw toward path tangent
--- Soften G1 breaks between independent quadratic segments (lateral offset snaps without this).
-local TANGENT_BLEND_STUDS = 5
+local WaveSimConsts = require(script.Parent:WaitForChild("WaveSimConsts"))
+local C = WaveSimConsts
 
 local feedSound = Instance.new("Sound")
 feedSound.Name = "OceanTD_FeedHit"
-feedSound.SoundId = FEED_SOUND_ID
+feedSound.SoundId = C.FEED_SOUND_ID
 feedSound.Volume = 0.85
 feedSound.Parent = SoundService
 
 local arrowSound = Instance.new("Sound")
 arrowSound.Name = "OceanTD_WaveArrows"
-arrowSound.SoundId = ARROW_SOUND_ID
+arrowSound.SoundId = C.ARROW_SOUND_ID
 arrowSound.Volume = 0.9
 arrowSound.Parent = SoundService
 
@@ -126,6 +54,7 @@ export type Summary = {
 export type HudSnapshot = {
 	wave: number,
 	reefHealth: number,
+	reefMax: number,
 	elapsedSec: number,
 	running: boolean,
 	feedProgress: number, -- 0..1 hunger filled this wave
@@ -241,7 +170,8 @@ local activeShots: { FoodShot } = {}
 local spawnQueue = 0
 local spawnDelay = 0
 local waveIndex = 0
-local reefHealth = REEF_START_HEALTH
+local reefMaxHealth = C.REEF_START_HEALTH
+local reefHealth = C.REEF_START_HEALTH
 local fishFed = 0
 local waveFishExpected = 0
 local waveFedUnits = 0 -- sum of maxHunger for fish fully fed this wave (incl. finished)
@@ -258,7 +188,7 @@ local arrowsWarned = false
 local hudListeners: { (HudSnapshot) -> () } = {}
 local stopListeners: { (Summary) -> () } = {}
 local fishRng = Random.new()
-local feedPitchCursor = FEED_PITCH_MIN
+local feedPitchCursor = C.FEED_PITCH_MIN
 
 local function fishWorldOffset(agent: FishAgent, pos: Vector3, tang: Vector3, atDist: number?): Vector3
 	local side = Vector3.new(-tang.Z, 0, tang.X)
@@ -290,10 +220,10 @@ local hungryMissToken = 0
 local lastHudFishFull = -1
 
 local function tangHungerForWave(wave: number): number
-	if wave <= EARLY_HUNGER_WAVE_MAX then
-		return TANG_HUNGER_EARLY
+	if wave <= C.EARLY_HUNGER_WAVE_MAX then
+		return C.TANG_HUNGER_EARLY
 	end
-	return TANG_HUNGER
+	return C.TANG_HUNGER
 end
 
 local function notifyHud()
@@ -380,6 +310,7 @@ local function flushHud()
 	local snap: HudSnapshot = {
 		wave = waveIndex,
 		reefHealth = reefHealth,
+		reefMax = reefMaxHealth,
 		elapsedSec = elapsed,
 		running = running,
 		feedProgress = feedProg,
@@ -400,23 +331,17 @@ local function fireStopped(summary: Summary)
 	end
 end
 
-local function hashKey(x: number, z: number): number
-	local cx = math.floor(x / HASH_CELL)
-	local cz = math.floor(z / HASH_CELL)
-	return cx * 73856093 + cz * 19349663
-end
-
 local function clearHash()
 	table.clear(hash)
 end
 
 local function insertHash(coral: CoralAgent)
 	local p = coral.part.Position
-	local r = TARGET_RANGE
-	local x0 = math.floor((p.X - r) / HASH_CELL)
-	local x1 = math.floor((p.X + r) / HASH_CELL)
-	local z0 = math.floor((p.Z - r) / HASH_CELL)
-	local z1 = math.floor((p.Z + r) / HASH_CELL)
+	local r = C.TARGET_RANGE
+	local x0 = math.floor((p.X - r) / C.HASH_CELL)
+	local x1 = math.floor((p.X + r) / C.HASH_CELL)
+	local z0 = math.floor((p.Z - r) / C.HASH_CELL)
+	local z1 = math.floor((p.Z + r) / C.HASH_CELL)
 	coral.hashKeys = {}
 	for cx = x0, x1 do
 		for cz = z0, z1 do
@@ -492,7 +417,7 @@ local function findIndexedPart(folder: Instance, prefix: string, index: number):
 end
 
 local function estimateSegLength(w0: Vector3, c: Vector3, w1: Vector3): number
-	local samples = math.max(8, math.ceil(((w1 - w0).Magnitude + (c - w0).Magnitude + (w1 - c).Magnitude) / PATH_SAMPLE_STEP))
+	local samples = math.max(8, math.ceil(((w1 - w0).Magnitude + (c - w0).Magnitude + (w1 - c).Magnitude) / C.PATH_SAMPLE_STEP))
 	local len = 0
 	local prev = w0
 	for s = 1, samples do
@@ -600,8 +525,8 @@ local function samplePath(path: PathData, dist: number): (Vector3, Vector3)
 	-- Independent W/C quads are only G0 at waypoints — blend heading into the next
 	-- segment so lateral school offsets don't snap when the tangent jumps.
 	local toEnd = seg.cumStart + seg.length - d
-	if toEnd < TANGENT_BLEND_STUDS and lo < #segs then
-		local blend = 1 - math.clamp(toEnd / TANGENT_BLEND_STUDS, 0, 1)
+	if toEnd < C.TANGENT_BLEND_STUDS and lo < #segs then
+		local blend = 1 - math.clamp(toEnd / C.TANGENT_BLEND_STUDS, 0, 1)
 		tang = blendUnitTangents(tang, segs[lo + 1].inTang, blend)
 	end
 	return pos, tang
@@ -707,7 +632,7 @@ local function setArrowCFrame(model: Instance, pos: Vector3, tang: Vector3, spin
 	local move = if tang.Magnitude > 1e-5 then tang.Unit else Vector3.new(0, 0, -1)
 	-- Face along path (yaw flip), stand like a fence (roll), corkscrew via spin.
 	local look = CFrame.lookAt(pos, pos + move, Vector3.yAxis)
-	local desired = look * CFrame.Angles(0, ARROW_YAW, ARROW_ROLL + spin)
+	local desired = look * CFrame.Angles(0, C.ARROW_YAW, C.ARROW_ROLL + spin)
 	if model:IsA("Model") then
 		model:PivotTo(desired)
 	elseif model:IsA("BasePart") then
@@ -796,8 +721,8 @@ local function createWavePathLabel(text: string, pos: Vector3, parent: Instance)
 	bb.AlwaysOnTop = true
 	bb.LightInfluence = 0
 	bb.MaxDistance = 2000
-	bb.Size = UDim2.fromScale(WAVE_LABEL_SCALE.X, WAVE_LABEL_SCALE.Y)
-	bb.StudsOffset = Vector3.new(0, WAVE_LABEL_HEIGHT, 0)
+	bb.Size = UDim2.fromScale(C.WAVE_LABEL_SCALE.X, C.WAVE_LABEL_SCALE.Y)
+	bb.StudsOffset = Vector3.new(0, C.WAVE_LABEL_HEIGHT, 0)
 	bb.Parent = part
 
 	local lbl = Instance.new("TextLabel")
@@ -841,7 +766,7 @@ local function startWaveArrowPreview()
 			spin = spin0,
 			alive = true,
 		})
-		if i % ARROW_LABEL_EVERY == 0 then
+		if i % C.ARROW_LABEL_EVERY == 0 then
 			local part = createWavePathLabel(waveText, pos, folderFx)
 			table.insert(wavePathLabels, {
 				part = part,
@@ -849,7 +774,7 @@ local function startWaveArrowPreview()
 				alive = true,
 			})
 		end
-		d += ARROW_PATH_SPACING
+		d += C.ARROW_PATH_SPACING
 	end
 end
 
@@ -859,7 +784,7 @@ local function tickArrowPreview(dt: number)
 		destroyArrowPreview()
 		return
 	end
-	local speed = FISH_SPEED * ARROW_SPEED_MULT
+	local speed = C.FISH_SPEED * C.ARROW_SPEED_MULT
 	for i = #arrowPreviews, 1, -1 do
 		local preview = arrowPreviews[i]
 		if not preview.alive or not preview.model.Parent then
@@ -870,7 +795,7 @@ local function tickArrowPreview(dt: number)
 			continue
 		end
 		preview.dist += speed * dt
-		preview.spin += ARROW_SPIN_RAD_PER_SEC * dt
+		preview.spin += C.ARROW_SPIN_RAD_PER_SEC * dt
 		if preview.dist >= path.totalLen then
 			preview.alive = false
 			preview.model:Destroy()
@@ -920,7 +845,7 @@ local function setFishCFrame(agent: FishAgent, pos: Vector3, pathTang: Vector3, 
 
 	local prev = agent.smoothTang
 	if prev.Magnitude > 1e-5 then
-		local alpha = 1 - math.exp(-TURN_RATE * math.max(dt, 1e-4))
+		local alpha = 1 - math.exp(-C.TURN_RATE * math.max(dt, 1e-4))
 		local blended = prev:Lerp(move, alpha)
 		if blended.Magnitude > 1e-5 then
 			move = blended.Unit
@@ -930,7 +855,7 @@ local function setFishCFrame(agent: FishAgent, pos: Vector3, pathTang: Vector3, 
 
 	-- Same as GreenArrows: look along swim dir, then fixed authored yaw/pitch/roll.
 	local desired = CFrame.lookAt(pos, pos + move, Vector3.yAxis)
-		* CFrame.Angles(TANG_PITCH, TANG_YAW, TANG_ROLL)
+		* CFrame.Angles(C.TANG_PITCH, C.TANG_YAW, C.TANG_ROLL)
 
 	local model = agent.model
 	if model:IsA("Model") then
@@ -950,13 +875,13 @@ local function setFishCFrame(agent: FishAgent, pos: Vector3, pathTang: Vector3, 
 end
 
 local function makeHungerBillboard(adornee: BasePart): (BillboardGui, Frame, Frame, TextLabel, TextLabel, UIScale)
-	local totalW = HUNGER_EMOJI_SIZE + HUNGER_BAR_GAP + HUNGER_BAR_PX_W
+	local totalW = C.HUNGER_EMOJI_SIZE + C.HUNGER_BAR_GAP + C.HUNGER_BAR_PX_W
 	local bb = Instance.new("BillboardGui")
 	bb.Name = "HungerBar"
-	bb.Size = UDim2.fromOffset(totalW, HUNGER_BAR_PX_H)
-	bb.StudsOffset = Vector3.new(0, HUNGER_BAR_HEIGHT, 0)
+	bb.Size = UDim2.fromOffset(totalW, C.HUNGER_BAR_PX_H)
+	bb.StudsOffset = Vector3.new(0, C.HUNGER_BAR_HEIGHT, 0)
 	bb.AlwaysOnTop = true
-	bb.MaxDistance = HUNGER_BAR_MAX_DIST
+	bb.MaxDistance = C.HUNGER_BAR_MAX_DIST
 	bb.Adornee = adornee
 	bb.Parent = adornee
 
@@ -966,7 +891,7 @@ local function makeHungerBillboard(adornee: BasePart): (BillboardGui, Frame, Fra
 	barHost.BackgroundTransparency = 1
 	barHost.AnchorPoint = Vector2.new(1, 0.5)
 	barHost.Position = UDim2.new(1, 0, 0.5, 0)
-	barHost.Size = UDim2.fromOffset(HUNGER_BAR_PX_W, HUNGER_BAR_STRIP_H)
+	barHost.Size = UDim2.fromOffset(C.HUNGER_BAR_PX_W, C.HUNGER_BAR_STRIP_H)
 	barHost.ZIndex = 1
 	barHost.Parent = bb
 
@@ -1007,10 +932,10 @@ local function makeHungerBillboard(adornee: BasePart): (BillboardGui, Frame, Fra
 	fork.BackgroundTransparency = 1
 	fork.AnchorPoint = Vector2.new(0, 0.5)
 	fork.Position = UDim2.new(0, 0, 0.5, 0)
-	fork.Size = UDim2.fromOffset(HUNGER_EMOJI_SIZE, HUNGER_EMOJI_SIZE)
+	fork.Size = UDim2.fromOffset(C.HUNGER_EMOJI_SIZE, C.HUNGER_EMOJI_SIZE)
 	fork.Font = Enum.Font.SourceSansBold
 	fork.Text = "🍴"
-	fork.TextSize = HUNGER_EMOJI_SIZE
+	fork.TextSize = C.HUNGER_EMOJI_SIZE
 	fork.TextScaled = false
 	fork.ZIndex = 4
 	fork.Parent = bb
@@ -1020,10 +945,10 @@ local function makeHungerBillboard(adornee: BasePart): (BillboardGui, Frame, Fra
 	happy.BackgroundTransparency = 1
 	happy.AnchorPoint = Vector2.new(0, 0.5)
 	happy.Position = UDim2.new(0, 0, 0.5, 0)
-	happy.Size = UDim2.fromOffset(HUNGER_EMOJI_SIZE, HUNGER_EMOJI_SIZE)
+	happy.Size = UDim2.fromOffset(C.HUNGER_EMOJI_SIZE, C.HUNGER_EMOJI_SIZE)
 	happy.Font = Enum.Font.SourceSansBold
 	happy.Text = "😊"
-	happy.TextSize = HUNGER_EMOJI_SIZE
+	happy.TextSize = C.HUNGER_EMOJI_SIZE
 	happy.TextScaled = false
 	happy.Visible = false
 	happy.ZIndex = 5
@@ -1041,11 +966,11 @@ local function setDangerFlash(agent: FishAgent, enable: boolean)
 	notifyHud()
 	if agent.billboard and agent.billboard.Parent then
 		-- Keep red-flashing bars visible when zoomed far out (skip LOD hide).
-		agent.billboard.MaxDistance = if enable then HUNGER_BAR_DANGER_MAX_DIST else HUNGER_BAR_MAX_DIST
+		agent.billboard.MaxDistance = if enable then C.HUNGER_BAR_DANGER_MAX_DIST else C.HUNGER_BAR_MAX_DIST
 	end
 	if not enable then
 		if agent.hunger < agent.maxHunger and agent.fill.Parent then
-			agent.fill.BackgroundColor3 = FILL_GREEN
+			agent.fill.BackgroundColor3 = C.FILL_GREEN
 			if agent.barStroke then
 				agent.barStroke.Color = Color3.new(1, 1, 1)
 			end
@@ -1059,15 +984,15 @@ local function setDangerFlash(agent: FishAgent, enable: boolean)
 			and agent.hunger < agent.maxHunger
 			and agent.model.Parent
 		do
-			agent.fill.BackgroundColor3 = DANGER_RED
+			agent.fill.BackgroundColor3 = C.DANGER_RED
 			if agent.barStroke then
-				agent.barStroke.Color = DANGER_RED
+				agent.barStroke.Color = C.DANGER_RED
 			end
 			task.wait(0.28)
 			if agent.dangerToken ~= my or agent.finished then
 				return
 			end
-			agent.fill.BackgroundColor3 = FILL_GREEN
+			agent.fill.BackgroundColor3 = C.FILL_GREEN
 			if agent.barStroke then
 				agent.barStroke.Color = Color3.new(1, 1, 1)
 			end
@@ -1078,9 +1003,9 @@ end
 
 local function playFeedSound()
 	local pitch = feedPitchCursor
-	feedPitchCursor += FEED_PITCH_STEP
-	if feedPitchCursor > FEED_PITCH_MAX then
-		feedPitchCursor = FEED_PITCH_MIN
+	feedPitchCursor += C.FEED_PITCH_STEP
+	if feedPitchCursor > C.FEED_PITCH_MAX then
+		feedPitchCursor = C.FEED_PITCH_MIN
 	end
 	local snd = feedSound:Clone()
 	snd.PlaybackSpeed = pitch
@@ -1100,16 +1025,16 @@ local function startHappyFlash(agent: FishAgent)
 	agent.dangerToken += 1
 	agent.dangerActive = false
 	local my = agent.pulseToken
-	agent.happyLabel.Text = HAPPY_EMOJIS[fishRng:NextInteger(1, #HAPPY_EMOJIS)]
+	agent.happyLabel.Text = C.HAPPY_EMOJIS[fishRng:NextInteger(1, #C.HAPPY_EMOJIS)]
 	task.spawn(function()
 		while agent.pulseToken == my and not agent.finished and agent.model.Parent do
 			agent.happyLabel.Visible = true
-			task.wait(HAPPY_FLASH_ON)
+			task.wait(C.HAPPY_FLASH_ON)
 			if agent.pulseToken ~= my or agent.finished then
 				return
 			end
 			agent.happyLabel.Visible = false
-			task.wait(HAPPY_FLASH_OFF)
+			task.wait(C.HAPPY_FLASH_OFF)
 		end
 	end)
 end
@@ -1128,7 +1053,7 @@ local function updateHungerVisual(agent: FishAgent)
 		agent.forkLabel.Visible = true
 		agent.happyLabel.Visible = false
 		if not agent.dangerActive then
-			agent.fill.BackgroundColor3 = FILL_GREEN
+			agent.fill.BackgroundColor3 = C.FILL_GREEN
 		end
 	end
 	notifyHud()
@@ -1144,7 +1069,7 @@ end
 
 local function ammoWorldPos(coral: CoralAgent): Vector3
 	local r = coral.diameter * 0.5
-	return coral.part.Position + Vector3.new(0, r + AMMO_RADIUS, 0)
+	return coral.part.Position + Vector3.new(0, r + C.AMMO_RADIUS, 0)
 end
 
 local function createAmmo(coral: CoralAgent, scale: number)
@@ -1162,7 +1087,7 @@ local function createAmmo(coral: CoralAgent, scale: number)
 	p.CanQuery = false
 	p.CanTouch = false
 	p.CastShadow = false
-	local s = AMMO_RADIUS * 2 * math.clamp(scale, 0.08, 1)
+	local s = C.AMMO_RADIUS * 2 * math.clamp(scale, 0.08, 1)
 	p.Size = Vector3.new(s, s, s)
 	p.CFrame = CFrame.new(ammoWorldPos(coral))
 	p.Parent = ensureFolder()
@@ -1187,14 +1112,14 @@ local function tickAmmoGrow(now: number)
 			coral.growing = false
 			coral.readyAt = now
 			if coral.ammo and coral.ammo.Parent then
-				local s = AMMO_RADIUS * 2
+				local s = C.AMMO_RADIUS * 2
 				coral.ammo.Size = Vector3.new(s, s, s)
 				coral.ammo.CFrame = CFrame.new(ammoWorldPos(coral))
 			else
 				createAmmo(coral, 1)
 			end
 		elseif coral.ammo and coral.ammo.Parent then
-			local s = AMMO_RADIUS * 2 * math.max(0.08, u)
+			local s = C.AMMO_RADIUS * 2 * math.max(0.08, u)
 			coral.ammo.Size = Vector3.new(s, s, s)
 			coral.ammo.CFrame = CFrame.new(ammoWorldPos(coral))
 		end
@@ -1216,7 +1141,7 @@ local function acquireFoodPart(): BasePart
 	n.CanQuery = false
 	n.CanTouch = false
 	n.CastShadow = false
-	n.Size = Vector3.new(FOOD_RADIUS * 2, FOOD_RADIUS * 2, FOOD_RADIUS * 2)
+	n.Size = Vector3.new(C.FOOD_RADIUS * 2, C.FOOD_RADIUS * 2, C.FOOD_RADIUS * 2)
 	n.Parent = ensureFolder()
 	return n
 end
@@ -1247,12 +1172,12 @@ local function makeCoralAgent(part: BasePart): CoralAgent?
 	local item = ItemCatalog.get(id)
 	local species = SpeciesCatalog.get(if typeof(speciesId) == "string" then speciesId else id)
 		or (if item then SpeciesCatalog.get(item.speciesId) else nil)
-	local reload = DEFAULT_RELOAD
-	local fillAmt = DEFAULT_FOOD_FILL
+	local reload = C.DEFAULT_RELOAD
+	local fillAmt = C.DEFAULT_FOOD_FILL
 	local diameter = part.Size.Y
 	if species then
-		reload = species.reloadSec or DEFAULT_RELOAD
-		fillAmt = species.foodFill or DEFAULT_FOOD_FILL
+		reload = species.reloadSec or C.DEFAULT_RELOAD
+		fillAmt = species.foodFill or C.DEFAULT_FOOD_FILL
 		diameter = species.diameter
 	end
 	return {
@@ -1307,7 +1232,7 @@ local function projectPointOntoPath(path: PathData, worldPos: Vector3): (number,
 	local bestD2 = math.huge
 	local bestDist = 0
 	local d = 0
-	local step = PATH_PROJECT_STEP
+	local step = C.PATH_PROJECT_STEP
 	while d <= path.totalLen do
 		local p = samplePath(path, d)
 		local dx = p.X - worldPos.X
@@ -1452,7 +1377,7 @@ local function finishFish(agent: FishAgent)
 		waveFedUnits += agent.maxHunger
 		local emoji = agent.happyLabel.Text
 		if emoji == "" then
-			emoji = HAPPY_EMOJIS[1]
+			emoji = C.HAPPY_EMOJIS[1]
 		end
 		local endPos = if pathData then pathData.endPos else nil
 		if not endPos then
@@ -1502,12 +1427,12 @@ local function spawnOneFish(spawnIndex: number)
 		clone.PrimaryPart = root
 	end
 	-- Wide random school placement (no tight 5-lane file).
-	local lateral = fishRng:NextNumber(-LATERAL_SPREAD, LATERAL_SPREAD)
-	local vert = fishRng:NextNumber(-VERT_SPREAD, VERT_SPREAD)
-	local bobAmp = fishRng:NextNumber(BOB_AMP_MIN, BOB_AMP_MAX)
+	local lateral = fishRng:NextNumber(-C.LATERAL_SPREAD, C.LATERAL_SPREAD)
+	local vert = fishRng:NextNumber(-C.VERT_SPREAD, C.VERT_SPREAD)
+	local bobAmp = fishRng:NextNumber(C.BOB_AMP_MIN, C.BOB_AMP_MAX)
 	local bobFreq = fishRng:NextNumber(0.012, 0.032) -- slow vertical jitter
 	local bobPhase = fishRng:NextNumber(0, math.pi * 2)
-	local wanderAmp = fishRng:NextNumber(WANDER_AMP_MIN, WANDER_AMP_MAX)
+	local wanderAmp = fishRng:NextNumber(C.WANDER_AMP_MIN, C.WANDER_AMP_MAX)
 	local wanderFreq = fishRng:NextNumber(0.014, 0.038) -- slow side jitter
 	local wanderPhase = fishRng:NextNumber(0, math.pi * 2)
 	local speedPhase = fishRng:NextNumber(0, math.pi * 2)
@@ -1567,7 +1492,7 @@ local function spawnOneFish(spawnIndex: number)
 end
 
 local function waveFishCount(wave: number): number
-	return WAVE1_COUNT + (wave - 1) * WAVE_COUNT_STEP
+	return C.WAVE1_COUNT + (wave - 1) * C.WAVE_COUNT_STEP
 end
 
 local function beginWave(wave: number)
@@ -1578,7 +1503,7 @@ local function beginWave(wave: number)
 	startWaveArrowPreview()
 	waveSpawning = true
 	spawnQueue = waveFishCount(wave)
-	spawnDelay = ARROW_LEAD_SEC
+	spawnDelay = C.ARROW_LEAD_SEC
 	-- Session start: arm all corals. Later waves: keep reload state; only pick up new places.
 	syncCorals(wave == 1)
 	local path = pathData
@@ -1596,7 +1521,7 @@ local function rebuildFishPathBuckets()
 	if not path or path.totalLen < 1 then
 		return
 	end
-	local maxBi = math.max(1, math.ceil(path.totalLen / PATH_BUCKET_SIZE) + 1)
+	local maxBi = math.max(1, math.ceil(path.totalLen / C.PATH_BUCKET_SIZE) + 1)
 	while #fishPathBuckets < maxBi do
 		table.insert(fishPathBuckets, {})
 	end
@@ -1605,7 +1530,7 @@ local function rebuildFishPathBuckets()
 		if f.finished or f.hunger + f.incomingFood >= f.maxHunger then
 			continue
 		end
-		local bi = math.clamp(math.floor(f.dist / PATH_BUCKET_SIZE) + 1, 1, maxBi)
+		local bi = math.clamp(math.floor(f.dist / C.PATH_BUCKET_SIZE) + 1, 1, maxBi)
 		table.insert(fishPathBuckets[bi], f)
 	end
 end
@@ -1620,18 +1545,18 @@ local function findClosestHungryFish(coral: CoralAgent): FishAgent?
 		return nil
 	end
 	-- Too far from the swim lane to meet fish reliably.
-	if coral.pathSideDist > TARGET_RANGE + LATERAL_SPREAD then
+	if coral.pathSideDist > C.TARGET_RANGE + C.LATERAL_SPREAD then
 		return nil
 	end
 	local fill = coral.foodFill
 	local cd = coral.pathDist
-	local d0 = math.max(0, cd - PATH_TARGET_LEAD_MAX)
-	local d1 = math.min(path.totalLen, cd + PATH_TARGET_PAST)
-	local b0 = math.floor(d0 / PATH_BUCKET_SIZE) + 1
-	local b1 = math.floor(d1 / PATH_BUCKET_SIZE) + 1
+	local d0 = math.max(0, cd - C.PATH_TARGET_LEAD_MAX)
+	local d1 = math.min(path.totalLen, cd + C.PATH_TARGET_PAST)
+	local b0 = math.floor(d0 / C.PATH_BUCKET_SIZE) + 1
+	local b1 = math.floor(d1 / C.PATH_BUCKET_SIZE) + 1
 	local origin = coral.part.Position
 	local best: FishAgent? = nil
-	local bestScore = TARGET_RANGE_SQ
+	local bestScore = C.TARGET_RANGE_SQ
 	for bi = b0, b1 do
 		local bucket = fishPathBuckets[bi]
 		if not bucket then
@@ -1647,7 +1572,7 @@ local function findClosestHungryFish(coral: CoralAgent): FishAgent?
 			local dy = fp.Y - origin.Y
 			local dz = fp.Z - origin.Z
 			local d2 = dx * dx + dy * dy + dz * dz
-			if d2 > TARGET_RANGE_SQ then
+			if d2 > C.TARGET_RANGE_SQ then
 				continue
 			end
 			-- Prefer fish still approaching this coral's path station.
@@ -1670,7 +1595,7 @@ local function predictFishMeetPos(agent: FishAgent, aheadSec: number): Vector3?
 	if not path then
 		return nil
 	end
-	local futureDist = agent.dist + FISH_SPEED * aheadSec
+	local futureDist = agent.dist + C.FISH_SPEED * aheadSec
 	if futureDist >= path.totalLen - 0.35 then
 		return nil
 	end
@@ -1682,16 +1607,16 @@ local function predictFishMeetPos(agent: FishAgent, aheadSec: number): Vector3?
 	else
 		fwd = fwd.Unit
 	end
-	return world + fwd * FOOD_FRONT_LEAD
+	return world + fwd * C.FOOD_FRONT_LEAD
 end
 
 local function fishCanEatFood(foodPos: Vector3, fishPos: Vector3): boolean
 	local dx = fishPos.X - foodPos.X
 	local dz = fishPos.Z - foodPos.Z
-	if dx * dx + dz * dz > FOOD_EAT_RADIUS_SQ then
+	if dx * dx + dz * dz > C.FOOD_EAT_RADIUS_SQ then
 		return false
 	end
-	return math.abs(fishPos.Y - foodPos.Y) <= FOOD_EAT_Y
+	return math.abs(fishPos.Y - foodPos.Y) <= C.FOOD_EAT_Y
 end
 
 -- Ease-in so the orb is still rising when the fish arrives at the meet.
@@ -1706,7 +1631,7 @@ local function foodFlightPos(shot: FoodShot, u: number): Vector3
 		side = side / sideLen
 		-- Envelope 0 at ends, peak mid — reads as current, not a target lock.
 		local envelope = math.sin(t * math.pi)
-		local sway = math.sin(t * math.pi * 2 + shot.swayPhase) * FOOD_SWAY_AMP * envelope
+		local sway = math.sin(t * math.pi * 2 + shot.swayPhase) * C.FOOD_SWAY_AMP * envelope
 		base = base + side * sway
 	end
 	return base
@@ -1718,7 +1643,7 @@ local function fireShot(coral: CoralAgent, target: FishAgent)
 	local flatX = fp.X - start.X
 	local flatZ = fp.Z - start.Z
 	local flat = math.sqrt(flatX * flatX + flatZ * flatZ)
-	local duration = math.clamp(flat / FISH_SPEED + FOOD_FIRE_LEAD_SEC, FOOD_RISE_MIN, FOOD_RISE_MAX)
+	local duration = math.clamp(flat / C.FISH_SPEED + C.FOOD_FIRE_LEAD_SEC, C.FOOD_RISE_MIN, C.FOOD_RISE_MAX)
 	local meet = predictFishMeetPos(target, duration)
 	if not meet then
 		return
@@ -1823,7 +1748,7 @@ local function tickShots(dt: number)
 		else
 			fwd = Vector3.new(0, 0, -1)
 		end
-		local mouth = target.root.Position + fwd * FOOD_FRONT_LEAD
+		local mouth = target.root.Position + fwd * C.FOOD_FRONT_LEAD
 		if fishCanEatFood(foodPos, mouth) or fishCanEatFood(foodPos, target.root.Position) then
 			finishShot(shot, true)
 			table.remove(activeShots, i)
@@ -1848,7 +1773,7 @@ local function tickFish(dt: number)
 		if agent.finished then
 			continue
 		end
-		agent.dist += FISH_SPEED * (1 + FISH_SPEED_VAR * math.sin(os.clock() * agent.speedFreq + agent.speedPhase)) * dt
+		agent.dist += C.FISH_SPEED * (1 + C.FISH_SPEED_VAR * math.sin(os.clock() * agent.speedFreq + agent.speedPhase)) * dt
 		if agent.dist >= path.totalLen then
 			finishFish(agent)
 			continue
@@ -1941,12 +1866,30 @@ function WaveSim.isRunning(): boolean
 	return running
 end
 
+function WaveSim.healReef(amount: number): boolean
+	if not running or amount <= 0 then
+		return false
+	end
+	if reefHealth >= reefMaxHealth then
+		return false
+	end
+	local before = reefHealth
+	reefHealth = math.clamp(reefHealth + amount, 0, reefMaxHealth)
+	if reefHealth == before then
+		return false
+	end
+	notifyHud()
+	flushHud()
+	return true
+end
+
 function WaveSim.getHudSnapshot(): HudSnapshot
 	local feedProg, feedDone = getFeedProgress()
 	local fishFull, fishTotal = getFishFullCounts()
 	return {
 		wave = waveIndex,
 		reefHealth = reefHealth,
+		reefMax = reefMaxHealth,
 		elapsedSec = if running then math.max(0, os.clock() - startedAt) else 0,
 		running = running,
 		feedProgress = feedProg,
@@ -1965,14 +1908,14 @@ function WaveSim.getFinishEmojis(): { string }
 		if not f.finished and f.hunger >= f.maxHunger then
 			local e = f.happyLabel.Text
 			if e == "" then
-				e = HAPPY_EMOJIS[((f.id - 1) % #HAPPY_EMOJIS) + 1]
+				e = C.HAPPY_EMOJIS[((f.id - 1) % #C.HAPPY_EMOJIS) + 1]
 			end
 			table.insert(out, e)
 		end
 	end
 	if #out == 0 then
-		for i = 1, math.min(8, #HAPPY_EMOJIS) do
-			table.insert(out, HAPPY_EMOJIS[i])
+		for i = 1, math.min(8, #C.HAPPY_EMOJIS) do
+			table.insert(out, C.HAPPY_EMOJIS[i])
 		end
 	end
 	return out
@@ -2069,10 +2012,11 @@ function WaveSim.start(): boolean
 	local myToken = token
 	running = true
 	waveIndex = 0
-	reefHealth = REEF_START_HEALTH
+	reefMaxHealth = C.REEF_START_HEALTH
+	reefHealth = C.REEF_START_HEALTH
 	fishFed = 0
 	WaveEndVfx.resetStreak()
-	feedPitchCursor = FEED_PITCH_MIN
+	feedPitchCursor = C.FEED_PITCH_MIN
 	startedAt = os.clock()
 	combatAcc = 0
 	nextFishId = 1
@@ -2087,14 +2031,14 @@ function WaveSim.start(): boolean
 		if myToken ~= token or not running then
 			return
 		end
-		-- Spawning (first fish waits ARROW_LEAD_SEC after GreenArrows start)
+		-- Spawning (first fish waits C.ARROW_LEAD_SEC after GreenArrows start)
 		if waveSpawning and spawnQueue > 0 then
 			spawnDelay -= dt
 			if spawnDelay <= 0 then
 				local idx = waveFishCount(waveIndex) - spawnQueue + 1
 				spawnOneFish(idx)
 				spawnQueue -= 1
-				spawnDelay = STAGGER_SEC
+				spawnDelay = C.STAGGER_SEC
 				if spawnQueue <= 0 then
 					waveSpawning = false
 				end
@@ -2108,8 +2052,8 @@ function WaveSim.start(): boolean
 
 		-- Ammo grow + combat cadence; also pick up newly placed corals (~10 Hz).
 		combatAcc += dt
-		if combatAcc >= COMBAT_DT then
-			combatAcc -= COMBAT_DT
+		if combatAcc >= C.COMBAT_DT then
+			combatAcc -= C.COMBAT_DT
 			syncCorals(false)
 			tickCombat()
 		end
@@ -2143,8 +2087,5 @@ function WaveSim.formatClock(sec: number): string
 	local r = s % 60
 	return string.format("%02d:%02d:%02d", h, m, r)
 end
-
--- Silence unused.
-local _ = hashKey
 
 return WaveSim

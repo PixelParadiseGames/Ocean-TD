@@ -12,6 +12,7 @@ local UserInputService = game:GetService("UserInputService")
 local GuiService = game:GetService("GuiService")
 local StarterGui = game:GetService("StarterGui")
 local RunService = game:GetService("RunService")
+local ContextActionService = game:GetService("ContextActionService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local player = Players.LocalPlayer
@@ -1117,6 +1118,24 @@ end
 mountSideSlots()
 WaveSign.mount()
 
+-- Own L3 (stick click): PlayerModule / other binds often mark it gameProcessed.
+-- Backpack open → Save Plots; waves running + backpack closed → Reef Heal.
+local L3_ACTION = "OceanTD_GamepadL3"
+local L3_PRIORITY = Enum.ContextActionPriority.High.Value
+ContextActionService:BindActionAtPriority(L3_ACTION, function(_name, state, _input)
+	if state ~= Enum.UserInputState.Begin then
+		return Enum.ContextActionResult.Pass
+	end
+	if InventoryState.isOpen() then
+		SavePlotSlot.toggle()
+		return Enum.ContextActionResult.Sink
+	end
+	if WaveSlot.tryOpenReefHealFromShortcut() then
+		return Enum.ContextActionResult.Sink
+	end
+	return Enum.ContextActionResult.Pass
+end, false, L3_PRIORITY, Enum.KeyCode.ButtonL3)
+
 local function refreshGamepadCloseLabel()
 	stopCloseLabelCycle()
 	refreshHelpSlotBadge()
@@ -1585,6 +1604,9 @@ InventoryState.onOpenChanged(function(isOpen)
 		if WaveSlot.isStopConfirmActive() then
 			WaveSlot.cancelStopConfirm()
 		end
+		if WaveSlot.isReefHealOpen() then
+			WaveSlot.cancelReefHeal()
+		end
 		task.spawn(function()
 			-- Reveal Slot1/2/3 as the backpack opens so they slide out from behind the panel.
 			task.spawn(SavePlotSlot.playReveal)
@@ -1739,6 +1761,20 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
 			return
 		end
 	end
+	-- Reef heal popup: B / Esc closes; A/Enter activates selected (default +1).
+	if WaveSlot.isReefHealOpen() then
+		if input.KeyCode == Enum.KeyCode.ButtonB or input.KeyCode == Enum.KeyCode.Escape then
+			WaveSlot.cancelReefHeal()
+			return
+		end
+		if input.KeyCode == Enum.KeyCode.ButtonA
+			or input.KeyCode == Enum.KeyCode.Return
+			or input.KeyCode == Enum.KeyCode.KeypadEnter
+		then
+			WaveSlot.handleReefHealPrimaryConfirm()
+			return
+		end
+	end
 	-- Finish wave early: Enter (keyboard) / R2 (gamepad); backpack must be closed.
 	if input.KeyCode == Enum.KeyCode.Return
 		or input.KeyCode == Enum.KeyCode.KeypadEnter
@@ -1748,17 +1784,23 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
 			return
 		end
 	end
-	-- Save plots arm: V (keyboard) / L3 (gamepad) while backpack open.
-	if input.KeyCode == Enum.KeyCode.V or input.KeyCode == Enum.KeyCode.ButtonL3 then
+	-- Save plots: V while backpack open (L3 is ContextAction — see L3_ACTION bind).
+	if input.KeyCode == Enum.KeyCode.V then
 		if InventoryState.isOpen() then
 			SavePlotSlot.toggle()
 			return
 		end
 	end
-	-- Clear plot arm: C (keyboard) / R3 (gamepad) while backpack open.
+	-- Clear plot: C / R3 while backpack open.
 	if input.KeyCode == Enum.KeyCode.C or input.KeyCode == Enum.KeyCode.ButtonR3 then
 		if InventoryState.isOpen() and not SavePlotSlot.isOpen() then
 			ClearPlotSlot.beginConfirm()
+			return
+		end
+	end
+	-- Reef heal: H while backpack closed (L3 via ContextAction bind).
+	if input.KeyCode == Enum.KeyCode.H then
+		if not InventoryState.isOpen() and WaveSlot.tryOpenReefHealFromShortcut() then
 			return
 		end
 	end
@@ -1784,6 +1826,7 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
 			or ClearPlotSlot.isConfirmActive()
 			or SkipWaveSlot.isConfirmActive()
 			or WaveSlot.isStopConfirmActive()
+			or WaveSlot.isReefHealOpen()
 		then
 			return
 		end
@@ -1847,6 +1890,9 @@ player.CharacterRemoving:Connect(function()
 	end
 	if WaveSlot.isStopConfirmActive() then
 		WaveSlot.cancelStopConfirm()
+	end
+	if WaveSlot.isReefHealOpen() then
+		WaveSlot.cancelReefHeal()
 	end
 end)
 

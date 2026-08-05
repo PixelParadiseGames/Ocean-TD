@@ -16,6 +16,7 @@ local oceanRoot = ReplicatedStorage:WaitForChild("OceanTD")
 local UiCircles = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiCircles"))
 local UiTheme = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiTheme"))
 local UiHaptics = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiHaptics"))
+local UiIdleCycle = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiIdleCycle"))
 
 local InventoryState = require(script.Parent:WaitForChild("InventoryState"))
 local WaveSim = require(script.Parent:WaitForChild("WaveSim"))
@@ -67,33 +68,43 @@ local hudBarFork: TextLabel? = nil
 local hudBarHeart: TextLabel? = nil
 local hudBarHeartScale: UIScale? = nil
 local hudFinishHint: TextLabel? = nil
-local hudReef: TextLabel? = nil
+local hudReefBar: Frame? = nil
+local hudReefFill: Frame? = nil
+local hudReefLabel: TextLabel? = nil
+local hudReefPlus: TextButton? = nil
 local hudTime: TextLabel? = nil
 local hudLayoutConn: RBXScriptConnection? = nil
 local finishFlashToken = 0
 local feedCompleteUi = false
-local heartHidden = false
-local heartHiddenWave = 0
 local lastHungryMissToken = -1
 local fillHurtToken = 0
-local forkCycleToken = 0
-local forkShowCount = false
 local lastFishFull = 0
 local lastFishTotal = 0
+local lastReefHealth = -1
+local lastReefMax = 10
 
 local BAR_BG = Color3.fromRGB(0x9e, 0x0b, 0x00)
 local BAR_FILL = Color3.fromRGB(0x12, 0xd9, 0x00)
 local BAR_DANGER_BG = Color3.fromRGB(255, 40, 45)
+local REEF_BAR_BG = Color3.fromRGB(0x00, 0x03, 0x29)
+local REEF_BAR_FILL = Color3.fromRGB(0xff, 0x18, 0x14)
+local REEF_PLUS_GREEN = Color3.fromRGB(50, 230, 100)
+local REEF_PLUS_DARK = Color3.fromRGB(0, 110, 35)
+local REEF_PLUS_STROKE = Color3.fromRGB(12, 70, 28)
 local FLASH_BRIGHT = Color3.fromRGB(90, 255, 90)
 local FLASH_DARK = Color3.fromRGB(0, 110, 35)
 local LINE_H = 28
 local BAR_H = 26
+local REEF_PLUS_SIZE = 26
+local REEF_ROW_GAP = 6
 local LABEL_TEXT_SIZE = math.floor(15 * 1.25 + 0.5) -- 25% bigger
 local FORK_COUNT_TEXT_SIZE = math.max(1, LABEL_TEXT_SIZE - 2)
-local HEART_HIDE_AT = 0.95
-local FORK_SHOW_AT = 0.05
 local SIDE_ICON_PAD = 6
 local BAR_TOP_GAP = 20
+local REEF_PANEL_W = 360
+local REEF_PANEL_H = 200
+local REEF_SCALE_IN = TweenInfo.new(0.28, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+local REEF_SCALE_OUT = TweenInfo.new(0.22, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
 
 local summaryGui: ScreenGui? = nil
 local summaryOpen = false
@@ -115,6 +126,26 @@ local stopConfirmOpenedAt = 0
 local stopTitleFlashConn: RBXScriptConnection? = nil
 local stopScaleToken = 0
 local stopPrevGuiSelected: GuiObject? = nil
+
+local reefHealOpen = false
+local reefHealGui: ScreenGui? = nil
+local reefHealPanel: Frame? = nil
+local reefHealDim: Frame? = nil
+local reefHealStroke: UIStroke? = nil
+local reefHealTitle: TextLabel? = nil
+local reefHealBtn: TextButton? = nil
+local reefHealClose: TextButton? = nil
+local reefHealOpenedAt = 0
+local reefHealStrokeConn: RBXScriptConnection? = nil
+local reefHealScaleToken = 0
+local reefHealPrevSelected: GuiObject? = nil
+local reefPlusFlashToken = 0
+local reefPlusIdleStop: UiIdleCycle.StopFn? = nil
+local IDLE_HALF_SEC = 2
+-- Forward-declared: WaveSlot.refreshHelpBadge runs before these locals are assigned.
+local applyReefPlusIdle: (showHelp: boolean) -> ()
+local stopReefPlusIdle: () -> ()
+local startReefPlusIdle: () -> ()
 
 local function isUsingGamepad(): boolean
 	local t = UserInputService:GetLastInputType()
@@ -270,6 +301,9 @@ function WaveSlot.refreshHelpBadge()
 		end
 	end
 	refreshFinishHint()
+	if hudReefPlus and reefPlusIdleStop and hudReefPlus.Text ~= "+" then
+		applyReefPlusIdle(true)
+	end
 end
 
 local dangerFlashToken = 0
@@ -411,45 +445,22 @@ local function refreshForkLabel()
 	if not hudBarFork then
 		return
 	end
+	hudBarFork.TextSize = FORK_COUNT_TEXT_SIZE
 	if feedCompleteUi then
-		hudBarFork.Text = "🍴100%"
-		hudBarFork.TextSize = FORK_COUNT_TEXT_SIZE
+		hudBarFork.Text = "100%"
 		return
 	end
-	if forkShowCount then
-		hudBarFork.Text = string.format("%d of %d", lastFishFull, lastFishTotal)
-		hudBarFork.TextSize = FORK_COUNT_TEXT_SIZE
-	else
-		hudBarFork.Text = "🍴"
-		hudBarFork.TextSize = LABEL_TEXT_SIZE
-	end
+	hudBarFork.Text = string.format("%d of %d", lastFishFull, lastFishTotal)
 end
 
-local function stopForkCycle()
-	forkCycleToken += 1
-	forkShowCount = false
-	refreshForkLabel()
-end
-
-local function startForkCycle()
-	if feedCompleteUi then
-		stopForkCycle()
+local function refreshRightForkEmoji()
+	if not hudBarHeart then
 		return
 	end
-	forkCycleToken += 1
-	local my = forkCycleToken
-	forkShowCount = false
-	refreshForkLabel()
-	task.spawn(function()
-		while my == forkCycleToken do
-			task.wait(3)
-			if my ~= forkCycleToken then
-				break
-			end
-			forkShowCount = not forkShowCount
-			refreshForkLabel()
-		end
-	end)
+	-- Finish hint (ENTER / R2) owns the right slot when feed is complete.
+	hudBarHeart.Visible = not feedCompleteUi
+	hudBarHeart.Text = "🍴"
+	hudBarHeart.TextSize = LABEL_TEXT_SIZE
 end
 
 local function playFinishFirework(emojis: { string })
@@ -549,6 +560,381 @@ function WaveSlot.tryFinishFromShortcut(): boolean
 	return true
 end
 
+local function refreshReefHudLabels()
+	local text = "🤍 Reef Health " .. tostring(math.max(0, lastReefHealth))
+	if hudReefLabel then
+		hudReefLabel.Text = text
+	end
+	if reefHealTitle then
+		reefHealTitle.Text = text
+	end
+	if hudReefFill then
+		local maxHp = math.max(1, lastReefMax)
+		hudReefFill.Size = UDim2.fromScale(math.clamp(lastReefHealth / maxHp, 0, 1), 1)
+	end
+	if reefHealBtn then
+		local atMax = lastReefHealth >= lastReefMax
+		reefHealBtn.AutoButtonColor = not atMax
+		reefHealBtn.BackgroundTransparency = if atMax then 0.45 else 0
+	end
+end
+
+stopReefPlusIdle = function()
+	if reefPlusIdleStop then
+		reefPlusIdleStop()
+		reefPlusIdleStop = nil
+	end
+	if hudReefPlus then
+		hudReefPlus.Text = "+"
+		hudReefPlus.TextSize = 22
+	end
+end
+
+applyReefPlusIdle = function(showHelp: boolean)
+	if not hudReefPlus then
+		return
+	end
+	if not showHelp then
+		hudReefPlus.Text = "+"
+		hudReefPlus.TextSize = 22
+		return
+	end
+	local mode = if deps then deps.getShortcutMode() else "keyboard"
+	if mode == "touch" then
+		hudReefPlus.Text = "+"
+		hudReefPlus.TextSize = 22
+		return
+	end
+	if mode == "gamepad" then
+		hudReefPlus.Text = "L3"
+		hudReefPlus.TextSize = 11
+	else
+		hudReefPlus.Text = "H"
+		hudReefPlus.TextSize = 16
+	end
+end
+
+startReefPlusIdle = function()
+	if not hudReefPlus then
+		return
+	end
+	stopReefPlusIdle()
+	reefPlusIdleStop = UiIdleCycle.subscribeSharedToggle(IDLE_HALF_SEC, applyReefPlusIdle, function()
+		return hudFrame ~= nil
+			and hudFrame.Visible
+			and WaveSim.isRunning()
+			and not reefHealOpen
+			and not InventoryState.isOpen()
+	end, false)
+end
+
+function WaveSlot.isReefHealOpen(): boolean
+	return reefHealOpen
+end
+
+function WaveSlot.hideReefHeal()
+	if not reefHealOpen and not (reefHealGui and reefHealGui.Enabled) then
+		return
+	end
+	reefHealOpen = false
+	reefHealScaleToken += 1
+	local my = reefHealScaleToken
+	if reefHealStrokeConn then
+		reefHealStrokeConn:Disconnect()
+		reefHealStrokeConn = nil
+	end
+	local sel = GuiService.SelectedObject
+	if (reefHealClose and sel == reefHealClose) or (reefHealBtn and sel == reefHealBtn) then
+		GuiService.SelectedObject = reefHealPrevSelected
+	end
+	reefHealPrevSelected = nil
+	if reefHealDim then
+		reefHealDim.Visible = false
+	end
+	if reefHealPanel and reefHealPanel.Visible and hudReefPlus then
+		local cam = Workspace.CurrentCamera
+		local vp = if cam then cam.ViewportSize else Vector2.new(1920, 1080)
+		local btnPos = hudReefPlus.AbsolutePosition
+		local btnSize = hudReefPlus.AbsoluteSize
+		local endX = (btnPos.X + btnSize.X * 0.5) / vp.X
+		local endY = (btnPos.Y + btnSize.Y * 0.5) / vp.Y
+		local tw = TweenService:Create(reefHealPanel, REEF_SCALE_OUT, {
+			Position = UDim2.fromScale(endX, endY),
+			Size = UDim2.fromOffset(40, 40),
+		})
+		tw:Play()
+		tw.Completed:Connect(function()
+			if my ~= reefHealScaleToken then
+				return
+			end
+			if reefHealPanel then
+				reefHealPanel.Visible = false
+			end
+			if reefHealGui then
+				reefHealGui.Enabled = false
+			end
+			if hudFrame and hudFrame.Visible and WaveSim.isRunning() then
+				startReefPlusIdle()
+			end
+		end)
+	else
+		if reefHealPanel then
+			reefHealPanel.Visible = false
+		end
+		if reefHealGui then
+			reefHealGui.Enabled = false
+		end
+		if hudFrame and hudFrame.Visible and WaveSim.isRunning() then
+			startReefPlusIdle()
+		end
+	end
+end
+
+function WaveSlot.cancelReefHeal()
+	if not reefHealOpen then
+		return
+	end
+	WaveSlot.hideReefHeal()
+end
+
+local function ensureReefHealUi()
+	if reefHealGui and reefHealPanel and reefHealBtn and reefHealClose then
+		return
+	end
+	local g = Instance.new("ScreenGui")
+	g.Name = "OceanTD_ReefHeal"
+	g.ResetOnSpawn = false
+	g.IgnoreGuiInset = true
+	g.DisplayOrder = 12070
+	g.Enabled = false
+	g.Parent = deps.playerGui
+	reefHealGui = g
+
+	local dim = Instance.new("Frame")
+	dim.Name = "Dim"
+	dim.BackgroundColor3 = Color3.new(0, 0, 0)
+	dim.BackgroundTransparency = 0.45
+	dim.BorderSizePixel = 0
+	dim.Size = UDim2.fromScale(1, 1)
+	dim.Visible = false
+	dim.Active = true
+	dim.ZIndex = 1
+	dim.Parent = g
+	reefHealDim = dim
+	dim.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			if os.clock() - reefHealOpenedAt < 0.35 then
+				return
+			end
+			WaveSlot.cancelReefHeal()
+		end
+	end)
+
+	local panel = Instance.new("Frame")
+	panel.Name = "Panel"
+	panel.AnchorPoint = Vector2.new(0.5, 0.5)
+	panel.Position = UDim2.fromScale(0.5, 0.5)
+	panel.Size = UDim2.fromOffset(REEF_PANEL_W, REEF_PANEL_H)
+	panel.BackgroundColor3 = Color3.fromRGB(18, 28, 40)
+	panel.BorderSizePixel = 0
+	panel.Visible = false
+	panel.ZIndex = 2
+	panel.Active = true
+	panel.ClipsDescendants = true
+	panel.Parent = g
+	reefHealPanel = panel
+	local corner = Instance.new("UICorner")
+	corner.CornerRadius = UDim.new(0, 14)
+	corner.Parent = panel
+	local stroke = Instance.new("UIStroke")
+	stroke.Color = Color3.fromRGB(255, 40, 45)
+	stroke.Thickness = 2.5
+	stroke.Parent = panel
+	reefHealStroke = stroke
+
+	local closeBtn = Instance.new("TextButton")
+	closeBtn.Name = "Close"
+	closeBtn.AnchorPoint = Vector2.new(1, 0)
+	closeBtn.Position = UDim2.new(1, -10, 0, 8)
+	closeBtn.Size = UDim2.fromOffset(36, 32)
+	closeBtn.BackgroundColor3 = Color3.fromRGB(200, 45, 50)
+	closeBtn.Font = UiTheme.Font
+	closeBtn.Text = "X"
+	closeBtn.TextColor3 = Color3.new(1, 1, 1)
+	closeBtn.TextSize = 18
+	closeBtn.AutoButtonColor = true
+	closeBtn.ZIndex = 5
+	closeBtn.Selectable = true
+	closeBtn.Parent = panel
+	reefHealClose = closeBtn
+	local cc = Instance.new("UICorner")
+	cc.CornerRadius = UDim.new(0, 8)
+	cc.Parent = closeBtn
+	closeBtn.Activated:Connect(function()
+		WaveSlot.cancelReefHeal()
+	end)
+
+	local title = Instance.new("TextLabel")
+	title.Name = "Title"
+	title.BackgroundTransparency = 1
+	title.AnchorPoint = Vector2.new(0.5, 0)
+	title.Position = UDim2.new(0.5, 0, 0, 52)
+	title.Size = UDim2.new(1, -40, 0, 36)
+	title.Font = UiTheme.Font
+	title.Text = "🤍 Reef Health 10"
+	title.TextColor3 = Color3.new(1, 1, 1)
+	title.TextScaled = true
+	title.ZIndex = 3
+	title.Parent = panel
+	reefHealTitle = title
+
+	local heal = Instance.new("TextButton")
+	heal.Name = "PlusOne"
+	heal.AnchorPoint = Vector2.new(0.5, 1)
+	heal.Position = UDim2.new(0.5, 0, 1, -24)
+	heal.Size = UDim2.fromOffset(200, 48)
+	heal.BackgroundColor3 = deps.green
+	heal.Font = UiTheme.Font
+	heal.Text = "+1 Health"
+	heal.TextColor3 = Color3.new(1, 1, 1)
+	heal.TextSize = 22
+	heal.AutoButtonColor = true
+	heal.Selectable = true
+	heal.ZIndex = 4
+	heal.Parent = panel
+	reefHealBtn = heal
+	local hc = Instance.new("UICorner")
+	hc.CornerRadius = UDim.new(0, 10)
+	hc.Parent = heal
+	local hs = Instance.new("UIStroke")
+	hs.Color = Color3.fromRGB(12, 70, 28)
+	hs.Thickness = 2.5
+	hs.Parent = heal
+	heal.Activated:Connect(function()
+		WaveSlot.commitReefHeal()
+	end)
+	closeBtn.NextSelectionDown = heal
+	heal.NextSelectionUp = closeBtn
+end
+
+function WaveSlot.commitReefHeal()
+	if not reefHealOpen then
+		return
+	end
+	if WaveSim.healReef(1) then
+		UiHaptics.pulseShort()
+		local snap = WaveSim.getHudSnapshot()
+		lastReefHealth = snap.reefHealth
+		lastReefMax = snap.reefMax
+		refreshReefHudLabels()
+	end
+end
+
+function WaveSlot.handleReefHealPrimaryConfirm()
+	if not reefHealOpen then
+		return
+	end
+	local sel = GuiService.SelectedObject
+	if reefHealClose and sel == reefHealClose then
+		WaveSlot.cancelReefHeal()
+		return
+	end
+	WaveSlot.commitReefHeal()
+end
+
+local function flashReefPlusThenOpen()
+	if not hudReefPlus then
+		WaveSlot.beginReefHeal()
+		return
+	end
+	reefPlusFlashToken += 1
+	local my = reefPlusFlashToken
+	hudReefPlus.BackgroundColor3 = REEF_PLUS_DARK
+	task.delay(0.12, function()
+		if my ~= reefPlusFlashToken or not hudReefPlus then
+			return
+		end
+		hudReefPlus.BackgroundColor3 = REEF_PLUS_GREEN
+		WaveSlot.beginReefHeal()
+	end)
+end
+
+function WaveSlot.beginReefHeal()
+	if reefHealOpen then
+		return
+	end
+	if not WaveSim.isRunning() or InventoryState.isOpen() then
+		return
+	end
+	stopReefPlusIdle()
+	if hudReefPlus then
+		hudReefPlus.Text = "+"
+		hudReefPlus.TextSize = 22
+	end
+	ensureReefHealUi()
+	refreshReefHudLabels()
+	reefHealOpenedAt = os.clock()
+	reefHealOpen = true
+	reefHealScaleToken += 1
+	if reefHealGui then
+		reefHealGui.Enabled = true
+	end
+	if reefHealDim then
+		reefHealDim.Visible = true
+	end
+	if reefHealPanel then
+		reefHealPanel.Visible = true
+		if hudReefPlus then
+			local cam = Workspace.CurrentCamera
+			local vp = if cam then cam.ViewportSize else Vector2.new(1920, 1080)
+			local btnPos = hudReefPlus.AbsolutePosition
+			local btnSize = hudReefPlus.AbsoluteSize
+			local startX = (btnPos.X + btnSize.X * 0.5) / vp.X
+			local startY = (btnPos.Y + btnSize.Y * 0.5) / vp.Y
+			reefHealPanel.Position = UDim2.fromScale(startX, startY)
+			reefHealPanel.Size = UDim2.fromOffset(40, 40)
+			TweenService:Create(reefHealPanel, REEF_SCALE_IN, {
+				Position = UDim2.fromScale(0.5, 0.5),
+				Size = UDim2.fromOffset(REEF_PANEL_W, REEF_PANEL_H),
+			}):Play()
+		else
+			reefHealPanel.Position = UDim2.fromScale(0.5, 0.5)
+			reefHealPanel.Size = UDim2.fromOffset(REEF_PANEL_W, REEF_PANEL_H)
+		end
+	end
+	if reefHealStrokeConn then
+		reefHealStrokeConn:Disconnect()
+		reefHealStrokeConn = nil
+	end
+	if reefHealStroke then
+		local t0 = os.clock()
+		local dark = Color3.fromRGB(110, 20, 25)
+		local bright = Color3.fromRGB(255, 50, 55)
+		reefHealStrokeConn = RunService.RenderStepped:Connect(function()
+			if not reefHealOpen or not reefHealStroke then
+				return
+			end
+			local wave = (math.sin((os.clock() - t0) * 2.2) + 1) * 0.5
+			reefHealStroke.Color = dark:Lerp(bright, wave)
+		end)
+	end
+	if isUsingGamepad() and reefHealBtn then
+		reefHealPrevSelected = GuiService.SelectedObject
+		GuiService.SelectedObject = reefHealBtn
+	end
+end
+
+function WaveSlot.tryOpenReefHealFromShortcut(): boolean
+	if not WaveSim.isRunning() or InventoryState.isOpen() or reefHealOpen then
+		return false
+	end
+	if WaveSlot.isStopConfirmActive() or summaryOpen then
+		return false
+	end
+	flashReefPlusThenOpen()
+	return true
+end
+
 local function ensureHud()
 	if hudFrame then
 		return
@@ -559,17 +945,102 @@ local function ensureHud()
 	f.BorderSizePixel = 0
 	f.Visible = false
 	f.ZIndex = 25
-	f.Size = UDim2.fromOffset(220, LINE_H * 3)
+	f.Size = UDim2.fromOffset(220, BAR_H * 2 + REEF_ROW_GAP + 4 + LINE_H)
 	f.Parent = deps.mainHUD
 	hudFrame = f
 
+	-- Reef health row (above wave bar): full-width bar, + overlays right end.
+	local reefBar = Instance.new("Frame")
+	reefBar.Name = "ReefProgress"
+	reefBar.BackgroundColor3 = REEF_BAR_BG
+	reefBar.BackgroundTransparency = 0.5
+	reefBar.BorderSizePixel = 0
+	reefBar.Size = UDim2.new(1, -4, 0, BAR_H)
+	reefBar.Position = UDim2.fromOffset(0, 0)
+	reefBar.ZIndex = 26
+	reefBar.ClipsDescendants = false
+	reefBar.Parent = f
+	local reefCorner = Instance.new("UICorner")
+	reefCorner.CornerRadius = UDim.new(1, 0)
+	reefCorner.Parent = reefBar
+	local reefStroke = Instance.new("UIStroke")
+	reefStroke.Color = Color3.new(1, 1, 1)
+	reefStroke.Thickness = 1.5
+	reefStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+	reefStroke.Parent = reefBar
+	hudReefBar = reefBar
+
+	local reefFill = Instance.new("Frame")
+	reefFill.Name = "Fill"
+	reefFill.BackgroundColor3 = REEF_BAR_FILL
+	reefFill.BackgroundTransparency = 0
+	reefFill.BorderSizePixel = 0
+	reefFill.Size = UDim2.fromScale(1, 1)
+	reefFill.ZIndex = 27
+	reefFill.Parent = reefBar
+	local reefFillCorner = Instance.new("UICorner")
+	reefFillCorner.CornerRadius = UDim.new(1, 0)
+	reefFillCorner.Parent = reefFill
+	hudReefFill = reefFill
+
+	local reefLabel = Instance.new("TextLabel")
+	reefLabel.Name = "ReefLabel"
+	reefLabel.BackgroundTransparency = 1
+	reefLabel.Size = UDim2.fromScale(1, 1)
+	reefLabel.Font = UiTheme.Font
+	reefLabel.TextSize = LABEL_TEXT_SIZE
+	reefLabel.TextColor3 = Color3.new(1, 1, 1)
+	reefLabel.TextStrokeTransparency = 0.35
+	reefLabel.TextStrokeColor3 = Color3.new(0, 0, 0)
+	reefLabel.TextXAlignment = Enum.TextXAlignment.Center
+	reefLabel.TextYAlignment = Enum.TextYAlignment.Center
+	reefLabel.ZIndex = 29
+	reefLabel.Text = "🤍 Reef Health 10"
+	reefLabel.Parent = reefBar
+	local reefPad = Instance.new("UIPadding")
+	reefPad.PaddingRight = UDim.new(0, REEF_PLUS_SIZE + 4)
+	reefPad.Parent = reefLabel
+	hudReefLabel = reefLabel
+
+	local plus = Instance.new("TextButton")
+	plus.Name = "ReefPlus"
+	plus.AnchorPoint = Vector2.new(1, 0.5)
+	plus.Position = UDim2.new(1, 0, 0.5, 0)
+	plus.Size = UDim2.fromOffset(BAR_H, BAR_H)
+	plus.BackgroundColor3 = REEF_PLUS_GREEN
+	plus.BackgroundTransparency = 0
+	plus.BorderSizePixel = 0
+	plus.Text = "+"
+	plus.Font = Enum.Font.SourceSansBold
+	plus.TextSize = 22
+	plus.TextColor3 = Color3.new(1, 1, 1)
+	plus.TextStrokeColor3 = REEF_PLUS_STROKE
+	plus.TextStrokeTransparency = 0
+	plus.AutoButtonColor = false
+	plus.ZIndex = 31
+	plus.Parent = reefBar
+	hudReefPlus = plus
+	UiCircles.ensure(plus)
+	local plusStroke = Instance.new("UIStroke")
+	plusStroke.Color = REEF_PLUS_STROKE
+	plusStroke.Thickness = 1.5
+	plusStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+	plusStroke.Parent = plus
+	plus.Activated:Connect(function()
+		if InventoryState.isOpen() or not WaveSim.isRunning() then
+			return
+		end
+		flashReefPlusThenOpen()
+	end)
+
+	local waveY = BAR_H + REEF_ROW_GAP
 	local bar = Instance.new("Frame")
 	bar.Name = "WaveProgress"
 	bar.BackgroundColor3 = BAR_BG
 	bar.BackgroundTransparency = 0.5
 	bar.BorderSizePixel = 0
 	bar.Size = UDim2.new(1, -4, 0, BAR_H)
-	bar.Position = UDim2.fromOffset(0, 0)
+	bar.Position = UDim2.fromOffset(0, waveY)
 	bar.ZIndex = 26
 	bar.ClipsDescendants = true
 	bar.Parent = f
@@ -610,7 +1081,7 @@ local function ensureHud()
 	label.TextXAlignment = Enum.TextXAlignment.Center
 	label.TextYAlignment = Enum.TextYAlignment.Center
 	label.ZIndex = 29
-	label.Text = "🌊Wave1"
+	label.Text = "🌊 Wave 1"
 	label.Parent = bar
 	hudWaveLabel = label
 
@@ -635,8 +1106,9 @@ local function ensureHud()
 		t.Parent = bar
 		return t
 	end
-	hudBarFork = mkSide("Fork", "🍴", Enum.TextXAlignment.Left)
-	hudBarHeart = mkSide("BrokenHeart", "-💔", Enum.TextXAlignment.Right)
+	hudBarFork = mkSide("ForkCount", "0 of 0", Enum.TextXAlignment.Left)
+	hudBarFork.TextSize = FORK_COUNT_TEXT_SIZE
+	hudBarHeart = mkSide("ForkEmoji", "🍴", Enum.TextXAlignment.Right)
 	local heartScale = Instance.new("UIScale")
 	heartScale.Scale = 1
 	heartScale.Parent = hudBarHeart
@@ -676,26 +1148,22 @@ local function ensureHud()
 	end)
 	hudWaveHit = hit
 
-	local function mk(name: string, order: number): TextLabel
-		local t = Instance.new("TextLabel")
-		t.Name = name
-		t.BackgroundTransparency = 1
-		t.Size = UDim2.new(1, -4, 0, LINE_H)
-		t.Position = UDim2.fromOffset(0, BAR_H + 4 + (order - 2) * LINE_H)
-		t.Font = UiTheme.Font
-		t.TextSize = 15
-		t.TextColor3 = Color3.new(1, 1, 1)
-		t.TextStrokeTransparency = 0.35
-		t.TextStrokeColor3 = Color3.new(0, 0, 0)
-		t.TextXAlignment = Enum.TextXAlignment.Right
-		t.TextYAlignment = Enum.TextYAlignment.Center
-		t.TextTruncate = Enum.TextTruncate.None
-		t.ZIndex = 26
-		t.Parent = f
-		return t
-	end
-	hudReef = mk("Reef", 2)
-	hudTime = mk("Time", 3)
+	local timeLabel = Instance.new("TextLabel")
+	timeLabel.Name = "Time"
+	timeLabel.BackgroundTransparency = 1
+	timeLabel.Size = UDim2.new(1, -4, 0, LINE_H)
+	timeLabel.Position = UDim2.fromOffset(0, waveY + BAR_H + 4)
+	timeLabel.Font = UiTheme.Font
+	timeLabel.TextSize = 15
+	timeLabel.TextColor3 = Color3.new(1, 1, 1)
+	timeLabel.TextStrokeTransparency = 0.35
+	timeLabel.TextStrokeColor3 = Color3.new(0, 0, 0)
+	timeLabel.TextXAlignment = Enum.TextXAlignment.Right
+	timeLabel.TextYAlignment = Enum.TextYAlignment.Center
+	timeLabel.TextTruncate = Enum.TextTruncate.None
+	timeLabel.ZIndex = 26
+	timeLabel.Parent = f
+	hudTime = timeLabel
 end
 
 local function layoutHud()
@@ -706,8 +1174,8 @@ local function layoutHud()
 	local slotPos = slot5.AbsolutePosition
 	local slotSize = slot5.AbsoluteSize
 	local parentPos = parent.AbsolutePosition
-	local w = math.max(240, slotSize.X + 120)
-	local h = BAR_H + 4 + LINE_H * 2
+	local w = math.max(260, slotSize.X + 140)
+	local h = BAR_H + REEF_ROW_GAP + BAR_H + 4 + LINE_H
 	local x = (slotPos.X + slotSize.X) - parentPos.X - w
 	local y = (slotPos.Y + slotSize.Y + BAR_TOP_GAP) - parentPos.Y
 	hudFrame.Size = UDim2.fromOffset(w, h)
@@ -723,7 +1191,9 @@ local function setHudVisible(on: boolean)
 	if on then
 		layoutHud()
 		if not wasVisible then
-			startForkCycle()
+			refreshForkLabel()
+			refreshRightForkEmoji()
+			startReefPlusIdle()
 		end
 		if not hudLayoutConn then
 			hudLayoutConn = RunService.RenderStepped:Connect(function()
@@ -739,11 +1209,12 @@ local function setHudVisible(on: boolean)
 		end
 		feedCompleteUi = false
 		hungerDangerUi = false
-		heartHidden = false
-		heartHiddenWave = 0
 		lastHungryMissToken = -1
 		fillHurtToken += 1
-		stopForkCycle()
+		if reefHealOpen then
+			WaveSlot.hideReefHeal()
+		end
+		stopReefPlusIdle()
 		stopFinishFlash()
 		stopDangerFlash()
 		restoreBarChrome()
@@ -754,10 +1225,11 @@ local function setHudVisible(on: boolean)
 			hudBarHeartScale.Scale = 1
 		end
 		if hudBarFork then
-			hudBarFork.Visible = false
+			hudBarFork.Visible = true
 		end
 		if hudBarHeart then
 			hudBarHeart.Visible = true
+			hudBarHeart.Text = "🍴"
 		end
 		if hudFinishHint then
 			hudFinishHint.Visible = false
@@ -782,38 +1254,16 @@ local function updateHud(snap: WaveSim.HudSnapshot)
 	if hudWaveFill then
 		hudWaveFill.Size = UDim2.fromScale(prog, 1)
 	end
-	if snap.wave ~= heartHiddenWave then
-		heartHiddenWave = snap.wave
-		heartHidden = false
-	end
-	if not heartHidden and prog >= HEART_HIDE_AT then
-		heartHidden = true
-	end
+	lastReefHealth = snap.reefHealth or 0
+	lastReefMax = snap.reefMax or 10
+	refreshReefHudLabels()
 	lastFishFull = snap.fishFull or 0
 	lastFishTotal = snap.fishTotal or 0
-	if forkShowCount then
-		refreshForkLabel()
-	end
-	if hudBarFork then
-		hudBarFork.Visible = prog >= FORK_SHOW_AT
-	end
-	if hudBarHeart then
-		hudBarHeart.Visible = not heartHidden
-	end
-	local missTok = snap.hungryMissToken or 0
-	if lastHungryMissToken < 0 then
-		lastHungryMissToken = missTok
-	elseif missTok > lastHungryMissToken then
-		flashFillHurt()
-		lastHungryMissToken = missTok
-	else
-		lastHungryMissToken = missTok
-	end
 	local complete = snap.feedComplete == true
 	local danger = snap.hungerDanger == true
 	if hudWaveLabel then
 		if complete then
-			hudWaveLabel.Text = "FINISH WAVE " .. tostring(snap.wave)
+			hudWaveLabel.Text = "NEXT WAVE"
 		else
 			hudWaveLabel.Text = "🌊 Wave " .. tostring(snap.wave)
 		end
@@ -823,7 +1273,6 @@ local function updateHud(snap: WaveSim.HudSnapshot)
 		if complete then
 			hungerDangerUi = false
 			stopDangerFlash()
-			stopForkCycle()
 			if hudWaveHit then
 				hudWaveHit.Visible = true
 				hudWaveHit.Active = true
@@ -836,12 +1285,25 @@ local function updateHud(snap: WaveSim.HudSnapshot)
 			end
 			stopFinishFlash()
 			restoreBarChrome()
-			startForkCycle()
 			if danger then
 				hungerDangerUi = true
 				startDangerFlash()
 			end
 		end
+	end
+	refreshForkLabel()
+	refreshRightForkEmoji()
+	if hudBarFork then
+		hudBarFork.Visible = true
+	end
+	local missTok = snap.hungryMissToken or 0
+	if lastHungryMissToken < 0 then
+		lastHungryMissToken = missTok
+	elseif missTok > lastHungryMissToken then
+		flashFillHurt()
+		lastHungryMissToken = missTok
+	else
+		lastHungryMissToken = missTok
 	end
 	refreshFinishHint()
 	if not complete and danger ~= hungerDangerUi then
@@ -851,9 +1313,6 @@ local function updateHud(snap: WaveSim.HudSnapshot)
 		else
 			stopDangerFlash()
 		end
-	end
-	if hudReef then
-		hudReef.Text = "❤️Reef Health " .. tostring(snap.reefHealth)
 	end
 	if hudTime then
 		hudTime.Text = "⏱️" .. WaveSim.formatClock(snap.elapsedSec)
@@ -1487,6 +1946,9 @@ function WaveSlot.mount(d: Deps)
 	InventoryState.onOpenChanged(function(isOpen)
 		setSlot5Interactable(not isOpen)
 		WaveSlot.refreshHelpBadge()
+		if isOpen and WaveSlot.isReefHealOpen() then
+			WaveSlot.cancelReefHeal()
+		end
 	end)
 
 	WaveSim.onHud(updateHud)
@@ -1495,6 +1957,9 @@ function WaveSlot.mount(d: Deps)
 		applyIcon(false)
 		if stopConfirmActive then
 			WaveSlot.hideStopConfirm()
+		end
+		if WaveSlot.isReefHealOpen() then
+			WaveSlot.hideReefHeal()
 		end
 		if not summaryOpen then
 			showSummary(summary)
