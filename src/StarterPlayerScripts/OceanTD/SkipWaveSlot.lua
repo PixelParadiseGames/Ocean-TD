@@ -19,6 +19,7 @@ local UiCircles = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiCircl
 local UiTheme = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiTheme"))
 local UiIdleCycle = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiIdleCycle"))
 local UiHaptics = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiHaptics"))
+local UiPopupScale = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiPopupScale"))
 
 local InventoryState = require(script.Parent:WaitForChild("InventoryState"))
 local WaveSim = require(script.Parent:WaitForChild("WaveSim"))
@@ -413,6 +414,7 @@ local function ensureConfirmUi()
 	panel.Active = true
 	panel.Parent = g
 	confirmPanel = panel
+	UiPopupScale.attach(panel)
 	local corner = Instance.new("UICorner")
 	corner.CornerRadius = UDim.new(0, 14)
 	corner.Parent = panel
@@ -578,6 +580,7 @@ function SkipWaveSlot.beginConfirm()
 		confirmDim.Visible = true
 	end
 	if confirmPanel then
+		UiPopupScale.attach(confirmPanel)
 		confirmPanel.Visible = true
 		if slot6 then
 			local cam = Workspace.CurrentCamera
@@ -791,9 +794,12 @@ function SkipWaveSlot.mount(d: Deps)
 		end
 		slot6.Visible = false
 		slot6Button.Selectable = false
-		slot6Button.Activated:Connect(function()
-			SkipWaveSlot.beginConfirm()
-		end)
+		if slot6Button:GetAttribute("_OceanTD_ActBound") ~= true then
+			slot6Button:SetAttribute("_OceanTD_ActBound", true)
+			slot6Button.Activated:Connect(function()
+				SkipWaveSlot.beginConfirm()
+			end)
+		end
 		d.log("Slot6 skip-wave button ready")
 	else
 		warn("[WAVE] MainHUD.Quickbar.Slot6 missing — skip wave unavailable")
@@ -856,9 +862,12 @@ function SkipWaveSlot.mount(d: Deps)
 				helpHit = btn
 			end
 			helpHit.Selectable = false
-			helpHit.Activated:Connect(function()
-				SkipWaveSlot.beginConfirm()
-			end)
+			if helpHit:GetAttribute("_OceanTD_ActBound") ~= true then
+				helpHit:SetAttribute("_OceanTD_ActBound", true)
+				helpHit.Activated:Connect(function()
+					SkipWaveSlot.beginConfirm()
+				end)
+			end
 		end
 	end
 

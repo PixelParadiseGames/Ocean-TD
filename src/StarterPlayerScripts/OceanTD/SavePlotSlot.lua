@@ -20,6 +20,7 @@ local UiIdleCycle = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiIdl
 local ItemCatalog = require(oceanRoot:WaitForChild("Shared"):WaitForChild("ItemCatalog"))
 local Remotes = require(oceanRoot:WaitForChild("Remotes"))
 local UiHaptics = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiHaptics"))
+local UiPopupScale = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiPopupScale"))
 
 local InventoryState = require(script.Parent:WaitForChild("InventoryState"))
 local PlacementController = require(script.Parent:WaitForChild("PlacementController"))
@@ -787,6 +788,7 @@ local function beginOverwriteConfirm(slotIndex: number)
 	pendingCounts = rows
 	populateOverwriteList(pendingCounts)
 	if overwriteGui then
+		UiPopupScale.attach(overwriteGui)
 		overwriteGui.Visible = true
 	end
 	overwriteOpen = true
@@ -866,6 +868,7 @@ ensureOverwriteUi = function()
 	wrap.SelectionGroup = true
 	wrap.Parent = saveGui
 	overwriteGui = wrap
+	UiPopupScale.attach(wrap)
 	local sizeConstraint = Instance.new("UISizeConstraint")
 	sizeConstraint.MinSize = Vector2.new(280, 260)
 	sizeConstraint.MaxSize = Vector2.new(460, 400)
@@ -1141,6 +1144,7 @@ local function ensureSaveUi()
 	panel.SelectionGroup = true
 	panel.Parent = g
 	savePanel = panel
+	UiPopupScale.attach(panel)
 	local sizeConstraint = Instance.new("UISizeConstraint")
 	sizeConstraint.MinSize = Vector2.new(360, 300)
 	sizeConstraint.MaxSize = Vector2.new(640, 480)
@@ -1228,8 +1232,10 @@ local function ensureSaveUi()
 end
 
 local function fittedPanelSize(vp: Vector2): Vector2
-	local maxW = math.min(PANEL_W, math.floor(vp.X * 0.88))
-	local maxH = math.min(PANEL_H, math.floor(vp.Y * 0.82))
+	-- Leave room for UiPopupScale so the scaled panel still fits the viewport.
+	local scale = UiPopupScale.get(vp)
+	local maxW = math.min(PANEL_W, math.floor(vp.X * 0.88 / scale))
+	local maxH = math.min(PANEL_H, math.floor(vp.Y * 0.82 / scale))
 	return Vector2.new(math.max(360, maxW), math.max(300, maxH))
 end
 
@@ -1337,6 +1343,9 @@ function SavePlotSlot.open()
 		return
 	end
 	ensureSaveUi()
+	if savePanel then
+		UiPopupScale.attach(savePanel)
+	end
 	fetchState()
 	uiOpen = true
 	InventoryState.setSavePlotsOpen(true)
@@ -1648,14 +1657,20 @@ function SavePlotSlot.mount(d: Deps)
 	end
 
 	if slot1Button then
-		slot1Button.Activated:Connect(function()
-			SavePlotSlot.toggle()
-		end)
+		if slot1Button:GetAttribute("_OceanTD_ActBound") ~= true then
+			slot1Button:SetAttribute("_OceanTD_ActBound", true)
+			slot1Button.Activated:Connect(function()
+				SavePlotSlot.toggle()
+			end)
+		end
 	end
 	if helpSlot1Hit then
-		helpSlot1Hit.Activated:Connect(function()
-			SavePlotSlot.toggle()
-		end)
+		if helpSlot1Hit:GetAttribute("_OceanTD_ActBound") ~= true then
+			helpSlot1Hit:SetAttribute("_OceanTD_ActBound", true)
+			helpSlot1Hit.Activated:Connect(function()
+				SavePlotSlot.toggle()
+			end)
+		end
 	end
 end
 

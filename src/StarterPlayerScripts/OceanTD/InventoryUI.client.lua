@@ -2,8 +2,9 @@
 --[[
 	Backpack / inventory UI — owner script.
 
-	Studio contract: StarterGui.MainHUD.Quickbar.Slot4 (backpack button).
-	Panel is built in code under MainHUD so it can grow (tabs, filters, etc.).
+	Studio contract: PlayerGui ScreenGui with Quickbar.Slot4 (backpack button).
+	Main HUD is split by resolution — tag variants Mobile / 720p (optional MainHUD).
+	Panel is built in code under the active Main HUD.
 ]]
 
 local Players = game:GetService("Players")
@@ -24,6 +25,8 @@ local UiCircles = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiCircl
 local UiTheme = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiTheme"))
 local UiIdleCycle = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiIdleCycle"))
 local UiHaptics = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiHaptics"))
+local UiViewportTags = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiViewportTags"))
+local UiPopupScale = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiPopupScale"))
 local InventoryState = require(script.Parent:WaitForChild("InventoryState"))
 local PlacementController = require(script.Parent:WaitForChild("PlacementController"))
 local RelocateController = require(script.Parent:WaitForChild("RelocateController"))
@@ -57,8 +60,24 @@ pcall(function()
 end)
 
 local function waitMainHUD(): ScreenGui
-	local hud = playerGui:WaitForChild("MainHUD", 60)
-	assert(hud and hud:IsA("ScreenGui"), "[INV] StarterGui.MainHUD ScreenGui missing — author in Studio")
+	local hud = UiViewportTags.waitMainHud(playerGui :: PlayerGui, 60)
+	local is720 = UiViewportTags.is720p(UiViewportTags.readViewport())
+	local vp = UiViewportTags.readViewport()
+	-- Don't rely on ViewportHudTags script order — force the known right HUDs now.
+	local mobile = playerGui:FindFirstChild(UiViewportTags.MOBILE_RIGHT_HUD)
+	if mobile and mobile:IsA("ScreenGui") then
+		mobile.Enabled = not is720
+	end
+	local p720 = playerGui:FindFirstChild(UiViewportTags.P720_RIGHT_HUD)
+	if p720 and p720:IsA("ScreenGui") then
+		p720.Enabled = is720
+	end
+	log(
+		"Main HUD:",
+		hud:GetFullName(),
+		if is720 then "(720p)" else "(Mobile)",
+		string.format("viewport=%.0fx%.0f", vp.X, vp.Y)
+	)
 	return hud
 end
 
@@ -242,7 +261,7 @@ end
 ----------------------------------------------------------------
 
 local mainHUD = waitMainHUD()
-mainHUD.DisplayOrder = math.max(mainHUD.DisplayOrder, 50)
+mainHUD.DisplayOrder = math.max(mainHUD.DisplayOrder, UiViewportTags.RIGHT_HUD_DISPLAY_ORDER)
 
 local slot4 = findQuickbarSlot4(mainHUD)
 local slotButton = ensureSlot4GuiButton(slot4)
@@ -573,15 +592,51 @@ gridPad.PaddingLeft = UDim.new(0, 6)
 gridPad.PaddingRight = UDim.new(0, 6)
 gridPad.Parent = scroll
 
+local itemButtons: { ImageButton } = {}
+
+local function backpackItemLabelHeight(): number
+	-- Mobile (<720): fixed 14px — looks correct; do not change.
+	if not UiViewportTags.is720p(UiViewportTags.readViewport()) then
+		return 14
+	end
+	return math.clamp(math.floor(14 * UiPopupScale.get()), 20, 40)
+end
+
+local function backpackItemLabelRoom(): number
+	-- Extra cell height under the icon for the name label.
+	if not UiViewportTags.is720p(UiViewportTags.readViewport()) then
+		return 18
+	end
+	return math.clamp(math.floor(18 * UiPopupScale.get()), 26, 52)
+end
+
 local function refreshGridCellSize()
 	local width = scroll.AbsoluteSize.X
 	if width <= 1 then
 		return
 	end
-	local pad = 22
-	local cell = math.floor((width - pad * 2) / 3)
-	cell = math.clamp(cell, 56, 120)
-	grid.CellSize = UDim2.fromOffset(cell, cell + 18)
+	-- 3 columns: padding L/R (6 each) + 2 horizontal gaps (CellPadding 10).
+	local hPad = 12
+	local gap = 10
+	local bar = scroll.ScrollBarThickness
+	local usable = width - hPad - gap * 2 - bar
+	local cell = math.floor(usable / 3)
+	if UiViewportTags.is720p(UiViewportTags.readViewport()) then
+		-- Stretch cells to fill the wider 720p panel (no 120px cap).
+		cell = math.max(56, cell)
+	else
+		-- Mobile: keep compact capped cells (looks correct under 720p).
+		cell = math.clamp(cell, 56, 120)
+	end
+	local labelRoom = backpackItemLabelRoom()
+	grid.CellSize = UDim2.fromOffset(cell, cell + labelRoom)
+	local labelH = backpackItemLabelHeight()
+	for _, btn in ipairs(itemButtons) do
+		local nameLbl = btn:FindFirstChild("Name")
+		if nameLbl and nameLbl:IsA("TextLabel") then
+			nameLbl.Size = UDim2.new(1, -4, 0, labelH)
+		end
+	end
 end
 
 scroll:GetPropertyChangedSignal("AbsoluteSize"):Connect(refreshGridCellSize)
@@ -616,7 +671,6 @@ host:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
 	end
 end)
 
-local itemButtons: { ImageButton } = {}
 local pulseConn: RBXScriptConnection? = nil
 local pulsedStroke: UIStroke? = nil
 local focusPulseConn: RBXScriptConnection? = nil
@@ -1036,84 +1090,96 @@ end
 local focusBackpackAfterSaveClose: (() -> ())? = nil
 local clearBackpackFocusForSave: (() -> ())? = nil
 local function mountSideSlots()
-	local depsShared = {
-		mainHUD = mainHUD,
-		ensureButton = ensureSlot4GuiButton,
-		passthroughDecor = passthroughDecor,
-		ensureCircle = ensureCircle,
-		ensureStroke = ensureStroke,
-		getShortcutMode = getShortcutMode,
-		getIdlePeriod = function()
-			return SLOT_IDLE_PERIOD
-		end,
-		log = log,
-	}
-	UndoSlot.mount(depsShared)
-	ClearPlotSlot.mount({
-		mainHUD = mainHUD,
-		playerGui = playerGui :: PlayerGui,
-		ensureButton = ensureSlot4GuiButton,
-		passthroughDecor = passthroughDecor,
-		ensureCircle = ensureCircle,
-		ensureStroke = ensureStroke,
-		getShortcutMode = getShortcutMode,
-		getIdlePeriod = function()
-			return SLOT_IDLE_PERIOD
-		end,
-		red = RED,
-		green = GREEN,
-		log = log,
-	})
-	SavePlotSlot.mount({
-		mainHUD = mainHUD,
-		playerGui = playerGui :: PlayerGui,
-		ensureButton = ensureSlot4GuiButton,
-		passthroughDecor = passthroughDecor,
-		ensureCircle = ensureCircle,
-		ensureStroke = ensureStroke,
-		getShortcutMode = getShortcutMode,
-		getIdlePeriod = function()
-			return SLOT_IDLE_PERIOD
-		end,
-		onClosedWithGamepad = function()
-			if focusBackpackAfterSaveClose then
-				focusBackpackAfterSaveClose()
-			end
-		end,
-		onOpenedWithGamepad = function()
-			if clearBackpackFocusForSave then
-				clearBackpackFocusForSave()
-			end
-		end,
-		log = log,
-	})
-	WaveSlot.mount({
-		mainHUD = mainHUD,
-		playerGui = playerGui :: PlayerGui,
-		ensureButton = ensureSlot4GuiButton,
-		passthroughDecor = passthroughDecor,
-		ensureCircle = ensureCircle,
-		ensureStroke = ensureStroke,
-		getShortcutMode = getShortcutMode,
-		red = RED,
-		green = GREEN,
-		log = log,
-	})
-	SkipWaveSlot.mount({
-		mainHUD = mainHUD,
-		playerGui = playerGui :: PlayerGui,
-		ensureButton = ensureSlot4GuiButton,
-		passthroughDecor = passthroughDecor,
-		ensureCircle = ensureCircle,
-		ensureStroke = ensureStroke,
-		getShortcutMode = getShortcutMode,
-		isWaveSummaryOpen = WaveSlot.isSummaryOpen,
-		isSavePlotsOpen = SavePlotSlot.isOpen,
-		isClearConfirmActive = ClearPlotSlot.isConfirmActive,
-		red = RED,
-		green = GREEN,
-		log = log,
-	})
+	local function mountOne(hud: ScreenGui)
+		local depsShared = {
+			mainHUD = hud,
+			ensureButton = ensureSlot4GuiButton,
+			passthroughDecor = passthroughDecor,
+			ensureCircle = ensureCircle,
+			ensureStroke = ensureStroke,
+			getShortcutMode = getShortcutMode,
+			getIdlePeriod = function()
+				return SLOT_IDLE_PERIOD
+			end,
+			log = log,
+		}
+		UndoSlot.mount(depsShared)
+		ClearPlotSlot.mount({
+			mainHUD = hud,
+			playerGui = playerGui :: PlayerGui,
+			ensureButton = ensureSlot4GuiButton,
+			passthroughDecor = passthroughDecor,
+			ensureCircle = ensureCircle,
+			ensureStroke = ensureStroke,
+			getShortcutMode = getShortcutMode,
+			getIdlePeriod = function()
+				return SLOT_IDLE_PERIOD
+			end,
+			red = RED,
+			green = GREEN,
+			log = log,
+		})
+		SavePlotSlot.mount({
+			mainHUD = hud,
+			playerGui = playerGui :: PlayerGui,
+			ensureButton = ensureSlot4GuiButton,
+			passthroughDecor = passthroughDecor,
+			ensureCircle = ensureCircle,
+			ensureStroke = ensureStroke,
+			getShortcutMode = getShortcutMode,
+			getIdlePeriod = function()
+				return SLOT_IDLE_PERIOD
+			end,
+			onClosedWithGamepad = function()
+				if focusBackpackAfterSaveClose then
+					focusBackpackAfterSaveClose()
+				end
+			end,
+			onOpenedWithGamepad = function()
+				if clearBackpackFocusForSave then
+					clearBackpackFocusForSave()
+				end
+			end,
+			log = log,
+		})
+		WaveSlot.mount({
+			mainHUD = hud,
+			playerGui = playerGui :: PlayerGui,
+			ensureButton = ensureSlot4GuiButton,
+			passthroughDecor = passthroughDecor,
+			ensureCircle = ensureCircle,
+			ensureStroke = ensureStroke,
+			getShortcutMode = getShortcutMode,
+			red = RED,
+			green = GREEN,
+			log = log,
+		})
+		SkipWaveSlot.mount({
+			mainHUD = hud,
+			playerGui = playerGui :: PlayerGui,
+			ensureButton = ensureSlot4GuiButton,
+			passthroughDecor = passthroughDecor,
+			ensureCircle = ensureCircle,
+			ensureStroke = ensureStroke,
+			getShortcutMode = getShortcutMode,
+			isWaveSummaryOpen = WaveSlot.isSummaryOpen,
+			isSavePlotsOpen = SavePlotSlot.isOpen,
+			isClearConfirmActive = ClearPlotSlot.isConfirmActive,
+			red = RED,
+			green = GREEN,
+			log = log,
+		})
+	end
+	-- Mount the inactive right HUD first (if present), then the active one last so
+	-- module deps.mainHUD / slot refs match layout. Bind-once attrs avoid double fire.
+	local otherName = if mainHUD.Name == UiViewportTags.P720_RIGHT_HUD
+		then UiViewportTags.MOBILE_RIGHT_HUD
+		else UiViewportTags.P720_RIGHT_HUD
+	local other = playerGui:FindFirstChild(otherName)
+	if other and other:IsA("ScreenGui") and other ~= mainHUD and UiViewportTags.hasQuickbarSlot4(other) then
+		mountOne(other)
+	end
+	mountOne(mainHUD)
 end
 mountSideSlots()
 WaveSign.mount()
@@ -1300,7 +1366,7 @@ local function makeItemButton(def, layoutOrder: number, instanceSuffix: string?)
 	label.BackgroundTransparency = 1
 	label.AnchorPoint = Vector2.new(0.5, 0)
 	label.Position = UDim2.new(0.5, 0, 0, 0)
-	label.Size = UDim2.new(1, -4, 0, 14)
+	label.Size = UDim2.new(1, -4, 0, backpackItemLabelHeight())
 	label.Font = UiTheme.Font
 	label.Text = def.displayName
 	label.TextColor3 = Color3.fromRGB(200, 220, 240)
@@ -1690,6 +1756,23 @@ end
 slotButton.Activated:Connect(function()
 	toggleFromUser(false)
 end)
+
+-- Other resolution HUD's Slot4 (so resize / wrong early bind still opens backpack).
+do
+	local otherName = if mainHUD.Name == UiViewportTags.P720_RIGHT_HUD
+		then UiViewportTags.MOBILE_RIGHT_HUD
+		else UiViewportTags.P720_RIGHT_HUD
+	local otherHud = playerGui:FindFirstChild(otherName)
+	if otherHud and otherHud:IsA("ScreenGui") and UiViewportTags.hasQuickbarSlot4(otherHud) then
+		local otherSlot4 = findQuickbarSlot4(otherHud)
+		local otherBtn = ensureSlot4GuiButton(otherSlot4)
+		passthroughDecor(otherSlot4, otherBtn)
+		otherBtn.Activated:Connect(function()
+			toggleFromUser(false)
+		end)
+		log("Also bound Slot4 on", otherHud.Name)
+	end
+end
 
 -- Help circle (Y / Q) — same toggle as Slot4; gamepad badge uses gamepad open path.
 if helpHitButton then

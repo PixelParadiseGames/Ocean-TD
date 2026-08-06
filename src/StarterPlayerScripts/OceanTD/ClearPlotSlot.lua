@@ -19,6 +19,7 @@ local UiIdleCycle = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiIdl
 local ItemCatalog = require(oceanRoot:WaitForChild("Shared"):WaitForChild("ItemCatalog"))
 local Remotes = require(oceanRoot:WaitForChild("Remotes"))
 local UiHaptics = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiHaptics"))
+local UiPopupScale = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiPopupScale"))
 
 local InventoryState = require(script.Parent:WaitForChild("InventoryState"))
 local PlacementController = require(script.Parent:WaitForChild("PlacementController"))
@@ -509,6 +510,7 @@ local function ensureClearConfirmUi()
 	sizeConstraint.MaxSize = Vector2.new(520, 480)
 	sizeConstraint.Parent = panel
 	clearConfirmPanel = panel
+	UiPopupScale.attach(panel)
 	local corner = Instance.new("UICorner")
 	corner.CornerRadius = UDim.new(0, 14)
 	corner.Parent = panel
@@ -792,6 +794,7 @@ function ClearPlotSlot.beginConfirm()
 		clearConfirmDim.Visible = true
 	end
 	if clearConfirmPanel then
+		UiPopupScale.attach(clearConfirmPanel)
 		clearConfirmPanel.Visible = true
 		-- Scale up from Slot2 into center.
 		if slot2 then
@@ -1081,14 +1084,20 @@ function ClearPlotSlot.mount(d: Deps)
 	end
 
 	if slot2Button then
-		slot2Button.Activated:Connect(function()
-			ClearPlotSlot.beginConfirm()
-		end)
+		if slot2Button:GetAttribute("_OceanTD_ActBound") ~= true then
+			slot2Button:SetAttribute("_OceanTD_ActBound", true)
+			slot2Button.Activated:Connect(function()
+				ClearPlotSlot.beginConfirm()
+			end)
+		end
 	end
 	if helpSlot2Hit then
-		helpSlot2Hit.Activated:Connect(function()
-			ClearPlotSlot.beginConfirm()
-		end)
+		if helpSlot2Hit:GetAttribute("_OceanTD_ActBound") ~= true then
+			helpSlot2Hit:SetAttribute("_OceanTD_ActBound", true)
+			helpSlot2Hit.Activated:Connect(function()
+				ClearPlotSlot.beginConfirm()
+			end)
+		end
 	end
 end
 

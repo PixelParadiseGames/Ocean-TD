@@ -17,6 +17,8 @@ local UiCircles = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiCircl
 local UiTheme = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiTheme"))
 local UiHaptics = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiHaptics"))
 local UiIdleCycle = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiIdleCycle"))
+local UiPopupScale = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiPopupScale"))
+local UiViewportTags = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiViewportTags"))
 
 local InventoryState = require(script.Parent:WaitForChild("InventoryState"))
 local WaveSim = require(script.Parent:WaitForChild("WaveSim"))
@@ -101,6 +103,10 @@ local LABEL_TEXT_SIZE = math.floor(15 * 1.25 + 0.5) -- 25% bigger
 local FORK_COUNT_TEXT_SIZE = math.max(1, LABEL_TEXT_SIZE - 2)
 local SIDE_ICON_PAD = 6
 local BAR_TOP_GAP = 20
+-- 720p+ wave/reef bars: wider than mobile quickbar track, and taller/larger text than popup baseline.
+local WAVE_HUD_WIDTH_MULT = 1.25 * 1.25 -- +25%, then another +25%
+local WAVE_HUD_SIZE_MULT = 1.25 -- extra UIScale on top of UiPopupScale (taller + larger text)
+local WAVE_HUD_SCALE_NAME = "_OceanTD_WaveHudScale"
 local REEF_PANEL_W = 360
 local REEF_PANEL_H = 200
 local REEF_SCALE_IN = TweenInfo.new(0.28, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
@@ -114,6 +120,8 @@ local confettiConn: RBXScriptConnection? = nil
 local confettiToken = 0
 local waveCamConn: RBXScriptConnection? = nil
 local waveCamCharConn: RBXScriptConnection? = nil
+-- Fixed offset baked when waves start — must NOT track live zoom or pinch fights CameraOffset.
+local waveCamOffset = Vector3.zero
 
 local stopConfirmActive = false
 local stopConfirmCheck: TextButton? = nil
@@ -163,24 +171,31 @@ local function clearWaveCameraOffset()
 	end
 end
 
-local function applyWaveCameraOffset()
-	local char = Players.LocalPlayer.Character
-	local hum = char and char:FindFirstChildOfClass("Humanoid")
-	if not hum then
-		return
-	end
+local function computeWaveCameraOffset(): Vector3
 	local cam = Workspace.CurrentCamera
 	if not cam then
-		hum.CameraOffset = Vector3.new(0, 3, 0)
-		return
+		return Vector3.new(0, 3, 0)
 	end
 	local dist = (cam.CFrame.Position - cam.Focus.Position).Magnitude
 	if dist < 1 then
 		dist = 12.5
 	end
 	local halfH = dist * math.tan(math.rad(cam.FieldOfView) * 0.5)
-	-- 20% of full vertical view in studs at the focus distance.
-	hum.CameraOffset = Vector3.new(0, halfH * (WAVE_CAM_SCREEN_SHIFT * 2), 0)
+	-- 20% of full vertical view in studs at the focus distance (at bake time).
+	return Vector3.new(0, halfH * (WAVE_CAM_SCREEN_SHIFT * 2), 0)
+end
+
+local function applyWaveCameraOffset()
+	local char = Players.LocalPlayer.Character
+	local hum = char and char:FindFirstChildOfClass("Humanoid")
+	if hum then
+		hum.CameraOffset = waveCamOffset
+	end
+end
+
+local function bakeWaveCameraOffset()
+	waveCamOffset = computeWaveCameraOffset()
+	applyWaveCameraOffset()
 end
 
 local function setWaveCameraActive(on: boolean)
@@ -188,13 +203,14 @@ local function setWaveCameraActive(on: boolean)
 		if waveCamConn then
 			return
 		end
-		waveCamConn = RunService.RenderStepped:Connect(applyWaveCameraOffset)
+		bakeWaveCameraOffset()
+		-- Re-assert fixed offset only (never recompute from zoom distance).
+		waveCamConn = RunService.Heartbeat:Connect(applyWaveCameraOffset)
 		if not waveCamCharConn then
 			waveCamCharConn = Players.LocalPlayer.CharacterAdded:Connect(function()
-				task.defer(applyWaveCameraOffset)
+				task.defer(bakeWaveCameraOffset)
 			end)
 		end
-		applyWaveCameraOffset()
 		return
 	end
 	if waveCamConn then
@@ -205,6 +221,7 @@ local function setWaveCameraActive(on: boolean)
 		waveCamCharConn:Disconnect()
 		waveCamCharConn = nil
 	end
+	waveCamOffset = Vector3.zero
 	clearWaveCameraOffset()
 end
 
@@ -561,7 +578,9 @@ function WaveSlot.tryFinishFromShortcut(): boolean
 end
 
 local function refreshReefHudLabels()
-	local text = "🤍 Reef Health " .. tostring(math.max(0, lastReefHealth))
+	local cur = math.max(0, lastReefHealth)
+	local maxHp = math.max(1, lastReefMax)
+	local text = "🤍 Reef Health " .. tostring(cur) .. "/" .. tostring(maxHp)
 	if hudReefLabel then
 		hudReefLabel.Text = text
 	end
@@ -569,11 +588,10 @@ local function refreshReefHudLabels()
 		reefHealTitle.Text = text
 	end
 	if hudReefFill then
-		local maxHp = math.max(1, lastReefMax)
-		hudReefFill.Size = UDim2.fromScale(math.clamp(lastReefHealth / maxHp, 0, 1), 1)
+		hudReefFill.Size = UDim2.fromScale(math.clamp(cur / maxHp, 0, 1), 1)
 	end
 	if reefHealBtn then
-		local atMax = lastReefHealth >= lastReefMax
+		local atMax = cur >= maxHp
 		reefHealBtn.AutoButtonColor = not atMax
 		reefHealBtn.BackgroundTransparency = if atMax then 0.45 else 0
 	end
@@ -743,6 +761,7 @@ local function ensureReefHealUi()
 	panel.ClipsDescendants = true
 	panel.Parent = g
 	reefHealPanel = panel
+	UiPopupScale.attach(panel)
 	local corner = Instance.new("UICorner")
 	corner.CornerRadius = UDim.new(0, 14)
 	corner.Parent = panel
@@ -781,7 +800,7 @@ local function ensureReefHealUi()
 	title.Position = UDim2.new(0.5, 0, 0, 52)
 	title.Size = UDim2.new(1, -40, 0, 36)
 	title.Font = UiTheme.Font
-	title.Text = "🤍 Reef Health 10"
+	title.Text = "🤍 Reef Health 10/10"
 	title.TextColor3 = Color3.new(1, 1, 1)
 	title.TextScaled = true
 	title.ZIndex = 3
@@ -883,6 +902,7 @@ function WaveSlot.beginReefHeal()
 		reefHealDim.Visible = true
 	end
 	if reefHealPanel then
+		UiPopupScale.attach(reefHealPanel)
 		reefHealPanel.Visible = true
 		if hudReefPlus then
 			local cam = Workspace.CurrentCamera
@@ -935,7 +955,55 @@ function WaveSlot.tryOpenReefHealFromShortcut(): boolean
 	return true
 end
 
+local function resolveActiveMainHud(): ScreenGui?
+	if not deps then
+		return nil
+	end
+	local pg = deps.playerGui
+	local mobile = pg:FindFirstChild(UiViewportTags.MOBILE_RIGHT_HUD)
+	local p720 = pg:FindFirstChild(UiViewportTags.P720_RIGHT_HUD)
+	-- Prefer the Enabled right HUD so bars aren't stuck on a disabled ScreenGui.
+	if mobile and mobile:IsA("ScreenGui") and mobile.Enabled then
+		return mobile
+	end
+	if p720 and p720:IsA("ScreenGui") and p720.Enabled then
+		return p720
+	end
+	return deps.mainHUD
+end
+
+local function syncWaveHudToActiveRightHud()
+	if not deps then
+		return
+	end
+	local hud = resolveActiveMainHud()
+	if not hud then
+		return
+	end
+	deps.mainHUD = hud
+	local quickbar = hud:FindFirstChild("Quickbar")
+	local found = if quickbar then quickbar:FindFirstChild("Slot5") else nil
+	if found and found:IsA("GuiObject") then
+		slot5 = found
+		-- Prefer existing bound hit target if present.
+		local existingHit = slot5:FindFirstChild("_OceanTD_Hit")
+		if existingHit and existingHit:IsA("GuiButton") then
+			slot5Button = existingHit
+		elseif slot5:IsA("GuiButton") then
+			slot5Button = slot5
+		end
+		local circle = slot5:FindFirstChild("Circle")
+		if circle and circle:IsA("GuiObject") then
+			slot5Circle = circle
+		end
+	end
+	if hudFrame and hudFrame.Parent ~= hud then
+		hudFrame.Parent = hud
+	end
+end
+
 local function ensureHud()
+	syncWaveHudToActiveRightHud()
 	if hudFrame then
 		return
 	end
@@ -943,6 +1011,7 @@ local function ensureHud()
 	f.Name = "OceanTD_WaveHud"
 	f.BackgroundTransparency = 1
 	f.BorderSizePixel = 0
+	f.Active = false
 	f.Visible = false
 	f.ZIndex = 25
 	f.Size = UDim2.fromOffset(220, BAR_H * 2 + REEF_ROW_GAP + 4 + LINE_H)
@@ -955,6 +1024,7 @@ local function ensureHud()
 	reefBar.BackgroundColor3 = REEF_BAR_BG
 	reefBar.BackgroundTransparency = 0.5
 	reefBar.BorderSizePixel = 0
+	reefBar.Active = false
 	reefBar.Size = UDim2.new(1, -4, 0, BAR_H)
 	reefBar.Position = UDim2.fromOffset(0, 0)
 	reefBar.ZIndex = 26
@@ -995,7 +1065,7 @@ local function ensureHud()
 	reefLabel.TextXAlignment = Enum.TextXAlignment.Center
 	reefLabel.TextYAlignment = Enum.TextYAlignment.Center
 	reefLabel.ZIndex = 29
-	reefLabel.Text = "🤍 Reef Health 10"
+	reefLabel.Text = "🤍 Reef Health 10/10"
 	reefLabel.Parent = reefBar
 	local reefPad = Instance.new("UIPadding")
 	reefPad.PaddingRight = UDim.new(0, REEF_PLUS_SIZE + 4)
@@ -1039,6 +1109,7 @@ local function ensureHud()
 	bar.BackgroundColor3 = BAR_BG
 	bar.BackgroundTransparency = 0.5
 	bar.BorderSizePixel = 0
+	bar.Active = false
 	bar.Size = UDim2.new(1, -4, 0, BAR_H)
 	bar.Position = UDim2.fromOffset(0, waveY)
 	bar.ZIndex = 26
@@ -1166,7 +1237,32 @@ local function ensureHud()
 	hudTime = timeLabel
 end
 
+local function applyWaveHudScale(root: GuiObject): number
+	local popup = UiPopupScale.get()
+	local barScale = if popup > 1 then popup * WAVE_HUD_SIZE_MULT else 1
+	local existing = root:FindFirstChild(WAVE_HUD_SCALE_NAME)
+	local scaleObj: UIScale
+	if existing and existing:IsA("UIScale") then
+		scaleObj = existing
+	else
+		if existing then
+			existing:Destroy()
+		end
+		-- Drop shared popup scale if present — wave HUD uses its own boost.
+		local shared = root:FindFirstChild("_OceanTD_PopupScale")
+		if shared then
+			shared:Destroy()
+		end
+		scaleObj = Instance.new("UIScale")
+		scaleObj.Name = WAVE_HUD_SCALE_NAME
+		scaleObj.Parent = root
+	end
+	scaleObj.Scale = barScale
+	return barScale
+end
+
 local function layoutHud()
+	syncWaveHudToActiveRightHud()
 	if not hudFrame or not slot5 then
 		return
 	end
@@ -1174,10 +1270,17 @@ local function layoutHud()
 	local slotPos = slot5.AbsolutePosition
 	local slotSize = slot5.AbsoluteSize
 	local parentPos = parent.AbsolutePosition
-	local w = math.max(260, slotSize.X + 140)
-	local h = BAR_H + REEF_ROW_GAP + BAR_H + 4 + LINE_H
-	local x = (slotPos.X + slotSize.X) - parentPos.X - w
-	local y = (slotPos.Y + slotSize.Y + BAR_TOP_GAP) - parentPos.Y
+	local scale = applyWaveHudScale(hudFrame)
+	local designW = math.max(260, slotSize.X + 140)
+	if scale > 1 then
+		designW = math.floor(designW * WAVE_HUD_WIDTH_MULT + 0.5)
+	end
+	local designH = BAR_H + REEF_ROW_GAP + BAR_H + 4 + LINE_H
+	local w = math.floor(designW / scale + 0.5)
+	local h = designH
+	local gap = math.floor(BAR_TOP_GAP * scale + 0.5)
+	local x = (slotPos.X + slotSize.X) - parentPos.X - designW
+	local y = (slotPos.Y + slotSize.Y + gap) - parentPos.Y
 	hudFrame.Size = UDim2.fromOffset(w, h)
 	hudFrame.Position = UDim2.fromOffset(math.floor(x + 0.5), math.floor(y + 0.5))
 end
@@ -1458,6 +1561,7 @@ local function showSummary(summary: WaveSim.Summary)
 		panel.BorderSizePixel = 0
 		panel.ZIndex = 2
 		panel.Parent = g
+		UiPopupScale.attach(panel)
 		local pc = Instance.new("UICorner")
 		pc.CornerRadius = UDim.new(0, 16)
 		pc.Parent = panel
@@ -1525,6 +1629,7 @@ local function showSummary(summary: WaveSim.Summary)
 	g.Enabled = true
 	local panel = g:FindFirstChild("Panel")
 	if panel and panel:IsA("Frame") then
+		UiPopupScale.attach(panel)
 		local title = panel:FindFirstChild("WaveReached")
 		local fed = panel:FindFirstChild("FishFed")
 		local lasted = panel:FindFirstChild("Lasted")
@@ -1687,6 +1792,7 @@ local function ensureStopConfirmUi()
 	panel.Active = true
 	panel.Parent = g
 	stopConfirmPanel = panel
+	UiPopupScale.attach(panel)
 	local corner = Instance.new("UICorner")
 	corner.CornerRadius = UDim.new(0, 14)
 	corner.Parent = panel
@@ -1811,6 +1917,7 @@ function WaveSlot.beginStopConfirm()
 		stopConfirmDim.Visible = true
 	end
 	if stopConfirmPanel then
+		UiPopupScale.attach(stopConfirmPanel)
 		stopConfirmPanel.Visible = true
 		if slot5 then
 			local cam = Workspace.CurrentCamera
@@ -1861,7 +1968,8 @@ end
 
 function WaveSlot.mount(d: Deps)
 	deps = d
-	local quickbar = d.mainHUD:FindFirstChild("Quickbar")
+	syncWaveHudToActiveRightHud()
+	local quickbar = deps.mainHUD:FindFirstChild("Quickbar")
 	local found = if quickbar then quickbar:FindFirstChild("Slot5") else nil
 	if found and found:IsA("GuiObject") then
 		slot5 = found
@@ -1872,10 +1980,13 @@ function WaveSlot.mount(d: Deps)
 		applyIcon(false)
 		d.ensureStroke(slot5Circle, "_OceanTD_WaveRing", Color3.new(1, 1, 1), 2).Enabled = false
 		slot5Button.Selectable = false
-		slot5Button.Activated:Connect(function()
-			toggleWaves()
-		end)
-		d.log("Slot5 wave button ready")
+		if slot5Button:GetAttribute("_OceanTD_ActBound") ~= true then
+			slot5Button:SetAttribute("_OceanTD_ActBound", true)
+			slot5Button.Activated:Connect(function()
+				WaveSlot.toggle()
+			end)
+		end
+		d.log("Slot5 wave button ready on", deps.mainHUD.Name)
 	else
 		warn("[WAVE] MainHUD.Quickbar.Slot5 missing — wave button unavailable")
 	end
@@ -1934,9 +2045,12 @@ function WaveSlot.mount(d: Deps)
 				helpHit = btn
 			end
 			helpHit.Selectable = false
-			helpHit.Activated:Connect(function()
-				toggleWaves()
-			end)
+			if helpHit:GetAttribute("_OceanTD_ActBound") ~= true then
+				helpHit:SetAttribute("_OceanTD_ActBound", true)
+				helpHit.Activated:Connect(function()
+					toggleWaves()
+				end)
+			end
 		end
 	end
 

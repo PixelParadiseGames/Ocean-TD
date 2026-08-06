@@ -464,9 +464,12 @@ function UndoSlot.mount(d: Deps)
 	end
 
 	if slot3Button then
-		slot3Button.Activated:Connect(function()
-			UndoSlot.requestUndo()
-		end)
+		if slot3Button:GetAttribute("_OceanTD_ActBound") ~= true then
+			slot3Button:SetAttribute("_OceanTD_ActBound", true)
+			slot3Button.Activated:Connect(function()
+				UndoSlot.requestUndo()
+			end)
+		end
 	end
 end
 
