@@ -30,6 +30,16 @@ local HAPPY_EXIT_FAN_STUDS = 18 -- lateral spread at arrival
 local HAPPY_EXIT_SOUND_ID = "rbxassetid://138571475125488"
 local HAPPY_EXIT_PITCH_MIN = 0.82
 local HAPPY_EXIT_PITCH_MAX = 1.28
+-- Finish firework (endpoint burst)
+local FIREWORK_SIZE_MIN = 15
+local FIREWORK_SIZE_MAX = 33
+local FIREWORK_START_SCALE = 0.08
+local FIREWORK_SPEED_MIN = 28
+local FIREWORK_SPEED_MAX = 62
+local FIREWORK_GRAV_MIN = 38
+local FIREWORK_GRAV_MAX = 72
+local FIREWORK_LIFE_MIN = 1.05
+local FIREWORK_LIFE_MAX = 1.75
 local END_HEART_RED = Color3.fromRGB(255, 40, 55)
 local END_HEART_BLACK = Color3.new(0, 0, 0)
 
@@ -295,6 +305,104 @@ function WaveEndVfx.pulseHappyExit(emoji: string, at: Vector3)
 			end
 		end
 	end)
+end
+
+-- Finish-button burst: tiny sparks that explode outward from the endpoint and arc down.
+function WaveEndVfx.burstHappyFirework(emojis: { string }, at: Vector3)
+	if #emojis == 0 then
+		return
+	end
+	playHappyExitSound()
+
+	local folder = resolveFolder()
+	local origin = at + Vector3.new(0, 2.5, 0)
+	local count = math.clamp(#emojis * 2, 14, 36)
+
+	for i = 1, count do
+		local emoji = emojis[((i - 1) % #emojis) + 1]
+		local delaySec = rng:NextNumber(0, 0.08)
+		task.delay(delaySec, function()
+			local anchor = Instance.new("Part")
+			anchor.Name = "OceanTD_HappyFirework"
+			anchor.Anchored = true
+			anchor.CanCollide = false
+			anchor.CanQuery = false
+			anchor.CanTouch = false
+			anchor.CastShadow = false
+			anchor.Transparency = 1
+			anchor.Size = Vector3.new(0.4, 0.4, 0.4)
+			anchor.CFrame = CFrame.new(origin)
+			anchor.Parent = folder
+
+			local sizeStuds = rng:NextNumber(FIREWORK_SIZE_MIN, FIREWORK_SIZE_MAX)
+			local bb = Instance.new("BillboardGui")
+			bb.Name = "HappySpark"
+			bb.Adornee = anchor
+			bb.AlwaysOnTop = true
+			bb.LightInfluence = 0
+			bb.MaxDistance = 2000
+			bb.Size = UDim2.fromScale(sizeStuds, sizeStuds)
+			bb.Parent = anchor
+
+			local scale = Instance.new("UIScale")
+			scale.Scale = FIREWORK_START_SCALE
+			scale.Parent = bb
+
+			local lbl = Instance.new("TextLabel")
+			lbl.BackgroundTransparency = 1
+			lbl.Size = UDim2.fromScale(1, 1)
+			lbl.Font = Enum.Font.SourceSansBold
+			lbl.Text = emoji
+			lbl.TextScaled = true
+			lbl.TextStrokeTransparency = 0.45
+			lbl.TextStrokeColor3 = Color3.fromRGB(20, 40, 10)
+			lbl.Parent = bb
+
+			-- Full sphere with a slight upward bias so arcs read as fireworks.
+			local yaw = rng:NextNumber(0, math.pi * 2)
+			local pitch = rng:NextNumber(-0.35, 1.15) -- more up than down at launch
+			local dir = Vector3.new(
+				math.cos(yaw) * math.cos(pitch),
+				math.sin(pitch),
+				math.sin(yaw) * math.cos(pitch)
+			).Unit
+			local speed = rng:NextNumber(FIREWORK_SPEED_MIN, FIREWORK_SPEED_MAX)
+			local vel = dir * speed
+			local grav = rng:NextNumber(FIREWORK_GRAV_MIN, FIREWORK_GRAV_MAX)
+			local life = rng:NextNumber(FIREWORK_LIFE_MIN, FIREWORK_LIFE_MAX)
+			local peakScale = rng:NextNumber(0.85, 1.45)
+			local popAt = rng:NextNumber(0.1, 0.22)
+			local pos = origin
+			local t0 = os.clock()
+			local conn: RBXScriptConnection
+			conn = RunService.RenderStepped:Connect(function(dt)
+				local age = os.clock() - t0
+				if age >= life then
+					conn:Disconnect()
+					if anchor.Parent then
+						anchor:Destroy()
+					end
+					return
+				end
+				vel += Vector3.new(0, -grav, 0) * dt
+				-- Light air drag so they don't fly forever.
+				vel *= (1 - 0.35 * dt)
+				pos += vel * dt
+				anchor.CFrame = CFrame.new(pos)
+
+				if age < popAt then
+					scale.Scale = FIREWORK_START_SCALE
+						+ (peakScale - FIREWORK_START_SCALE) * (age / popAt)
+				else
+					local fadeU = math.clamp((age - popAt) / math.max(0.05, life - popAt), 0, 1)
+					scale.Scale = peakScale * (1 - 0.35 * fadeU)
+				end
+				local fade = math.clamp((age - life * 0.55) / (life * 0.45), 0, 1)
+				lbl.TextTransparency = fade
+				lbl.TextStrokeTransparency = 0.45 + 0.55 * fade
+			end)
+		end)
+	end
 end
 
 function WaveEndVfx.playReefHealthTicks(amount: number, endPos: Vector3?)

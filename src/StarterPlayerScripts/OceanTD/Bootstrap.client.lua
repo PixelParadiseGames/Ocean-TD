@@ -12,6 +12,7 @@ local oceanRoot = ReplicatedStorage:WaitForChild("OceanTD")
 local Remotes = require(oceanRoot:WaitForChild("Remotes"))
 local ClientPlot = require(script.Parent:WaitForChild("ClientPlot"))
 local InventoryState = require(script.Parent:WaitForChild("InventoryState"))
+local WaveSim = require(script.Parent:WaitForChild("WaveSim"))
 
 -- Scroll / pinch zoom-out: further than place default (was 1.25×; now 1.75×).
 -- Pinch + mousewheel both clamp to CameraMaxZoomDistance (ZoomController listens).
@@ -119,6 +120,10 @@ do
 		-- Backpack uses R3 for Clear Plot — block default zoom, don't snap.
 		if InventoryState.isOpen() then
 			return Enum.ContextActionResult.Sink
+		end
+		-- Waves running: R3 is Skip Wave (InventoryUI) — don't steal for zoom.
+		if WaveSim.isRunning() then
+			return Enum.ContextActionResult.Pass
 		end
 		task.spawn(cycleGamepadZoom)
 		return Enum.ContextActionResult.Sink

@@ -37,6 +37,7 @@ local UndoSlot = require(script.Parent:WaitForChild("UndoSlot"))
 local SavePlotSlot = require(script.Parent:WaitForChild("SavePlotSlot"))
 local WaveSlot = require(script.Parent:WaitForChild("WaveSlot"))
 local SkipWaveSlot = require(script.Parent:WaitForChild("SkipWaveSlot"))
+local WaveSpeedSlot = require(script.Parent:WaitForChild("WaveSpeedSlot"))
 local WaveSign = require(script.Parent:WaitForChild("WaveSign"))
 
 local TWEEN_OPEN = TweenInfo.new(0.28, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
@@ -1169,6 +1170,16 @@ local function mountSideSlots()
 			green = GREEN,
 			log = log,
 		})
+		WaveSpeedSlot.mount({
+			mainHUD = hud,
+			playerGui = playerGui :: PlayerGui,
+			ensureButton = ensureSlot4GuiButton,
+			passthroughDecor = passthroughDecor,
+			ensureCircle = ensureCircle,
+			ensureStroke = ensureStroke,
+			getShortcutMode = getShortcutMode,
+			log = log,
+		})
 	end
 	-- Mount the inactive right HUD first (if present), then the active one last so
 	-- module deps.mainHUD / slot refs match layout. Bind-once attrs avoid double fire.
@@ -1210,6 +1221,7 @@ local function refreshGamepadCloseLabel()
 	SavePlotSlot.refreshHelpBadge()
 	WaveSlot.refreshHelpBadge()
 	SkipWaveSlot.refreshHelpBadge()
+	WaveSpeedSlot.refreshHelpBadge()
 	ClearPlotSlot.layoutConfirmIfActive()
 	if not closeX.Visible then
 		closeX.Text = "X"
@@ -1701,6 +1713,7 @@ InventoryState.onOpenChanged(function(isOpen)
 			SavePlotSlot.refreshHelpBadge()
 			WaveSlot.refreshHelpBadge()
 			SkipWaveSlot.refreshHelpBadge()
+			WaveSpeedSlot.refreshHelpBadge()
 		end)
 	end
 end)
@@ -1880,6 +1893,11 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
 			ClearPlotSlot.beginConfirm()
 			return
 		end
+		-- Skip Wave: R3 gamepad while closed (waves running).
+		if not InventoryState.isOpen() and input.KeyCode == Enum.KeyCode.ButtonR3 then
+			SkipWaveSlot.beginConfirm()
+			return
+		end
 	end
 	-- Reef heal: H while backpack closed (L3 via ContextAction bind).
 	if input.KeyCode == Enum.KeyCode.H then
@@ -1887,14 +1905,30 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
 			return
 		end
 	end
-	-- Undo while backpack open; Skip Wave while closed (Z / L2).
-	if input.KeyCode == Enum.KeyCode.Z or input.KeyCode == Enum.KeyCode.ButtonL2 then
+	if input.KeyCode == Enum.KeyCode.Z then
 		if InventoryState.isOpen() and not SavePlotSlot.isOpen() then
 			UndoSlot.requestUndo()
 			return
 		end
 		if not InventoryState.isOpen() then
 			SkipWaveSlot.beginConfirm()
+			return
+		end
+	end
+	-- Undo L2 while backpack open; Wave Speed L2 / T while closed.
+	if input.KeyCode == Enum.KeyCode.ButtonL2 then
+		if InventoryState.isOpen() and not SavePlotSlot.isOpen() then
+			UndoSlot.requestUndo()
+			return
+		end
+		if not InventoryState.isOpen() then
+			WaveSpeedSlot.cycle()
+			return
+		end
+	end
+	if input.KeyCode == Enum.KeyCode.T then
+		if not InventoryState.isOpen() then
+			WaveSpeedSlot.cycle()
 			return
 		end
 	end
@@ -1987,4 +2021,4 @@ SavePlotSlot.syncVisibility()
 UserInputService.LastInputTypeChanged:Connect(function()
 	refreshGamepadCloseLabel()
 end)
-log("Backpack UI ready — shortcuts: Y/Q backpack; Z/L2 undo (open) / skip wave (closed); C/R3 clear; R/X waves")
+log("Backpack UI ready — shortcuts: Y/Q backpack; Z/L2 undo (open); Z/R3 skip (closed); T/L2 wave speed (closed); C/R3 clear; R/X waves")

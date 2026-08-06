@@ -1,7 +1,7 @@
 --!strict
 --[[
 	Slot6 Skip Wave — slides out from under Slot5 while waves run.
-	Shortcuts: Z (keyboard) / L2 (gamepad) when backpack is closed.
+	Shortcuts: Z (keyboard) / R3 (gamepad) when backpack is closed.
 	Help badge orange; hidden on touch. Click / shortcut opens confirm popup.
 ]]
 
@@ -236,7 +236,7 @@ local function styleHelpBadge(): boolean
 	helpSlot.BackgroundTransparency = 0
 	helpSlot.Active = false
 	UiCircles.ensure(helpSlot)
-	helpLetter.Text = if mode == "gamepad" then "L2" else "Z"
+	helpLetter.Text = if mode == "gamepad" then "R3" else "Z"
 	helpLetter.TextColor3 = Color3.new(1, 1, 1)
 	helpLetter.Visible = true
 	return true

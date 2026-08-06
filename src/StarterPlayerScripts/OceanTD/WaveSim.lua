@@ -176,6 +176,8 @@ local fishFed = 0
 local waveFishExpected = 0
 local waveFedUnits = 0 -- sum of maxHunger for fish fully fed this wave (incl. finished)
 local startedAt = 0
+local simClock = 0 -- advances with dt * speedMult (ammo/combat); HUD clock stays real-time
+local speedMult = 1 -- 1 | 1.5 | 2; session-only, player-controlled
 local waveSpawning = false
 local moveConn: RBXScriptConnection? = nil
 local combatAcc = 0
@@ -189,6 +191,8 @@ local hudListeners: { (HudSnapshot) -> () } = {}
 local stopListeners: { (Summary) -> () } = {}
 local fishRng = Random.new()
 local feedPitchCursor = C.FEED_PITCH_MIN
+
+local SPEED_STEPS = { 1, 1.5, 2 }
 
 local function fishWorldOffset(agent: FishAgent, pos: Vector3, tang: Vector3, atDist: number?): Vector3
 	local side = Vector3.new(-tang.Z, 0, tang.X)
@@ -1097,7 +1101,7 @@ end
 local function startAmmoGrow(coral: CoralAgent)
 	createAmmo(coral, 0.08)
 	coral.growing = true
-	coral.growT0 = os.clock()
+	coral.growT0 = simClock
 	coral.readyAt = math.huge
 end
 
@@ -1358,7 +1362,7 @@ local function destroyFish(agent: FishAgent)
 	end
 end
 
-local function finishFish(agent: FishAgent)
+local function finishFish(agent: FishAgent, skipHappyVfx: boolean?)
 	if agent.finished then
 		return
 	end
@@ -1375,19 +1379,21 @@ local function finishFish(agent: FishAgent)
 	else
 		fishFed += 1
 		waveFedUnits += agent.maxHunger
-		local emoji = agent.happyLabel.Text
-		if emoji == "" then
-			emoji = C.HAPPY_EMOJIS[1]
-		end
-		local endPos = if pathData then pathData.endPos else nil
-		if not endPos then
-			local heart = WaveEndVfx.getEndHeartPart()
-			if heart then
-				endPos = heart.Position
+		if not skipHappyVfx then
+			local emoji = agent.happyLabel.Text
+			if emoji == "" then
+				emoji = C.HAPPY_EMOJIS[1]
 			end
-		end
-		if endPos then
-			WaveEndVfx.pulseHappyExit(emoji, endPos)
+			local endPos = if pathData then pathData.endPos else nil
+			if not endPos then
+				local heart = WaveEndVfx.getEndHeartPart()
+				if heart then
+					endPos = heart.Position
+				end
+			end
+			if endPos then
+				WaveEndVfx.pulseHappyExit(emoji, endPos)
+			end
 		end
 	end
 	destroyFish(agent)
@@ -1695,7 +1701,7 @@ local function finishShot(shot: FoodShot, fed: boolean)
 end
 
 local function tickCombat()
-	local now = os.clock()
+	local now = simClock
 	local anyHungry = false
 	for _, f in ipairs(fishList) do
 		if not f.finished and f.hunger < f.maxHunger then
@@ -1773,7 +1779,7 @@ local function tickFish(dt: number)
 		if agent.finished then
 			continue
 		end
-		agent.dist += C.FISH_SPEED * (1 + C.FISH_SPEED_VAR * math.sin(os.clock() * agent.speedFreq + agent.speedPhase)) * dt
+		agent.dist += C.FISH_SPEED * (1 + C.FISH_SPEED_VAR * math.sin(simClock * agent.speedFreq + agent.speedPhase)) * dt
 		if agent.dist >= path.totalLen then
 			finishFish(agent)
 			continue
@@ -1930,11 +1936,22 @@ function WaveSim.finishWaveEarly(): boolean
 	if not complete then
 		return false
 	end
-	-- Credit remaining full fish (same as reaching the heart fed).
+	local burstEmojis = WaveSim.getFinishEmojis()
+	local endPos = if pathData then pathData.endPos else nil
+	if not endPos then
+		local heart = WaveEndVfx.getEndHeartPart()
+		if heart then
+			endPos = heart.Position
+		end
+	end
+	-- Credit remaining full fish (same as reaching the heart fed); one firework instead of N stacked exits.
 	for _, f in ipairs(fishList) do
 		if not f.finished and f.hunger >= f.maxHunger then
-			finishFish(f)
+			finishFish(f, true)
 		end
+	end
+	if endPos and #burstEmojis > 0 then
+		WaveEndVfx.burstHappyFirework(burstEmojis, endPos)
 	end
 	clearActiveWaveEntities()
 	UiHaptics.pulseTriple()
@@ -2018,6 +2035,7 @@ function WaveSim.start(): boolean
 	WaveEndVfx.resetStreak()
 	feedPitchCursor = C.FEED_PITCH_MIN
 	startedAt = os.clock()
+	simClock = 0
 	combatAcc = 0
 	nextFishId = 1
 	ensureFolder()
@@ -2031,9 +2049,11 @@ function WaveSim.start(): boolean
 		if myToken ~= token or not running then
 			return
 		end
+		local simDt = dt * speedMult
+		simClock += simDt
 		-- Spawning (first fish waits C.ARROW_LEAD_SEC after GreenArrows start)
 		if waveSpawning and spawnQueue > 0 then
-			spawnDelay -= dt
+			spawnDelay -= simDt
 			if spawnDelay <= 0 then
 				local idx = waveFishCount(waveIndex) - spawnQueue + 1
 				spawnOneFish(idx)
@@ -2045,13 +2065,13 @@ function WaveSim.start(): boolean
 			end
 		end
 
-		tickArrowPreview(dt)
-		tickFish(dt)
-		tickShots(dt)
-		tickAmmoGrow(os.clock())
+		tickArrowPreview(simDt)
+		tickFish(simDt)
+		tickShots(simDt)
+		tickAmmoGrow(simClock)
 
 		-- Ammo grow + combat cadence; also pick up newly placed corals (~10 Hz).
-		combatAcc += dt
+		combatAcc += simDt
 		if combatAcc >= C.COMBAT_DT then
 			combatAcc -= C.COMBAT_DT
 			syncCorals(false)
@@ -2078,6 +2098,24 @@ function WaveSim.start(): boolean
 	end)
 
 	return true
+end
+
+function WaveSim.getSpeedMult(): number
+	return speedMult
+end
+
+-- Returns new mult after cycle: 1 → 1.5 → 2 → 1
+function WaveSim.cycleSpeed(): number
+	local idx = 1
+	for i, s in ipairs(SPEED_STEPS) do
+		if math.abs(speedMult - s) < 1e-4 then
+			idx = i
+			break
+		end
+	end
+	idx = idx % #SPEED_STEPS + 1
+	speedMult = SPEED_STEPS[idx]
+	return speedMult
 end
 
 function WaveSim.formatClock(sec: number): string

@@ -508,28 +508,28 @@ local function playFinishFirework(emojis: { string })
 		lbl.BackgroundTransparency = 1
 		lbl.Text = emoji
 		lbl.Font = Enum.Font.SourceSansBold
-		lbl.TextSize = 28
+		lbl.TextSize = rng:NextInteger(22, 40)
 		lbl.AnchorPoint = Vector2.new(0.5, 0.5)
 		lbl.Position = UDim2.fromOffset(ox, oy)
-		lbl.Size = UDim2.fromOffset(36, 36)
+		lbl.Size = UDim2.fromOffset(48, 48)
 		lbl.ZIndex = 81
 		lbl.Parent = layer
 		local scale = Instance.new("UIScale")
-		scale.Scale = 0.15
+		scale.Scale = 0.12
 		scale.Parent = lbl
 
 		local angle = rng:NextNumber(0, math.pi * 2)
-		local speed = rng:NextNumber(220, 520)
+		local speed = rng:NextNumber(260, 620)
 		local vx = math.cos(angle) * speed
-		local vy = math.sin(angle) * speed - rng:NextNumber(80, 220)
-		local grav = rng:NextNumber(780, 1100)
-		local life = rng:NextNumber(1.15, 1.85)
-		local popAt = rng:NextNumber(0.12, 0.28)
+		local vy = math.sin(angle) * speed - rng:NextNumber(120, 280)
+		local grav = rng:NextNumber(820, 1200)
+		local life = rng:NextNumber(1.15, 1.9)
+		local popAt = rng:NextNumber(0.1, 0.24)
+		local peak = rng:NextNumber(1.15, 1.85)
 		local x = ox
 		local y = oy
 		task.spawn(function()
 			local t0 = os.clock()
-			local popped = false
 			while my == fireworkToken and lbl.Parent do
 				local dt = RunService.RenderStepped:Wait()
 				local age = os.clock() - t0
@@ -541,22 +541,20 @@ local function playFinishFirework(emojis: { string })
 				y += vy * dt
 				vx *= (1 - 0.55 * dt)
 				lbl.Position = UDim2.fromOffset(x, y)
-				if not popped and age >= popAt then
-					popped = true
-					scale.Scale = 1.55
-				elseif popped then
-					scale.Scale = 1.55 + (1.05 - 1.55) * math.clamp((age - popAt) / 0.2, 0, 1)
+				if age < popAt then
+					scale.Scale = 0.12 + (peak - 0.12) * (age / popAt)
 				else
-					scale.Scale = 0.15 + (1.2 - 0.15) * (age / popAt)
+					local u = math.clamp((age - popAt) / math.max(0.05, life - popAt), 0, 1)
+					scale.Scale = peak * (1 - 0.3 * u)
 				end
-				lbl.TextTransparency = math.clamp((age - life * 0.65) / (life * 0.35), 0, 1)
+				lbl.TextTransparency = math.clamp((age - life * 0.6) / (life * 0.4), 0, 1)
 			end
 			if lbl.Parent then
 				lbl:Destroy()
 			end
 		end)
 	end
-	task.delay(2.4, function()
+	task.delay(2.5, function()
 		if layer.Parent and my == fireworkToken then
 			layer:Destroy()
 		end
