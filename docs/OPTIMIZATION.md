@@ -39,3 +39,11 @@ For each feature ask: instances? updates/sec? remotes/sec? who receives them? wo
 
 ## LOD
 Far = cheaper. Low device = stable FPS over density.
+
+## Shipped (Ocean TD)
+| Item | Where |
+|------|--------|
+| Plot-frame freeze | `PlotFrameContract` + `PlotService` RingMath-only; TerrainPlotAlign no-op |
+| Placed coral spatial index | `PlacedCoralIndex` — grid O(1) Spot Taken; wave gather without `GetDescendants` |
+| Placement aim throttle | `PlacementController` raycast ≤25 Hz or on pointer move; cam freeze stays per-frame |
+| Typed wave visual pools | `WaveEntityPool` — `acquireFish("Tang")` / food / arrows / ammo / SFX; add kinds via `Fish.<Name>` |

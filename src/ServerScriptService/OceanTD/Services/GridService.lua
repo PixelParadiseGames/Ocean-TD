@@ -1,5 +1,6 @@
 --!strict
 -- In-memory occupancy for plot layouts.
+-- Cells store exact plot-local VisualPos (lx,ly,lz) plus rounded grid keys (gx,gy,gz).
 
 local PlotTypes = require(game:GetService("ReplicatedStorage"):WaitForChild("OceanTD"):WaitForChild("Shared"):WaitForChild("PlotTypes"))
 local GridMath = require(game:GetService("ReplicatedStorage"):WaitForChild("OceanTD"):WaitForChild("Shared"):WaitForChild("GridMath"))
@@ -9,9 +10,12 @@ type PlotId = PlotTypes.PlotId
 
 export type CellData = {
 	id: string,
-	lx: number,
+	lx: number, -- VisualPos plot-local
 	ly: number,
 	lz: number,
+	gx: number,
+	gy: number,
+	gz: number,
 	ownerUserId: number,
 	plotId: PlotId,
 }
@@ -29,9 +33,26 @@ local function compoundKey(plotId: string, gx: number, gy: number, gz: number): 
 	return plotId .. ":" .. GridMath.key(gx, gy, gz)
 end
 
-local function localToKey(plotId: string, lx: number, ly: number, lz: number): string
-	local gx, gy, gz = GridMath.worldToGrid(Vector3.new(lx, ly, lz), Vector3.zero)
-	return compoundKey(plotId, gx, gy, gz)
+local function resolveGridKey(
+	plotId: string,
+	lx: number,
+	ly: number,
+	lz: number,
+	gx: number?,
+	gy: number?,
+	gz: number?
+): (number, number, number, string)
+	local rx: number
+	local ry: number
+	local rz: number
+	if typeof(gx) == "number" and typeof(gy) == "number" and typeof(gz) == "number" then
+		rx = math.round(gx)
+		ry = math.round(gy)
+		rz = math.round(gz)
+	else
+		rx, ry, rz = GridMath.worldToGrid(Vector3.new(lx, ly, lz), Vector3.zero)
+	end
+	return rx, ry, rz, compoundKey(plotId, rx, ry, rz)
 end
 
 function GridService.clearPlot(plotId: PlotId)
@@ -51,7 +72,12 @@ function GridService.getPlotCount(plotId: PlotId): number
 end
 
 function GridService.getCell(plotId: PlotId, lx: number, ly: number, lz: number): CellData?
-	return cells[localToKey(plotId, lx, ly, lz)]
+	local _, _, _, key = resolveGridKey(plotId, lx, ly, lz, nil, nil, nil)
+	return cells[key]
+end
+
+function GridService.getCellAtGrid(plotId: PlotId, gx: number, gy: number, gz: number): CellData?
+	return cells[compoundKey(plotId, math.round(gx), math.round(gy), math.round(gz))]
 end
 
 function GridService.isOccupied(plotId: PlotId, lx: number, ly: number, lz: number): boolean
@@ -64,9 +90,12 @@ function GridService.tryOccupy(
 	itemId: string,
 	lx: number,
 	ly: number,
-	lz: number
+	lz: number,
+	gx: number?,
+	gy: number?,
+	gz: number?
 ): (boolean, string?)
-	local key = localToKey(plotId, lx, ly, lz)
+	local rx, ry, rz, key = resolveGridKey(plotId, lx, ly, lz, gx, gy, gz)
 	if cells[key] then
 		return false, "SpotTaken"
 	end
@@ -75,6 +104,9 @@ function GridService.tryOccupy(
 		lx = lx,
 		ly = ly,
 		lz = lz,
+		gx = rx,
+		gy = ry,
+		gz = rz,
 		ownerUserId = ownerUserId,
 		plotId = plotId,
 	}
@@ -82,8 +114,16 @@ function GridService.tryOccupy(
 	return true, nil
 end
 
-function GridService.vacate(plotId: PlotId, lx: number, ly: number, lz: number): (boolean, CellData?)
-	local key = localToKey(plotId, lx, ly, lz)
+function GridService.vacate(
+	plotId: PlotId,
+	lx: number,
+	ly: number,
+	lz: number,
+	gx: number?,
+	gy: number?,
+	gz: number?
+): (boolean, CellData?)
+	local _, _, _, key = resolveGridKey(plotId, lx, ly, lz, gx, gy, gz)
 	local cell = cells[key]
 	if not cell then
 		return false, nil
@@ -102,13 +142,15 @@ function GridService.hydrate(plotId: PlotId, ownerUserId: number, layout: { Layo
 			local lx = tonumber(obj.lx) or 0
 			local ly = tonumber(obj.ly) or 0
 			local lz = tonumber(obj.lz) or 0
-			local ok = GridService.tryOccupy(plotId, ownerUserId, obj.id, lx, ly, lz)
+			local gx = tonumber(obj.gx)
+			local gy = tonumber(obj.gy)
+			local gz = tonumber(obj.gz)
+			local ok = GridService.tryOccupy(plotId, ownerUserId, obj.id, lx, ly, lz, gx, gy, gz)
 			if ok then
 				count += 1
 			end
 		end
 	end
-	-- tryOccupy increments; clearPlot zeroed — recount for accuracy
 	plotObjectCounts[plotId] = count
 	log("Hydrated", plotId, "objects=", count)
 end
@@ -130,6 +172,9 @@ function GridService.snapshot(plotId: PlotId): { LayoutObject }
 				lx = cell.lx,
 				ly = cell.ly,
 				lz = cell.lz,
+				gx = cell.gx,
+				gy = cell.gy,
+				gz = cell.gz,
 			})
 		end
 	end

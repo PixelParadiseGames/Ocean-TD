@@ -79,12 +79,21 @@ local function sanitizeLayout(raw: any): { LayoutObject }
 	end
 	for _, obj in ipairs(raw) do
 		if typeof(obj) == "table" and typeof(obj.id) == "string" then
-			table.insert(layout, {
+			local entry: LayoutObject = {
 				id = obj.id,
 				lx = tonumber(obj.lx) or 0,
 				ly = tonumber(obj.ly) or 0,
 				lz = tonumber(obj.lz) or 0,
-			})
+			}
+			local gx = tonumber(obj.gx)
+			local gy = tonumber(obj.gy)
+			local gz = tonumber(obj.gz)
+			if gx and gy and gz then
+				entry.gx = math.round(gx)
+				entry.gy = math.round(gy)
+				entry.gz = math.round(gz)
+			end
+			table.insert(layout, entry)
 		end
 	end
 	return layout
@@ -98,6 +107,9 @@ local function cloneLayout(layout: { LayoutObject }): { LayoutObject }
 			lx = obj.lx,
 			ly = obj.ly,
 			lz = obj.lz,
+			gx = obj.gx,
+			gy = obj.gy,
+			gz = obj.gz,
 		})
 	end
 	return out

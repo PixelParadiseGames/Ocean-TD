@@ -1,7 +1,8 @@
 --!strict
 --[[
 	Client-only feed-wave simulation (solo). Fish, food, reef health — not replicated.
-	Optimized: path samples once, spatial hash for coral↔fish, 10 Hz targeting, pooled FX.
+	Optimized: path samples once, path-bucket coral↔fish, 10 Hz targeting, PlacedCoralIndex gather,
+	WaveEntityPool (Tang fish / food / arrows / ammo / SFX).
 ]]
 
 local ContentProvider = game:GetService("ContentProvider")
@@ -18,6 +19,7 @@ local CoralVisual = require(oceanRoot:WaitForChild("Shared"):WaitForChild("Coral
 local UiHaptics = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiHaptics"))
 
 local ClientPlot = require(script.Parent:WaitForChild("ClientPlot"))
+local WaveEntityPool = require(script.Parent:WaitForChild("WaveEntityPool"))
 local WaveEndVfx = require(script.Parent:WaitForChild("WaveEndVfx"))
 local WaveStartVfx = require(script.Parent:WaitForChild("WaveStartVfx"))
 
@@ -63,6 +65,7 @@ export type HudSnapshot = {
 	hungryMissToken: number, -- bumps when a hungry fish reaches the end (broken heart)
 	fishFull: number, -- fully-fed fish this wave (alive + finished happy)
 	fishTotal: number, -- fish expected this wave
+	speedMult: number,
 }
 
 type PathSegment = {
@@ -126,7 +129,6 @@ type CoralAgent = {
 	growing: boolean,
 	growT0: number,
 	busy: boolean, -- projectile in flight
-	hashKeys: { number },
 	pathDist: number, -- nearest distance along WaveRoute
 	pathSideDist: number, -- world distance from that path point
 }
@@ -163,9 +165,7 @@ local folder: Folder? = nil
 local pathData: PathData? = nil
 local fishList: { FishAgent } = {}
 local coralList: { CoralAgent } = {}
-local hash: { [number]: { CoralAgent } } = {}
 local fishPathBuckets: { { FishAgent } } = {}
-local foodPool: { BasePart } = {}
 local activeShots: { FoodShot } = {}
 local spawnQueue = 0
 local spawnDelay = 0
@@ -182,7 +182,6 @@ local waveSpawning = false
 local moveConn: RBXScriptConnection? = nil
 local combatAcc = 0
 local nextFishId = 1
-local tangTemplate: Instance? = nil
 local greenArrowsTemplate: Instance? = nil
 local arrowPreviews: { ArrowPreview } = {}
 local wavePathLabels: { WavePathLabel } = {}
@@ -323,6 +322,7 @@ local function flushHud()
 		hungryMissToken = hungryMissToken,
 		fishFull = fishFull,
 		fishTotal = fishTotal,
+		speedMult = speedMult,
 	}
 	for _, cb in ipairs(hudListeners) do
 		cb(snap)
@@ -332,32 +332,6 @@ end
 local function fireStopped(summary: Summary)
 	for _, cb in ipairs(stopListeners) do
 		cb(summary)
-	end
-end
-
-local function clearHash()
-	table.clear(hash)
-end
-
-local function insertHash(coral: CoralAgent)
-	local p = coral.part.Position
-	local r = C.TARGET_RANGE
-	local x0 = math.floor((p.X - r) / C.HASH_CELL)
-	local x1 = math.floor((p.X + r) / C.HASH_CELL)
-	local z0 = math.floor((p.Z - r) / C.HASH_CELL)
-	local z1 = math.floor((p.Z + r) / C.HASH_CELL)
-	coral.hashKeys = {}
-	for cx = x0, x1 do
-		for cz = z0, z1 do
-			local k = cx * 73856093 + cz * 19349663
-			local bucket = hash[k]
-			if not bucket then
-				bucket = {}
-				hash[k] = bucket
-			end
-			table.insert(bucket, coral)
-			table.insert(coral.hashKeys, k)
-		end
 	end
 end
 
@@ -466,6 +440,20 @@ local function buildPath(): PathData?
 		return nil
 	end
 
+	-- WaveRoute is authored on Plot1; remap into the local player's plot CFrame.
+	local mirrored = ClientPlot.get()
+	local plotLabel = if mirrored then mirrored.plotId else "?"
+	if mirrored and not ClientPlot.getPlot1CFrame() then
+		warn("[WAVE] Cannot remap WaveRoute onto", plotLabel, "(missing Plot1 CFrame from server)")
+		return nil
+	end
+
+	-- Rigid Plot1→local remap only (same frame as coral/décor). Do not snap to
+	-- Terrain — that flattens authored swim height onto the seafloor.
+	local function wpPos(part: BasePart): Vector3
+		return ClientPlot.remapFromPlot1(part.Position)
+	end
+
 	local segments: { PathSegment } = {}
 	local total = 0
 	for s = 1, #waypoints - 1 do
@@ -474,9 +462,9 @@ local function buildPath(): PathData?
 			warn("[WAVE] Missing control C" .. tostring(s) .. " for segment W" .. tostring(s) .. "→W" .. tostring(s + 1))
 			return nil
 		end
-		local w0 = waypoints[s].Position
-		local w1 = waypoints[s + 1].Position
-		local c = ctrl.Position
+		local w0 = wpPos(waypoints[s])
+		local w1 = wpPos(waypoints[s + 1])
+		local c = wpPos(ctrl)
 		local length = estimateSegLength(w0, c, w1)
 		table.insert(segments, {
 			w0 = w0,
@@ -495,11 +483,21 @@ local function buildPath(): PathData?
 		table.insert(waypointDists, segments[s].cumStart + segments[s].length)
 	end
 
-	print("[WAVE] Path ready:", #waypoints, "waypoints,", #segments, "curve segments, len=", string.format("%.1f", total))
+	print(
+		"[WAVE] Path ready:",
+		#waypoints,
+		"waypoints,",
+		#segments,
+		"curve segments, len=",
+		string.format("%.1f", total),
+		"plot=",
+		plotLabel,
+		"rigidRemap=true"
+	)
 	return {
 		segments = segments,
 		totalLen = total,
-		endPos = waypoints[#waypoints].Position,
+		endPos = wpPos(waypoints[#waypoints]),
 		waypointDists = waypointDists,
 	}
 end
@@ -566,24 +564,6 @@ local function isOnFinalTwoWaypoints(path: PathData, dist: number): boolean
 	return pathSegmentIndex(path, dist) >= math.max(1, n - 1)
 end
 
-local function getTangTemplate(): Instance?
-	if tangTemplate and tangTemplate.Parent then
-		return tangTemplate
-	end
-	local fishFolder = ReplicatedStorage:FindFirstChild("Fish")
-	if not fishFolder then
-		warn("[WAVE] ReplicatedStorage.Fish missing")
-		return nil
-	end
-	local tang = fishFolder:FindFirstChild("Tang")
-	if not tang then
-		warn("[WAVE] ReplicatedStorage.Fish.Tang missing")
-		return nil
-	end
-	tangTemplate = tang
-	return tang
-end
-
 local function getGreenArrowsTemplate(): Instance?
 	if greenArrowsTemplate and greenArrowsTemplate.Parent then
 		return greenArrowsTemplate
@@ -601,35 +581,7 @@ local function getGreenArrowsTemplate(): Instance?
 end
 
 local function findPrimary(inst: Instance): BasePart?
-	if inst:IsA("BasePart") then
-		return inst
-	end
-	if inst:IsA("Model") then
-		if inst.PrimaryPart then
-			return inst.PrimaryPart
-		end
-		return inst:FindFirstChildWhichIsA("BasePart", true)
-	end
-	return inst:FindFirstChildWhichIsA("BasePart", true)
-end
-
-local function prepareLocalFxInstance(inst: Instance)
-	for _, d in ipairs(inst:GetDescendants()) do
-		if d:IsA("BasePart") then
-			d.Anchored = true
-			d.CanCollide = false
-			d.CanTouch = false
-			d.CanQuery = false
-			d.CastShadow = false
-		end
-	end
-	if inst:IsA("BasePart") then
-		inst.Anchored = true
-		inst.CanCollide = false
-		inst.CanTouch = false
-		inst.CanQuery = false
-		inst.CastShadow = false
-	end
+	return WaveEntityPool.findPrimary(inst)
 end
 
 local function setArrowCFrame(model: Instance, pos: Vector3, tang: Vector3, spin: number)
@@ -658,9 +610,7 @@ end
 
 local function destroyArrowPreview()
 	for _, preview in ipairs(arrowPreviews) do
-		if preview.model.Parent then
-			preview.model:Destroy()
-		end
+		WaveEntityPool.releaseArrows(preview.model)
 	end
 	table.clear(arrowPreviews)
 	for _, label in ipairs(wavePathLabels) do
@@ -672,38 +622,7 @@ local function destroyArrowPreview()
 end
 
 local function playArrowStartSound()
-	local snd = arrowSound:Clone()
-	snd.Volume = 0.9
-	snd.Parent = SoundService
-	snd:Play()
-	local ttl = math.max(1.5, (snd.TimeLength > 0 and snd.TimeLength or 1.2) + 0.4)
-	task.delay(ttl, function()
-		if snd.Parent then
-			snd:Destroy()
-		end
-	end)
-end
-
-local function cloneGreenArrowsSet(tmpl: Instance, name: string): Instance
-	local clone = tmpl:Clone()
-	clone.Name = name
-	if clone:IsA("Folder") then
-		local model = Instance.new("Model")
-		model.Name = name
-		for _, ch in ipairs(clone:GetChildren()) do
-			ch.Parent = model
-		end
-		clone:Destroy()
-		clone = model
-	end
-	prepareLocalFxInstance(clone)
-	if clone:IsA("Model") then
-		local root = findPrimary(clone)
-		if root and not clone.PrimaryPart then
-			clone.PrimaryPart = root
-		end
-	end
-	return clone
+	WaveEntityPool.playSound("arrow", arrowSound, 1, 0.9)
 end
 
 local function createWavePathLabel(text: string, pos: Vector3, parent: Instance): BasePart
@@ -759,8 +678,10 @@ local function startWaveArrowPreview()
 	local i = 0
 	while d < path.totalLen - 0.05 do
 		i += 1
-		local clone = cloneGreenArrowsSet(tmpl, "OceanTD_GreenArrows_" .. tostring(i))
-		clone.Parent = folderFx
+		local clone = WaveEntityPool.acquireArrows("OceanTD_GreenArrows_" .. tostring(i), folderFx)
+		if not clone then
+			break
+		end
 		local spin0 = (i - 1) * 0.55
 		local pos, tang = samplePath(path, d)
 		setArrowCFrame(clone, pos, tang, spin0)
@@ -792,9 +713,7 @@ local function tickArrowPreview(dt: number)
 	for i = #arrowPreviews, 1, -1 do
 		local preview = arrowPreviews[i]
 		if not preview.alive or not preview.model.Parent then
-			if preview.model.Parent then
-				preview.model:Destroy()
-			end
+			WaveEntityPool.releaseArrows(preview.model)
 			table.remove(arrowPreviews, i)
 			continue
 		end
@@ -802,7 +721,7 @@ local function tickArrowPreview(dt: number)
 		preview.spin += C.ARROW_SPIN_RAD_PER_SEC * dt
 		if preview.dist >= path.totalLen then
 			preview.alive = false
-			preview.model:Destroy()
+			WaveEntityPool.releaseArrows(preview.model)
 			table.remove(arrowPreviews, i)
 			continue
 		end
@@ -1011,17 +930,7 @@ local function playFeedSound()
 	if feedPitchCursor > C.FEED_PITCH_MAX then
 		feedPitchCursor = C.FEED_PITCH_MIN
 	end
-	local snd = feedSound:Clone()
-	snd.PlaybackSpeed = pitch
-	snd.Volume = 0.85
-	snd.Parent = SoundService
-	snd:Play()
-	local ttl = math.max(0.8, (snd.TimeLength > 0 and snd.TimeLength or 0.5) / math.max(0.2, pitch) + 0.25)
-	task.delay(ttl, function()
-		if snd.Parent then
-			snd:Destroy()
-		end
-	end)
+	WaveEntityPool.playSound("feed", feedSound, pitch, 0.85)
 end
 
 local function startHappyFlash(agent: FishAgent)
@@ -1065,7 +974,7 @@ end
 
 local function destroyAmmo(coral: CoralAgent)
 	if coral.ammo then
-		coral.ammo:Destroy()
+		WaveEntityPool.releaseAmmo(coral.ammo)
 		coral.ammo = nil
 	end
 	-- Do not clear coral.growing here — createAmmo calls this while starting a grow.
@@ -1078,23 +987,12 @@ end
 
 local function createAmmo(coral: CoralAgent, scale: number)
 	if coral.ammo and coral.ammo.Parent then
-		coral.ammo:Destroy()
+		WaveEntityPool.releaseAmmo(coral.ammo)
 		coral.ammo = nil
 	end
-	local p = Instance.new("Part")
-	p.Name = "OceanTD_CoralAmmo"
-	p.Shape = Enum.PartType.Ball
-	p.Material = Enum.Material.Neon
-	p.Color = coral.color
-	p.Anchored = true
-	p.CanCollide = false
-	p.CanQuery = false
-	p.CanTouch = false
-	p.CastShadow = false
 	local s = C.AMMO_RADIUS * 2 * math.clamp(scale, 0.08, 1)
-	p.Size = Vector3.new(s, s, s)
+	local p = WaveEntityPool.acquireAmmo(ensureFolder(), coral.color, s)
 	p.CFrame = CFrame.new(ammoWorldPos(coral))
-	p.Parent = ensureFolder()
 	coral.ammo = p
 end
 
@@ -1131,33 +1029,11 @@ local function tickAmmoGrow(now: number)
 end
 
 local function acquireFoodPart(): BasePart
-	local p = table.remove(foodPool)
-	if p and p.Parent then
-		p.Transparency = 0
-		return p
-	end
-	local n = Instance.new("Part")
-	n.Name = "OceanTD_FoodOrb"
-	n.Shape = Enum.PartType.Ball
-	n.Material = Enum.Material.Neon
-	n.Anchored = true
-	n.CanCollide = false
-	n.CanQuery = false
-	n.CanTouch = false
-	n.CastShadow = false
-	n.Size = Vector3.new(C.FOOD_RADIUS * 2, C.FOOD_RADIUS * 2, C.FOOD_RADIUS * 2)
-	n.Parent = ensureFolder()
-	return n
+	return WaveEntityPool.acquireFood(ensureFolder(), C.FOOD_RADIUS)
 end
 
 local function releaseFoodPart(p: BasePart)
-	p.Transparency = 1
-	p.CFrame = CFrame.new(0, -1000, 0)
-	if #foodPool < 64 then
-		table.insert(foodPool, p)
-	else
-		p:Destroy()
-	end
+	WaveEntityPool.releaseFood(p)
 end
 
 local function makeCoralAgent(part: BasePart): CoralAgent?
@@ -1195,39 +1071,23 @@ local function makeCoralAgent(part: BasePart): CoralAgent?
 		growing = false,
 		growT0 = 0,
 		busy = false,
-		hashKeys = {},
 		pathDist = 0,
 		pathSideDist = 0,
 	}
 end
 
 local function gatherPlotCoralParts(): { BasePart }
-	local parts: { BasePart } = {}
-	local seen: { [BasePart]: boolean } = {}
-	local root = Workspace:FindFirstChild("OceanTD_Placed")
-	if not root then
-		return parts
-	end
-	local function consider(inst: Instance)
-		if not inst:IsA("BasePart") or seen[inst] then
-			return
-		end
-		local agent = makeCoralAgent(inst)
-		if not agent then
-			return
-		end
-		seen[inst] = true
-		table.insert(parts, inst)
-	end
 	local mirrored = ClientPlot.get()
-	local plotFolder = if mirrored then root:FindFirstChild(mirrored.plotId) else nil
-	if plotFolder then
-		for _, inst in ipairs(plotFolder:GetDescendants()) do
-			consider(inst)
-		end
+	if not mirrored then
+		return {}
 	end
-	for _, inst in ipairs(root:GetDescendants()) do
-		consider(inst)
+	local PlacedCoralIndex = require(script.Parent:WaitForChild("PlacedCoralIndex"))
+	local indexed = PlacedCoralIndex.getParts(mirrored.plotId)
+	local parts: { BasePart } = {}
+	for _, inst in ipairs(indexed) do
+		if inst.Parent then
+			table.insert(parts, inst)
+		end
 	end
 	return parts
 end
@@ -1329,12 +1189,10 @@ local function syncCorals(sessionStart: boolean)
 		end
 	end
 
-	clearHash()
 	for _, c in ipairs(coralList) do
 		-- Prefer rest look for shot color (ignore transient hover/relocate neon wash).
 		local _, restColor = CoralVisual.readRestLook(c.part)
 		c.color = restColor
-		insertHash(c)
 	end
 	-- Full reproject only when arming a wave session (path is live); new places project above.
 	if sessionStart then
@@ -1357,9 +1215,7 @@ local function destroyFish(agent: FishAgent)
 	agent.pulseToken += 1
 	agent.dangerToken += 1
 	agent.dangerActive = false
-	if agent.model.Parent then
-		agent.model:Destroy()
-	end
+	WaveEntityPool.releaseFish(WaveEntityPool.FISH_TANG, agent.model)
 end
 
 local function finishFish(agent: FishAgent, skipHappyVfx: boolean?)
@@ -1371,6 +1227,7 @@ local function finishFish(agent: FishAgent, skipHappyVfx: boolean?)
 		local dealt = math.min(empty, reefHealth)
 		reefHealth = math.max(0, reefHealth - empty)
 		local endPos = if pathData then pathData.endPos else nil
+		WaveEndVfx.notifyUnderfedArrival()
 		WaveEndVfx.playReefHealthTicks(dealt, endPos)
 		hungryMissToken += 1
 		if dealt > 0 then
@@ -1386,10 +1243,7 @@ local function finishFish(agent: FishAgent, skipHappyVfx: boolean?)
 			end
 			local endPos = if pathData then pathData.endPos else nil
 			if not endPos then
-				local heart = WaveEndVfx.getEndHeartPart()
-				if heart then
-					endPos = heart.Position
-				end
+				endPos = WaveEndVfx.getEndHeartWorldPos()
 			end
 			if endPos then
 				WaveEndVfx.pulseHappyExit(emoji, endPos)
@@ -1402,36 +1256,14 @@ end
 
 local function spawnOneFish(spawnIndex: number)
 	local path = pathData
-	local tmpl = getTangTemplate()
-	if not path or not tmpl then
+	if not path then
 		return
 	end
-	local clone = tmpl:Clone()
-	clone.Name = "Tang_" .. tostring(nextFishId)
-	for _, d in ipairs(clone:GetDescendants()) do
-		if d:IsA("BasePart") then
-			d.Anchored = true
-			d.CanCollide = false
-			d.CanTouch = false
-			d.CanQuery = false
-			d.CastShadow = false
-		end
-	end
-	if clone:IsA("BasePart") then
-		clone.Anchored = true
-		clone.CanCollide = false
-		clone.CanQuery = false
-		clone.CanTouch = false
+	local clone, root = WaveEntityPool.acquireFish(WaveEntityPool.FISH_TANG, "Tang_" .. tostring(nextFishId))
+	if not clone or not root then
+		return
 	end
 	clone.Parent = ensureFolder()
-	local root = findPrimary(clone)
-	if not root then
-		clone:Destroy()
-		return
-	end
-	if clone:IsA("Model") and not clone.PrimaryPart then
-		clone.PrimaryPart = root
-	end
 	-- Wide random school placement (no tight 5-lane file).
 	local lateral = fishRng:NextNumber(-C.LATERAL_SPREAD, C.LATERAL_SPREAD)
 	local vert = fishRng:NextNumber(-C.VERT_SPREAD, C.VERT_SPREAD)
@@ -1830,7 +1662,6 @@ local function hardCleanup()
 		destroyAmmo(c)
 	end
 	table.clear(coralList)
-	clearHash()
 	spawnQueue = 0
 	waveSpawning = false
 	destroyArrowPreview()
@@ -1904,6 +1735,7 @@ function WaveSim.getHudSnapshot(): HudSnapshot
 		hungryMissToken = hungryMissToken,
 		fishFull = fishFull,
 		fishTotal = fishTotal,
+		speedMult = speedMult,
 	}
 end
 
@@ -1939,10 +1771,7 @@ function WaveSim.finishWaveEarly(): boolean
 	local burstEmojis = WaveSim.getFinishEmojis()
 	local endPos = if pathData then pathData.endPos else nil
 	if not endPos then
-		local heart = WaveEndVfx.getEndHeartPart()
-		if heart then
-			endPos = heart.Position
-		end
+		endPos = WaveEndVfx.getEndHeartWorldPos()
 	end
 	-- Credit remaining full fish (same as reaching the heart fed); one firework instead of N stacked exits.
 	for _, f in ipairs(fishList) do
@@ -2022,7 +1851,8 @@ function WaveSim.start(): boolean
 	if not pathData then
 		return false
 	end
-	if not getTangTemplate() then
+	if not WaveEntityPool.hasFishKind(WaveEntityPool.FISH_TANG) then
+		warn("[WAVE] ReplicatedStorage.Fish.Tang missing")
 		return false
 	end
 	token += 1
@@ -2040,6 +1870,7 @@ function WaveSim.start(): boolean
 	nextFishId = 1
 	ensureFolder()
 	hardCleanup()
+	WaveEndVfx.refreshLocalEndHeart()
 	beginWave(1)
 	notifyHud()
 	flushHud()
@@ -2115,6 +1946,7 @@ function WaveSim.cycleSpeed(): number
 	end
 	idx = idx % #SPEED_STEPS + 1
 	speedMult = SPEED_STEPS[idx]
+	notifyHud()
 	return speedMult
 end
 

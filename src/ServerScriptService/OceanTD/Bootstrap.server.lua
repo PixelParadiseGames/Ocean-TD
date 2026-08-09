@@ -16,6 +16,7 @@ local DecorReplicator = require(Services:WaitForChild("DecorReplicator"))
 local PlacementService = require(Services:WaitForChild("PlacementService"))
 local UndoService = require(Services:WaitForChild("UndoService"))
 local PlotSaveService = require(Services:WaitForChild("PlotSaveService"))
+local WaveWatchService = require(Services:WaitForChild("WaveWatchService"))
 
 local Constants = require(oceanRoot:WaitForChild("Shared"):WaitForChild("Constants"))
 
@@ -24,16 +25,19 @@ PersistenceService.init()
 PlotService.init()
 PlacementService.init()
 PlotSaveService.init()
+WaveWatchService.init()
 
 do
 	local poses = {}
 	for i = 1, Constants.MAX_PLOTS do
 		local slot = PlotService.getSlotByIndex(i)
 		if slot then
-			poses[i] = { plotIndex = slot.plotIndex, cframe = slot.cframe }
+			poses[i] = { plotIndex = slot.plotIndex, cframe = slot.cframe, size = slot.size }
 		end
 	end
 	DecorReplicator.replicate(poses)
+	local WaveHeartReplicator = require(Services:WaitForChild("WaveHeartReplicator"))
+	WaveHeartReplicator.replicate(poses)
 end
 
 local plotAssignedRemote = Remotes.get("PlotAssigned")
@@ -88,6 +92,9 @@ local function onPlayerAdded(player: Player)
 
 	plotAssignedRemote:FireClient(player, payload)
 	sessionReadyRemote:FireClient(player)
+	-- Joiner first (race-safe), then everyone.
+	WaveWatchService.broadcastRoster(player)
+	WaveWatchService.broadcastRoster(nil)
 
 	local function hookCharacter(character: Model)
 		onCharacterAdded(player, character)
@@ -119,6 +126,7 @@ local function onPlayerRemoving(player: Player)
 	end
 	PlotService.free(player)
 	plotClearedRemote:FireClient(player)
+	WaveWatchService.broadcastRoster(nil)
 
 	PersistenceService.release(player)
 	PlayerSession.remove(player)

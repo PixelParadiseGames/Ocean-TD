@@ -122,6 +122,7 @@ end
 export type PlotPose = {
 	plotIndex: number,
 	cframe: CFrame,
+	size: Vector3?,
 }
 
 function DecorReplicator.isReady(): boolean

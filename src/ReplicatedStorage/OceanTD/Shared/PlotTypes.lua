@@ -7,13 +7,20 @@ export type PlotBoundsPayload = {
 	cframe: CFrame,
 	size: Vector3,
 	spawnCFrame: CFrame?,
+	-- Plot1 / MasterTerrainBox pose (for remapping WaveRoute etc. onto other plots).
+	plot1CFrame: CFrame?,
 }
 
 export type LayoutObject = {
 	id: string,
+	-- Plot-local VisualPos (exact). Restore via plot.CFrame:PointToWorldSpace — never re-raycast.
 	lx: number,
 	ly: number,
 	lz: number,
+	-- Optional rounded grid keys (preferred for occupancy). Fallback: WorldToGrid(VisualPos).
+	gx: number?,
+	gy: number?,
+	gz: number?,
 }
 
 export type PlotSaveSlot = {

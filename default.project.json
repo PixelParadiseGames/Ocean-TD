@@ -13,7 +13,10 @@
           "SessionReady": { "$className": "RemoteEvent" },
           "PlaceResult": { "$className": "RemoteEvent" },
           "ReportHighestWave": { "$className": "RemoteEvent" },
-          "RequestPlace": { "$className": "RemoteFunction" }
+          "PlotRoster": { "$className": "RemoteEvent" },
+          "WaveWatchPush": { "$className": "RemoteEvent" },
+          "RequestPlace": { "$className": "RemoteFunction" },
+          "RequestPlotRoster": { "$className": "RemoteFunction" }
         }
       }
     },

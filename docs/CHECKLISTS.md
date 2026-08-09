@@ -34,3 +34,10 @@ Follow these when doing repeating work. Do not invent a parallel data path.
 3. Re-stamp terrain; refresh `StaticPlot_2..N` décor clones.
 4. Recheck spawn offsets authored on plot 1.
 5. Smoke-test assign on plot 1 and a non-1 slot.
+
+## Change plot frame / placement math
+1. Read `Shared/PlotFrameContract.lua` — do **not** reintroduce TerrainPlotAlign or PreviewBox live poses.
+2. Runtime poses = Master + `RingMath` + `ExpansionOffset` only.
+3. Layout stays plot-local VisualPos; restore = `PointToWorldSpace` (no re-raycast).
+4. Boot must log `contractOk= true`; fix Studio stamp if islands disagree.
+5. Add a FAILURE_MODES row if a new frame source can drift across boots.

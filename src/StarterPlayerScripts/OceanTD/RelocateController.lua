@@ -27,6 +27,7 @@ local UiHaptics = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiHapti
 
 local InventoryState = require(script.Parent:WaitForChild("InventoryState"))
 local ClientPlot = require(script.Parent:WaitForChild("ClientPlot"))
+local PlacedCoralIndex = require(script.Parent:WaitForChild("PlacedCoralIndex"))
 local PlaceVfx = require(script.Parent:WaitForChild("PlaceVfx"))
 local PlacementController = require(script.Parent:WaitForChild("PlacementController"))
 local SelectRing = require(script.Parent:WaitForChild("SelectRing"))
@@ -552,23 +553,7 @@ local function findBlockingCoral(worldPos: Vector3, ignorePart: BasePart?): Base
 	if not plot then
 		return nil
 	end
-	local localPos = GridMath.worldToPlotLocal(worldPos, plot.cframe)
-	local gx, gy, gz = GridMath.worldToGrid(localPos, Vector3.zero)
-	local root = Workspace:FindFirstChild("OceanTD_Placed")
-	local folder = root and root:FindFirstChild(plot.plotId)
-	if not folder then
-		return nil
-	end
-	for _, inst in ipairs(folder:GetChildren()) do
-		if inst:IsA("BasePart") and inst ~= ignorePart then
-			local lp = GridMath.worldToPlotLocal(inst.Position, plot.cframe)
-			local ax, ay, az = GridMath.worldToGrid(lp, Vector3.zero)
-			if ax == gx and ay == gy and az == gz then
-				return inst
-			end
-		end
-	end
-	return nil
+	return PlacedCoralIndex.getAtWorld(plot.plotId, worldPos, plot.cframe, ignorePart)
 end
 
 local function sameGrid(a: Vector3, b: Vector3): boolean
@@ -1031,7 +1016,11 @@ local function startHoverLoop()
 end
 
 local function syncChrome()
-	if recycleFlying or introAnimating then
+	if recycleFlying then
+		return
+	end
+	-- Intro owns recycle tween; still sync ✓ once the coral has been moved.
+	if introAnimating and not hasMoved and not recyclePending then
 		return
 	end
 	if not active or not part or not checkBtn or not cancelBtn then
@@ -1129,16 +1118,25 @@ local function syncChrome()
 				end
 			else
 				recycleBtn.BackgroundColor3 = REC_GREEN
-				-- icon → shortcut → COLLECT (1s each)
-				local phase = math.floor((os.clock() - gamepadChromeT0) / HOVER_HINT_PERIOD) % 3
+				-- Touch: icon ↔ COLLECT (no Del). Keyboard/gamepad: icon → Del/L1 → COLLECT.
+				local showShortcut = isUsingGamepad() or not UserInputService.TouchEnabled
+				local phaseCount = if showShortcut then 3 else 2
+				local phase = math.floor((os.clock() - gamepadChromeT0) / HOVER_HINT_PERIOD) % phaseCount
 				if recycleIcon then
 					recycleIcon.Visible = phase == 0
 				end
 				if recyclePlus then
-					if phase == 1 then
-						recyclePlus.Text = if isUsingGamepad() then "L1" else "Del"
-						recyclePlus.Visible = true
-					elseif phase == 2 then
+					if showShortcut then
+						if phase == 1 then
+							recyclePlus.Text = if isUsingGamepad() then "L1" else "Del"
+							recyclePlus.Visible = true
+						elseif phase == 2 then
+							recyclePlus.Text = "COLLECT"
+							recyclePlus.Visible = true
+						else
+							recyclePlus.Visible = false
+						end
+					elseif phase == 1 then
 						recyclePlus.Text = "COLLECT"
 						recyclePlus.Visible = true
 					else
@@ -1611,6 +1609,7 @@ function RelocateController.commit()
 		if part and part.Parent then
 			local finalPos = if typeof(result.worldPos) == "Vector3" then result.worldPos else toPos
 			part.CFrame = CFrame.new(finalPos)
+			PlacedCoralIndex.reindex(part)
 			if typeof(result.placeId) == "string" and result.placeId ~= "" then
 				part:SetAttribute("OceanTD_PlaceId", result.placeId)
 				placeId = result.placeId

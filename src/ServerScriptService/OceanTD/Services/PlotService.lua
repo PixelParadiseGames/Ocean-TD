@@ -1,16 +1,17 @@
 --!strict
 --[[
-	Plot assignment from ArenaGeneratorPlugin contract.
+	Plot assignment — old-game stable pattern.
 
-	Hide Previews moves MasterTerrainBox + TerrainPreviews into ServerStorage
-	(not Destroy). Runtime must read Workspace OR ServerStorage.
+	Runtime poses are a deterministic function of MasterTerrainBox only
+	(RingMath + ExpansionOffset). PreviewBox_* are Studio stamp helpers;
+	they are NOT read for live plot CFrames (avoids box↔terrain drift and
+	per-boot TerrainPlotAlign sliding saved locals).
 
-	Plot1 = MasterTerrainBox
-	Plot2 = TerrainPreviews.PreviewBox_1
-	…
-	PlotN = TerrainPreviews.PreviewBox_(N-1)
+	Hide Previews stashes Master (+ previews) in ServerStorage — runtime
+	reads Master from Workspace OR ServerStorage.
 
-	If boxes are missing, fall back to RingMath matching the plugin formula.
+	Plot1 = Master.CFrame
+	Plot2..N = RingMath.plotCFrame(i, …) matching ArenaGeneratorPlugin.
 ]]
 
 local Workspace = game:GetService("Workspace")
@@ -20,6 +21,7 @@ local oceanShared = game:GetService("ReplicatedStorage"):WaitForChild("OceanTD")
 local Constants = require(oceanShared:WaitForChild("Constants"))
 local GridMath = require(oceanShared:WaitForChild("GridMath"))
 local RingMath = require(oceanShared:WaitForChild("RingMath"))
+local PlotFrameContract = require(oceanShared:WaitForChild("PlotFrameContract"))
 local PlotTypes = require(oceanShared:WaitForChild("PlotTypes"))
 
 type PlotBoundsPayload = PlotTypes.PlotBoundsPayload
@@ -79,31 +81,6 @@ function PlotService.getMasterTerrain(): BasePart?
 	local master = findInWorkspaceOrStorage(Constants.MASTER_TERRAIN_NAME)
 	if master and master:IsA("BasePart") then
 		return master
-	end
-	return nil
-end
-
-local function getTerrainPreviewsFolder(): Folder?
-	local folder = findInWorkspaceOrStorage(Constants.TERRAIN_PREVIEWS_FOLDER)
-	if folder and folder:IsA("Folder") then
-		return folder
-	end
-	return nil
-end
-
-local function findPreviewBox(previewIndex: number): BasePart?
-	local name = Constants.PREVIEW_BOX_PREFIX .. tostring(previewIndex)
-	local folder = getTerrainPreviewsFolder()
-	if folder then
-		local box = folder:FindFirstChild(name)
-		if box and box:IsA("BasePart") then
-			return box
-		end
-	end
-	-- Loose search (older layouts)
-	local loose = findInWorkspaceOrStorage(name)
-	if loose and loose:IsA("BasePart") then
-		return loose
 	end
 	return nil
 end
@@ -172,61 +149,55 @@ local function expansionFromMaster(master: BasePart): number
 	return 0
 end
 
--- Primary: read Master + PreviewBoxes (Workspace or ServerStorage after Hide).
-local function initFromMasterAndPreviews(): boolean
+-- Primary: MasterTerrainBox + deterministic RingMath (no PreviewBox / no voxel align).
+local function initFromMasterAndRing(): boolean
 	local master = PlotService.getMasterTerrain()
 	if not master then
 		return false
 	end
 
-	local previewCount = Constants.MAX_PLOTS - 1
-	local previews: { BasePart } = {}
-	local missing: { string } = {}
-	for i = 1, previewCount do
-		local box = findPreviewBox(i)
-		if box then
-			table.insert(previews, box)
-		else
-			table.insert(missing, Constants.PREVIEW_BOX_PREFIX .. tostring(i))
-		end
-	end
-
 	masterPlotCf = master.CFrame
 	local size = master.Size
-
-	if #missing > 0 then
-		-- Compute poses with the same formula as ArenaGeneratorPlugin.
-		warnPlot(
-			"Preview boxes missing (",
-			table.concat(missing, ", "),
-			") — computing from MasterTerrainBox via plugin RingMath. Parent=",
-			master:GetFullName()
-		)
-		local expansion = expansionFromMaster(master)
-		local centerCf = RingMath.pluginCenterCFrame(master.CFrame, size, Constants.MAX_PLOTS, expansion)
-		ringCenter = centerCf.Position
-		registerLogicalSlot(1, master.CFrame, size, master:GetFullName())
-		for i = 1, previewCount do
-			local cf = RingMath.pluginPreviewCFrame(i, Constants.MAX_PLOTS, master.CFrame, size, expansion)
-			registerLogicalSlot(i + 1, cf, size, "RingMath.PreviewBox_" .. tostring(i))
-		end
-		log("Init from MasterTerrainBox + RingMath fallback; ringCenter≈", ringCenter)
-		return true
-	end
-
-	local sum = master.Position
-	for _, box in ipairs(previews) do
-		sum += box.Position
-	end
-	ringCenter = sum / (1 + #previews)
-
+	local expansion = expansionFromMaster(master)
 	local masterParent = if master.Parent == ServerStorage then "ServerStorage" else "Workspace"
-	registerLogicalSlot(1, master.CFrame, master.Size, masterParent .. "." .. Constants.MASTER_TERRAIN_NAME)
-	for i, box in ipairs(previews) do
-		registerLogicalSlot(i + 1, box.CFrame, box.Size, box:GetFullName())
+	local plotCount = Constants.MAX_PLOTS
+
+	local sum = Vector3.zero
+	for i = 1, plotCount do
+		local cf = RingMath.plotCFrame(i, plotCount, master.CFrame, size, expansion)
+		local source = if i == 1
+			then (masterParent .. "." .. Constants.MASTER_TERRAIN_NAME)
+			else string.format("RingMath.Plot%d (ExpansionOffset=%.2f)", i, expansion)
+		registerLogicalSlot(i, cf, size, source)
+		sum += cf.Position
+	end
+	ringCenter = sum / plotCount
+
+	-- Contract guard: every slot must still match RingMath (catches accidental calibrate).
+	local driftCount = 0
+	for i = 1, plotCount do
+		local slot = slotsById[plotIdFromIndex(i)]
+		if slot then
+			local expected = PlotFrameContract.expectedCFrame(i, plotCount, master.CFrame, size, expansion)
+			if not PlotFrameContract.passes(slot.cframe, expected) then
+				driftCount += 1
+				warnPlot(
+					"PlotFrameContract VIOLATION",
+					slot.plotId,
+					string.format("drift=%.2f studs — do not runtime-calibrate plot CFrames", PlotFrameContract.poseDrift(slot.cframe, expected))
+				)
+			end
+		end
 	end
 
-	log("Init from Master + PreviewBoxes (incl. ServerStorage stash); ringCenter≈", ringCenter)
+	log(
+		"Init from Master + RingMath (stable; no TerrainPlotAlign); ExpansionOffset=",
+		expansion,
+		"ringCenter≈",
+		ringCenter,
+		"contractOk=",
+		driftCount == 0
+	)
 	return true
 end
 
@@ -267,7 +238,7 @@ function PlotService.init()
 	end
 	initialized = true
 
-	local ok = initFromMasterAndPreviews()
+	local ok = initFromMasterAndRing()
 	if not ok then
 		ok = initFromPlotsFolder()
 	end
@@ -310,12 +281,24 @@ function PlotService.getOwnerPlotId(player: Player): PlotId?
 	return ownerToPlot[player]
 end
 
+local function resolvePlot1CFrame(): CFrame?
+	if masterPlotCf then
+		return masterPlotCf
+	end
+	local plot1 = slotsById["Plot1"]
+	if plot1 then
+		return plot1.cframe
+	end
+	return nil
+end
+
 local function buildPayload(slot: PlotSlot): PlotBoundsPayload
 	return {
 		plotId = slot.plotId,
 		cframe = slot.cframe,
 		size = slot.size,
 		spawnCFrame = slot.spawnCFrame,
+		plot1CFrame = resolvePlot1CFrame(),
 	}
 end
 
@@ -343,34 +326,125 @@ function PlotService.isInsideOwnerPlot(player: Player, worldPos: Vector3): boole
 	return GridMath.isInsidePlotXZ(worldPos, slot.cframe, slot.size)
 end
 
+function PlotService.getPlotOwner(plotId: PlotId): Player?
+	local slot = slotsById[plotId]
+	return if slot then slot.owner else nil
+end
+
+function PlotService.getRosterPayload(): { { plotId: string, cframe: CFrame, size: Vector3, ownerUserId: number } }
+	local out = {}
+	for i = 1, Constants.MAX_PLOTS do
+		local plotId = plotIdFromIndex(i)
+		local slot = slotsById[plotId]
+		if slot then
+			table.insert(out, {
+				plotId = plotId,
+				cframe = slot.cframe,
+				size = slot.size,
+				ownerUserId = if slot.owner then slot.owner.UserId else 0,
+			})
+		end
+	end
+	return out
+end
+
+local function wrapPlotIndex(i: number): number
+	local n = Constants.MAX_PLOTS
+	local r = ((i - 1) % n) + 1
+	if r < 1 then
+		r += n
+	end
+	return r
+end
+
+local function shuffleInPlace(list: { number })
+	for i = #list, 2, -1 do
+		local j = math.random(1, i)
+		list[i], list[j] = list[j], list[i]
+	end
+end
+
+local function claimSlot(player: Player, plotIndex: number): PlotBoundsPayload?
+	local plotId = plotIdFromIndex(plotIndex)
+	local slot = slotsById[plotId]
+	if not slot or slot.owner ~= nil then
+		return nil
+	end
+	slot.owner = player
+	ownerToPlot[player] = plotId
+	player:SetAttribute(Constants.PLOT_ID_ATTR, plotId)
+	local decor = PlotService.getDecorFolder(plotIndex)
+	log(
+		"Assigned",
+		player.Name,
+		"->",
+		plotId,
+		"source=",
+		slot.sourceName,
+		"decor=",
+		if decor then decor.Name else "none"
+	)
+	return buildPayload(slot)
+end
+
+-- First player: random free plot. Later joins: seat beside an occupied plot (random side).
+local function pickAssignPlotIndex(): number?
+	local free: { number } = {}
+	local occupied: { number } = {}
+	for i = 1, Constants.MAX_PLOTS do
+		local slot = slotsById[plotIdFromIndex(i)]
+		if slot then
+			if slot.owner then
+				table.insert(occupied, i)
+			else
+				table.insert(free, i)
+			end
+		end
+	end
+	if #free == 0 then
+		return nil
+	end
+	if #occupied == 0 then
+		return free[math.random(1, #free)]
+	end
+
+	-- Try each occupied plot (shuffled) and a random neighbor side first.
+	shuffleInPlace(occupied)
+	for _, anchor in ipairs(occupied) do
+		local sides = { -1, 1 }
+		if math.random(1, 2) == 2 then
+			sides[1], sides[2] = sides[2], sides[1]
+		end
+		for _, delta in ipairs(sides) do
+			local neighbor = wrapPlotIndex(anchor + delta)
+			local slot = slotsById[plotIdFromIndex(neighbor)]
+			if slot and slot.owner == nil then
+				return neighbor
+			end
+		end
+	end
+
+	-- No free adjacent seat — any free slot (shuffled).
+	shuffleInPlace(free)
+	return free[1]
+end
+
 function PlotService.assign(player: Player): PlotBoundsPayload?
 	if ownerToPlot[player] then
 		return PlotService.getBoundsPayload(player)
 	end
 
-	for i = 1, Constants.MAX_PLOTS do
-		local plotId = plotIdFromIndex(i)
-		local slot = slotsById[plotId]
-		if slot and slot.owner == nil then
-			slot.owner = player
-			ownerToPlot[player] = plotId
-			local decor = PlotService.getDecorFolder(i)
-			log(
-				"Assigned",
-				player.Name,
-				"->",
-				plotId,
-				"source=",
-				slot.sourceName,
-				"decor=",
-				if decor then decor.Name else "none"
-			)
-			return buildPayload(slot)
-		end
+	local plotIndex = pickAssignPlotIndex()
+	if not plotIndex then
+		warnPlot("No free plot for", player.Name, "(server full)")
+		return nil
 	end
-
-	warnPlot("No free plot for", player.Name, "(server full)")
-	return nil
+	local payload = claimSlot(player, plotIndex)
+	if not payload then
+		warnPlot("Failed to claim plot index", plotIndex, "for", player.Name)
+		return nil
+	end
+	return payload
 end
 
 function PlotService.teleportToPlot(player: Player)
@@ -417,6 +491,7 @@ function PlotService.free(player: Player)
 		slot.owner = nil
 	end
 	ownerToPlot[player] = nil
+	player:SetAttribute(Constants.PLOT_ID_ATTR, nil)
 	log("Freed", plotId, "from", player.Name)
 end
 

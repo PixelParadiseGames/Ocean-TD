@@ -41,6 +41,9 @@ local SPEED_SOUND_PITCH = { 0.85, 1.05, 1.3 }
 local ICON_1X = "rbxassetid://130235737024254"
 local ICON_15X = "rbxassetid://93866614390396"
 local ICON_2X = "rbxassetid://85700415632293"
+local ICON_CROSSFADE = TweenInfo.new(0.25, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+-- Hold icon (incl. crossfade) before rejoining shared idle text clock.
+local ICON_HOLD_SEC = 1
 
 local speedSoundTemplate = Instance.new("Sound")
 speedSoundTemplate.Name = "OceanTD_WaveSpeedSound"
@@ -70,6 +73,7 @@ local slot7Button: GuiButton? = nil
 local slot7Circle: GuiObject? = nil
 local slot7Stroke: UIStroke? = nil
 local speedIcon: ImageLabel? = nil
+local speedIconFade: ImageLabel? = nil -- outgoing icon during crossfade
 local speedLabel: TextLabel? = nil
 local orbitDot: Frame? = nil
 local orbitConn: RBXScriptConnection? = nil
@@ -88,9 +92,12 @@ local slot7HomeZ = 1
 local helpHomeZ = 1
 local slideToken = 0
 local clickFlashToken = 0
+local iconFadeToken = 0
+local iconFadeTweens: { Tween } = {}
 local revealed = false
 local hudUnsub: (() -> ())? = nil
 local showingText = false
+local iconFading = false
 
 local function speedStep(): number
 	local mult = WaveSim.getSpeedMult()
@@ -188,6 +195,32 @@ local function ensureOrbitLayers(circle: GuiObject)
 		speedIcon = img
 	end
 
+	-- Reused outgoing layer for 0.25s icon crossfades (no per-click alloc).
+	local fade = circle:FindFirstChild("_OceanTD_SpeedIconFade")
+	if fade and fade:IsA("ImageLabel") then
+		speedIconFade = fade
+	else
+		if fade then
+			fade:Destroy()
+		end
+		local img = Instance.new("ImageLabel")
+		img.Name = "_OceanTD_SpeedIconFade"
+		img.BackgroundTransparency = 1
+		img.BorderSizePixel = 0
+		img.Size = UDim2.fromScale(1, 1)
+		img.Position = UDim2.fromScale(0, 0)
+		img.ScaleType = Enum.ScaleType.Fit
+		img.Active = false
+		img.Visible = false
+		img.ImageTransparency = 1
+		img.ZIndex = circle.ZIndex + 2
+		img.Parent = circle
+		UiCircles.ensure(img)
+		speedIconFade = img
+	end
+	speedIcon.ZIndex = circle.ZIndex + 1
+	speedIconFade.ZIndex = circle.ZIndex + 2
+
 	local dot = circle:FindFirstChild("_OceanTD_SpeedOrbit")
 	if dot and dot:IsA("Frame") then
 		orbitDot = dot
@@ -257,8 +290,13 @@ local function applyIconVisual()
 	end
 	slot7Circle.BackgroundColor3 = originalBg
 	slot7Circle.BackgroundTransparency = originalBgTrans
+	if speedIconFade then
+		speedIconFade.Visible = false
+		speedIconFade.ImageTransparency = 1
+	end
 	if speedIcon then
 		speedIcon.Image = img
+		speedIcon.ImageTransparency = 0
 		speedIcon.Visible = true
 	end
 	if speedLabel then
@@ -268,7 +306,7 @@ local function applyIconVisual()
 end
 
 local function applyTextVisual()
-	if not slot7Circle then
+	if not slot7Circle or iconFading then
 		return
 	end
 	if slot7Circle:IsA("ImageLabel") or slot7Circle:IsA("ImageButton") then
@@ -278,6 +316,9 @@ local function applyTextVisual()
 	slot7Circle.BackgroundTransparency = 0
 	if speedIcon then
 		speedIcon.Visible = false
+	end
+	if speedIconFade then
+		speedIconFade.Visible = false
 	end
 	if speedLabel then
 		speedLabel.Text = "WAVE\nSPEED"
@@ -320,8 +361,95 @@ local function startIdleCycle()
 	end
 	UiCircles.ensure(slot7Circle)
 	idleStop = UiIdleCycle.subscribeSharedToggle(IDLE_HALF_SEC, applyIdleFrame, function()
-		return revealed and slot7 ~= nil and slot7.Visible
+		return revealed and slot7 ~= nil and slot7.Visible and not iconFading
 	end, false)
+end
+
+local function cancelIconFade()
+	iconFadeToken += 1
+	for _, tw in ipairs(iconFadeTweens) do
+		tw:Cancel()
+	end
+	table.clear(iconFadeTweens)
+	iconFading = false
+	if speedIconFade then
+		speedIconFade.Visible = false
+		speedIconFade.ImageTransparency = 1
+	end
+	if speedIcon then
+		speedIcon.ImageTransparency = 0
+	end
+end
+
+-- Force icon mode and crossfade old → new; keep icon up for ICON_HOLD_SEC total, then rejoin idle.
+local function crossfadeSpeedIcons(oldImg: string, newImg: string)
+	if not speedIcon or not speedIconFade or not slot7Circle then
+		applyIconVisual()
+		return
+	end
+	cancelIconFade()
+	local my = iconFadeToken
+	iconFading = true
+
+	-- Pause idle so text doesn't steal the hold window.
+	if idleStop then
+		idleStop()
+		idleStop = nil
+	end
+	if speedLabel then
+		speedLabel.Visible = false
+	end
+	if slot7Circle:IsA("ImageLabel") or slot7Circle:IsA("ImageButton") then
+		(slot7Circle :: any).Image = ""
+	end
+	slot7Circle.BackgroundColor3 = originalBg
+	slot7Circle.BackgroundTransparency = originalBgTrans
+	showingText = false
+
+	speedIconFade.Image = oldImg
+	speedIconFade.ImageTransparency = 0
+	speedIconFade.Visible = true
+	speedIcon.Image = newImg
+	speedIcon.ImageTransparency = 1
+	speedIcon.Visible = true
+
+	local twOut = TweenService:Create(speedIconFade, ICON_CROSSFADE, { ImageTransparency = 1 })
+	local twIn = TweenService:Create(speedIcon, ICON_CROSSFADE, { ImageTransparency = 0 })
+	table.insert(iconFadeTweens, twOut)
+	table.insert(iconFadeTweens, twIn)
+	twOut:Play()
+	twIn:Play()
+	twIn.Completed:Once(function()
+		if my ~= iconFadeToken then
+			return
+		end
+		if speedIconFade then
+			speedIconFade.Visible = false
+			speedIconFade.ImageTransparency = 1
+		end
+		if speedIcon then
+			speedIcon.ImageTransparency = 0
+		end
+		table.clear(iconFadeTweens)
+	end)
+
+	-- One timer covers fade + post-fade hold (≥1s icon), then sync with shared slot clock.
+	task.delay(ICON_HOLD_SEC, function()
+		if my ~= iconFadeToken then
+			return
+		end
+		iconFading = false
+		if speedIconFade then
+			speedIconFade.Visible = false
+			speedIconFade.ImageTransparency = 1
+		end
+		if speedIcon then
+			speedIcon.ImageTransparency = 0
+		end
+		if revealed then
+			startIdleCycle()
+		end
+	end)
 end
 
 local function styleHelpBadge(): boolean
@@ -467,13 +595,12 @@ function WaveSpeedSlot.cycle()
 	if not WaveSim.isRunning() then
 		return false
 	end
+	local oldImg = iconForMult(WaveSim.getSpeedMult())
 	WaveSim.cycleSpeed()
+	local newImg = iconForMult(WaveSim.getSpeedMult())
 	UiHaptics.pulseShort()
 	playSpeedSound()
-	-- Orbit reads the current speed each frame; icon still needs a refresh.
-	if not showingText then
-		applyIconVisual()
-	end
+	crossfadeSpeedIcons(oldImg, newImg)
 	flashClickFeedback()
 	deps.log("Wave speed →", WaveSim.getSpeedMult(), "x")
 	return true
@@ -539,6 +666,7 @@ function WaveSpeedSlot.playHide()
 
 	stopIdleCycle()
 	stopOrbitAnim()
+	cancelIconFade()
 	clickFlashToken += 1
 	revealed = false
 	if slot7Stroke then

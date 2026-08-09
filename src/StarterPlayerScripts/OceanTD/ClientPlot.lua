@@ -4,13 +4,16 @@
 local RunService = game:GetService("RunService")
 local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local GridMath = require(ReplicatedStorage:WaitForChild("OceanTD"):WaitForChild("Shared"):WaitForChild("GridMath"))
+local oceanShared = ReplicatedStorage:WaitForChild("OceanTD"):WaitForChild("Shared")
+local Constants = require(oceanShared:WaitForChild("Constants"))
+local GridMath = require(oceanShared:WaitForChild("GridMath"))
 
 export type MirroredPlot = {
 	plotId: string,
 	cframe: CFrame,
 	size: Vector3,
 	spawnCFrame: CFrame?,
+	plot1CFrame: CFrame?,
 }
 
 local ClientPlot = {}
@@ -18,6 +21,8 @@ local ClientPlot = {}
 local mirrored: MirroredPlot? = nil
 local ready = false
 local changed = Instance.new("BindableEvent")
+local plot1CfCache: CFrame? = nil
+local plot1CfFromServer: CFrame? = nil
 
 -- Local-only hollow red plastic outline (floor + 4 walls) — visible from inside the plot.
 local flashFolder: Folder? = nil
@@ -124,6 +129,13 @@ end
 
 function ClientPlot.set(payload: MirroredPlot)
 	mirrored = payload
+	if payload.plot1CFrame then
+		plot1CfFromServer = payload.plot1CFrame
+		plot1CfCache = payload.plot1CFrame
+	elseif payload.plotId == "Plot1" then
+		plot1CfFromServer = payload.cframe
+		plot1CfCache = payload.cframe
+	end
 	if flashActive then
 		ensureOutOfPlotFlash()
 	end
@@ -133,6 +145,8 @@ end
 function ClientPlot.clear()
 	mirrored = nil
 	ready = false
+	plot1CfFromServer = nil
+	plot1CfCache = nil
 	destroyOutOfPlotFlash()
 	changed:Fire(nil)
 end
@@ -147,6 +161,77 @@ end
 
 function ClientPlot.isReady(): boolean
 	return ready
+end
+
+-- Plot1 authored space (WaveRoute, EndPoint heart, etc.).
+-- Prefer server-sent MasterTerrainBox pose — clients often cannot see it after Hide Previews.
+function ClientPlot.getPlot1CFrame(): CFrame?
+	if plot1CfCache then
+		return plot1CfCache
+	end
+	if plot1CfFromServer then
+		plot1CfCache = plot1CfFromServer
+		return plot1CfCache
+	end
+	if mirrored and mirrored.plot1CFrame then
+		plot1CfCache = mirrored.plot1CFrame
+		return plot1CfCache
+	end
+	local master = Workspace:FindFirstChild(Constants.MASTER_TERRAIN_NAME)
+	if master and master:IsA("BasePart") then
+		plot1CfCache = master.CFrame
+		return plot1CfCache
+	end
+	local plots = Workspace:FindFirstChild(Constants.PLOT_FOLDER_NAME)
+	local p1 = plots and plots:FindFirstChild("Plot1")
+	local bounds = p1 and p1:FindFirstChild(Constants.BOUNDS_NAME)
+	if bounds and bounds:IsA("BasePart") then
+		plot1CfCache = bounds.CFrame
+		return plot1CfCache
+	end
+	if mirrored and mirrored.plotId == "Plot1" then
+		plot1CfCache = mirrored.cframe
+		return plot1CfCache
+	end
+	return nil
+end
+
+-- Map a Plot1-authored world point onto the local player's plot (rigid).
+-- Server plot CFrames are Master + RingMath — same family as place/save/décor.
+function ClientPlot.remapFromPlot1(worldPos: Vector3): Vector3
+	local localPlot = mirrored
+	if not localPlot then
+		return worldPos
+	end
+	local p1 = ClientPlot.getPlot1CFrame()
+	if not p1 then
+		warn("[PLOT] remapFromPlot1: missing Plot1 CFrame; leaving point on Plot1 (", localPlot.plotId, ")")
+		return worldPos
+	end
+	return localPlot.cframe * p1:PointToObjectSpace(worldPos)
+end
+
+-- Map a Plot1-authored CFrame onto the local player's plot (preserves orientation).
+function ClientPlot.remapCFrameFromPlot1(worldCf: CFrame): CFrame
+	local localPlot = mirrored
+	if not localPlot then
+		return worldCf
+	end
+	local p1 = ClientPlot.getPlot1CFrame()
+	if not p1 then
+		warn("[PLOT] remapCFrameFromPlot1: missing Plot1 CFrame; leaving on Plot1 (", localPlot.plotId, ")")
+		return worldCf
+	end
+	return localPlot.cframe * p1:ToObjectSpace(worldCf)
+end
+
+-- Remap into an arbitrary plot (spectate / ghost waves).
+function ClientPlot.remapFromPlot1To(worldPos: Vector3, _targetPlotId: string, targetCf: CFrame, _targetSize: Vector3): Vector3
+	local p1 = ClientPlot.getPlot1CFrame()
+	if not p1 then
+		return worldPos
+	end
+	return targetCf * p1:PointToObjectSpace(worldPos)
 end
 
 function ClientPlot.onChanged(cb: (MirroredPlot?) -> ()): RBXScriptConnection

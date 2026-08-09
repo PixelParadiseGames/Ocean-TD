@@ -10,6 +10,8 @@ local RunService = game:GetService("RunService")
 local SoundService = game:GetService("SoundService")
 local Workspace = game:GetService("Workspace")
 
+local ClientPlot = require(script.Parent:WaitForChild("ClientPlot"))
+
 local WaveEndVfx = {}
 
 local REEF_TICK_SOUND_ID = "rbxassetid://128707491647978"
@@ -42,6 +44,7 @@ local FIREWORK_LIFE_MIN = 1.05
 local FIREWORK_LIFE_MAX = 1.75
 local END_HEART_RED = Color3.fromRGB(255, 40, 55)
 local END_HEART_BLACK = Color3.new(0, 0, 0)
+local UNDERFED_HIDE_SEC = 0.25
 
 local reefTickSound = Instance.new("Sound")
 reefTickSound.Name = "OceanTD_ReefTick"
@@ -63,7 +66,10 @@ end)
 
 local getFolder: (() -> Folder)? = nil
 local endHeartPart: BasePart? = nil
+local endHeartPlotId: string? = nil
 local endHeartAnimToken = 0
+local heartHideToken = 0
+local heartHideUntil = 0
 local reefTickStreak = 0
 local rng = Random.new()
 
@@ -73,6 +79,13 @@ end
 
 function WaveEndVfx.resetStreak()
 	reefTickStreak = 0
+	heartHideToken += 1
+	heartHideUntil = 0
+	local heart = endHeartPart
+	if heart and heart.Parent then
+		heart.LocalTransparencyModifier = 0
+		heart.Color = END_HEART_RED
+	end
 end
 
 local function resolveFolder(): Folder
@@ -89,22 +102,151 @@ local function resolveFolder(): Folder
 	return f
 end
 
-function WaveEndVfx.getEndHeartPart(): BasePart?
-	if endHeartPart and endHeartPart.Parent then
-		return endHeartPart
-	end
+local function findAuthoredEndPoint(): Instance?
 	local route = Workspace:FindFirstChild("WaveRoute")
 	local a = route and route:FindFirstChild("A")
-	local ep = a and a:FindFirstChild("EndPoint")
-	local heart = ep and ep:FindFirstChild("heart")
+	return a and a:FindFirstChild("EndPoint")
+end
+
+local function findHeartIn(root: Instance?): BasePart?
+	if not root then
+		return nil
+	end
+	local heart = root:FindFirstChild("heart", true)
 	if heart and heart:IsA("BasePart") then
-		endHeartPart = heart
 		return heart
+	end
+	-- Fallback: any BasePart under EndPoint
+	if root:IsA("BasePart") then
+		return root
+	end
+	return root:FindFirstChildWhichIsA("BasePart", true)
+end
+
+-- Server replicates EndPoint to Workspace.OceanTD_PlotHearts.PlotN (N>=2).
+-- Plot1 uses authored WaveRoute.A.EndPoint.
+local function findPlotEndHeartRoot(plotId: string): Instance?
+	if plotId == "Plot1" then
+		return findAuthoredEndPoint()
+	end
+	local folder = Workspace:FindFirstChild("OceanTD_PlotHearts")
+	if not folder then
+		return nil
+	end
+	return folder:FindFirstChild(plotId)
+end
+
+local heartByPlotId: { [string]: BasePart } = {}
+
+local function resolveEndHeartForPlot(plotId: string): BasePart?
+	local cached = heartByPlotId[plotId]
+	if cached and cached.Parent then
+		return cached
+	end
+	local root = findPlotEndHeartRoot(plotId)
+	local heart = findHeartIn(root)
+	if heart then
+		heartByPlotId[plotId] = heart
+		endHeartPart = heart
+		endHeartPlotId = plotId
+	else
+		heartByPlotId[plotId] = nil
+	end
+	return heart
+end
+
+function WaveEndVfx.getEndHeartPart(): BasePart?
+	local plot = ClientPlot.get()
+	local plotId = if plot then plot.plotId else "Plot1"
+	return resolveEndHeartForPlot(plotId)
+end
+
+function WaveEndVfx.getEndHeartPartForPlot(plotId: string): BasePart?
+	return resolveEndHeartForPlot(plotId)
+end
+
+function WaveEndVfx.getEndHeartWorldPos(): Vector3?
+	local heart = WaveEndVfx.getEndHeartPart()
+	if heart then
+		return heart.Position
+	end
+	-- Fallback remap if server hearts not ready yet
+	local authored = findHeartIn(findAuthoredEndPoint())
+	if authored then
+		return ClientPlot.remapFromPlot1(authored.Position)
 	end
 	return nil
 end
 
-local function pulseReefHeartLoss(at: Vector3)
+function WaveEndVfx.getEndHeartWorldPosForPlot(plotId: string): Vector3?
+	local heart = resolveEndHeartForPlot(plotId)
+	if heart then
+		return heart.Position
+	end
+	local authored = findHeartIn(findAuthoredEndPoint())
+	if authored and plotId ~= "Plot1" then
+		-- Soft fallback until OceanTD_PlotHearts replicates
+		local plot = ClientPlot.get()
+		if plot and plot.plotId == plotId then
+			return ClientPlot.remapFromPlot1(authored.Position)
+		end
+	end
+	return nil
+end
+
+function WaveEndVfx.refreshLocalEndHeart()
+	table.clear(heartByPlotId)
+	endHeartPart = nil
+	endHeartPlotId = nil
+	local plot = ClientPlot.get()
+	if not plot then
+		return
+	end
+	if plot.plotId == "Plot1" then
+		resolveEndHeartForPlot("Plot1")
+		return
+	end
+	local heart = resolveEndHeartForPlot(plot.plotId)
+	if heart then
+		return
+	end
+	task.spawn(function()
+		local folder = Workspace:WaitForChild("OceanTD_PlotHearts", 10)
+		if folder then
+			folder:WaitForChild(plot.plotId, 5)
+		end
+		heartByPlotId[plot.plotId] = nil
+		endHeartPart = nil
+		endHeartPlotId = nil
+		resolveEndHeartForPlot(plot.plotId)
+	end)
+end
+
+local function setEndHeartHidden(heart: BasePart, hidden: boolean)
+	heart.LocalTransparencyModifier = if hidden then 1 else 0
+end
+
+-- Underfed fish hit the end: hide mesh 0.25s.
+function WaveEndVfx.notifyUnderfedArrival()
+	local heart = WaveEndVfx.getEndHeartPart()
+	if not heart then
+		return
+	end
+	heartHideToken += 1
+	local myHide = heartHideToken
+	heartHideUntil = os.clock() + UNDERFED_HIDE_SEC
+	setEndHeartHidden(heart, true)
+	task.delay(UNDERFED_HIDE_SEC, function()
+		if myHide ~= heartHideToken or os.clock() < heartHideUntil then
+			return
+		end
+		if heart.Parent then
+			setEndHeartHidden(heart, false)
+		end
+	end)
+end
+
+local function pulseReefHeartLoss(at: Vector3, tintHeart: boolean?)
 	local folder = resolveFolder()
 	local startPos = at + Vector3.new(0, 2, 0)
 	local anchor = Instance.new("Part")
@@ -150,7 +292,8 @@ local function pulseReefHeartLoss(at: Vector3)
 	lbl.TextStrokeColor3 = Color3.fromRGB(80, 0, 10)
 	lbl.Parent = holder
 
-	local worldHeart = WaveEndVfx.getEndHeartPart()
+	-- Local plot heart (Plot1 authored, or remapped clone on Plot2+).
+	local worldHeart = if tintHeart ~= false then WaveEndVfx.getEndHeartPart() else nil
 	endHeartAnimToken += 1
 	local myHeartToken = endHeartAnimToken
 	if worldHeart then
@@ -405,16 +548,13 @@ function WaveEndVfx.burstHappyFirework(emojis: { string }, at: Vector3)
 	end
 end
 
-function WaveEndVfx.playReefHealthTicks(amount: number, endPos: Vector3?)
+function WaveEndVfx.playReefHealthTicks(amount: number, endPos: Vector3?, tintHeart: boolean?)
 	if amount <= 0 then
 		return
 	end
 	local at = endPos
 	if not at then
-		local heart = WaveEndVfx.getEndHeartPart()
-		if heart then
-			at = heart.Position
-		end
+		at = WaveEndVfx.getEndHeartWorldPos()
 	end
 	for i = 1, amount do
 		local pitch = math.max(REEF_TICK_PITCH_MIN, REEF_TICK_PITCH_START - reefTickStreak * REEF_TICK_PITCH_STEP)
@@ -433,10 +573,25 @@ function WaveEndVfx.playReefHealthTicks(amount: number, endPos: Vector3?)
 				end
 			end)
 			if at then
-				pulseReefHeartLoss(at)
+				pulseReefHeartLoss(at, tintHeart)
 			end
 		end)
 	end
 end
+
+ClientPlot.onChanged(function(plot)
+	table.clear(heartByPlotId)
+	endHeartPart = nil
+	endHeartPlotId = nil
+	if plot then
+		WaveEndVfx.refreshLocalEndHeart()
+	end
+end)
+
+task.defer(function()
+	if ClientPlot.get() then
+		WaveEndVfx.refreshLocalEndHeart()
+	end
+end)
 
 return WaveEndVfx

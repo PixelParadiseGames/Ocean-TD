@@ -14,6 +14,8 @@ local REMOTE_EVENTS = {
 	"SessionReady",
 	"PlaceResult",
 	"ReportHighestWave",
+	"PlotRoster",
+	"WaveWatchPush",
 }
 
 local REMOTE_FUNCTIONS = {
@@ -26,6 +28,7 @@ local REMOTE_FUNCTIONS = {
 	"RequestSavePlotSlot",
 	"RequestLoadPlotSlot",
 	"RequestRenamePlotSave",
+	"RequestPlotRoster",
 }
 
 local function getRoot(): Instance

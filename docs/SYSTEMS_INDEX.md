@@ -8,9 +8,11 @@ Update this file in the **same change** when you add or rename a system. If inde
 |--------|--------|-------|---------|-------|
 | Bootstrap (server) | Live | `src/ServerScriptService/OceanTD/Bootstrap.server.lua` | wires services below | Join → load → assign → hydrate → ready; leave → snapshot → save → free |
 | Bootstrap (client) | Live | `src/StarterPlayerScripts/OceanTD/Bootstrap.client.lua` | `ClientPlot.lua` | Mirrors plot bounds; SessionReady |
-| PlotService | Live | `.../Services/PlotService.lua` | `Shared/Constants`, `Shared/GridMath`, `Shared/RingMath` | Master + PreviewBox_1..5; `getDecorFolder`; Bounds fallback |
-| DecorReplicator | Live | `.../Services/DecorReplicator.lua` | PlotService poses | Boot: `MasterPlotDecor` → `StaticPlot_2..N` rigid remap |
-| RingMath | Live | `src/ReplicatedStorage/OceanTD/Shared/RingMath.lua` | — | Matches ArenaGeneratorPlugin preview formula |
+| PlotService | Live | `.../Services/PlotService.lua` | `Shared/Constants`, `Shared/GridMath`, `Shared/RingMath` | Master + RingMath poses (no PreviewBox / no voxel align); random first assign; later joins seat beside occupied |
+| WaveHeartReplicator | Live | `.../Services/WaveHeartReplicator.lua` | PlotService poses, WaveRoute.A.EndPoint | Clones end heart onto Plot2..N via rigid Plot1→slot remap |
+| DecorReplicator | Live | `.../Services/DecorReplicator.lua` | PlotService poses | Boot: `MasterPlotDecor` → `StaticPlot_2..N` via rigid Plot1→slot remap |
+| TerrainPlotAlign | Deprecated | `src/ReplicatedStorage/OceanTD/Shared/TerrainPlotAlign.lua` | — | No-op stub; do not use for persistence (per-boot XZ nudge broke leave/rejoin) |
+| RingMath | Live | `src/ReplicatedStorage/OceanTD/Shared/RingMath.lua` | — | Matches ArenaGeneratorPlugin preview formula; sole runtime Plot2..N pose source |
 | GridService | Live | `.../Services/GridService.lua` | `Shared/GridMath`, `Shared/PlotTypes` | In-memory cells; `tryOccupy` / hydrate / snapshot |
 | PersistenceService | Live | `.../Services/PersistenceService.lua` | `Shared/PlotTypes`, `Shared/Constants` | DataStore `OceanTD_Player_v1`; anti-wipe; `plotSaves` 1–4 + activeIndex |
 | PlotSaveService | Live | `.../Services/PlotSaveService.lua` | Persistence, Placement, Undo, Grid | Manual save/load/NEW/rename; load wipes undo; autosave targets active slot |
@@ -21,8 +23,10 @@ Update this file in the **same change** when you add or rename a system. If inde
 | SavePlotSlot | Live | `src/StarterPlayerScripts/OceanTD/SavePlotSlot.lua` | InventoryState, Remotes | Slot1 save UI / 2×2 presets / L3·V; blue `#0073ed` help |
 | ClearPlotSlot | Live | `src/StarterPlayerScripts/OceanTD/ClearPlotSlot.lua` | ClearPlotVfx, InventoryState | Slot2 clear-plot UI / confirm / shortcuts |
 | UndoSlot | Live | `src/StarterPlayerScripts/OceanTD/UndoSlot.lua` | Remotes RequestUndo | Slot3 undo UI / cycle / Z/L2 while backpack open |
-| WaveSlot | Live | `src/StarterPlayerScripts/OceanTD/WaveSlot.lua` | WaveSim | Slot5 start/stop waves; R/ButtonX; green help; summary + confetti |
-| SkipWaveSlot | Live | `src/StarterPlayerScripts/OceanTD/SkipWaveSlot.lua` | WaveSim, InventoryState | Slot6 skip (slides under Slot5); Z/L2 when backpack closed; confirm popup |
+| WaveSlot | Live | `src/StarterPlayerScripts/OceanTD/WaveSlot.lua` | WaveSim, WaveWatchMode | Slot5 start/stop waves; R/ButtonX; green help; summary + confetti; red watch stroke |
+| SkipWaveSlot | Live | `src/StarterPlayerScripts/OceanTD/SkipWaveSlot.lua` | WaveSim, InventoryState, WaveWatchMode | Slot6 skip (slides under Slot5); Z/L2 when backpack closed; confirm popup; watch chrome |
+| WaveSpeedSlot | Live | `src/StarterPlayerScripts/OceanTD/WaveSpeedSlot.lua` | WaveSim, WaveWatchMode | Slot7 wave speed 1×/1.5×/2×; T/L2; watch chrome |
+| WaveWatch | Live | WaveWatchHost/Visitor + WaveGhostSim + WaveWatchHud + WaveWatchService | WaveSim, PlotRoster, WaveWatchPush | Spectate host plot; own center HUD + slots; host strip bottom-right with name |
 | WaveSign | Live | `src/StarterPlayerScripts/OceanTD/WaveSign.lua` | WaveSim, ClientPlot, Persistence highestWave | Plot “Current Wave Sign”: live Wave N / idle all-time high |
 | InventoryState | Live | `src/StarterPlayerScripts/OceanTD/InventoryState.lua` | ItemCatalog | Open + selected; clear-plot + save-plots modal gates |
 | ItemCatalog | Live | `src/ReplicatedStorage/OceanTD/Shared/ItemCatalog.lua` | SpeciesCatalog via `speciesId` | BrainCoral first; register new items here |
@@ -35,10 +39,14 @@ Update this file in the **same change** when you add or rename a system. If inde
 | PlacementBootstrap | Live | `src/StarterPlayerScripts/OceanTD/PlacementBootstrap.client.lua` | PlacementController | Requires controller on client boot |
 | UiIdleCycle | Live | `src/ReplicatedStorage/OceanTD/Shared/UiIdleCycle.lua` | — | Shared delay+dirty idle toggles / sequences (slots, close label) |
 | ForceLandscape | Live | `src/StarterPlayerScripts/OceanTD/ForceLandscape.client.lua` | — | Landscape only; no portrait mobile |
+| MobileSkillsB | Live | `src/StarterPlayerScripts/OceanTD/MobileSkillsB.client.lua` | Studio `MobileLeftUI.dPad.Skills`, `MobileSkillsB` | dPad Skills toggles MobileSkillsB ScreenGui |
+| PlotFrameContract | Live | `src/ReplicatedStorage/OceanTD/Shared/PlotFrameContract.lua` | RingMath, PlotService | Forbids runtime plot CFrame calibrate; boot drift check |
+| PlacedCoralIndex | Live | `src/StarterPlayerScripts/OceanTD/PlacedCoralIndex.lua` | ClientPlot, GridMath | Client grid index of `OceanTD_Placed`; place/relocate/wave gather |
+| WaveEntityPool | Live | `src/StarterPlayerScripts/OceanTD/WaveEntityPool.lua` | `ReplicatedStorage.Fish.*`, GreenArrows | Typed acquire/release for Tang (+ future kinds), food, arrows, ammo, SFX |
 | Remove coral | Live | PlacementService.recycle + RelocateController | GridService, UndoService | Recycle credits seed; Slot3/Z/L2 undoes |
 | Clear plot | Live | PlacementService.clearPlot + InventoryUI Slot2 | ClearPlotVfx, UndoService | Full seed refund; Slot2/C/R3 + ✓/X; one undo step |
 | Save plots | Live | PlotSaveService + SavePlotSlot | Persistence plotSaves | 4 presets; active slot autosave; SAVE overwrite confirm; LOAD/NEW; wipe undo on load |
-| Feed waves | Live | WaveSlot + SkipWaveSlot + WaveSim | WaveRoute.A, ReplicatedStorage.Fish.Tang, ReplicatedStorage.GreenArrows | Client-only solo; Slot5 start/stop; Slot6 skip; Tang waves; green path preview; brain food; reef health |
+| Feed waves | Live | WaveSlot + SkipWaveSlot + WaveSim + WaveWatch | WaveRoute.A, Tang, GreenArrows, PlotRoster | Solo client sim; visitors get sparse ghost + HUD on host plot |
 | RNG coral rolls | Planned | — | — | Common → rare weights |
 | Shop / Robux | Planned | — | — | Server grant only |
 | Skill tree | Planned | — | — | Persist unlocks; server enforces caps |

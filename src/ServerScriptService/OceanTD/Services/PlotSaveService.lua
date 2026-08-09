@@ -34,6 +34,9 @@ local function cloneLayout(layout: { LayoutObject }): { LayoutObject }
 			lx = obj.lx,
 			ly = obj.ly,
 			lz = obj.lz,
+			gx = obj.gx,
+			gy = obj.gy,
+			gz = obj.gz,
 		})
 	end
 	return out

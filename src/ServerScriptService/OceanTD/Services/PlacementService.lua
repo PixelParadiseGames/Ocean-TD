@@ -26,6 +26,18 @@ type LayoutObject = {
 	lx: number,
 	ly: number,
 	lz: number,
+	gx: number?,
+	gy: number?,
+	gz: number?,
+}
+
+export type PlaceResult = {
+	ok: boolean,
+	errorCode: string?,
+	worldPos: Vector3?,
+	speciesId: string?,
+	itemId: string?,
+	placeId: string?,
 }
 
 local PlacementService = {}
@@ -155,20 +167,100 @@ function PlacementService.hydrateVisuals(plotId: string, boundsCFrame: CFrame)
 		if not species then
 			return
 		end
+		-- Same anchor as save — PointToWorldSpace(VisualPos). Never re-raycast / grid-center.
 		local world = GridMath.plotLocalToWorld(Vector3.new(cell.lx, cell.ly, cell.lz), boundsCFrame)
-		PlacementService.spawnVisual(plotId, species.speciesId, world, nil)
+		local visual = PlacementService.spawnVisual(plotId, species.speciesId, world, nil)
+		if visual then
+			visual:SetAttribute("OceanTD_ItemId", cell.id)
+			visual:SetAttribute("OceanTD_SpeciesId", species.speciesId)
+		end
 	end)
 	log("Hydrated visuals", plotId)
 end
 
-export type PlaceResult = {
-	ok: boolean,
-	errorCode: string?,
-	worldPos: Vector3?,
-	speciesId: string?,
-	itemId: string?,
-	placeId: string?,
-}
+-- Restore from plot-local VisualPos. Skips surface ray / normal place gates.
+-- Prefer saved gx,gy,gz for occupancy; fall back to WorldToGrid(VisualPos).
+-- Same anchor as save — avoids FindSurfaceInCell random offset skewing restore.
+function PlacementService.placeFromSave(
+	player: Player,
+	itemId: string,
+	visualLocal: Vector3,
+	gx: number?,
+	gy: number?,
+	gz: number?,
+	consumeSeed: boolean?
+): PlaceResult
+	local shouldConsume = consumeSeed == true
+	local item = ItemCatalog.get(itemId)
+	if not item then
+		return { ok = false, errorCode = "UnknownItem" }
+	end
+	local species = SpeciesCatalog.getByItemId(itemId)
+	if not species then
+		return { ok = false, errorCode = "UnknownSpecies" }
+	end
+	if not PlayerSession.canSave(player) then
+		return { ok = false, errorCode = "NotReady" }
+	end
+	local plotId = PlotService.getOwnerPlotId(player)
+	if not plotId then
+		return { ok = false, errorCode = "NoPlot" }
+	end
+	local slot = PlotService.getSlot(plotId)
+	if not slot then
+		return { ok = false, errorCode = "BadPlot" }
+	end
+
+	if shouldConsume then
+		local debited = select(1, PersistenceService.tryDebitItem(player, itemId, 1))
+		if not debited then
+			return { ok = false, errorCode = "NoSeeds" }
+		end
+	end
+
+	-- exactPos = plot.CFrame:PointToWorldSpace(VisualPos) — never re-snap to terrain/grid center.
+	local worldPos = GridMath.plotLocalToWorld(visualLocal, slot.cframe)
+	local occupied, occupyErr = GridService.tryOccupy(
+		plotId,
+		player.UserId,
+		itemId,
+		visualLocal.X,
+		visualLocal.Y,
+		visualLocal.Z,
+		gx,
+		gy,
+		gz
+	)
+	if not occupied then
+		if shouldConsume then
+			PersistenceService.creditItem(player, itemId, 1)
+		end
+		return { ok = false, errorCode = occupyErr or "SpotTaken" }
+	end
+
+	local visual = PlacementService.spawnVisual(plotId, species.speciesId, worldPos, nil)
+	if not visual then
+		GridService.vacate(plotId, visualLocal.X, visualLocal.Y, visualLocal.Z, gx, gy, gz)
+		if shouldConsume then
+			PersistenceService.creditItem(player, itemId, 1)
+		end
+		return { ok = false, errorCode = "VisualFail" }
+	end
+
+	local placeIdAttr = visual:GetAttribute("OceanTD_PlaceId")
+	local placeId = if typeof(placeIdAttr) == "string" then placeIdAttr else HttpService:GenerateGUID(false)
+	visual:SetAttribute("OceanTD_PlaceId", placeId)
+	visual:SetAttribute("OceanTD_ItemId", itemId)
+	visual:SetAttribute("OceanTD_SpeciesId", species.speciesId)
+
+	return {
+		ok = true,
+		worldPos = worldPos,
+		speciesId = species.speciesId,
+		itemId = itemId,
+		placeId = placeId,
+	}
+end
 
 -- consumeSeed: player places debit inventory. Internal hydrate/load can pass false.
 function PlacementService.place(player: Player, itemId: string, worldPos: Vector3, consumeSeed: boolean?): PlaceResult
@@ -199,8 +291,19 @@ function PlacementService.place(player: Player, itemId: string, worldPos: Vector
 		end
 	end
 
-	-- Snap visual to ray hit pos (client sends terrain hit); occupancy uses plot-local grid.
-	local occupied, occupyErr = GridService.tryOccupy(plotId, player.UserId, itemId, localPos.X, localPos.Y, localPos.Z)
+	-- Snap visual to ray hit pos (client sends terrain hit); store exact VisualPos + rounded grid key.
+	local gx, gy, gz = GridMath.worldToGrid(localPos, Vector3.zero)
+	local occupied, occupyErr = GridService.tryOccupy(
+		plotId,
+		player.UserId,
+		itemId,
+		localPos.X,
+		localPos.Y,
+		localPos.Z,
+		gx,
+		gy,
+		gz
+	)
 	if not occupied then
 		if shouldConsume then
 			PersistenceService.creditItem(player, itemId, 1)
@@ -211,7 +314,7 @@ function PlacementService.place(player: Player, itemId: string, worldPos: Vector
 	local visual = PlacementService.spawnVisual(plotId, species.speciesId, worldPos, nil)
 	if not visual then
 		warnPlace("Visual spawn failed after occupy — rolling back cell")
-		GridService.vacate(plotId, localPos.X, localPos.Y, localPos.Z)
+		GridService.vacate(plotId, localPos.X, localPos.Y, localPos.Z, gx, gy, gz)
 		if shouldConsume then
 			PersistenceService.creditItem(player, itemId, 1)
 		end
@@ -322,15 +425,35 @@ function PlacementService.move(
 		return { ok = false, errorCode = "SpotTaken" }
 	end
 
-	local vacated, cell = GridService.vacate(plotId, fromLocal.X, fromLocal.Y, fromLocal.Z)
+	local vacated, cell = GridService.vacate(plotId, fromLocal.X, fromLocal.Y, fromLocal.Z, fgx, fgy, fgz)
 	if not vacated or not cell then
 		return { ok = false, errorCode = "NotFound" }
 	end
 
-	local occupied, occupyErr = GridService.tryOccupy(plotId, player.UserId, cell.id, toLocal.X, toLocal.Y, toLocal.Z)
+	local occupied, occupyErr = GridService.tryOccupy(
+		plotId,
+		player.UserId,
+		cell.id,
+		toLocal.X,
+		toLocal.Y,
+		toLocal.Z,
+		tgx,
+		tgy,
+		tgz
+	)
 	if not occupied then
 		-- Roll back vacate so the coral isn't lost from the grid.
-		GridService.tryOccupy(plotId, player.UserId, cell.id, fromLocal.X, fromLocal.Y, fromLocal.Z)
+		GridService.tryOccupy(
+			plotId,
+			player.UserId,
+			cell.id,
+			fromLocal.X,
+			fromLocal.Y,
+			fromLocal.Z,
+			fgx,
+			fgy,
+			fgz
+		)
 		return { ok = false, errorCode = occupyErr or "SpotTaken" }
 	end
 
@@ -433,6 +556,12 @@ export type ClearPlotEntry = {
 	placeId: string,
 	itemId: string,
 	worldPos: Vector3,
+	lx: number?,
+	ly: number?,
+	lz: number?,
+	gx: number?,
+	gy: number?,
+	gz: number?,
 }
 
 export type ClearPlotResult = {
@@ -477,6 +606,12 @@ function PlacementService.clearPlot(player: Player, allowEmpty: boolean?, record
 			placeId = placeId,
 			itemId = cell.id,
 			worldPos = worldPos,
+			lx = cell.lx,
+			ly = cell.ly,
+			lz = cell.lz,
+			gx = cell.gx,
+			gy = cell.gy,
+			gz = cell.gz,
 		})
 	end)
 
@@ -493,12 +628,18 @@ function PlacementService.clearPlot(player: Player, allowEmpty: boolean?, record
 	local entries: { ClearPlotEntry } = {}
 	local credits: { [string]: number } = {}
 	for _, entry in ipairs(pending) do
-		local localPos = worldToPlotLocal(plotId, entry.worldPos)
-		if not localPos then
-			continue
+		local lx = entry.lx
+		local ly = entry.ly
+		local lz = entry.lz
+		if typeof(lx) ~= "number" or typeof(ly) ~= "number" or typeof(lz) ~= "number" then
+			local localPos = worldToPlotLocal(plotId, entry.worldPos)
+			if not localPos then
+				continue
+			end
+			lx, ly, lz = localPos.X, localPos.Y, localPos.Z
 		end
 		local visual = findVisualByPlaceId(plotId, entry.placeId) or findVisualAtGrid(plotId, entry.worldPos)
-		local vacated, vacatedCell = GridService.vacate(plotId, localPos.X, localPos.Y, localPos.Z)
+		local vacated, vacatedCell = GridService.vacate(plotId, lx, ly, lz, entry.gx, entry.gy, entry.gz)
 		if not vacated or not vacatedCell then
 			continue
 		end
@@ -571,12 +712,20 @@ function PlacementService.applyLayout(player: Player, layout: { LayoutObject }):
 		if typeof(obj) ~= "table" or typeof(obj.id) ~= "string" then
 			continue
 		end
-		local worldPos = GridMath.plotLocalToWorld(Vector3.new(obj.lx, obj.ly, obj.lz), slot.cframe)
-		local result = PlacementService.place(player, obj.id, worldPos, true)
+		-- fromSave: exact VisualPos + saved grid keys — never re-raycast / cell-center snap.
+		local result = PlacementService.placeFromSave(
+			player,
+			obj.id,
+			Vector3.new(obj.lx, obj.ly, obj.lz),
+			obj.gx,
+			obj.gy,
+			obj.gz,
+			true
+		)
 		if result.ok then
 			placed += 1
 		else
-			warnPlace("applyLayout place failed", obj.id, result.errorCode)
+			warnPlace("applyLayout placeFromSave failed", obj.id, result.errorCode)
 		end
 	end
 	suppressUndoRecord = false

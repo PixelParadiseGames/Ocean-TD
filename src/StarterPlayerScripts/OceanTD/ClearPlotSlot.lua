@@ -214,22 +214,13 @@ local function gatherOwnedPlotParts(): { BasePart }
 		table.insert(parts, inst)
 	end
 
-	local root = Workspace:FindFirstChild("OceanTD_Placed")
-	if not root then
+	local mirrored = ClientPlot.get()
+	if not mirrored then
 		return parts
 	end
-	local mirrored = ClientPlot.get()
-	local folder = if mirrored then root:FindFirstChild(mirrored.plotId) else nil
-	if folder then
-		for _, inst in ipairs(folder:GetChildren()) do
-			consider(inst)
-		end
-	end
-	-- Fallback: streaming / folder mismatch — scan all placed visuals.
-	if #parts == 0 then
-		for _, inst in ipairs(root:GetDescendants()) do
-			consider(inst)
-		end
+	local PlacedCoralIndex = require(script.Parent:WaitForChild("PlacedCoralIndex"))
+	for _, inst in ipairs(PlacedCoralIndex.getParts(mirrored.plotId)) do
+		consider(inst)
 	end
 	return parts
 end

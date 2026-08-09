@@ -44,6 +44,7 @@ local TWEEN_OPEN = TweenInfo.new(0.28, Enum.EasingStyle.Back, Enum.EasingDirecti
 local TWEEN_CLOSE = TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
 local RED = Color3.fromRGB(220, 50, 55)
 local DARK_RED = Color3.fromRGB(120, 10, 20)
+local BRIGHT_YELLOW = Color3.fromRGB(255, 230, 40)
 local GREEN = Color3.fromRGB(40, 220, 110)
 local PANEL_WIDTH_SCALE = 0.33
 local SLOT4_GAP_PX = 8
@@ -348,7 +349,7 @@ slot4:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
 	disarmTouchBlockingOverlays(mainHUD, slot4)
 end)
 
-local closedStroke = ensureStroke(circle, "_OceanTD_ClosedRing", RED, 3)
+local closedStroke = ensureStroke(circle, "_OceanTD_ClosedRing", BRIGHT_YELLOW, 3)
 closedStroke.Enabled = true
 
 local originalCircleImage = ""
@@ -494,7 +495,7 @@ local function applySlotClosedChrome()
 	stopCloseXPulse()
 	stopCloseLabelCycle()
 	closedStroke.Enabled = true
-	closedStroke.Color = RED
+	closedStroke.Color = BRIGHT_YELLOW
 	closedStroke.Thickness = 3
 	closeX.Visible = false
 	closeX.Text = "X"
@@ -549,7 +550,7 @@ panel.Parent = host
 Instance.new("UICorner", panel).CornerRadius = UDim.new(0, 12)
 
 local panelStroke = Instance.new("UIStroke")
-panelStroke.Color = RED
+panelStroke.Color = BRIGHT_YELLOW
 panelStroke.Thickness = 1.5
 panelStroke.Parent = panel
 

@@ -17,6 +17,9 @@ Document bugs we must not rediscover. Add a row when a nasty one ships.
 | Studio “data lost” panic | API services off in Studio | Enable Studio DataStore access; logs still show load/save path |
 | Double-assign same plot | Race on PlayerAdded | Single `PlotService.assign`; slot.owner check |
 | Save during save | Overlapping autosave + leave | `session.saving` flag in `PlayerSession` |
+| Coral + wave path slide radially on rejoin | Runtime `TerrainPlotAlign` / PreviewBox pose ≠ save-time `slot.cframe` | **PlotFrameContract**: Master+RingMath only; no voxel calibrate; boot logs `contractOk=` |
+| PreviewBox used as live pose | Boxes drifted vs stamp / ExpansionOffset | Runtime ignores PreviewBoxes; stamp helpers only ([STUDIO_CONTRACT.md](STUDIO_CONTRACT.md)) |
 
 ## Verify quickly
 Search output for `[PERSIST]` load/save counts and `[PLOT] Assigned` / `Freed`.
+Expect `[PLOT] Init from Master + RingMath … contractOk= true`.

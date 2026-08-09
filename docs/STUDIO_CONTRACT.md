@@ -14,15 +14,14 @@ Author once on the master wedge; stamp terrain and remap décor around the ring;
 4. **3. Hide Previews** — moves `MasterTerrainBox` + `TerrainPreviews` into **ServerStorage** (not Destroy). Show brings them back.
 
 ## Logical mapping (runtime)
-| Logical plot | Source instance |
-|--------------|-----------------|
-| Plot1 | `MasterTerrainBox` |
-| Plot2 | `TerrainPreviews.PreviewBox_1` |
-| Plot3 | `PreviewBox_2` |
-| … | … |
-| Plot6 | `PreviewBox_5` |
+| Logical plot | Runtime pose |
+|--------------|--------------|
+| Plot1 | `MasterTerrainBox.CFrame` |
+| Plot2..N | `RingMath.plotCFrame` from Master + `ExpansionOffset` (same formula as plugin previews) |
 
-`PlotService` searches **Workspace and ServerStorage**. If preview parts are missing, it recomputes poses with the same formula as the plugin (`RingMath`).
+`PreviewBox_*` are **Studio stamp helpers only** — not read for live plot CFrames. Spawning previews writes `MasterTerrainBox.ExpansionOffset` so runtime RingMath matches the stamp.
+
+**No runtime terrain calibrate.** If islands disagree with the ring (waves/décor off corals), fix in Studio: Show Previews → Stamp Terrain → Hide, then restart. Do not reintroduce per-boot XZ nudges — they break leave/rejoin VisualPos restore.
 
 ## Décor cloning (runtime)
 Author props only under **`Workspace.MasterPlotDecor`** (plot 1). At server boot, `DecorReplicator` clones them to **`StaticPlot_2` … `StaticPlot_N`** with a rigid remap from plot 1’s CFrame. There is no `StaticPlot_1`.
@@ -30,8 +29,7 @@ Author props only under **`Workspace.MasterPlotDecor`** (plot 1). At server boot
 Expect `[DECOR] Cloned … -> StaticPlot_N` in Output. Do not hand-duplicate décor onto every wedge.
 
 ## Required for assign
-- `MasterTerrainBox` in Workspace **or** ServerStorage (after Hide).
-- Prefer also `TerrainPreviews` with PreviewBoxes (same places).
+- `MasterTerrainBox` in Workspace **or** ServerStorage (after Hide), with `ExpansionOffset` matching the last Spawn/Update Previews.
 
 Optional: `MasterPlotDecor` (required for décor clones).  
 `Workspace.Arena` optional for future mid-arena coop/PvP only.
@@ -47,4 +45,4 @@ Optional Studio reference: `Workspace.UI["Move Icon"]` — code uses the asset i
 - Six masters; `StaticPlot_1`; Master paths for every player; `PreviewBox_i == Plot_i`; requiring a hand-placed Arena.Center; assuming Hide deletes boxes.
 
 ## After plugin
-Expect `[PLOT] Init from Master + PreviewBoxes (incl. ServerStorage stash)` or RingMath fallback, then `[DECOR]` clone lines. Smoke: [SMOKE_TEST.md](SMOKE_TEST.md).
+Expect `[PLOT] Init from Master + RingMath (stable; no TerrainPlotAlign)` then `[DECOR]` clone lines. Smoke: [SMOKE_TEST.md](SMOKE_TEST.md).

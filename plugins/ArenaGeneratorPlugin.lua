@@ -84,6 +84,7 @@ previewBtn.MouseButton1Click:Connect(function()
 	masterBox.Parent = workspace
 	masterBox.Transparency = 0.5 
 	masterBox.Locked = false 
+	masterBox:SetAttribute("ExpansionOffset", expansionOffset)
 	previewsVisible = true
 	hideBtn.Text = "3. Hide Previews"
 
@@ -139,9 +140,10 @@ stampBtn.MouseButton1Click:Connect(function()
 
 	local function getMasterVoxel(worldPos)
 		local offset = worldPos - mRegionMin
-		local ix = math.floor(offset.X / 4) + 1
-		local iy = math.floor(offset.Y / 4) + 1
-		local iz = math.floor(offset.Z / 4) + 1
+		-- Nearest voxel (round) reduces systematic drift vs floor on rotated stamps.
+		local ix = math.floor(offset.X / 4 + 0.5) + 1
+		local iy = math.floor(offset.Y / 4 + 0.5) + 1
+		local iz = math.floor(offset.Z / 4 + 0.5) + 1
 
 		if mMats[ix] and mMats[ix][iy] and mMats[ix][iy][iz] then
 			return mMats[ix][iy][iz], mOccs[ix][iy][iz]

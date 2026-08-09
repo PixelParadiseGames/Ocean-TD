@@ -30,6 +30,8 @@ local Constants = {
 
 	HIGHEST_WAVE_ATTR = "OceanTD_HighestWave",
 	CURRENT_WAVE_SIGN_NAME = "Current Wave Sign",
+	-- Replicated on Player: which plot they own ("Plot1" …).
+	PLOT_ID_ATTR = "OceanTD_PlotId",
 
 	-- Four named plot presets; autosave writes the active slot.
 	PLOT_SAVE_SLOT_COUNT = 4,
