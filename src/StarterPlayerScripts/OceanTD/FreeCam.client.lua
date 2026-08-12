@@ -380,6 +380,9 @@ setEnabled = function(on: boolean)
 		return
 	end
 	if on then
+		if playerGui:GetAttribute("OceanTD_PlotSizeCinematicBusy") == true then
+			return
+		end
 		if PlacementController.isActive() or RelocateController.isActive() then
 			return
 		end
@@ -413,6 +416,9 @@ setEnabled = function(on: boolean)
 		stopRender()
 		renderConn = RunService.RenderStepped:Connect(function(dt)
 			if not active then
+				return
+			end
+			if playerGui:GetAttribute("OceanTD_PlotSizeCinematicBusy") == true then
 				return
 			end
 			if PlacementController.isActive() or RelocateController.isActive() then
@@ -773,6 +779,12 @@ task.spawn(function()
 	end)
 	playerGui:GetAttributeChangedSignal("OceanTD_SkillsBubblesOpen"):Connect(function()
 		syncDPadIcon()
+	end)
+
+	playerGui:GetAttributeChangedSignal("OceanTD_ForceCloseFreeCam"):Connect(function()
+		if active then
+			setEnabled(false)
+		end
 	end)
 
 	print("[FreeCam] Ready — plot SkyCam + SkyCamFocus look-at")

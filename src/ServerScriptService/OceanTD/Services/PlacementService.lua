@@ -30,6 +30,7 @@ type LayoutObject = {
 	gx: number?,
 	gy: number?,
 	gz: number?,
+	diameter: number?,
 }
 
 export type PlaceResult = {
@@ -121,8 +122,14 @@ function PlacementService.validateWorldPos(player: Player, worldPos: Vector3): (
 	return true, nil, plotId
 end
 
-function PlacementService.spawnVisual(plotId: string, speciesId: string, worldPos: Vector3, color: Color3?): BasePart?
-	local part = CoralVisual.create(speciesId, worldPos, { ghost = false, color = color })
+function PlacementService.spawnVisual(
+	plotId: string,
+	speciesId: string,
+	worldPos: Vector3,
+	color: Color3?,
+	diameter: number?
+): BasePart?
+	local part = CoralVisual.create(speciesId, worldPos, { ghost = false, color = color, diameter = diameter })
 	if not part then
 		return nil
 	end
@@ -170,7 +177,7 @@ function PlacementService.hydrateVisuals(plotId: string, boundsCFrame: CFrame)
 		end
 		-- Same anchor as save — PointToWorldSpace(VisualPos). Never re-raycast / grid-center.
 		local world = GridMath.plotLocalToWorld(Vector3.new(cell.lx, cell.ly, cell.lz), boundsCFrame)
-		local visual = PlacementService.spawnVisual(plotId, species.speciesId, world, nil)
+		local visual = PlacementService.spawnVisual(plotId, species.speciesId, world, nil, cell.diameter)
 		if visual then
 			visual:SetAttribute("OceanTD_ItemId", cell.id)
 			visual:SetAttribute("OceanTD_SpeciesId", species.speciesId)
@@ -189,7 +196,8 @@ function PlacementService.placeFromSave(
 	gx: number?,
 	gy: number?,
 	gz: number?,
-	consumeSeed: boolean?
+	consumeSeed: boolean?,
+	diameter: number?
 ): PlaceResult
 	local shouldConsume = consumeSeed == true
 	local item = ItemCatalog.get(itemId)
@@ -230,7 +238,8 @@ function PlacementService.placeFromSave(
 		visualLocal.Z,
 		gx,
 		gy,
-		gz
+		gz,
+		diameter
 	)
 	if not occupied then
 		if shouldConsume then
@@ -239,7 +248,7 @@ function PlacementService.placeFromSave(
 		return { ok = false, errorCode = occupyErr or "SpotTaken" }
 	end
 
-	local visual = PlacementService.spawnVisual(plotId, species.speciesId, worldPos, nil)
+	local visual = PlacementService.spawnVisual(plotId, species.speciesId, worldPos, nil, diameter)
 	if not visual then
 		GridService.vacate(plotId, visualLocal.X, visualLocal.Y, visualLocal.Z, gx, gy, gz)
 		if shouldConsume then
@@ -264,7 +273,13 @@ function PlacementService.placeFromSave(
 end
 
 -- consumeSeed: player places debit inventory. Internal hydrate/load can pass false.
-function PlacementService.place(player: Player, itemId: string, worldPos: Vector3, consumeSeed: boolean?): PlaceResult
+function PlacementService.place(
+	player: Player,
+	itemId: string,
+	worldPos: Vector3,
+	consumeSeed: boolean?,
+	diameterOverride: number?
+): PlaceResult
 	local shouldConsume = consumeSeed ~= false
 	local item = ItemCatalog.get(itemId)
 	if not item then
@@ -299,6 +314,11 @@ function PlacementService.place(player: Player, itemId: string, worldPos: Vector
 	end
 
 	-- Snap visual to ray hit pos (client sends terrain hit); store exact VisualPos + rounded grid key.
+	local diameter: number? = nil
+	if species.speciesId == "BrainCoral" or itemId == "BrainCoral" then
+		-- Prefer client ghost size so preview matches the placed coral.
+		diameter = CoralVisual.sanitizeBrainDiameter(diameterOverride)
+	end
 	local gx, gy, gz = GridMath.worldToGrid(localPos, Vector3.zero)
 	local occupied, occupyErr = GridService.tryOccupy(
 		plotId,
@@ -309,7 +329,8 @@ function PlacementService.place(player: Player, itemId: string, worldPos: Vector
 		localPos.Z,
 		gx,
 		gy,
-		gz
+		gz,
+		diameter
 	)
 	if not occupied then
 		if shouldConsume then
@@ -318,7 +339,7 @@ function PlacementService.place(player: Player, itemId: string, worldPos: Vector
 		return { ok = false, errorCode = occupyErr or "SpotTaken" }
 	end
 
-	local visual = PlacementService.spawnVisual(plotId, species.speciesId, worldPos, nil)
+	local visual = PlacementService.spawnVisual(plotId, species.speciesId, worldPos, nil, diameter)
 	if not visual then
 		warnPlace("Visual spawn failed after occupy — rolling back cell")
 		GridService.vacate(plotId, localPos.X, localPos.Y, localPos.Z, gx, gy, gz)
@@ -446,7 +467,8 @@ function PlacementService.move(
 		toLocal.Z,
 		tgx,
 		tgy,
-		tgz
+		tgz,
+		cell.diameter
 	)
 	if not occupied then
 		-- Roll back vacate so the coral isn't lost from the grid.
@@ -459,7 +481,8 @@ function PlacementService.move(
 			fromLocal.Z,
 			fgx,
 			fgy,
-			fgz
+			fgz,
+			cell.diameter
 		)
 		return { ok = false, errorCode = occupyErr or "SpotTaken" }
 	end
@@ -727,7 +750,8 @@ function PlacementService.applyLayout(player: Player, layout: { LayoutObject }):
 			obj.gx,
 			obj.gy,
 			obj.gz,
-			true
+			true,
+			obj.diameter
 		)
 		if result.ok then
 			placed += 1

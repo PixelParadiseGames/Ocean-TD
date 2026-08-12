@@ -102,6 +102,10 @@ local function sanitizeLayout(raw: any): { LayoutObject }
 				entry.gy = math.round(gy)
 				entry.gz = math.round(gz)
 			end
+			local diameter = tonumber(obj.diameter)
+			if diameter and diameter > 0 then
+				entry.diameter = diameter
+			end
 			table.insert(layout, entry)
 		end
 	end
@@ -119,6 +123,7 @@ local function cloneLayout(layout: { LayoutObject }): { LayoutObject }
 			gx = obj.gx,
 			gy = obj.gy,
 			gz = obj.gz,
+			diameter = obj.diameter,
 		})
 	end
 	return out

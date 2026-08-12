@@ -131,6 +131,7 @@ type CoralAgent = {
 	diameter: number,
 	readyAt: number,
 	ammo: BasePart?,
+	ammoSizeMult: number, -- 0.70..0.99 — each neon food is 1–30% smaller
 	growing: boolean,
 	growT0: number,
 	busy: boolean, -- projectile in flight
@@ -1020,9 +1021,19 @@ local function destroyAmmo(coral: CoralAgent)
 	-- Do not clear coral.growing here — createAmmo calls this while starting a grow.
 end
 
+local function rollAmmoSizeMult(): number
+	-- 1%–30% smaller than base AMMO_RADIUS.
+	return 1 - (0.01 + math.random() * 0.29)
+end
+
+local function ammoFullDiameter(coral: CoralAgent): number
+	return C.AMMO_RADIUS * 2 * coral.ammoSizeMult
+end
+
 local function ammoWorldPos(coral: CoralAgent): Vector3
 	local r = coral.diameter * 0.5
-	return coral.part.Position + Vector3.new(0, r + C.AMMO_RADIUS, 0)
+	local ammoR = C.AMMO_RADIUS * coral.ammoSizeMult
+	return coral.part.Position + Vector3.new(0, r + ammoR, 0)
 end
 
 local function createAmmo(coral: CoralAgent, scale: number)
@@ -1030,7 +1041,12 @@ local function createAmmo(coral: CoralAgent, scale: number)
 		WaveEntityPool.releaseAmmo(coral.ammo)
 		coral.ammo = nil
 	end
-	local s = C.AMMO_RADIUS * 2 * math.clamp(scale, 0.08, 1)
+	local clamped = math.clamp(scale, 0.08, 1)
+	-- New orb (grow start or instant full): pick a random 1–30% smaller size.
+	if clamped <= 0.08 or clamped >= 1 then
+		coral.ammoSizeMult = rollAmmoSizeMult()
+	end
+	local s = ammoFullDiameter(coral) * clamped
 	local p = WaveEntityPool.acquireAmmo(ensureFolder(), coral.color, s)
 	p.CFrame = CFrame.new(ammoWorldPos(coral))
 	coral.ammo = p
@@ -1054,14 +1070,14 @@ local function tickAmmoGrow(now: number)
 			coral.growing = false
 			coral.readyAt = now
 			if coral.ammo and coral.ammo.Parent then
-				local s = C.AMMO_RADIUS * 2
+				local s = ammoFullDiameter(coral)
 				coral.ammo.Size = Vector3.new(s, s, s)
 				coral.ammo.CFrame = CFrame.new(ammoWorldPos(coral))
 			else
 				createAmmo(coral, 1)
 			end
 		elseif coral.ammo and coral.ammo.Parent then
-			local s = C.AMMO_RADIUS * 2 * math.max(0.08, u)
+			local s = ammoFullDiameter(coral) * math.max(0.08, u)
 			coral.ammo.Size = Vector3.new(s, s, s)
 			coral.ammo.CFrame = CFrame.new(ammoWorldPos(coral))
 		end
@@ -1108,6 +1124,7 @@ local function makeCoralAgent(part: BasePart): CoralAgent?
 		diameter = diameter,
 		readyAt = 0,
 		ammo = nil,
+		ammoSizeMult = 1,
 		growing = false,
 		growT0 = 0,
 		busy = false,

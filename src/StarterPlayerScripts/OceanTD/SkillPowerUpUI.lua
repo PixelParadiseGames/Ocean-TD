@@ -296,6 +296,9 @@ end
 
 local function applyStages(raw: any)
 	stagesMap = SkillStages.sanitizeMap(raw)
+	if SkillsBubbleSim.isRunning() then
+		SkillsBubbleSim.refreshStageLayouts()
+	end
 end
 
 local function currentStage(skillId: string): number
@@ -560,6 +563,8 @@ local function refreshTemplate()
 		if closeHitBtn then
 			closeHitBtn.ZIndex = POWERUP_Z + 710
 		end
+		-- raiseInteractive flattens child ZIndex; put the white X back on top.
+		ensureCloseXVisible()
 	end
 	if unlockBtn and unlockBtn.Visible and unlockBtn.Active then
 		raiseInteractive(unlockBtn, POWERUP_Z + 650)
@@ -670,6 +675,8 @@ local function doUnlockRemote()
 			if WaveSim.isRunning() then
 				WaveSim.rebuildRouteForPlotSize(stagesMap[skillId])
 			end
+		else
+			SkillsBubbleSim.refreshStageLayouts()
 		end
 		return
 	end

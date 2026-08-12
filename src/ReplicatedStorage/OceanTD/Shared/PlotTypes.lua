@@ -23,6 +23,8 @@ export type LayoutObject = {
 	gx: number?,
 	gy: number?,
 	gz: number?,
+	-- Optional visual diameter (BrainCoral random 2..5). Missing → species default.
+	diameter: number?,
 }
 
 export type PlotSaveSlot = {

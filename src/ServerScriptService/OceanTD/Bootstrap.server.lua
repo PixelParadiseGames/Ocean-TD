@@ -183,11 +183,11 @@ end)
 print("[PLOT] OceanTD server bootstrap complete")
 
 local requestPlace = Remotes.getFunction("RequestPlace")
-requestPlace.OnServerInvoke = function(player: Player, itemId: any, worldPos: any)
+requestPlace.OnServerInvoke = function(player: Player, itemId: any, worldPos: any, diameter: any)
 	if typeof(itemId) ~= "string" or typeof(worldPos) ~= "Vector3" then
 		return { ok = false, errorCode = "BadRequest" }
 	end
-	return PlacementService.place(player, itemId, worldPos)
+	return PlacementService.place(player, itemId, worldPos, true, diameter)
 end
 
 local requestMove = Remotes.getFunction("RequestMove")

@@ -46,6 +46,7 @@ local MODE_CONFIRM = "Confirm"
 local mode = MODE_OFF
 local armedItemId: string? = nil
 local ghost: BasePart? = nil
+local ghostPlaceDiameter: number? = nil
 local warnLabel: TextLabel? = nil
 local moveHintImage: ImageLabel? = nil
 local moveHintBillboard: BillboardGui? = nil
@@ -418,6 +419,7 @@ local function clearGhost()
 	warnLabel = nil
 	ghostBaseColor = nil
 	ghostBaseMaterial = nil
+	ghostPlaceDiameter = nil
 	SelectRing.destroy(placeSelectRing)
 	-- Keep move icon alive (billboard may be Adorned to this ghost).
 	detachMoveHintToScreen()
@@ -890,7 +892,18 @@ local function updateGhostAt(anchorPos: Vector3)
 		validSpot, rejectReason = evaluatePos(anchorPos)
 	end
 	if not ghost then
-		ghost = CoralVisual.create(speciesId, anchorPos, { ghost = true, valid = validSpot })
+		local ghostDiameter: number? = nil
+		if speciesId == "BrainCoral" then
+			ghostDiameter = CoralVisual.randomBrainDiameter()
+			ghostPlaceDiameter = ghostDiameter
+		else
+			ghostPlaceDiameter = nil
+		end
+		ghost = CoralVisual.create(speciesId, anchorPos, {
+			ghost = true,
+			valid = validSpot,
+			diameter = ghostDiameter,
+		})
 		if ghost then
 			ghost.Parent = Workspace
 			ensureWarnBillboard(ghost)
@@ -1779,7 +1792,7 @@ local function commitPlace()
 	HandOrb.flyToPlant(placePos)
 
 	local rf = Remotes.getFunction("RequestPlace")
-	local result = rf:InvokeServer(armedItemId, placePos)
+	local result = rf:InvokeServer(armedItemId, placePos, ghostPlaceDiameter)
 	if typeof(result) == "table" and result.ok then
 		log("Committed", armedItemId)
 		UiHaptics.rampOpen(1)

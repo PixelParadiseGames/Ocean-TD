@@ -1,7 +1,9 @@
 --!strict
 --[[
-	Soft lava-lamp bubble physics for MobileSkillsA ImageButtons.
+	Soft lava-lamp bubble physics for MobileSkillsA skill ImageButtons.
 	Heartbeat only while open. Does not touch placement / other HUD systems.
+	Bubble size + label placement use per-stage Studio templates (SkillStages);
+	only PlotSize / EarnMore / PlaceMore BTNs are playable bubbles.
 
 	Coords: physics + hits use GuiObject.AbsolutePosition space.
 	Pointer→abs is calibrated per grab (raw vs inset-subtracted) so we never guess
@@ -52,6 +54,22 @@ type Bubble = {
 	origZ: number,
 }
 
+type LabelLayoutSnap = {
+	position: UDim2,
+	size: UDim2,
+	anchor: Vector2,
+	textScaled: boolean,
+	textSize: number,
+	textX: Enum.TextXAlignment,
+	textY: Enum.TextYAlignment,
+}
+
+type BubbleLayoutSnap = {
+	sizeOffset: Vector2,
+	sizeUdim: UDim2,
+	labels: { LabelLayoutSnap },
+}
+
 type Drag = {
 	bubble: Bubble,
 	input: InputObject,
@@ -83,6 +101,8 @@ local conn: RBXScriptConnection? = nil
 local inputConns: { RBXScriptConnection } = {}
 local layer: Frame? = nil
 local hostGui: ScreenGui? = nil
+local hostPanel: Instance? = nil
+local cachedLayoutSnaps: { [number]: BubbleLayoutSnap }? = nil
 local physAcc = 0
 local bobTime = 0
 local stopToken = 0
@@ -219,6 +239,135 @@ local function collectImageButtons(root: Instance): { GuiButton }
 		end
 	end
 	return list
+end
+
+local function findNamedButton(root: Instance, name: string): GuiButton?
+	local powerUp = root:FindFirstChild("PowerUpTemplate", true)
+	local lower = string.lower(name)
+	for _, d in ipairs(root:GetDescendants()) do
+		if not d:IsA("GuiButton") then
+			continue
+		end
+		if string.lower(d.Name) ~= lower then
+			continue
+		end
+		if layer and d:IsDescendantOf(layer) then
+			continue
+		end
+		if powerUp and d:IsDescendantOf(powerUp) then
+			continue
+		end
+		return d
+	end
+	return nil
+end
+
+local function collectBubbleLabels(root: GuiButton): { TextLabel }
+	local list: { TextLabel } = {}
+	for _, d in ipairs(root:GetDescendants()) do
+		if d:IsA("TextLabel") and not string.find(d.Name, "_OceanTD_", 1, true) then
+			table.insert(list, d)
+		end
+	end
+	return list
+end
+
+local function snapshotBubbleLayout(btn: GuiButton): BubbleLayoutSnap
+	local wasVisible = btn.Visible
+	btn.Visible = true
+	local abs = btn.AbsoluteSize
+	local sizeOffset = if abs.X >= 1 and abs.Y >= 1
+		then Vector2.new(abs.X, abs.Y)
+		else Vector2.new(math.max(btn.Size.X.Offset, 64), math.max(btn.Size.Y.Offset, 64))
+	local labels: { LabelLayoutSnap } = {}
+	for _, lbl in ipairs(collectBubbleLabels(btn)) do
+		table.insert(labels, {
+			position = lbl.Position,
+			size = lbl.Size,
+			anchor = lbl.AnchorPoint,
+			textScaled = lbl.TextScaled,
+			textSize = lbl.TextSize,
+			textX = lbl.TextXAlignment,
+			textY = lbl.TextYAlignment,
+		})
+	end
+	btn.Visible = wasVisible
+	return {
+		sizeOffset = sizeOffset,
+		sizeUdim = btn.Size,
+		labels = labels,
+	}
+end
+
+local function applyBubbleLayoutSnap(btn: GuiButton, snap: BubbleLayoutSnap)
+	btn.Size = UDim2.fromOffset(math.max(1, snap.sizeOffset.X), math.max(1, snap.sizeOffset.Y))
+	local dstLabels = collectBubbleLabels(btn)
+	for i, dst in ipairs(dstLabels) do
+		local src = snap.labels[i]
+		if not src then
+			break
+		end
+		-- Geometry from stage template; keep skill-authored text.
+		dst.Position = src.position
+		dst.Size = src.size
+		dst.AnchorPoint = src.anchor
+		dst.TextScaled = src.textScaled
+		dst.TextSize = src.textSize
+		dst.TextXAlignment = src.textX
+		dst.TextYAlignment = src.textY
+	end
+end
+
+local function readSkillStage(skillId: string): number
+	local ok, ui = pcall(function()
+		return require(script.Parent:WaitForChild("SkillPowerUpUI"))
+	end)
+	if ok and typeof(ui) == "table" and typeof((ui :: any).getStage) == "function" then
+		return SkillStages.clampStage((ui :: any).getStage(skillId))
+	end
+	return SkillStages.MIN_STAGE
+end
+
+local function hideLayoutOnlyButtons(root: Instance)
+	for _, d in ipairs(root:GetDescendants()) do
+		if d:IsA("GuiButton") and SkillStages.isBubbleLayoutOnlyButtonName(d.Name) then
+			d.Visible = false
+		end
+	end
+end
+
+local function ensureLayoutSnaps(panel: Instance): { [number]: BubbleLayoutSnap }
+	if cachedLayoutSnaps then
+		return cachedLayoutSnaps
+	end
+	local snaps: { [number]: BubbleLayoutSnap } = {}
+	for stage = SkillStages.MIN_STAGE, SkillStages.MAX_STAGE do
+		local layoutName = SkillStages.bubbleLayoutButtonName(stage)
+		local layoutBtn = findNamedButton(panel, layoutName)
+		if layoutBtn then
+			snaps[stage] = snapshotBubbleLayout(layoutBtn)
+		else
+			warn("[SkillsBubbles] Missing stage layout BTN", layoutName, "for stage", stage)
+		end
+	end
+	cachedLayoutSnaps = snaps
+	return snaps
+end
+
+local function applyStageLayoutsToSkillButtons(panel: Instance, buttons: { GuiButton })
+	local snapsByStage = ensureLayoutSnaps(panel)
+	for _, btn in ipairs(buttons) do
+		local def = SkillStages.fromButtonName(btn.Name)
+		if not def then
+			continue
+		end
+		local stage = readSkillStage(def.id)
+		local snap = snapsByStage[stage]
+		if snap then
+			applyBubbleLayoutSnap(btn, snap)
+		end
+	end
+	hideLayoutOnlyButtons(panel)
 end
 
 local function ensureLayer(sg: ScreenGui): Frame
@@ -377,6 +526,8 @@ end
 function SkillsBubbleSim.preHide(panel: Instance)
 	for _, d in ipairs(panel:GetDescendants()) do
 		if d:IsA("GuiButton") and SkillStages.isSkillButtonName(d.Name) then
+			d.Visible = false
+		elseif d:IsA("GuiButton") and SkillStages.isBubbleLayoutOnlyButtonName(d.Name) then
 			d.Visible = false
 		end
 	end
@@ -739,6 +890,7 @@ function SkillsBubbleSim.stop(onDone: (() -> ())?)
 			layer = nil
 		end
 		hostGui = nil
+		hostPanel = nil
 		if onDone then
 			onDone()
 		end
@@ -791,6 +943,7 @@ function SkillsBubbleSim.start(panel: Instance)
 		return
 	end
 	hostGui = sg
+	hostPanel = panel
 	-- Do NOT toggle IgnoreGuiInset — keeps AbsolutePosition consistent with other UI
 	-- and avoids fighting PlacementController / HUD inset assumptions.
 	sg.DisplayOrder = math.max(sg.DisplayOrder, 50)
@@ -804,6 +957,9 @@ function SkillsBubbleSim.start(panel: Instance)
 		warn("[SkillsBubbles] No ImageButtons under MobileSkillsA")
 		return
 	end
+
+	-- Stage → Studio template size/label placement (skill text stays on the skill BTN).
+	applyStageLayoutsToSkillButtons(panel, buttons)
 
 	for i, btn in ipairs(buttons) do
 		btn.Visible = true
@@ -1012,6 +1168,36 @@ end
 
 function SkillsBubbleSim.isSuppressed(): boolean
 	return suppressed
+end
+
+-- Re-apply stage template size/label layout while bubbles are live (after unlock).
+function SkillsBubbleSim.refreshStageLayouts()
+	if not running or #bubbles == 0 then
+		return
+	end
+	local panel = hostPanel
+	if not panel or not panel.Parent then
+		return
+	end
+	local buttons: { GuiButton } = {}
+	for _, b in ipairs(bubbles) do
+		if b.btn.Parent then
+			table.insert(buttons, b.btn)
+		end
+	end
+	if #buttons == 0 then
+		return
+	end
+	-- Snapshot templates from Studio tree (layout-only + skill BTNs still under panel parents
+	-- may be gone — templates stay under MobileSkillsA; skill bubbles are on the layer).
+	applyStageLayoutsToSkillButtons(panel, buttons)
+	for _, b in ipairs(bubbles) do
+		local abs = b.btn.AbsoluteSize
+		local r = math.max(8, math.max(abs.X, abs.Y) * 0.5)
+		b.radius = r
+		b.mass = r
+		writeBubble(b)
+	end
 end
 
 local function applyGamepadFocusVisual()

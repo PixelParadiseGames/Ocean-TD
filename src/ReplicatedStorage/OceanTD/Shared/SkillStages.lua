@@ -30,6 +30,39 @@ for _, def in ipairs(DEFS) do
 	BY_BUTTON[def.buttonName] = def
 end
 
+-- Studio ImageButtons used only for bubble size + label placement per stage.
+-- Label *text* stays skill-authored; geometry comes from these templates.
+local BUBBLE_LAYOUT_BTN_BY_STAGE: { [number]: string } = {
+	[1] = "PlaceMoreBTN",
+	[2] = "RHealthBTN",
+	[3] = "SkipBTN",
+	[4] = "EarnMoreBTN",
+	[5] = "RollSpeedBTN",
+	[6] = "LuckBTN",
+	[7] = "WaveSpeedBTN",
+	[8] = "PlotSizeBTN",
+}
+
+function SkillStages.bubbleLayoutButtonName(stage: number): string
+	local s = SkillStages.clampStage(stage)
+	return BUBBLE_LAYOUT_BTN_BY_STAGE[s] or BUBBLE_LAYOUT_BTN_BY_STAGE[1]
+end
+
+function SkillStages.isBubbleLayoutButtonName(name: string): boolean
+	local lower = string.lower(name)
+	for _, n in pairs(BUBBLE_LAYOUT_BTN_BY_STAGE) do
+		if lower == string.lower(n) then
+			return true
+		end
+	end
+	return false
+end
+
+-- Layout-only Studio buttons (not playable skill bubbles).
+function SkillStages.isBubbleLayoutOnlyButtonName(name: string): boolean
+	return SkillStages.isBubbleLayoutButtonName(name) and not SkillStages.isSkillButtonName(name)
+end
+
 function SkillStages.all(): { SkillDef }
 	return DEFS
 end

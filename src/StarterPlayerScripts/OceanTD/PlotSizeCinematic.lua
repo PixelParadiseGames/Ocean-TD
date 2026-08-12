@@ -39,6 +39,11 @@ local function forceCloseSkills()
 	playerGui:SetAttribute("OceanTD_ForceCloseSkills", os.clock())
 end
 
+local function forceCloseFreeCam()
+	-- FreeCam RenderStepped owns Scriptable cam — must release before cinematic tweens.
+	playerGui:SetAttribute("OceanTD_ForceCloseFreeCam", os.clock())
+end
+
 local function getPlotSizesFolder(): Instance?
 	local plot = ClientPlot.get()
 	if not plot then
@@ -220,7 +225,9 @@ function PlotSizeCinematic.play(prevStage: number, newStage: number, opts: { ski
 	local skipCam = opts ~= nil and opts.skipCamera == true
 	local poses = if opts then opts.poses else nil
 
+	playerGui:SetAttribute("OceanTD_PlotSizeCinematicBusy", true)
 	forceCloseSkills()
+	forceCloseFreeCam()
 	task.wait(0.05)
 
 	local folder = getPlotSizesFolder()
@@ -290,6 +297,7 @@ function PlotSizeCinematic.play(prevStage: number, newStage: number, opts: { ski
 		if my == token then
 			busy = false
 		end
+		playerGui:SetAttribute("OceanTD_PlotSizeCinematicBusy", false)
 		if okCommit then
 			pcall(function()
 				Remotes.get("ReportPlotSizeCinematicDone"):FireServer(newStage)

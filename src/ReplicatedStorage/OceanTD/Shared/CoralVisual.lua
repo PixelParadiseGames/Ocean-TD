@@ -8,7 +8,23 @@ export type VisualOptions = {
 	ghost: boolean?,
 	valid: boolean?, -- ghost only: species color vs red when blocked
 	color: Color3?,
+	diameter: number?, -- overrides species default (e.g. BrainCoral 2..5)
 }
+
+local BRAIN_DIAMETER_MIN = 2
+local BRAIN_DIAMETER_MAX = 5
+
+function CoralVisual.randomBrainDiameter(): number
+	return BRAIN_DIAMETER_MIN + math.random() * (BRAIN_DIAMETER_MAX - BRAIN_DIAMETER_MIN)
+end
+
+function CoralVisual.sanitizeBrainDiameter(raw: any): number
+	local n = tonumber(raw)
+	if typeof(n) ~= "number" or n ~= n then
+		return CoralVisual.randomBrainDiameter()
+	end
+	return math.clamp(n, BRAIN_DIAMETER_MIN, BRAIN_DIAMETER_MAX)
+end
 
 local function applyPartFlags(part: BasePart, castShadow: boolean, canCollide: boolean)
 	part.Anchored = true
@@ -26,7 +42,10 @@ function CoralVisual.create(speciesId: string, worldPos: Vector3, opts: VisualOp
 	end
 	opts = opts or {}
 
-	local diameter = def.diameter
+	local diameter = opts.diameter or def.diameter
+	if typeof(diameter) ~= "number" or diameter ~= diameter or diameter <= 0 then
+		diameter = def.diameter
+	end
 	local part = Instance.new("Part")
 	part.Name = def.speciesId
 	part.Shape = Enum.PartType.Ball
@@ -60,6 +79,7 @@ function CoralVisual.create(speciesId: string, worldPos: Vector3, opts: VisualOp
 
 	part:SetAttribute("OceanTD_SpeciesId", def.speciesId)
 	part:SetAttribute("OceanTD_ItemId", def.itemId)
+	part:SetAttribute("OceanTD_Diameter", diameter)
 	return part
 end
 

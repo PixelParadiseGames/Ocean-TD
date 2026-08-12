@@ -123,6 +123,7 @@ local summaryOpen = false
 local finishBtn: TextButton? = nil
 local continueBtn: TextButton? = nil
 local prevGuiSelected: GuiObject? = nil
+local summarySelectableRestore: { [GuiObject]: boolean } = {}
 local confettiConn: RBXScriptConnection? = nil
 local confettiToken = 0
 local summaryStroke: UIStroke? = nil
@@ -1546,6 +1547,64 @@ local function stopSummaryStrokeCycle()
 	end
 end
 
+local function endSummaryGamepadNav()
+	for obj, _ in pairs(summarySelectableRestore) do
+		if obj.Parent then
+			obj.Selectable = true
+		end
+	end
+	table.clear(summarySelectableRestore)
+	if continueBtn then
+		continueBtn.NextSelectionUp = nil
+		continueBtn.NextSelectionDown = nil
+		continueBtn.NextSelectionLeft = nil
+		continueBtn.NextSelectionRight = nil
+	end
+	if finishBtn then
+		finishBtn.NextSelectionUp = nil
+		finishBtn.NextSelectionDown = nil
+		finishBtn.NextSelectionLeft = nil
+		finishBtn.NextSelectionRight = nil
+	end
+end
+
+local function beginSummaryGamepadNav()
+	endSummaryGamepadNav()
+	if not continueBtn or not finishBtn then
+		return
+	end
+	GuiService.AutoSelectGuiEnabled = true
+	for _, layer in ipairs(deps.playerGui:GetChildren()) do
+		if not layer:IsA("LayerCollector") then
+			continue
+		end
+		local function consider(obj: Instance)
+			if obj:IsA("GuiObject") and obj.Selectable then
+				if obj ~= continueBtn and obj ~= finishBtn then
+					summarySelectableRestore[obj] = true
+					obj.Selectable = false
+				end
+			end
+		end
+		consider(layer)
+		for _, d in ipairs(layer:GetDescendants()) do
+			consider(d)
+		end
+	end
+	continueBtn.Selectable = true
+	finishBtn.Selectable = true
+	-- Stick / DPad can only bounce between CONTINUE and FINISH.
+	continueBtn.NextSelectionUp = finishBtn
+	continueBtn.NextSelectionDown = finishBtn
+	continueBtn.NextSelectionLeft = finishBtn
+	continueBtn.NextSelectionRight = finishBtn
+	finishBtn.NextSelectionUp = continueBtn
+	finishBtn.NextSelectionDown = continueBtn
+	finishBtn.NextSelectionLeft = continueBtn
+	finishBtn.NextSelectionRight = continueBtn
+	GuiService.SelectedObject = continueBtn
+end
+
 local function startSummaryStrokeCycle()
 	stopSummaryStrokeCycle()
 	if not summaryStroke then
@@ -1565,6 +1624,7 @@ local function hideSummary()
 	summaryOpen = false
 	stopConfetti()
 	stopSummaryStrokeCycle()
+	endSummaryGamepadNav()
 	if summaryGui then
 		summaryGui.Enabled = false
 	end
@@ -1693,9 +1753,6 @@ local function ensureSummaryButtons(panel: Frame)
 	end
 	finishBtn = finish :: TextButton
 	styleSummaryButton(finishBtn, FINISH_RED, FINISH_STROKE)
-
-	continueBtn.NextSelectionDown = finishBtn
-	finishBtn.NextSelectionUp = continueBtn
 end
 
 local function readAttrInt(name: string): number
@@ -1759,12 +1816,17 @@ end
 
 local function ensureSummaryStats(panel: Frame)
 	local root = panel:FindFirstChild("StatsRoot")
-	-- Rebuild if an older layout is missing the "This Time" header.
+	-- Rebuild if an older layout is missing the session header.
 	if root and root:IsA("Frame") then
 		local left = root:FindFirstChild("ThisRun")
 		if not (left and left:FindFirstChild("ThisTimeHeader")) then
 			root:Destroy()
 			root = nil
+		elseif left then
+			local hdr = left:FindFirstChild("ThisTimeHeader")
+			if hdr and hdr:IsA("TextLabel") and hdr.Text ~= "This Session" then
+				hdr.Text = "This Session"
+			end
 		end
 	end
 	if root and root:IsA("Frame") then
@@ -1816,7 +1878,7 @@ local function ensureSummaryStats(panel: Frame)
 	right.ZIndex = 3
 	right.Parent = root
 
-	makeSummaryColHeader(left, "ThisTimeHeader", "This Time")
+	makeSummaryColHeader(left, "ThisTimeHeader", "This Session")
 	makeSummaryColHeader(right, "RecordHeader", "Record")
 
 	local row0 = SUMMARY_COL_HEADER_SIZE + 10
@@ -1935,10 +1997,10 @@ local function showSummary(summary: WaveSim.Summary)
 		startSummaryStrokeCycle()
 	end
 
-	-- Joystick: default CONTINUE (A continues); navigate down to FINISH.
-	if isUsingGamepad() and continueBtn then
+	-- Joystick: only CONTINUE ↔ FINISH (lock every other Selectable in PlayerGui).
+	if isUsingGamepad() and continueBtn and finishBtn then
 		prevGuiSelected = GuiService.SelectedObject
-		GuiService.SelectedObject = continueBtn
+		beginSummaryGamepadNav()
 	end
 end
 

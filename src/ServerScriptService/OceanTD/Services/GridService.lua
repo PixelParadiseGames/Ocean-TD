@@ -18,6 +18,7 @@ export type CellData = {
 	gz: number,
 	ownerUserId: number,
 	plotId: PlotId,
+	diameter: number?,
 }
 
 local GridService = {}
@@ -93,7 +94,8 @@ function GridService.tryOccupy(
 	lz: number,
 	gx: number?,
 	gy: number?,
-	gz: number?
+	gz: number?,
+	diameter: number?
 ): (boolean, string?)
 	local rx, ry, rz, key = resolveGridKey(plotId, lx, ly, lz, gx, gy, gz)
 	if cells[key] then
@@ -109,6 +111,7 @@ function GridService.tryOccupy(
 		gz = rz,
 		ownerUserId = ownerUserId,
 		plotId = plotId,
+		diameter = if typeof(diameter) == "number" and diameter > 0 then diameter else nil,
 	}
 	plotObjectCounts[plotId] = (plotObjectCounts[plotId] or 0) + 1
 	return true, nil
@@ -145,7 +148,8 @@ function GridService.hydrate(plotId: PlotId, ownerUserId: number, layout: { Layo
 			local gx = tonumber(obj.gx)
 			local gy = tonumber(obj.gy)
 			local gz = tonumber(obj.gz)
-			local ok = GridService.tryOccupy(plotId, ownerUserId, obj.id, lx, ly, lz, gx, gy, gz)
+			local diameter = tonumber(obj.diameter)
+			local ok = GridService.tryOccupy(plotId, ownerUserId, obj.id, lx, ly, lz, gx, gy, gz, diameter)
 			if ok then
 				count += 1
 			end
@@ -175,6 +179,7 @@ function GridService.snapshot(plotId: PlotId): { LayoutObject }
 				gx = cell.gx,
 				gy = cell.gy,
 				gz = cell.gz,
+				diameter = cell.diameter,
 			})
 		end
 	end
