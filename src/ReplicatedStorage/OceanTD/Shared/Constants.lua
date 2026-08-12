@@ -24,14 +24,24 @@ local Constants = {
 	PREVIEW_BOX_PREFIX = "PreviewBox_",
 
 	DATASTORE_NAME = "OceanTD_Player_v1",
-	PROFILE_VERSION = 3,
+	PROFILE_VERSION = 7,
 
 	AUTOSAVE_INTERVAL_SEC = 60,
 
 	HIGHEST_WAVE_ATTR = "OceanTD_HighestWave",
+	HIGHEST_FISH_FED_ATTR = "OceanTD_HighestFishFed",
+	LONGEST_WAVE_SEC_ATTR = "OceanTD_LongestWaveSec",
 	CURRENT_WAVE_SIGN_NAME = "Current Wave Sign",
 	-- Replicated on Player: which plot they own ("Plot1" …).
 	PLOT_ID_ATTR = "OceanTD_PlotId",
+	-- Replicated on Player: plot outline palette index 1–15 (see PlotOutlineColors).
+	PLOT_OUTLINE_COLOR_ATTR = "PlotOutlineColorIndex",
+	-- Replicated on Player: authoritative $D (sand dollars). Client never writes this.
+	SAND_DOLLARS_ATTR = "OceanTD_SandDollars",
+	-- Hard cap so wallet math stays a safe integer (below 2^53).
+	SAND_DOLLARS_MAX = 1000000000000000, -- 1e15
+	-- Studio left HUD: MobileLeftUI.dPad.$DCount
+	SAND_DOLLARS_COUNT_NAME = "$DCount",
 
 	-- Four named plot presets; autosave writes the active slot.
 	PLOT_SAVE_SLOT_COUNT = 4,

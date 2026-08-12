@@ -14,10 +14,13 @@ Update this file in the **same change** when you add or rename a system. If inde
 | TerrainPlotAlign | Deprecated | `src/ReplicatedStorage/OceanTD/Shared/TerrainPlotAlign.lua` | — | No-op stub; do not use for persistence (per-boot XZ nudge broke leave/rejoin) |
 | RingMath | Live | `src/ReplicatedStorage/OceanTD/Shared/RingMath.lua` | — | Matches ArenaGeneratorPlugin preview formula; sole runtime Plot2..N pose source |
 | GridService | Live | `.../Services/GridService.lua` | `Shared/GridMath`, `Shared/PlotTypes` | In-memory cells; `tryOccupy` / hydrate / snapshot |
-| PersistenceService | Live | `.../Services/PersistenceService.lua` | `Shared/PlotTypes`, `Shared/Constants` | DataStore `OceanTD_Player_v1`; anti-wipe; `plotSaves` 1–4 + activeIndex |
+| PersistenceService | Live | `.../Services/PersistenceService.lua` | `Shared/PlotTypes`, `Shared/Constants` | DataStore `OceanTD_Player_v1`; anti-wipe; `plotSaves` 1–4 + activeIndex; $D wallet + receipt merge |
+| $D / sand dollars | Live | `SandDollarHud.client.lua` + `EconomyService.lua` | Persistence `currencies.sandDollars`, `processedReceipts`, `SandDollarProducts` | HUD `MobileLeftUI.dPad.$DCount`; Robux ProcessReceipt only; never client-grant |
 | PlotSaveService | Live | `.../Services/PlotSaveService.lua` | Persistence, Placement, Undo, Grid | Manual save/load/NEW/rename; load wipes undo; autosave targets active slot |
 | PlayerSession | Live | `.../Services/PlayerSession.lua` | — | `layoutLoaded` gate for saves |
-| Remotes | Live | `src/ReplicatedStorage/OceanTD/Remotes.lua` | `RemoteEvents` folder (not named Remotes — avoids ModuleScript name clash) | `PlotAssigned`, `PlotCleared`, `SessionReady`, `RequestPlace` / `RequestMove` / `RequestRecycle` / `RequestUndo` / `RequestClearPlot` / `RequestGetPlotSaves` / `RequestSavePlotSlot` / `RequestLoadPlotSlot` / `RequestRenamePlotSave` (RF) |
+| Remotes | Live | `src/ReplicatedStorage/OceanTD/Remotes.lua` | `RemoteEvents` folder (not named Remotes — avoids ModuleScript name clash) | Includes `RequestUnlockSkillStage`, `RequestGetSkillStages`, `SkillStagesSync` |
+| Plot outline | Live | `PlotOutlineColor.client.lua` | `PlotOutlineColors`, `PlotOutlineWire`, ClientPlot, Persistence `plotOutlineColorIndex` | Neon OBB in `PlayerPlotPropertyLines`; bottom hint bar (3s + leave/return); `PlotOutlineColorPopup` ‹› + Done |
+| Plot neighbor visuals | Live | `PlotNeighborVisuals.client.lua` | PlotRoster, PlotOutlineWire | Thinner white wireframes in `OtherPlayersPlotVisuals`; skips own plot |
 | GridMath | Live | `src/ReplicatedStorage/OceanTD/Shared/GridMath.lua` | `Constants` | Cell size 4; plot-local helpers |
 | InventoryUI | Live | `src/StarterPlayerScripts/OceanTD/InventoryUI.client.lua` | `InventoryState`, `PlacementController`, `SavePlotSlot`, `ClearPlotSlot`, `UndoSlot`, `WaveSlot`, `SkipWaveSlot`, ItemCatalog, UiCircles | Slot4 backpack; mounts Slot1–3 + Slot5–6 waves; drag-scroll; drag-out place |
 | SavePlotSlot | Live | `src/StarterPlayerScripts/OceanTD/SavePlotSlot.lua` | InventoryState, Remotes | Slot1 save UI / 2×2 presets / L3·V; blue `#0073ed` help |
@@ -39,16 +42,19 @@ Update this file in the **same change** when you add or rename a system. If inde
 | PlacementBootstrap | Live | `src/StarterPlayerScripts/OceanTD/PlacementBootstrap.client.lua` | PlacementController | Requires controller on client boot |
 | UiIdleCycle | Live | `src/ReplicatedStorage/OceanTD/Shared/UiIdleCycle.lua` | — | Shared delay+dirty idle toggles / sequences (slots, close label) |
 | ForceLandscape | Live | `src/StarterPlayerScripts/OceanTD/ForceLandscape.client.lua` | — | Landscape only; no portrait mobile |
-| MobileSkillsB | Live | `src/StarterPlayerScripts/OceanTD/MobileSkillsB.client.lua` | Studio `MobileLeftUI.dPad.Skills`, `MobileSkillsB` | dPad Skills toggles MobileSkillsB ScreenGui |
+| MobileSkillsB | Live | `src/StarterPlayerScripts/OceanTD/MobileSkillsB.client.lua` | `SkillsBubbleSim`, `SkillPowerUpUI`, Studio `MobileLeftUI.dPad.Skills`, `MobileSkillsB` | Toggle skills; pulsing X/B close; gamepad focus; skill bubbles open power-up |
+| Skill power-up stages | Live | `SkillPowerUpUI.lua` | `SkillStages`, Persistence `skillStages`, PowerUpTemplate | Per-skill stages 1–8; rebind template; $D unlock (0 for test); CloseBTN hides popup only |
+| Plot Size grow | Live | `PlotSizeCinematic.lua` | `MasterPlotDecor.PlotSizes` templates, PlotService size | Unlock → cam ChangeSizeCam/Focus 1s → footprint tween → cam back 1s; join applies stage size |
+| SkillsBubbleSim | Live | `src/StarterPlayerScripts/OceanTD/SkillsBubbleSim.lua` | MobileSkillsB, SkillStages | Soft bubbles for PlotSize/EarnMore/PlaceMore BTNs only |
 | PlotFrameContract | Live | `src/ReplicatedStorage/OceanTD/Shared/PlotFrameContract.lua` | RingMath, PlotService | Forbids runtime plot CFrame calibrate; boot drift check |
 | PlacedCoralIndex | Live | `src/StarterPlayerScripts/OceanTD/PlacedCoralIndex.lua` | ClientPlot, GridMath | Client grid index of `OceanTD_Placed`; place/relocate/wave gather |
 | WaveEntityPool | Live | `src/StarterPlayerScripts/OceanTD/WaveEntityPool.lua` | `ReplicatedStorage.Fish.*`, GreenArrows | Typed acquire/release for Tang (+ future kinds), food, arrows, ammo, SFX |
 | Remove coral | Live | PlacementService.recycle + RelocateController | GridService, UndoService | Recycle credits seed; Slot3/Z/L2 undoes |
 | Clear plot | Live | PlacementService.clearPlot + InventoryUI Slot2 | ClearPlotVfx, UndoService | Full seed refund; Slot2/C/R3 + ✓/X; one undo step |
 | Save plots | Live | PlotSaveService + SavePlotSlot | Persistence plotSaves | 4 presets; active slot autosave; SAVE overwrite confirm; LOAD/NEW; wipe undo on load |
-| Feed waves | Live | WaveSlot + SkipWaveSlot + WaveSim + WaveWatch | WaveRoute.A, Tang, GreenArrows, PlotRoster | Solo client sim; visitors get sparse ghost + HUD on host plot |
+| Feed waves | Live | WaveSlot + SkipWaveSlot + WaveSim + WaveWatch | WaveRoute.A, Tang, GreenArrows, PlotRoster, WaveFeedPayout | Solo client sim; hunger-full → `ReportFishFed` → $D (EarnMore ×); visitors get sparse ghost + HUD on host plot |
 | RNG coral rolls | Planned | — | — | Common → rare weights |
-| Shop / Robux | Planned | — | — | Server grant only |
+| Shop / Robux | Live ($D packs) | `EconomyService.lua` | `SandDollarProducts`, Persistence receipts | Paste product IDs in `SandDollarProducts.lua`; ProcessReceipt grants $D |
 | Skill tree | Planned | — | — | Persist unlocks; server enforces caps |
 | Arena Center coop/PvP | Planned | — | — | `Workspace.Arena.Center` |
 

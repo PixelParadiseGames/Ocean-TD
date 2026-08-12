@@ -9,6 +9,8 @@ export type PlotBoundsPayload = {
 	spawnCFrame: CFrame?,
 	-- Plot1 / MasterTerrainBox pose (for remapping WaveRoute etc. onto other plots).
 	plot1CFrame: CFrame?,
+	-- RingMath pose (stable). Active `cframe` may be a Plot Size template offset.
+	ringCFrame: CFrame?,
 }
 
 export type LayoutObject = {
@@ -34,20 +36,32 @@ export type PlotSaves = {
 	slots: { PlotSaveSlot },
 }
 
+export type ProcessedReceipt = {
+	amount: number,
+	productId: number,
+}
+
 export type PlayerProfile = {
 	version: number,
 	currencies: {
 		sandDollars: number,
 		gold: number,
 	},
+	-- Robux $D grants keyed by Marketplace PurchaseId (idempotent ProcessReceipt).
+	processedReceipts: { [string]: ProcessedReceipt },
 	inventory: { [string]: any },
 	skillTree: { [string]: any },
 	layout: { LayoutObject }, -- mirror of active plot-save slot (compat + hydrate)
 	plotSaves: PlotSaves,
 	highestWave: number, -- all-time best wave reached (permanent)
+	highestFishFed: number, -- all-time most fish fed in one run
+	longestWaveSec: number, -- all-time longest run duration (seconds)
+	plotOutlineColorIndex: number, -- 1–15 (15 = no stroke); see PlotOutlineColors
+	skillStages: { [string]: number }, -- skillId → highest unlocked stage 1..8
 }
 
 local Constants = require(script.Parent.Constants)
+local SkillStages = require(script.Parent.SkillStages)
 
 local PlotTypes = {}
 
@@ -78,6 +92,7 @@ function PlotTypes.defaultProfile(): PlayerProfile
 			sandDollars = 0,
 			gold = 0,
 		},
+		processedReceipts = {},
 		inventory = {
 			BrainCoral = Constants.STARTING_BRAIN_CORAL_SEEDS,
 		},
@@ -85,6 +100,10 @@ function PlotTypes.defaultProfile(): PlayerProfile
 		layout = {},
 		plotSaves = PlotTypes.defaultPlotSaves(),
 		highestWave = 0,
+		highestFishFed = 0,
+		longestWaveSec = 0,
+		plotOutlineColorIndex = 2, -- teal
+		skillStages = SkillStages.defaultMap(),
 	}
 end
 

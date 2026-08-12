@@ -3,21 +3,30 @@
 -- Active plot-save slot receives layout snapshots; all four slots persist with the profile.
 
 local DataStoreService = game:GetService("DataStoreService")
+local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 
 local Constants = require(game:GetService("ReplicatedStorage"):WaitForChild("OceanTD"):WaitForChild("Shared"):WaitForChild("Constants"))
 local PlotTypes = require(game:GetService("ReplicatedStorage"):WaitForChild("OceanTD"):WaitForChild("Shared"):WaitForChild("PlotTypes"))
+local PlotOutlineColors = require(game:GetService("ReplicatedStorage"):WaitForChild("OceanTD"):WaitForChild("Shared"):WaitForChild("PlotOutlineColors"))
+local SkillStages = require(game:GetService("ReplicatedStorage"):WaitForChild("OceanTD"):WaitForChild("Shared"):WaitForChild("SkillStages"))
 
 type PlayerProfile = PlotTypes.PlayerProfile
 type LayoutObject = PlotTypes.LayoutObject
 type PlotSaveSlot = PlotTypes.PlotSaveSlot
 type PlotSaves = PlotTypes.PlotSaves
+type ProcessedReceipt = PlotTypes.ProcessedReceipt
 
 local PersistenceService = {}
 
 local store: DataStore? = nil
 local profiles: { [Player]: PlayerProfile } = {}
 local intentionalClear: { [number]: boolean } = {} -- userId -> allow empty overwrite once
+-- GetAsync failed: session may play, but we must not persist (would write $D = 0).
+local loadFailed: { [Player]: boolean } = {}
+-- Anti-spam for client-reported fish fills (count this second).
+local feedRate: { [Player]: { t0: number, count: number } } = {}
+local FEED_MAX_PER_SEC = 40
 
 local function log(...: any)
 	print("[PERSIST]", ...)
@@ -169,6 +178,65 @@ local function sanitizePlotSaves(raw: any, legacyLayout: { LayoutObject }): Plot
 	}
 end
 
+local function clampSandDollars(n: any): number
+	local v = tonumber(n)
+	if typeof(v) ~= "number" or v ~= v or v < 0 then
+		return 0
+	end
+	local maxN = Constants.SAND_DOLLARS_MAX
+	if v >= maxN then
+		return maxN
+	end
+	return math.floor(v)
+end
+
+local function sanitizeReceipts(raw: any): { [string]: ProcessedReceipt }
+	local out: { [string]: ProcessedReceipt } = {}
+	if typeof(raw) ~= "table" then
+		return out
+	end
+	for k, v in pairs(raw) do
+		if typeof(k) == "string" and k ~= "" and typeof(v) == "table" then
+			local amount = clampSandDollars(v.amount)
+			local productId = math.floor(tonumber(v.productId) or 0)
+			if amount > 0 then
+				out[k] = { amount = amount, productId = productId }
+			end
+		end
+	end
+	return out
+end
+
+local function cloneReceipts(src: { [string]: ProcessedReceipt }): { [string]: ProcessedReceipt }
+	local out: { [string]: ProcessedReceipt } = {}
+	for k, v in pairs(src) do
+		out[k] = { amount = v.amount, productId = v.productId }
+	end
+	return out
+end
+
+local function unionReceipts(
+	a: { [string]: ProcessedReceipt },
+	b: { [string]: ProcessedReceipt }
+): { [string]: ProcessedReceipt }
+	local out = cloneReceipts(a)
+	for k, v in pairs(b) do
+		if out[k] == nil then
+			out[k] = { amount = v.amount, productId = v.productId }
+		end
+	end
+	return out
+end
+
+local function playerByUserId(userId: number): Player?
+	for _, plr in ipairs(Players:GetPlayers()) do
+		if plr.UserId == userId then
+			return plr
+		end
+	end
+	return nil
+end
+
 local function sanitizeInventory(raw: any, isNewProfile: boolean): { [string]: any }
 	if typeof(raw) ~= "table" then
 		if isNewProfile then
@@ -196,9 +264,10 @@ local function sanitizeProfile(raw: any): PlayerProfile
 		profile.version = raw.version
 	end
 	if typeof(raw.currencies) == "table" then
-		profile.currencies.sandDollars = tonumber(raw.currencies.sandDollars) or 0
-		profile.currencies.gold = tonumber(raw.currencies.gold) or 0
+		profile.currencies.sandDollars = clampSandDollars(raw.currencies.sandDollars)
+		profile.currencies.gold = math.max(0, math.floor(tonumber(raw.currencies.gold) or 0))
 	end
+	profile.processedReceipts = sanitizeReceipts(raw.processedReceipts)
 	local hadInventoryKey = typeof(raw.inventory) == "table"
 	-- Brand-new store miss uses defaultProfile seeds; existing empty inventory stays empty
 	-- (placed corals already "spent" those seeds onto the plot).
@@ -221,6 +290,12 @@ local function sanitizeProfile(raw: any): PlayerProfile
 	end
 	local hw = tonumber(raw.highestWave)
 	profile.highestWave = if hw and hw > 0 then math.floor(hw) else 0
+	local hf = tonumber(raw.highestFishFed)
+	profile.highestFishFed = if hf and hf > 0 then math.floor(hf) else 0
+	local ls = tonumber(raw.longestWaveSec)
+	profile.longestWaveSec = if ls and ls > 0 then math.floor(ls) else 0
+	profile.plotOutlineColorIndex = PlotOutlineColors.clampIndex(raw.plotOutlineColorIndex)
+	profile.skillStages = SkillStages.sanitizeMap(raw.skillStages)
 	profile.version = math.max(profile.version, Constants.PROFILE_VERSION)
 	return profile
 end
@@ -259,6 +334,22 @@ function PersistenceService.getHighestWave(player: Player): number
 	return profile.highestWave or 0
 end
 
+function PersistenceService.getHighestFishFed(player: Player): number
+	local profile = profiles[player]
+	if not profile then
+		return 0
+	end
+	return profile.highestFishFed or 0
+end
+
+function PersistenceService.getLongestWaveSec(player: Player): number
+	local profile = profiles[player]
+	if not profile then
+		return 0
+	end
+	return profile.longestWaveSec or 0
+end
+
 -- Returns true if the stored high score increased.
 function PersistenceService.reportHighestWave(player: Player, wave: number): boolean
 	local profile = profiles[player]
@@ -274,10 +365,272 @@ function PersistenceService.reportHighestWave(player: Player, wave: number): boo
 	return true
 end
 
+-- Best-of updates for wave / fish fed / duration from one run summary.
+function PersistenceService.reportWaveRecords(
+	player: Player,
+	wave: number,
+	fishFed: number,
+	elapsedSec: number
+): { wave: boolean, fishFed: boolean, duration: boolean }
+	local changed = { wave = false, fishFed = false, duration = false }
+	local profile = profiles[player]
+	if not profile then
+		return changed
+	end
+	local w = math.clamp(math.floor(tonumber(wave) or 0), 0, 100000)
+	local fed = math.clamp(math.floor(tonumber(fishFed) or 0), 0, 10000000)
+	local sec = math.clamp(math.floor(tonumber(elapsedSec) or 0), 0, 8640000) -- 100 days
+	if w > (profile.highestWave or 0) then
+		profile.highestWave = w
+		player:SetAttribute(Constants.HIGHEST_WAVE_ATTR, w)
+		changed.wave = true
+	end
+	if fed > (profile.highestFishFed or 0) then
+		profile.highestFishFed = fed
+		player:SetAttribute(Constants.HIGHEST_FISH_FED_ATTR, fed)
+		changed.fishFed = true
+	end
+	if sec > (profile.longestWaveSec or 0) then
+		profile.longestWaveSec = sec
+		player:SetAttribute(Constants.LONGEST_WAVE_SEC_ATTR, sec)
+		changed.duration = true
+	end
+	return changed
+end
+
 function PersistenceService.syncHighestWaveAttribute(player: Player)
 	local profile = profiles[player]
 	local w = if profile then (profile.highestWave or 0) else 0
 	player:SetAttribute(Constants.HIGHEST_WAVE_ATTR, w)
+end
+
+function PersistenceService.syncWaveRecordAttributes(player: Player)
+	local profile = profiles[player]
+	local w = if profile then (profile.highestWave or 0) else 0
+	local fed = if profile then (profile.highestFishFed or 0) else 0
+	local sec = if profile then (profile.longestWaveSec or 0) else 0
+	player:SetAttribute(Constants.HIGHEST_WAVE_ATTR, w)
+	player:SetAttribute(Constants.HIGHEST_FISH_FED_ATTR, fed)
+	player:SetAttribute(Constants.LONGEST_WAVE_SEC_ATTR, sec)
+end
+
+function PersistenceService.getPlotOutlineColorIndex(player: Player): number
+	local profile = profiles[player]
+	if not profile then
+		return PlotOutlineColors.DEFAULT_INDEX
+	end
+	return PlotOutlineColors.clampIndex(profile.plotOutlineColorIndex)
+end
+
+function PersistenceService.setPlotOutlineColorIndex(player: Player, index: number): number
+	local profile = profiles[player]
+	local clamped = PlotOutlineColors.clampIndex(index)
+	if not profile then
+		player:SetAttribute(Constants.PLOT_OUTLINE_COLOR_ATTR, clamped)
+		return clamped
+	end
+	profile.plotOutlineColorIndex = clamped
+	player:SetAttribute(Constants.PLOT_OUTLINE_COLOR_ATTR, clamped)
+	return clamped
+end
+
+function PersistenceService.syncPlotOutlineColorAttribute(player: Player)
+	local profile = profiles[player]
+	local idx = if profile
+		then PlotOutlineColors.clampIndex(profile.plotOutlineColorIndex)
+		else PlotOutlineColors.DEFAULT_INDEX
+	player:SetAttribute(Constants.PLOT_OUTLINE_COLOR_ATTR, idx)
+end
+
+function PersistenceService.getSandDollars(player: Player): number
+	local profile = profiles[player]
+	if not profile then
+		return 0
+	end
+	return clampSandDollars(profile.currencies.sandDollars)
+end
+
+function PersistenceService.syncSandDollarsAttribute(player: Player)
+	player:SetAttribute(Constants.SAND_DOLLARS_ATTR, PersistenceService.getSandDollars(player))
+end
+
+function PersistenceService.didLoadFail(player: Player): boolean
+	return loadFailed[player] == true
+end
+
+function PersistenceService.getSkillStages(player: Player): { [string]: number }
+	local profile = profiles[player]
+	if not profile then
+		return SkillStages.defaultMap()
+	end
+	return SkillStages.sanitizeMap(profile.skillStages)
+end
+
+function PersistenceService.getSkillStage(player: Player, skillId: string): number
+	local stages = PersistenceService.getSkillStages(player)
+	return SkillStages.clampStage(stages[skillId])
+end
+
+-- Unlock next stage for skillId. Returns { ok, stage, prevStage?, errorCode?, sandDollars? }.
+function PersistenceService.tryUnlockSkillStage(player: Player, skillId: string): {
+	ok: boolean,
+	stage: number,
+	prevStage: number?,
+	errorCode: string?,
+	sandDollars: number?,
+}
+	local profile = profiles[player]
+	if not profile then
+		return { ok = false, stage = 1, errorCode = "NoProfile", sandDollars = 0 }
+	end
+	local def = SkillStages.get(skillId)
+	if not def then
+		return { ok = false, stage = 1, errorCode = "BadSkill", sandDollars = profile.currencies.sandDollars }
+	end
+	profile.skillStages = SkillStages.sanitizeMap(profile.skillStages)
+	local current = SkillStages.clampStage(profile.skillStages[skillId])
+	local nextStage = SkillStages.nextStage(current)
+	if not nextStage then
+		return { ok = false, stage = current, prevStage = current, errorCode = "Maxed", sandDollars = profile.currencies.sandDollars }
+	end
+	local cost = math.max(0, math.floor(SkillStages.stageCost(skillId, nextStage)))
+	local cash = clampSandDollars(profile.currencies.sandDollars)
+	if cash < cost then
+		return { ok = false, stage = current, prevStage = current, errorCode = "CantAfford", sandDollars = cash }
+	end
+	profile.currencies.sandDollars = cash - cost
+	profile.skillStages[skillId] = nextStage
+	PersistenceService.syncSandDollarsAttribute(player)
+	return {
+		ok = true,
+		stage = nextStage,
+		prevStage = current,
+		sandDollars = profile.currencies.sandDollars,
+	}
+end
+
+-- TEMP / debug: reset every skill to stage 1.
+function PersistenceService.resetSkillStages(player: Player): { [string]: number }
+	local profile = profiles[player]
+	if not profile then
+		return SkillStages.defaultMap()
+	end
+	profile.skillStages = SkillStages.defaultMap()
+	return SkillStages.sanitizeMap(profile.skillStages)
+end
+
+-- Atomic Robux $D grant. Idempotent on PurchaseId. Safe if the player is offline
+-- or on another server (session save merges unknown receipts instead of clobbering).
+function PersistenceService.grantSandDollarsFromReceipt(
+	userId: number,
+	purchaseId: string,
+	productId: number,
+	amount: number
+): (string, number)
+	if typeof(userId) ~= "number" or userId <= 0 then
+		return "failed", 0
+	end
+	if typeof(purchaseId) ~= "string" or purchaseId == "" then
+		return "failed", 0
+	end
+	local grant = clampSandDollars(amount)
+	if grant <= 0 then
+		return "failed", 0
+	end
+	local pid = math.floor(tonumber(productId) or 0)
+
+	local applied = false
+	local already = false
+	local resultCash = 0
+
+	local ok, err = withDataStoreRetry("ReceiptUpdate", userId, function()
+		getStore():UpdateAsync(keyFor(userId), function(old)
+			if typeof(old) == "table" then
+				local receipts = sanitizeReceipts(old.processedReceipts)
+				if receipts[purchaseId] ~= nil then
+					already = true
+					resultCash = clampSandDollars(if typeof(old.currencies) == "table" then old.currencies.sandDollars else 0)
+					return old
+				end
+			end
+			local p = sanitizeProfile(old)
+			if p.processedReceipts[purchaseId] ~= nil then
+				already = true
+				resultCash = p.currencies.sandDollars
+				return old
+			end
+			p.processedReceipts[purchaseId] = { amount = grant, productId = pid }
+			p.currencies.sandDollars = clampSandDollars(p.currencies.sandDollars + grant)
+			applied = true
+			resultCash = p.currencies.sandDollars
+			return p
+		end)
+	end)
+
+	if not ok then
+		warnPersist("Receipt grant failed userId=", userId, "purchaseId=", purchaseId, err)
+		return "failed", 0
+	end
+
+	local plr = playerByUserId(userId)
+	if plr and profiles[plr] and loadFailed[plr] ~= true then
+		local mem = profiles[plr]
+		if mem.processedReceipts[purchaseId] == nil then
+			mem.processedReceipts[purchaseId] = { amount = grant, productId = pid }
+			mem.currencies.sandDollars = clampSandDollars(mem.currencies.sandDollars + grant)
+		end
+		PersistenceService.syncSandDollarsAttribute(plr)
+		resultCash = mem.currencies.sandDollars
+	elseif plr then
+		plr:SetAttribute(Constants.SAND_DOLLARS_ATTR, resultCash)
+	end
+
+	if already then
+		log("Receipt already granted userId=", userId, "purchaseId=", purchaseId, "sandDollars=", resultCash)
+		return "already", resultCash
+	end
+	if applied then
+		log("Receipt granted userId=", userId, "purchaseId=", purchaseId, "+", grant, "sandDollars=", resultCash)
+		return "granted", resultCash
+	end
+	return "failed", 0
+end
+
+-- Credit $D for fish whose hunger bars filled (client reports count only).
+-- Amount comes from persisted EarnMore stage. In-memory; autosave/leave persist.
+function PersistenceService.creditSandDollarsFromFeed(player: Player, fishCount: any): (boolean, number, number)
+	local profile = profiles[player]
+	if not profile or loadFailed[player] == true then
+		return false, 0, 0
+	end
+	local n = math.floor(tonumber(fishCount) or 0)
+	if n < 1 then
+		return false, 0, clampSandDollars(profile.currencies.sandDollars)
+	end
+	n = math.min(n, FEED_MAX_PER_SEC)
+
+	local now = os.clock()
+	local window = feedRate[player]
+	if window == nil or now - window.t0 >= 1 then
+		window = { t0 = now, count = 0 }
+		feedRate[player] = window
+	end
+	local room = FEED_MAX_PER_SEC - window.count
+	if room <= 0 then
+		return false, 0, clampSandDollars(profile.currencies.sandDollars)
+	end
+	n = math.min(n, room)
+	window.count += n
+
+	local stage = SkillStages.clampStage(profile.skillStages.EarnMore)
+	local per = SkillStages.earnMorePerFish(stage)
+	local grant = clampSandDollars(n * per)
+	if grant <= 0 then
+		return false, 0, clampSandDollars(profile.currencies.sandDollars)
+	end
+	profile.currencies.sandDollars = clampSandDollars(profile.currencies.sandDollars + grant)
+	PersistenceService.syncSandDollarsAttribute(player)
+	return true, grant, profile.currencies.sandDollars
 end
 
 function PersistenceService.getActiveSlotIndex(player: Player): number
@@ -435,11 +788,13 @@ function PersistenceService.load(player: Player): PlayerProfile
 
 	if not ok then
 		warnPersist("GetAsync failed for", userId, result)
+		loadFailed[player] = true
 		profiles[player] = profile
-		log("Load fallback empty profile userId=", userId, "layout=0")
+		log("Load fallback empty profile userId=", userId, "layout=0 — SAVES BLOCKED (protect $D)")
 		return profile
 	end
 
+	loadFailed[player] = nil
 	if result == nil then
 		profiles[player] = profile
 		log("Load new profile userId=", userId, "layout=0", "seeds=", Constants.STARTING_BRAIN_CORAL_SEEDS)
@@ -484,6 +839,10 @@ function PersistenceService.save(player: Player, layoutOverride: { LayoutObject 
 		warnPersist("Save skipped — no in-memory profile for", player.Name)
 		return false
 	end
+	if loadFailed[player] == true then
+		warnPersist("Save skipped — load failed; refusing to persist (protect $D) for", player.Name)
+		return false
+	end
 
 	if layoutOverride ~= nil then
 		profile.layout = layoutOverride
@@ -504,9 +863,10 @@ function PersistenceService.save(player: Player, layoutOverride: { LayoutObject 
 	local toWrite = {
 		version = profile.version,
 		currencies = {
-			sandDollars = profile.currencies.sandDollars,
-			gold = profile.currencies.gold,
+			sandDollars = clampSandDollars(profile.currencies.sandDollars),
+			gold = math.max(0, math.floor(tonumber(profile.currencies.gold) or 0)),
 		},
+		processedReceipts = cloneReceipts(profile.processedReceipts),
 		inventory = profile.inventory,
 		skillTree = profile.skillTree,
 		layout = profile.layout,
@@ -515,6 +875,10 @@ function PersistenceService.save(player: Player, layoutOverride: { LayoutObject 
 			slots = slotsOut,
 		},
 		highestWave = profile.highestWave or 0,
+		highestFishFed = profile.highestFishFed or 0,
+		longestWaveSec = profile.longestWaveSec or 0,
+		plotOutlineColorIndex = PlotOutlineColors.clampIndex(profile.plotOutlineColorIndex),
+		skillStages = SkillStages.sanitizeMap(profile.skillStages),
 	}
 
 	local saved = false
@@ -539,6 +903,21 @@ function PersistenceService.save(player: Player, layoutOverride: { LayoutObject 
 				end
 			end
 
+			-- Wallet merge: never drop Robux grants that landed via ProcessReceipt
+			-- on this or another server while this session held a stale snapshot.
+			-- Use the pre-UpdateAsync snapshot (toWrite) so retries cannot double-add.
+			local memReceipts = toWrite.processedReceipts
+			local oldReceipts = oldProfile.processedReceipts
+			local extraFromStore = 0
+			for purchaseId, rec in pairs(oldReceipts) do
+				if memReceipts[purchaseId] == nil then
+					extraFromStore += rec.amount
+				end
+			end
+			toWrite.processedReceipts = unionReceipts(oldReceipts, memReceipts)
+			toWrite.currencies.sandDollars =
+				clampSandDollars(clampSandDollars(toWrite.currencies.sandDollars) + extraFromStore)
+
 			saved = true
 			return toWrite
 		end)
@@ -556,14 +935,21 @@ function PersistenceService.save(player: Player, layoutOverride: { LayoutObject 
 		layoutCount(toWrite.layout),
 		"activeSlot=",
 		toWrite.plotSaves.activeIndex,
+		"sandDollars=",
+		toWrite.currencies.sandDollars,
 		"blockedEmptyWipe=",
 		blocked
 	)
+	profile.processedReceipts = cloneReceipts(toWrite.processedReceipts)
+	profile.currencies.sandDollars = clampSandDollars(toWrite.currencies.sandDollars)
+	PersistenceService.syncSandDollarsAttribute(player)
 	return saved
 end
 
 function PersistenceService.release(player: Player)
 	profiles[player] = nil
+	loadFailed[player] = nil
+	feedRate[player] = nil
 end
 
 return PersistenceService

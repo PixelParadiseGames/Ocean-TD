@@ -38,6 +38,8 @@ Optional: `MasterPlotDecor` (required for décor clones).
 | Path / asset | Used by |
 |--------------|---------|
 | `rbxassetid://345081302` | Placement confirm move hint (under coral) |
+| `StarterGui.MobileLeftUI.dPad.$DCount` | Persistent $D balance (`SandDollarHud`); tap to buy Robux packs |
+| `Workspace.MasterPlotDecor.PlotSizes` | Plot Size stages (`MasterTerrainBoxSTART`/`2`–`7`/`MAX`) + `ChangeSizeCam` / `ChangeSizeCamFocus` |
 
 Optional Studio reference: `Workspace.UI["Move Icon"]` — code uses the asset id directly.
 

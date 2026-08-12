@@ -14,6 +14,7 @@ export type MirroredPlot = {
 	size: Vector3,
 	spawnCFrame: CFrame?,
 	plot1CFrame: CFrame?,
+	ringCFrame: CFrame?,
 }
 
 local ClientPlot = {}
@@ -208,7 +209,8 @@ function ClientPlot.remapFromPlot1(worldPos: Vector3): Vector3
 		warn("[PLOT] remapFromPlot1: missing Plot1 CFrame; leaving point on Plot1 (", localPlot.plotId, ")")
 		return worldPos
 	end
-	return localPlot.cframe * p1:PointToObjectSpace(worldPos)
+	local base = localPlot.ringCFrame or localPlot.cframe
+	return base * p1:PointToObjectSpace(worldPos)
 end
 
 -- Map a Plot1-authored CFrame onto the local player's plot (preserves orientation).
@@ -222,7 +224,8 @@ function ClientPlot.remapCFrameFromPlot1(worldCf: CFrame): CFrame
 		warn("[PLOT] remapCFrameFromPlot1: missing Plot1 CFrame; leaving on Plot1 (", localPlot.plotId, ")")
 		return worldCf
 	end
-	return localPlot.cframe * p1:ToObjectSpace(worldCf)
+	local base = localPlot.ringCFrame or localPlot.cframe
+	return base * p1:ToObjectSpace(worldCf)
 end
 
 -- Remap into an arbitrary plot (spectate / ghost waves).

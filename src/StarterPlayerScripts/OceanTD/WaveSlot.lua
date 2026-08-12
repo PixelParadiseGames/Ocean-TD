@@ -13,6 +13,8 @@ local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local oceanRoot = ReplicatedStorage:WaitForChild("OceanTD")
+local Constants = require(oceanRoot:WaitForChild("Shared"):WaitForChild("Constants"))
+local Remotes = require(oceanRoot:WaitForChild("Remotes"))
 local UiCircles = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiCircles"))
 local UiTheme = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiTheme"))
 local UiHaptics = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiHaptics"))
@@ -29,7 +31,11 @@ local START_ICON = "rbxassetid://74802566438233"
 local STOP_ICON = "rbxassetid://96580667427806"
 local HELP_GREEN = Color3.fromRGB(40, 180, 80)
 local HELP_RED = Color3.fromRGB(200, 45, 50)
-local FINISH_GREEN = Color3.fromRGB(40, 180, 80)
+local FINISH_RED = Color3.fromRGB(200, 45, 50)
+local FINISH_STROKE = Color3.fromRGB(255, 55, 60)
+local CONTINUE_GREEN = Color3.fromRGB(40, 180, 80)
+local CONTINUE_STROKE = Color3.fromRGB(70, 255, 110)
+local CONTINUE_HEARTS = 5
 local CONFETTI_COUNT = 40
 local CONFETTI_LIFE = 2.4
 -- Shift camera subject up so the avatar sits ~20% lower on screen during waves.
@@ -115,9 +121,23 @@ local REEF_SCALE_OUT = TweenInfo.new(0.22, Enum.EasingStyle.Quad, Enum.EasingDir
 local summaryGui: ScreenGui? = nil
 local summaryOpen = false
 local finishBtn: TextButton? = nil
+local continueBtn: TextButton? = nil
 local prevGuiSelected: GuiObject? = nil
 local confettiConn: RBXScriptConnection? = nil
 local confettiToken = 0
+local summaryStroke: UIStroke? = nil
+local summaryStrokeConn: RBXScriptConnection? = nil
+local SUMMARY_CORNER = 32
+local SUMMARY_STROKE_THICKNESS = 3.5
+local SUMMARY_PANEL_W = 540
+local SUMMARY_PANEL_H = 340
+local SUMMARY_BTN_W = 200
+local SUMMARY_BTN_H = 44
+local SUMMARY_BTN_GAP = 12
+local SUMMARY_BTN_BOTTOM = 18
+-- Full rainbow once every ~12s.
+local SUMMARY_RGB_HUE_PER_SEC = 1 / 12
+local reportWaveRecordsRemote = Remotes.get("ReportWaveRecords")
 local waveCamConn: RBXScriptConnection? = nil
 local waveCamCharConn: RBXScriptConnection? = nil
 -- Fixed offset baked when waves start — must NOT track live zoom or pinch fights CameraOffset.
@@ -299,6 +319,15 @@ end
 
 function WaveSlot.refreshHelpBadge()
 	if not helpSlot5 then
+		return
+	end
+	if Players.LocalPlayer.PlayerGui:GetAttribute("OceanTD_SkillsBubblesOpen") == true then
+		helpSlot5.Visible = false
+		if helpHit then
+			helpHit.Visible = false
+			helpHit.Active = false
+		end
+		refreshFinishHint()
 		return
 	end
 	local backpackOpen = InventoryState.isOpen()
@@ -1286,8 +1315,10 @@ end
 local function setHudVisible(on: boolean)
 	ensureHud()
 	local wasVisible = hudFrame ~= nil and hudFrame.Visible
+	local skillsOpen = Players.LocalPlayer.PlayerGui:GetAttribute("OceanTD_SkillsBubblesOpen") == true
 	if hudFrame then
-		hudFrame.Visible = on
+		-- Keep wave sim running; only suppress the HUD chrome while skills bubbles are open.
+		hudFrame.Visible = on and not skillsOpen
 	end
 	if on then
 		layoutHud()
@@ -1508,14 +1539,37 @@ local function playConfetti(parent: Frame)
 	end)
 end
 
+local function stopSummaryStrokeCycle()
+	if summaryStrokeConn then
+		summaryStrokeConn:Disconnect()
+		summaryStrokeConn = nil
+	end
+end
+
+local function startSummaryStrokeCycle()
+	stopSummaryStrokeCycle()
+	if not summaryStroke then
+		return
+	end
+	local t0 = os.clock()
+	summaryStrokeConn = RunService.RenderStepped:Connect(function()
+		if not summaryOpen or not summaryStroke then
+			return
+		end
+		local hue = ((os.clock() - t0) * SUMMARY_RGB_HUE_PER_SEC) % 1
+		summaryStroke.Color = Color3.fromHSV(hue, 1, 1)
+	end)
+end
+
 local function hideSummary()
 	summaryOpen = false
 	stopConfetti()
+	stopSummaryStrokeCycle()
 	if summaryGui then
 		summaryGui.Enabled = false
 	end
 	local sel = GuiService.SelectedObject
-	if finishBtn and sel == finishBtn then
+	if (finishBtn and sel == finishBtn) or (continueBtn and sel == continueBtn) then
 		GuiService.SelectedObject = prevGuiSelected
 	end
 	prevGuiSelected = nil
@@ -1527,10 +1581,287 @@ function WaveSlot.dismissSummary()
 	end
 end
 
+local function continueFromSummary()
+	if not summaryOpen then
+		return
+	end
+	hideSummary()
+	if WaveSim.continueWithHearts(CONTINUE_HEARTS) then
+		applyIcon(true)
+		setHudVisible(true)
+		setWaveCameraActive(true)
+		deps.log("Waves continued (+" .. tostring(CONTINUE_HEARTS) .. " hearts)")
+	end
+end
+
+function WaveSlot.continueFromSummary()
+	continueFromSummary()
+end
+
+function WaveSlot.handleSummaryPrimaryConfirm(): boolean
+	if not summaryOpen then
+		return false
+	end
+	local sel = GuiService.SelectedObject
+	if sel == finishBtn then
+		hideSummary()
+		return true
+	end
+	continueFromSummary()
+	return true
+end
+
+local function styleSummaryButton(btn: TextButton, fill: Color3, strokeColor: Color3)
+	btn.BackgroundColor3 = fill
+	btn.TextColor3 = Color3.new(1, 1, 1)
+	local corner = btn:FindFirstChildOfClass("UICorner")
+	if not corner then
+		corner = Instance.new("UICorner")
+		corner.Parent = btn
+	end
+	corner.CornerRadius = UDim.new(0, 10)
+	local stroke = btn:FindFirstChildOfClass("UIStroke")
+	if not stroke then
+		stroke = Instance.new("UIStroke")
+		stroke.Parent = btn
+	end
+	stroke.Name = "BtnEdge"
+	stroke.Thickness = 2.5
+	stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+	stroke.Color = strokeColor
+end
+
+local function ensureSummaryButtons(panel: Frame)
+	local finishY = -(SUMMARY_BTN_BOTTOM)
+	local continueY = -(SUMMARY_BTN_BOTTOM + SUMMARY_BTN_H + SUMMARY_BTN_GAP)
+
+	local continue = panel:FindFirstChild("Continue")
+	if not (continue and continue:IsA("TextButton")) then
+		if continue then
+			continue:Destroy()
+		end
+		local btn = Instance.new("TextButton")
+		btn.Name = "Continue"
+		btn.AnchorPoint = Vector2.new(0.5, 1)
+		btn.Position = UDim2.new(0.5, 0, 1, continueY)
+		btn.Size = UDim2.fromOffset(SUMMARY_BTN_W, SUMMARY_BTN_H)
+		btn.Font = UiTheme.Font
+		btn.Text = "CONTINUE"
+		btn.TextSize = 22
+		btn.AutoButtonColor = true
+		btn.Selectable = true
+		btn.ZIndex = 4
+		btn.Parent = panel
+		btn.Activated:Connect(function()
+			continueFromSummary()
+		end)
+		continue = btn
+	else
+		continue.Position = UDim2.new(0.5, 0, 1, continueY)
+		continue.Size = UDim2.fromOffset(SUMMARY_BTN_W, SUMMARY_BTN_H)
+		continue.Text = "CONTINUE"
+	end
+	continueBtn = continue :: TextButton
+	styleSummaryButton(continueBtn, CONTINUE_GREEN, CONTINUE_STROKE)
+
+	local finish = panel:FindFirstChild("Finish")
+	if not (finish and finish:IsA("TextButton")) then
+		if finish then
+			finish:Destroy()
+		end
+		local btn = Instance.new("TextButton")
+		btn.Name = "Finish"
+		btn.AnchorPoint = Vector2.new(0.5, 1)
+		btn.Position = UDim2.new(0.5, 0, 1, finishY)
+		btn.Size = UDim2.fromOffset(SUMMARY_BTN_W, SUMMARY_BTN_H)
+		btn.Font = UiTheme.Font
+		btn.Text = "FINISH"
+		btn.TextSize = 22
+		btn.AutoButtonColor = true
+		btn.Selectable = true
+		btn.ZIndex = 4
+		btn.Parent = panel
+		btn.Activated:Connect(function()
+			hideSummary()
+		end)
+		finish = btn
+	else
+		finish.Position = UDim2.new(0.5, 0, 1, finishY)
+		finish.Size = UDim2.fromOffset(SUMMARY_BTN_W, SUMMARY_BTN_H)
+		finish.Text = "FINISH"
+		finish.BackgroundColor3 = FINISH_RED
+	end
+	finishBtn = finish :: TextButton
+	styleSummaryButton(finishBtn, FINISH_RED, FINISH_STROKE)
+
+	continueBtn.NextSelectionDown = finishBtn
+	finishBtn.NextSelectionUp = continueBtn
+end
+
+local function readAttrInt(name: string): number
+	local attr = Players.LocalPlayer:GetAttribute(name)
+	if typeof(attr) == "number" and attr >= 0 then
+		return math.floor(attr)
+	end
+	return 0
+end
+
+local function reportAndReadRecords(summary: WaveSim.Summary): { wave: number, fishFed: number, elapsedSec: number }
+	local wave = math.max(0, math.floor(summary.waveReached))
+	local fed = math.max(0, math.floor(summary.fishFed))
+	local sec = math.max(0, math.floor(summary.elapsedSec + 0.5))
+	local bestWave = math.max(readAttrInt(Constants.HIGHEST_WAVE_ATTR), wave)
+	local bestFed = math.max(readAttrInt(Constants.HIGHEST_FISH_FED_ATTR), fed)
+	local bestSec = math.max(readAttrInt(Constants.LONGEST_WAVE_SEC_ATTR), sec)
+	-- Optimistic local mirror so Record column updates immediately on a new PB.
+	Players.LocalPlayer:SetAttribute(Constants.HIGHEST_WAVE_ATTR, bestWave)
+	Players.LocalPlayer:SetAttribute(Constants.HIGHEST_FISH_FED_ATTR, bestFed)
+	Players.LocalPlayer:SetAttribute(Constants.LONGEST_WAVE_SEC_ATTR, bestSec)
+	pcall(function()
+		reportWaveRecordsRemote:FireServer(wave, fed, sec)
+	end)
+	return { wave = bestWave, fishFed = bestFed, elapsedSec = bestSec }
+end
+
+local function makeSummaryStatLabel(parent: Instance, name: string, y: number, textSize: number): TextLabel
+	local lbl = Instance.new("TextLabel")
+	lbl.Name = name
+	lbl.BackgroundTransparency = 1
+	lbl.Position = UDim2.fromOffset(0, y)
+	lbl.Size = UDim2.new(1, 0, 0, textSize + 8)
+	lbl.Font = UiTheme.Font
+	lbl.TextSize = textSize
+	lbl.TextColor3 = Color3.new(1, 1, 1)
+	lbl.TextXAlignment = Enum.TextXAlignment.Center
+	lbl.TextTruncate = Enum.TextTruncate.AtEnd
+	lbl.ZIndex = 3
+	lbl.Parent = parent
+	return lbl
+end
+
+local SUMMARY_COL_HEADER_SIZE = 23 -- was 20; +3
+
+local function makeSummaryColHeader(parent: Instance, name: string, text: string): TextLabel
+	local hdr = Instance.new("TextLabel")
+	hdr.Name = name
+	hdr.BackgroundTransparency = 1
+	hdr.Position = UDim2.fromOffset(0, 0)
+	hdr.Size = UDim2.new(1, 0, 0, SUMMARY_COL_HEADER_SIZE + 8)
+	hdr.Font = UiTheme.Font
+	hdr.TextSize = SUMMARY_COL_HEADER_SIZE
+	hdr.TextColor3 = Color3.fromRGB(255, 220, 90)
+	hdr.TextXAlignment = Enum.TextXAlignment.Center
+	hdr.Text = text
+	hdr.ZIndex = 3
+	hdr.Parent = parent
+	return hdr
+end
+
+local function ensureSummaryStats(panel: Frame)
+	local root = panel:FindFirstChild("StatsRoot")
+	-- Rebuild if an older layout is missing the "This Time" header.
+	if root and root:IsA("Frame") then
+		local left = root:FindFirstChild("ThisRun")
+		if not (left and left:FindFirstChild("ThisTimeHeader")) then
+			root:Destroy()
+			root = nil
+		end
+	end
+	if root and root:IsA("Frame") then
+		local left = root:FindFirstChild("ThisRun")
+		local right = root:FindFirstChild("Record")
+		for _, col in ipairs({ left, right }) do
+			if col then
+				for _, ch in ipairs(col:GetChildren()) do
+					if ch:IsA("TextLabel") then
+						ch.TextXAlignment = Enum.TextXAlignment.Center
+						if ch.Name == "ThisTimeHeader" or ch.Name == "RecordHeader" then
+							ch.TextSize = SUMMARY_COL_HEADER_SIZE
+							ch.Size = UDim2.new(1, 0, 0, SUMMARY_COL_HEADER_SIZE + 8)
+						end
+					end
+				end
+			end
+		end
+		return root
+	end
+	for _, name in ipairs({ "WaveReached", "FishFed", "Lasted", "StatsRoot" }) do
+		local old = panel:FindFirstChild(name)
+		if old then
+			old:Destroy()
+		end
+	end
+
+	root = Instance.new("Frame")
+	root.Name = "StatsRoot"
+	root.BackgroundTransparency = 1
+	root.Position = UDim2.fromOffset(20, 18)
+	root.Size = UDim2.new(1, -40, 0, 160)
+	root.ZIndex = 3
+	root.Parent = panel
+
+	local left = Instance.new("Frame")
+	left.Name = "ThisRun"
+	left.BackgroundTransparency = 1
+	left.Position = UDim2.fromScale(0, 0)
+	left.Size = UDim2.new(0.5, -8, 1, 0)
+	left.ZIndex = 3
+	left.Parent = root
+
+	local right = Instance.new("Frame")
+	right.Name = "Record"
+	right.BackgroundTransparency = 1
+	right.Position = UDim2.new(0.5, 8, 0, 0)
+	right.Size = UDim2.new(0.5, -8, 1, 0)
+	right.ZIndex = 3
+	right.Parent = root
+
+	makeSummaryColHeader(left, "ThisTimeHeader", "This Time")
+	makeSummaryColHeader(right, "RecordHeader", "Record")
+
+	local row0 = SUMMARY_COL_HEADER_SIZE + 10
+	makeSummaryStatLabel(left, "Wave", row0, 22)
+	makeSummaryStatLabel(left, "FishFed", row0 + 40, 20)
+	makeSummaryStatLabel(left, "Lasted", row0 + 78, 20)
+
+	makeSummaryStatLabel(right, "Wave", row0, 22)
+	makeSummaryStatLabel(right, "FishFed", row0 + 40, 20)
+	makeSummaryStatLabel(right, "Lasted", row0 + 78, 20)
+
+	return root
+end
+
+local function fillSummaryStats(panel: Frame, summary: WaveSim.Summary, records: { wave: number, fishFed: number, elapsedSec: number })
+	local root = ensureSummaryStats(panel)
+	local left = root:FindFirstChild("ThisRun")
+	local right = root:FindFirstChild("Record")
+	local function setCol(col: Instance?, wave: number, fed: number, sec: number)
+		if not col then
+			return
+		end
+		local w = col:FindFirstChild("Wave")
+		local f = col:FindFirstChild("FishFed")
+		local t = col:FindFirstChild("Lasted")
+		if w and w:IsA("TextLabel") then
+			w.Text = "🌊 Wave " .. tostring(wave)
+		end
+		if f and f:IsA("TextLabel") then
+			f.Text = "🐟 Fish Fed: " .. tostring(fed)
+		end
+		if t and t:IsA("TextLabel") then
+			t.Text = "⏱️ " .. WaveSim.formatClock(sec)
+		end
+	end
+	setCol(left, summary.waveReached, summary.fishFed, summary.elapsedSec)
+	setCol(right, records.wave, records.fishFed, records.elapsedSec)
+end
+
 local function showSummary(summary: WaveSim.Summary)
 	summaryOpen = true
 	setHudVisible(false)
 	applyIcon(false)
+
+	local records = reportAndReadRecords(summary)
 
 	if not summaryGui then
 		local g = Instance.new("ScreenGui")
@@ -1554,73 +1885,25 @@ local function showSummary(summary: WaveSim.Summary)
 		panel.Name = "Panel"
 		panel.AnchorPoint = Vector2.new(0.5, 0.5)
 		panel.Position = UDim2.fromScale(0.5, 0.5)
-		panel.Size = UDim2.fromOffset(420, 280)
+		panel.Size = UDim2.fromOffset(SUMMARY_PANEL_W, SUMMARY_PANEL_H)
 		panel.BackgroundColor3 = Color3.fromRGB(16, 26, 38)
 		panel.BorderSizePixel = 0
 		panel.ZIndex = 2
 		panel.Parent = g
 		UiPopupScale.attach(panel)
 		local pc = Instance.new("UICorner")
-		pc.CornerRadius = UDim.new(0, 16)
+		pc.CornerRadius = UDim.new(0, SUMMARY_CORNER)
 		pc.Parent = panel
+		local edge = Instance.new("UIStroke")
+		edge.Name = "SummaryEdge"
+		edge.Thickness = SUMMARY_STROKE_THICKNESS
+		edge.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+		edge.Color = Color3.fromHSV(0, 1, 1)
+		edge.Parent = panel
+		summaryStroke = edge
 
-		local title = Instance.new("TextLabel")
-		title.Name = "WaveReached"
-		title.BackgroundTransparency = 1
-		title.Position = UDim2.fromOffset(16, 36)
-		title.Size = UDim2.new(1, -32, 0, 48)
-		title.Font = UiTheme.Font
-		title.TextSize = 36
-		title.TextColor3 = Color3.new(1, 1, 1)
-		title.TextXAlignment = Enum.TextXAlignment.Center
-		title.ZIndex = 3
-		title.Parent = panel
-
-		local fed = Instance.new("TextLabel")
-		fed.Name = "FishFed"
-		fed.BackgroundTransparency = 1
-		fed.Position = UDim2.fromOffset(16, 96)
-		fed.Size = UDim2.new(1, -32, 0, 32)
-		fed.Font = UiTheme.Font
-		fed.TextSize = 24
-		fed.TextColor3 = Color3.new(1, 1, 1)
-		fed.TextXAlignment = Enum.TextXAlignment.Center
-		fed.ZIndex = 3
-		fed.Parent = panel
-
-		local lasted = Instance.new("TextLabel")
-		lasted.Name = "Lasted"
-		lasted.BackgroundTransparency = 1
-		lasted.Position = UDim2.fromOffset(16, 140)
-		lasted.Size = UDim2.new(1, -32, 0, 28)
-		lasted.Font = UiTheme.Font
-		lasted.TextSize = 22
-		lasted.TextColor3 = Color3.new(1, 1, 1)
-		lasted.TextXAlignment = Enum.TextXAlignment.Center
-		lasted.ZIndex = 3
-		lasted.Parent = panel
-
-		local finish = Instance.new("TextButton")
-		finish.Name = "Finish"
-		finish.AnchorPoint = Vector2.new(0.5, 1)
-		finish.Position = UDim2.new(0.5, 0, 1, -18)
-		finish.Size = UDim2.fromOffset(200, 44)
-		finish.BackgroundColor3 = FINISH_GREEN
-		finish.Font = UiTheme.Font
-		finish.Text = "FINISH"
-		finish.TextColor3 = Color3.new(1, 1, 1)
-		finish.TextSize = 22
-		finish.AutoButtonColor = true
-		finish.Selectable = true
-		finish.ZIndex = 4
-		finish.Parent = panel
-		local fc = Instance.new("UICorner")
-		fc.CornerRadius = UDim.new(0, 10)
-		fc.Parent = finish
-		finish.Activated:Connect(function()
-			hideSummary()
-		end)
-		finishBtn = finish
+		ensureSummaryStats(panel)
+		ensureSummaryButtons(panel)
 	end
 
 	local g = summaryGui :: ScreenGui
@@ -1628,32 +1911,34 @@ local function showSummary(summary: WaveSim.Summary)
 	local panel = g:FindFirstChild("Panel")
 	if panel and panel:IsA("Frame") then
 		UiPopupScale.attach(panel)
-		local title = panel:FindFirstChild("WaveReached")
-		local fed = panel:FindFirstChild("FishFed")
-		local lasted = panel:FindFirstChild("Lasted")
-		if title and title:IsA("TextLabel") then
-			title.Text = "Wave " .. tostring(summary.waveReached)
+		panel.Size = UDim2.fromOffset(SUMMARY_PANEL_W, SUMMARY_PANEL_H)
+		local corner = panel:FindFirstChildOfClass("UICorner")
+		if corner then
+			corner.CornerRadius = UDim.new(0, SUMMARY_CORNER)
 		end
-		if fed and fed:IsA("TextLabel") then
-			fed.Text = "Fish Fed " .. tostring(summary.fishFed)
+		local edge = panel:FindFirstChild("SummaryEdge")
+		if edge and edge:IsA("UIStroke") then
+			summaryStroke = edge
+			edge.Thickness = SUMMARY_STROKE_THICKNESS
+		elseif not summaryStroke then
+			local stroke = Instance.new("UIStroke")
+			stroke.Name = "SummaryEdge"
+			stroke.Thickness = SUMMARY_STROKE_THICKNESS
+			stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+			stroke.Color = Color3.fromHSV(0, 1, 1)
+			stroke.Parent = panel
+			summaryStroke = stroke
 		end
-		if lasted and lasted:IsA("TextLabel") then
-			lasted.Text = WaveSim.formatClock(summary.elapsedSec)
-		end
+		ensureSummaryButtons(panel)
+		fillSummaryStats(panel, summary, records)
 		playConfetti(panel)
+		startSummaryStrokeCycle()
 	end
 
-	-- Joystick: select FINISH so A activates it immediately.
-	if not finishBtn and panel then
-		local found = panel:FindFirstChild("Finish")
-		if found and found:IsA("TextButton") then
-			finishBtn = found
-			finishBtn.Selectable = true
-		end
-	end
-	if isUsingGamepad() and finishBtn then
+	-- Joystick: default CONTINUE (A continues); navigate down to FINISH.
+	if isUsingGamepad() and continueBtn then
 		prevGuiSelected = GuiService.SelectedObject
-		GuiService.SelectedObject = finishBtn
+		GuiService.SelectedObject = continueBtn
 	end
 end
 
@@ -2060,6 +2345,26 @@ function WaveSlot.mount(d: Deps)
 		WaveSlot.refreshHelpBadge()
 		if isOpen and WaveSlot.isReefHealOpen() then
 			WaveSlot.cancelReefHeal()
+		end
+	end)
+	Players.LocalPlayer.PlayerGui:GetAttributeChangedSignal("OceanTD_SkillsBubblesOpen"):Connect(function()
+		local skillsOpen = Players.LocalPlayer.PlayerGui:GetAttribute("OceanTD_SkillsBubblesOpen") == true
+		if skillsOpen then
+			if slot5 then
+				slot5.Visible = false
+			end
+			WaveSlot.refreshHelpBadge()
+			if hudFrame then
+				hudFrame.Visible = false
+			end
+		else
+			if slot5 then
+				slot5.Visible = true
+			end
+			WaveSlot.refreshHelpBadge()
+			if WaveSim.isRunning() then
+				setHudVisible(true)
+			end
 		end
 	end)
 

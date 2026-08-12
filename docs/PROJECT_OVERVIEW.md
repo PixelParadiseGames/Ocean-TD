@@ -13,7 +13,7 @@ Each player owns a bleached reef plot. Place corals, sponges, and reef critters 
 ## Currencies
 | Name | Role |
 |------|------|
-| **$D Sand Dollars** | Common currency |
+| **$D Sand Dollars** | Common currency (persistent; Robux packs; HUD `MobileLeftUI.dPad.$DCount`) |
 | **Gold** | Rare currency |
 | **Robux** | Shop / packs (later) |
 

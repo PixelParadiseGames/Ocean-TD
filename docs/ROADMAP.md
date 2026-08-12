@@ -18,15 +18,16 @@ Ordered. Do not invent parallel data paths when a later phase lands — extend t
 - **Live (client prototype):** Slot5 start/stop, `WaveRoute.A` Tang waves, local coral food, reef health, summary UI
 - Player-triggered waves on **own** plot only (solo client sim; server authority later)
 - Path through reef; satiety from nearby coral nutrition; empty bars at exit damage reef
-- Reward $D later; no per-frame remotes for agents (batch / owner-only)
+- Reward $D on hunger-bar fill (EarnMore ×; batched `ReportFishFed`); no per-frame remotes for agents
 
 ## Phase 4 — RNG rolls
 - Roll / autoroll for common → rare coral types
 - Costs $D or tickets; server RNG; inventory grants
 
 ## Phase 5 — Shop / Robux
-- Gold + Robux products: packs, powerups, critters
-- Server grant only; receipt validation
+- **Live:** $D Robux packs via ProcessReceipt (`SandDollarProducts` + `EconomyService`); HUD `$DCount`
+- Gold + more products (powerups, critters) later
+- Server grant only; receipt validation (do not add a second ProcessReceipt handler)
 
 ## Phase 6 — Skill tree
 - Permanent unlocks: luck, plot size, income, coral tiers, max placed

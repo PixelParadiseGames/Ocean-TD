@@ -12,6 +12,7 @@ local PlayerSession = require(Services:WaitForChild("PlayerSession"))
 local PlotService = require(Services:WaitForChild("PlotService"))
 local GridService = require(Services:WaitForChild("GridService"))
 local PersistenceService = require(Services:WaitForChild("PersistenceService"))
+local EconomyService = require(Services:WaitForChild("EconomyService"))
 local DecorReplicator = require(Services:WaitForChild("DecorReplicator"))
 local PlacementService = require(Services:WaitForChild("PlacementService"))
 local UndoService = require(Services:WaitForChild("UndoService"))
@@ -22,6 +23,7 @@ local Constants = require(oceanRoot:WaitForChild("Shared"):WaitForChild("Constan
 
 Remotes.initServer()
 PersistenceService.init()
+EconomyService.init()
 PlotService.init()
 PlacementService.init()
 PlotSaveService.init()
@@ -85,13 +87,25 @@ local function onPlayerAdded(player: Player)
 		return
 	end
 
+	-- Apply Plot Size stage BEFORE hydrate so layout locals match the Studio box pose.
+	do
+		local plotSizeStage = PersistenceService.getSkillStage(player, "PlotSize")
+		local sized = PlotService.applyOwnerPlotSizeStage(player, plotSizeStage)
+		if sized then
+			payload = sized
+		end
+	end
+
 	GridService.hydrate(payload.plotId, player.UserId, profile.layout, payload.cframe)
 	PlacementService.hydrateVisuals(payload.plotId, payload.cframe)
 	PlayerSession.markReady(player, payload.plotId)
-	PersistenceService.syncHighestWaveAttribute(player)
+	PersistenceService.syncWaveRecordAttributes(player)
+	PersistenceService.syncPlotOutlineColorAttribute(player)
+	PersistenceService.syncSandDollarsAttribute(player)
 
 	plotAssignedRemote:FireClient(player, payload)
 	sessionReadyRemote:FireClient(player)
+	Remotes.get("SkillStagesSync"):FireClient(player, PersistenceService.getSkillStages(player))
 	-- Joiner first (race-safe), then everyone.
 	WaveWatchService.broadcastRoster(player)
 	WaveWatchService.broadcastRoster(nil)
@@ -231,6 +245,15 @@ requestRenamePlotSave.OnServerInvoke = function(player: Player, slotIndex: any, 
 	return PlotSaveService.renameSlot(player, slotIndex, name)
 end
 
+local reportFishFed = Remotes.get("ReportFishFed")
+reportFishFed.OnServerEvent:Connect(function(player: Player, fishCount: any)
+	local session = PlayerSession.get(player)
+	if not session or session.layoutLoaded ~= true then
+		return
+	end
+	PersistenceService.creditSandDollarsFromFeed(player, fishCount)
+end)
+
 local reportHighestWave = Remotes.get("ReportHighestWave")
 reportHighestWave.OnServerEvent:Connect(function(player: Player, wave: any)
 	if typeof(wave) ~= "number" then
@@ -240,3 +263,109 @@ reportHighestWave.OnServerEvent:Connect(function(player: Player, wave: any)
 	local w = math.clamp(math.floor(wave), 0, 100000)
 	PersistenceService.reportHighestWave(player, w)
 end)
+
+local reportWaveRecords = Remotes.get("ReportWaveRecords")
+reportWaveRecords.OnServerEvent:Connect(function(player: Player, wave: any, fishFed: any, elapsedSec: any)
+	if typeof(wave) ~= "number" or typeof(fishFed) ~= "number" or typeof(elapsedSec) ~= "number" then
+		return
+	end
+	PersistenceService.reportWaveRecords(player, wave, fishFed, elapsedSec)
+end)
+
+local requestSetPlotOutlineColor = Remotes.getFunction("RequestSetPlotOutlineColor")
+requestSetPlotOutlineColor.OnServerInvoke = function(player: Player, index: any)
+	if typeof(index) ~= "number" then
+		return PersistenceService.getPlotOutlineColorIndex(player)
+	end
+	return PersistenceService.setPlotOutlineColorIndex(player, index)
+end
+
+local requestGetSkillStages = Remotes.getFunction("RequestGetSkillStages")
+requestGetSkillStages.OnServerInvoke = function(player: Player)
+	return PersistenceService.getSkillStages(player)
+end
+
+local requestUnlockSkillStage = Remotes.getFunction("RequestUnlockSkillStage")
+requestUnlockSkillStage.OnServerInvoke = function(player: Player, skillId: any)
+	if typeof(skillId) ~= "string" then
+		return { ok = false, stage = 1, errorCode = "BadSkill" }
+	end
+	local result = PersistenceService.tryUnlockSkillStage(player, skillId)
+	if result.ok then
+		Remotes.get("SkillStagesSync"):FireClient(player, PersistenceService.getSkillStages(player))
+		if skillId == "PlotSize" then
+			-- Defer bounds apply until the client grow tween finishes (ReportPlotSizeCinematicDone).
+			-- Otherwise PlotAssigned snaps the outline to the new size before the cinematic.
+			local plotId = PlotService.getOwnerPlotId(player)
+			local slot = if plotId then PlotService.getSlot(plotId) else nil
+			local prevStage = result.prevStage or (result.stage - 1)
+			local prevCf: CFrame? = nil
+			local prevSize: Vector3? = nil
+			local newCf: CFrame? = nil
+			local newSize: Vector3? = nil
+			local ringCf: CFrame? = nil
+			local spawnCf: CFrame? = nil
+			local plot1Cf: CFrame? = nil
+			if slot then
+				prevCf, prevSize = PlotService.getStageWorldPose(slot, prevStage)
+				newCf, newSize = PlotService.getStageWorldPose(slot, result.stage)
+				ringCf = slot.ringCFrame
+				spawnCf = slot.spawnCFrame
+				local bounds = PlotService.getBoundsPayload(player)
+				plot1Cf = if bounds then bounds.plot1CFrame else nil
+			end
+			Remotes.get("PlotSizeChanged"):FireClient(player, {
+				prevStage = prevStage,
+				stage = result.stage,
+				prevCFrame = prevCf,
+				prevSize = prevSize,
+				cframe = newCf,
+				size = newSize,
+				plotId = plotId,
+				plot1CFrame = plot1Cf,
+				ringCFrame = ringCf,
+				spawnCFrame = spawnCf,
+			})
+		end
+	end
+	return result
+end
+
+local reportPlotSizeCinematicDone = Remotes.get("ReportPlotSizeCinematicDone")
+reportPlotSizeCinematicDone.OnServerEvent:Connect(function(player: Player, stage: any)
+	if typeof(stage) ~= "number" then
+		return
+	end
+	local want = PersistenceService.getSkillStage(player, "PlotSize")
+	local s = math.floor(stage)
+	if s ~= want then
+		-- Still apply saved stage (reconnect / desync).
+		s = want
+	end
+	local payload = PlotService.applyOwnerPlotSizeStage(player, s)
+	if payload then
+		Remotes.get("PlotAssigned"):FireClient(player, payload)
+		WaveWatchService.broadcastRoster(nil)
+	end
+end)
+
+local requestResetSkillStages = Remotes.getFunction("RequestResetSkillStages")
+requestResetSkillStages.OnServerInvoke = function(player: Player)
+	local stages = PersistenceService.resetSkillStages(player)
+	Remotes.get("SkillStagesSync"):FireClient(player, stages)
+	local payload = PlotService.applyOwnerPlotSizeStage(player, 1)
+	if payload then
+		Remotes.get("PlotAssigned"):FireClient(player, payload)
+		Remotes.get("PlotSizeChanged"):FireClient(player, {
+			prevStage = 1,
+			stage = 1,
+			size = payload.size,
+			cframe = payload.cframe,
+			plotId = payload.plotId,
+			plot1CFrame = payload.plot1CFrame,
+			reset = true,
+		})
+		WaveWatchService.broadcastRoster(nil)
+	end
+	return { ok = true, skillStages = stages }
+end

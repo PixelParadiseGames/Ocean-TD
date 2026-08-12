@@ -263,6 +263,15 @@ function SkipWaveSlot.refreshHelpBadge()
 	if not helpSlot then
 		return
 	end
+	local pg = game:GetService("Players").LocalPlayer:FindFirstChild("PlayerGui")
+	if pg and pg:GetAttribute("OceanTD_SkillsBubblesOpen") == true then
+		helpSlot.Visible = false
+		if helpHit then
+			helpHit.Visible = false
+			helpHit.Active = false
+		end
+		return
+	end
 	local backpackOpen = InventoryState.isOpen()
 	if revealed and styleHelpBadge() then
 		helpSlot.Visible = true
@@ -625,6 +634,10 @@ function SkipWaveSlot.playReveal()
 	if not slot6 or not homePos then
 		return
 	end
+	local pg = game:GetService("Players").LocalPlayer:FindFirstChild("PlayerGui")
+	if pg and pg:GetAttribute("OceanTD_SkillsBubblesOpen") == true then
+		return
+	end
 	if revealed and slot6.Visible then
 		return
 	end
@@ -875,6 +888,20 @@ function SkipWaveSlot.mount(d: Deps)
 	InventoryState.onOpenChanged(function(isOpen)
 		setSlot6Interactable(not isOpen)
 		SkipWaveSlot.refreshHelpBadge()
+	end)
+
+	local playerGui = game:GetService("Players").LocalPlayer:WaitForChild("PlayerGui")
+	playerGui:GetAttributeChangedSignal("OceanTD_SkillsBubblesOpen"):Connect(function()
+		if playerGui:GetAttribute("OceanTD_SkillsBubblesOpen") == true then
+			if slot6 then
+				slot6.Visible = false
+			end
+			if helpSlot then
+				helpSlot.Visible = false
+			end
+		else
+			SkipWaveSlot.syncToWaveRunning(WaveSim.isRunning())
+		end
 	end)
 
 	if hudUnsub then

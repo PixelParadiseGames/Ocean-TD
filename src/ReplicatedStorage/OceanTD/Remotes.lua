@@ -14,8 +14,13 @@ local REMOTE_EVENTS = {
 	"SessionReady",
 	"PlaceResult",
 	"ReportHighestWave",
+	"ReportWaveRecords",
 	"PlotRoster",
 	"WaveWatchPush",
+	"SkillStagesSync",
+	"ReportFishFed",
+	"PlotSizeChanged",
+	"ReportPlotSizeCinematicDone",
 }
 
 local REMOTE_FUNCTIONS = {
@@ -29,6 +34,10 @@ local REMOTE_FUNCTIONS = {
 	"RequestLoadPlotSlot",
 	"RequestRenamePlotSave",
 	"RequestPlotRoster",
+	"RequestSetPlotOutlineColor",
+	"RequestUnlockSkillStage",
+	"RequestGetSkillStages",
+	"RequestResetSkillStages",
 }
 
 local function getRoot(): Instance

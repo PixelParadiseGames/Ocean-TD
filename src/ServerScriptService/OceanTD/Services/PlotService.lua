@@ -23,6 +23,7 @@ local GridMath = require(oceanShared:WaitForChild("GridMath"))
 local RingMath = require(oceanShared:WaitForChild("RingMath"))
 local PlotFrameContract = require(oceanShared:WaitForChild("PlotFrameContract"))
 local PlotTypes = require(oceanShared:WaitForChild("PlotTypes"))
+local SkillStages = require(oceanShared:WaitForChild("SkillStages"))
 
 type PlotBoundsPayload = PlotTypes.PlotBoundsPayload
 type PlotId = PlotTypes.PlotId
@@ -30,7 +31,8 @@ type PlotId = PlotTypes.PlotId
 export type PlotSlot = {
 	plotId: PlotId,
 	plotIndex: number,
-	cframe: CFrame,
+	ringCFrame: CFrame, -- RingMath / Master pose (stable)
+	cframe: CFrame, -- active bounds (Plot Size template)
 	size: Vector3,
 	spawnCFrame: CFrame,
 	owner: Player?,
@@ -132,6 +134,7 @@ local function registerLogicalSlot(plotIndex: number, cf: CFrame, size: Vector3,
 	slotsById[plotId] = {
 		plotId = plotId,
 		plotIndex = plotIndex,
+		ringCFrame = cf,
 		cframe = cf,
 		size = size,
 		spawnCFrame = spawnCf,
@@ -287,7 +290,8 @@ local function resolvePlot1CFrame(): CFrame?
 	end
 	local plot1 = slotsById["Plot1"]
 	if plot1 then
-		return plot1.cframe
+		-- Ring pose, not the active Plot Size template (templates are offsets from Master).
+		return plot1.ringCFrame
 	end
 	return nil
 end
@@ -299,6 +303,7 @@ local function buildPayload(slot: PlotSlot): PlotBoundsPayload
 		size = slot.size,
 		spawnCFrame = slot.spawnCFrame,
 		plot1CFrame = resolvePlot1CFrame(),
+		ringCFrame = slot.ringCFrame,
 	}
 end
 
@@ -503,6 +508,103 @@ function PlotService.getAvailableCount(): number
 		end
 	end
 	return n
+end
+
+local function findPlotSizesFolder(): Instance?
+	local decor = Workspace:FindFirstChild(Constants.MASTER_DECOR_NAME)
+	if not decor then
+		return nil
+	end
+	return decor:FindFirstChild(SkillStages.PLOT_SIZES_FOLDER)
+end
+
+function PlotService.getPlotSizeTemplate(stage: number): BasePart?
+	local folder = findPlotSizesFolder()
+	if not folder then
+		return nil
+	end
+	local name = SkillStages.plotSizePartName(stage)
+	local part = folder:FindFirstChild(name)
+	if part and part:IsA("BasePart") then
+		return part
+	end
+	return nil
+end
+
+function PlotService.getSizeForStage(stage: number): Vector3?
+	local part = PlotService.getPlotSizeTemplate(stage)
+	if part then
+		return part.Size
+	end
+	-- Fallback: master terrain size for stage 1.
+	local master = PlotService.getMasterTerrain()
+	if master and SkillStages.clampStage(stage) <= 1 then
+		return master.Size
+	end
+	return nil
+end
+
+-- World pose of a PlotSizes template on this slot (Studio CFrame + Size, remapped via ring).
+function PlotService.getStageWorldPose(slot: PlotSlot, stage: number): (CFrame?, Vector3?)
+	local template = PlotService.getPlotSizeTemplate(stage)
+	if not template then
+		return nil, nil
+	end
+	local p1 = resolvePlot1CFrame()
+	if not p1 then
+		return template.CFrame, template.Size
+	end
+	local ring = slot.ringCFrame
+	local worldCf = ring * p1:ToObjectSpace(template.CFrame)
+	return worldCf, template.Size
+end
+
+-- Apply Studio PlotSizes box (CFrame + Size) for this player's stage.
+function PlotService.setOwnerPlotSize(player: Player, size: Vector3, boundsCf: CFrame?): PlotBoundsPayload?
+	local plotId = ownerToPlot[player]
+	if not plotId then
+		return nil
+	end
+	local slot = slotsById[plotId]
+	if not slot or slot.owner ~= player then
+		return nil
+	end
+	local sx = math.max(4, size.X)
+	local sy = math.max(1, size.Y)
+	local sz = math.max(4, size.Z)
+	local newSize = Vector3.new(sx, sy, sz)
+	local newCf = boundsCf or slot.cframe
+	local oldCf = slot.cframe
+	slot.size = newSize
+	slot.cframe = newCf
+	-- Keep spawn remapped from ring (avatar start), not the size-box center.
+	slot.spawnCFrame = resolveSpawnCFrame(slot.ringCFrame, newSize)
+	log("Plot size →", plotId, "size=", slot.size, "pos=", slot.cframe.Position, "for", player.Name)
+
+	if oldCf ~= newCf then
+		local GridService = require(script.Parent:WaitForChild("GridService"))
+		local PlacementService = require(script.Parent:WaitForChild("PlacementService"))
+		GridService.reframe(plotId, oldCf, newCf)
+		PlacementService.hydrateVisuals(plotId, newCf)
+	end
+	return buildPayload(slot)
+end
+
+function PlotService.applyOwnerPlotSizeStage(player: Player, stage: number): PlotBoundsPayload?
+	local plotId = ownerToPlot[player]
+	if not plotId then
+		return nil
+	end
+	local slot = slotsById[plotId]
+	if not slot then
+		return nil
+	end
+	local worldCf, size = PlotService.getStageWorldPose(slot, stage)
+	if not worldCf or not size then
+		warnPlot("PlotSizes template missing for stage", stage)
+		return PlotService.getBoundsPayload(player)
+	end
+	return PlotService.setOwnerPlotSize(player, size, worldCf)
 end
 
 return PlotService

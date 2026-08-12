@@ -24,6 +24,8 @@ local MAX_SOUND_PER_KEY = 12
 local ATTR_KIND = "OceanTD_PoolFishKind"
 
 local fishPools: { [string]: { Instance } } = {}
+-- Prevents double-release / double-acquire (shared WaveSim + WaveGhostSim pool).
+local fishInUse: { [Instance]: boolean } = {}
 local foodPool: { BasePart } = {}
 local arrowPool: { Instance } = {}
 local ammoPool: { BasePart } = {}
@@ -143,7 +145,7 @@ function WaveEntityPool.acquireFish(kind: string, name: string): (Instance?, Bas
 	end
 	while #pool > 0 do
 		local inst = table.remove(pool) :: Instance
-		if inst then
+		if inst and not fishInUse[inst] then
 			local root = findPrimary(inst)
 			if root then
 				stripHungerUi(root)
@@ -151,6 +153,7 @@ function WaveEntityPool.acquireFish(kind: string, name: string): (Instance?, Bas
 				if inst:IsA("Model") and not inst.PrimaryPart then
 					inst.PrimaryPart = root
 				end
+				fishInUse[inst] = true
 				return inst, root
 			end
 			inst:Destroy()
@@ -161,6 +164,7 @@ function WaveEntityPool.acquireFish(kind: string, name: string): (Instance?, Bas
 		return nil, nil
 	end
 	clone.Name = name
+	fishInUse[clone] = true
 	return clone, root
 end
 
@@ -168,6 +172,12 @@ function WaveEntityPool.releaseFish(kind: string, model: Instance)
 	if not model then
 		return
 	end
+	-- Idempotent: hardCleanup used to re-release finished fish and corrupt the pool
+	-- (same Tang handed to two live agents → one "steals" the other and it vanishes).
+	if not fishInUse[model] then
+		return
+	end
+	fishInUse[model] = nil
 	local root = findPrimary(model)
 	if root then
 		stripHungerUi(root)

@@ -22,6 +22,7 @@ local ClientPlot = require(script.Parent:WaitForChild("ClientPlot"))
 local WaveEntityPool = require(script.Parent:WaitForChild("WaveEntityPool"))
 local WaveEndVfx = require(script.Parent:WaitForChild("WaveEndVfx"))
 local WaveStartVfx = require(script.Parent:WaitForChild("WaveStartVfx"))
+local WaveFeedPayout = require(script.Parent:WaitForChild("WaveFeedPayout"))
 
 local WaveSim = {}
 
@@ -116,6 +117,8 @@ type FishAgent = {
 	smoothTang: Vector3,
 	lastWorld: Vector3,
 	incomingFood: number, -- pending fill units from in-flight food orbs
+	payoutDone: boolean, -- $D already reported for this fill
+	fedCounted: boolean, -- counted toward this wave's feed bar / early-finish
 }
 
 type CoralAgent = {
@@ -174,7 +177,8 @@ local reefMaxHealth = C.REEF_START_HEALTH
 local reefHealth = C.REEF_START_HEALTH
 local fishFed = 0
 local waveFishExpected = 0
-local waveFedUnits = 0 -- sum of maxHunger for fish fully fed this wave (incl. finished)
+local waveFishSpawned = 0 -- successfully spawned this wave (denominator once spawning ends)
+local waveFishFullyFed = 0 -- fish that reached full hunger this wave (alive or finished happy)
 local startedAt = 0
 local simClock = 0 -- advances with dt * speedMult (ammo/combat); HUD clock stays real-time
 local speedMult = 1 -- 1 | 1.5 | 2; session-only, player-controlled
@@ -208,6 +212,8 @@ local function fishWorldOffset(agent: FishAgent, pos: Vector3, tang: Vector3, at
 	local up = agent.vert
 		+ agent.bobAmp * math.sin(d * agent.bobFreq + agent.bobPhase)
 		+ agent.bobAmp * 0.35 * math.sin(d * agent.bobFreq * 1.4 + agent.bobPhase + 2.0)
+	-- Don't dive into the floor / out of view under the route.
+	up = math.max(up, C.FISH_MIN_PATH_Y)
 	return pos + side * lat + Vector3.yAxis * up
 end
 
@@ -242,40 +248,50 @@ local function anyHungerDanger(): boolean
 	return false
 end
 
-local function getFishFullCounts(): (number, number)
-	local per = tangHungerForWave(waveIndex)
-	local full = math.floor(waveFedUnits / math.max(1, per) + 0.5)
-	for _, f in ipairs(fishList) do
-		if not f.finished and f.hunger >= f.maxHunger then
-			full += 1
-		end
+local function markFishFullyFed(agent: FishAgent)
+	if agent.fedCounted then
+		return
 	end
-	return full, waveFishExpected
+	agent.fedCounted = true
+	waveFishFullyFed += 1
+	notifyHud()
+end
+
+local function waveProgressDenominator(): number
+	-- After spawning finishes, use actual spawns so a failed acquire can't soft-lock the bar.
+	if (not waveSpawning) and spawnQueue <= 0 then
+		return math.max(1, waveFishSpawned)
+	end
+	return math.max(1, waveFishExpected)
+end
+
+local function getFishFullCounts(): (number, number)
+	return waveFishFullyFed, waveProgressDenominator()
 end
 
 local function getFeedProgress(): (number, boolean)
 	if not running or waveFishExpected <= 0 then
 		return 0, false
 	end
-	local total = waveFishExpected * tangHungerForWave(waveIndex)
-	if total <= 0 then
-		return 0, false
-	end
-	local filled = waveFedUnits
+	local total = waveProgressDenominator()
+	local filled = waveFishFullyFed
 	local anyHungryAlive = false
 	for _, f in ipairs(fishList) do
-		if not f.finished then
-			filled += math.min(f.hunger, f.maxHunger)
-			if f.hunger < f.maxHunger then
-				anyHungryAlive = true
+		if not f.finished and f.hunger < f.maxHunger then
+			anyHungryAlive = true
+			-- Partial credit so the bar moves before a fish is fully fed.
+			if f.maxHunger > 0 then
+				filled += math.clamp(f.hunger / f.maxHunger, 0, 0.999)
 			end
 		end
 	end
 	local progress = math.clamp(filled / total, 0, 1)
-	local complete = (not waveSpawning)
-		and spawnQueue <= 0
+	local spawningDone = (not waveSpawning) and spawnQueue <= 0
+	-- Complete only when every spawned fish was fully fed (underfed exits permanently block).
+	local complete = spawningDone
+		and waveFishSpawned > 0
 		and (not anyHungryAlive)
-		and progress >= 0.999
+		and waveFishFullyFed >= waveFishSpawned
 	return progress, complete
 end
 
@@ -956,6 +972,7 @@ local function updateHungerVisual(agent: FishAgent)
 	local u = agent.hunger / agent.maxHunger
 	agent.fill.Size = UDim2.fromScale(math.clamp(u, 0, 1), 1)
 	if agent.hunger >= agent.maxHunger then
+		markFishFullyFed(agent)
 		agent.barFrame.Visible = false
 		agent.forkLabel.Visible = false
 		setDangerFlash(agent, false)
@@ -1218,6 +1235,17 @@ local function destroyFish(agent: FishAgent)
 	WaveEntityPool.releaseFish(WaveEntityPool.FISH_TANG, agent.model)
 end
 
+-- Drop finished agents (models already released) so the next wave won't share refs.
+local function pruneFinishedFish()
+	local kept: { FishAgent } = {}
+	for _, f in ipairs(fishList) do
+		if not f.finished then
+			table.insert(kept, f)
+		end
+	end
+	fishList = kept
+end
+
 local function finishFish(agent: FishAgent, skipHappyVfx: boolean?)
 	if agent.finished then
 		return
@@ -1235,7 +1263,7 @@ local function finishFish(agent: FishAgent, skipHappyVfx: boolean?)
 		end
 	else
 		fishFed += 1
-		waveFedUnits += agent.maxHunger
+		markFishFullyFed(agent)
 		if not skipHappyVfx then
 			local emoji = agent.happyLabel.Text
 			if emoji == "" then
@@ -1307,8 +1335,12 @@ local function spawnOneFish(spawnIndex: number)
 		smoothTang = tang.Magnitude > 1e-5 and tang.Unit or Vector3.new(0, 0, -1),
 		lastWorld = pos,
 		incomingFood = 0,
+		payoutDone = false,
+		fedCounted = false,
 	}
 	nextFishId += 1
+	waveFishSpawned += 1
+	notifyHud()
 	local bb, fill, barFrame, forkLabel, happyLabel, barScale = makeHungerBillboard(root)
 	agent.billboard = bb
 	agent.fill = fill
@@ -1334,9 +1366,11 @@ local function waveFishCount(wave: number): number
 end
 
 local function beginWave(wave: number)
+	pruneFinishedFish()
 	waveIndex = wave
 	waveFishExpected = waveFishCount(wave)
-	waveFedUnits = 0
+	waveFishSpawned = 0
+	waveFishFullyFed = 0
 	-- Path preview: GreenArrows race the full route; fish follow 1s later.
 	startWaveArrowPreview()
 	waveSpawning = true
@@ -1395,45 +1429,75 @@ local function findClosestHungryFish(coral: CoralAgent): FishAgent?
 	local origin = coral.part.Position
 	local best: FishAgent? = nil
 	local bestScore = C.TARGET_RANGE_SQ
+
+	local function consider(f: FishAgent)
+		if not fishNeedsFood(f, fill) then
+			return
+		end
+		local fp = f.root.Position
+		local dx = fp.X - origin.X
+		local dy = fp.Y - origin.Y
+		local dz = fp.Z - origin.Z
+		local d2 = dx * dx + dy * dy + dz * dz
+		if d2 > C.TARGET_RANGE_SQ then
+			return
+		end
+		-- Prefer fish at/past this coral so stragglers don't slip through unfed
+		-- while the school still approaching soaks every shot.
+		local score = d2
+		if f.dist >= cd - 1 then
+			score *= 0.4
+		elseif f.dist < cd then
+			score *= 0.9
+		end
+		if score < bestScore then
+			bestScore = score
+			best = f
+		end
+	end
+
 	for bi = b0, b1 do
 		local bucket = fishPathBuckets[bi]
-		if not bucket then
-			continue
+		if bucket then
+			for _, f in ipairs(bucket) do
+				consider(f)
+			end
 		end
-		for _, f in ipairs(bucket) do
-			-- Same-tick: earlier corals may have already reserved this fish.
-			if not fishNeedsFood(f, fill) then
-				continue
-			end
-			local fp = f.root.Position
-			local dx = fp.X - origin.X
-			local dy = fp.Y - origin.Y
-			local dz = fp.Z - origin.Z
-			local d2 = dx * dx + dy * dy + dz * dz
-			if d2 > C.TARGET_RANGE_SQ then
-				continue
-			end
-			-- Prefer fish still approaching this coral's path station.
-			local score = d2
-			if f.dist < cd then
-				score *= 0.7
-			end
-			if score < bestScore then
-				bestScore = score
-				best = f
-			end
+	end
+
+	-- Fallback: any hungry fish in 3D range (catches window misses / bucket edge cases).
+	if not best then
+		for _, f in ipairs(fishList) do
+			consider(f)
 		end
 	end
 	return best
 end
 
 -- Predict mouth world pos using the same path + offset math the fish uses.
+-- Integrates each fish's ±FISH_SPEED_VAR surge (constant FISH_SPEED caused systematic misses).
+local function fishSpeedFactorAt(agent: FishAgent, clock: number): number
+	return 1 + C.FISH_SPEED_VAR * math.sin(clock * agent.speedFreq + agent.speedPhase)
+end
+
+local function predictFishDistAhead(agent: FishAgent, aheadSec: number): number
+	local steps = math.max(4, math.ceil(aheadSec * 24))
+	local stepDt = aheadSec / steps
+	local dist = agent.dist
+	local t = simClock
+	for _ = 1, steps do
+		dist += C.FISH_SPEED * fishSpeedFactorAt(agent, t) * stepDt
+		t += stepDt
+	end
+	return dist
+end
+
 local function predictFishMeetPos(agent: FishAgent, aheadSec: number): Vector3?
 	local path = pathData
 	if not path then
 		return nil
 	end
-	local futureDist = agent.dist + C.FISH_SPEED * aheadSec
+	local futureDist = predictFishDistAhead(agent, aheadSec)
 	if futureDist >= path.totalLen - 0.35 then
 		return nil
 	end
@@ -1448,27 +1512,43 @@ local function predictFishMeetPos(agent: FishAgent, aheadSec: number): Vector3?
 	return world + fwd * C.FOOD_FRONT_LEAD
 end
 
-local function fishCanEatFood(foodPos: Vector3, fishPos: Vector3): boolean
+local function fishMouthWorld(target: FishAgent): Vector3
+	local fwd = target.smoothTang
+	if fwd.Magnitude > 1e-5 then
+		fwd = fwd.Unit
+	else
+		fwd = Vector3.new(0, 0, -1)
+	end
+	return target.root.Position + fwd * C.FOOD_FRONT_LEAD
+end
+
+local function fishCanEatFood(foodPos: Vector3, fishPos: Vector3, radiusSq: number?, maxY: number?): boolean
+	local r2 = if radiusSq ~= nil then radiusSq else C.FOOD_EAT_RADIUS_SQ
+	local yMax = if maxY ~= nil then maxY else C.FOOD_EAT_Y
 	local dx = fishPos.X - foodPos.X
 	local dz = fishPos.Z - foodPos.Z
-	if dx * dx + dz * dz > C.FOOD_EAT_RADIUS_SQ then
+	if dx * dx + dz * dz > r2 then
 		return false
 	end
-	return math.abs(fishPos.Y - foodPos.Y) <= C.FOOD_EAT_Y
+	return math.abs(fishPos.Y - foodPos.Y) <= yMax
 end
 
 -- Ease-in so the orb is still rising when the fish arrives at the meet.
-local function foodFlightPos(shot: FoodShot, u: number): Vector3
+local function foodFlightPos(shot: FoodShot, u: number, meetPos: Vector3): Vector3
 	local t = math.clamp(u, 0, 1)
 	local ease = t * t
-	local base = shot.startPos:Lerp(shot.meetPos, ease)
-	local along = shot.meetPos - shot.startPos
+	local base = shot.startPos:Lerp(meetPos, ease)
+	local along = meetPos - shot.startPos
 	local side = Vector3.new(-along.Z, 0, along.X)
 	local sideLen = side.Magnitude
 	if sideLen > 1e-4 then
 		side = side / sideLen
 		-- Envelope 0 at ends, peak mid — reads as current, not a target lock.
+		-- Fade sway earlier so late flight can home cleanly.
 		local envelope = math.sin(t * math.pi)
+		if t > 0.7 then
+			envelope *= (1 - t) / 0.3
+		end
 		local sway = math.sin(t * math.pi * 2 + shot.swayPhase) * C.FOOD_SWAY_AMP * envelope
 		base = base + side * sway
 	end
@@ -1481,10 +1561,14 @@ local function fireShot(coral: CoralAgent, target: FishAgent)
 	local flatX = fp.X - start.X
 	local flatZ = fp.Z - start.Z
 	local flat = math.sqrt(flatX * flatX + flatZ * flatZ)
-	local duration = math.clamp(flat / C.FISH_SPEED + C.FOOD_FIRE_LEAD_SEC, C.FOOD_RISE_MIN, C.FOOD_RISE_MAX)
+	-- Estimate duration from distance; prediction uses the fish's live speed curve.
+	local speedNow = C.FISH_SPEED * math.max(0.55, fishSpeedFactorAt(target, simClock))
+	local duration = math.clamp(flat / speedNow + C.FOOD_FIRE_LEAD_SEC, C.FOOD_RISE_MIN, C.FOOD_RISE_MAX)
 	local meet = predictFishMeetPos(target, duration)
+	-- Near route end (or bad predict): still fire at the live mouth — don't let them ghost past.
 	if not meet then
-		return
+		meet = fishMouthWorld(target)
+		duration = math.clamp(duration * 0.65, C.FOOD_RISE_MIN * 0.75, C.FOOD_RISE_MAX)
 	end
 
 	coral.busy = true
@@ -1526,6 +1610,13 @@ local function finishShot(shot: FoodShot, fed: boolean)
 	clearShotTarget(shot)
 	if fed and target and not target.finished and target.hunger < target.maxHunger then
 		target.hunger = math.min(target.maxHunger, target.hunger + shot.fill)
+		if (not target.payoutDone) and target.hunger >= target.maxHunger then
+			target.payoutDone = true
+			WaveFeedPayout.noteFilled(target.root.Position)
+		end
+		if target.hunger >= target.maxHunger then
+			markFishFullyFed(target)
+		end
 		updateHungerVisual(target)
 		playFeedSound()
 	end
@@ -1576,17 +1667,18 @@ local function tickShots(dt: number)
 
 		shot.age += dt
 		local u = shot.age / math.max(0.05, shot.duration)
-		local foodPos = foodFlightPos(shot, math.min(u, 1))
+		local mouth = fishMouthWorld(target)
+		-- Late flight: home toward the live mouth so surge/wander don't waste the shot.
+		local meet = shot.meetPos
+		local homeStart = C.FOOD_HOME_START_U
+		if u > homeStart then
+			local homeT = math.clamp((u - homeStart) / math.max(1e-3, 1 - homeStart), 0, 1)
+			homeT = homeT * homeT
+			meet = shot.meetPos:Lerp(mouth, homeT)
+		end
+		local foodPos = foodFlightPos(shot, math.min(u, 1), meet)
 		shot.part.CFrame = CFrame.new(foodPos)
 
-		-- Mouth-ish: slight lead on live fish for forgiveness vs speed jitter.
-		local fwd = target.smoothTang
-		if fwd.Magnitude > 1e-5 then
-			fwd = fwd.Unit
-		else
-			fwd = Vector3.new(0, 0, -1)
-		end
-		local mouth = target.root.Position + fwd * C.FOOD_FRONT_LEAD
 		if fishCanEatFood(foodPos, mouth) or fishCanEatFood(foodPos, target.root.Position) then
 			finishShot(shot, true)
 			table.remove(activeShots, i)
@@ -1594,7 +1686,10 @@ local function tickShots(dt: number)
 		end
 
 		if u >= 1 then
-			finishShot(shot, false)
+			-- Last-chance credit if the orb ended near the fish (prediction leftover).
+			local fed = fishCanEatFood(foodPos, mouth, C.FOOD_END_GRACE_RADIUS_SQ, C.FOOD_END_GRACE_Y)
+				or fishCanEatFood(foodPos, target.root.Position, C.FOOD_END_GRACE_RADIUS_SQ, C.FOOD_END_GRACE_Y)
+			finishShot(shot, fed)
 			table.remove(activeShots, i)
 			continue
 		end
@@ -1625,10 +1720,14 @@ local function tickFish(dt: number)
 end
 
 local function compactFishList()
+	pruneFinishedFish()
 	local kept: { FishAgent } = {}
 	for _, f in ipairs(fishList) do
-		if not f.finished and f.model.Parent then
+		if f.model.Parent then
 			table.insert(kept, f)
+		else
+			-- Orphaned visual (should be rare with pool in-use tracking) — drop without re-release.
+			f.finished = true
 		end
 	end
 	fishList = kept
@@ -1843,38 +1942,7 @@ function WaveSim.stop(): Summary
 	return summary
 end
 
-function WaveSim.start(): boolean
-	if running then
-		return false
-	end
-	pathData = buildPath()
-	if not pathData then
-		return false
-	end
-	if not WaveEntityPool.hasFishKind(WaveEntityPool.FISH_TANG) then
-		warn("[WAVE] ReplicatedStorage.Fish.Tang missing")
-		return false
-	end
-	token += 1
-	local myToken = token
-	running = true
-	waveIndex = 0
-	reefMaxHealth = C.REEF_START_HEALTH
-	reefHealth = C.REEF_START_HEALTH
-	fishFed = 0
-	WaveEndVfx.resetStreak()
-	feedPitchCursor = C.FEED_PITCH_MIN
-	startedAt = os.clock()
-	simClock = 0
-	combatAcc = 0
-	nextFishId = 1
-	ensureFolder()
-	hardCleanup()
-	WaveEndVfx.refreshLocalEndHeart()
-	beginWave(1)
-	notifyHud()
-	flushHud()
-
+local function attachSimLoop(myToken: number)
 	disconnectMove()
 	moveConn = RunService.Heartbeat:Connect(function(dt)
 		if myToken ~= token or not running then
@@ -1889,7 +1957,8 @@ function WaveSim.start(): boolean
 				local idx = waveFishCount(waveIndex) - spawnQueue + 1
 				spawnOneFish(idx)
 				spawnQueue -= 1
-				spawnDelay = C.STAGGER_SEC
+				-- Slight random gap so the school reads as a parade, not a metronome.
+				spawnDelay = C.STAGGER_SEC * fishRng:NextNumber(0.7, 1.35)
 				if spawnQueue <= 0 then
 					waveSpawning = false
 				end
@@ -1927,7 +1996,67 @@ function WaveSim.start(): boolean
 			beginWave(waveIndex + 1)
 		end
 	end)
+end
 
+-- After defeat / stop summary: set reef hearts and begin the next wave (keeps run stats).
+function WaveSim.continueWithHearts(hearts: number): boolean
+	if running then
+		return false
+	end
+	pathData = buildPath()
+	if not pathData then
+		return false
+	end
+	if not WaveEntityPool.hasFishKind(WaveEntityPool.FISH_TANG) then
+		warn("[WAVE] ReplicatedStorage.Fish.Tang missing")
+		return false
+	end
+	token += 1
+	local myToken = token
+	running = true
+	reefMaxHealth = C.REEF_START_HEALTH
+	reefHealth = math.clamp(math.floor(hearts + 0.5), 1, reefMaxHealth)
+	ensureFolder()
+	WaveEndVfx.refreshLocalEndHeart()
+	beginWave(math.max(1, waveIndex) + 1)
+	notifyHud()
+	flushHud()
+	attachSimLoop(myToken)
+	return true
+end
+
+function WaveSim.start(): boolean
+	if running then
+		return false
+	end
+	pathData = buildPath()
+	if not pathData then
+		return false
+	end
+	if not WaveEntityPool.hasFishKind(WaveEntityPool.FISH_TANG) then
+		warn("[WAVE] ReplicatedStorage.Fish.Tang missing")
+		return false
+	end
+	token += 1
+	local myToken = token
+	running = true
+	waveIndex = 0
+	reefMaxHealth = C.REEF_START_HEALTH
+	reefHealth = C.REEF_START_HEALTH
+	fishFed = 0
+	WaveEndVfx.resetStreak()
+	feedPitchCursor = C.FEED_PITCH_MIN
+	startedAt = os.clock()
+	simClock = 0
+	combatAcc = 0
+	nextFishId = 1
+	ensureFolder()
+	hardCleanup()
+	WaveEndVfx.refreshLocalEndHeart()
+	beginWave(1)
+	notifyHud()
+	flushHud()
+	attachSimLoop(myToken)
 	return true
 end
 

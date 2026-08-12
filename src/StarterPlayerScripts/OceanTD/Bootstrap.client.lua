@@ -134,11 +134,22 @@ local plotAssigned = Remotes.get("PlotAssigned")
 local plotCleared = Remotes.get("PlotCleared")
 local sessionReady = Remotes.get("SessionReady")
 
+-- Starts PlotSize unlock cinematic listener + hides size templates.
+require(script.Parent:WaitForChild("PlotSizeCinematic"))
+
 local function log(...: any)
 	print("[PLOT]", ...)
 end
 
 plotAssigned.OnClientEvent:Connect(function(payload)
+	-- During the grow tween ClientPlot is owned by PlotSizeCinematic; applying here
+	-- early would flash the new size before the tween. After grow, cinematic sets
+	-- the new bounds and then ReportPlotSizeCinematicDone → PlotAssigned (safe).
+	local PlotSizeCinematic = require(script.Parent:WaitForChild("PlotSizeCinematic"))
+	if PlotSizeCinematic.isBusy() then
+		log("Assigned deferred (plot-size cinematic busy)", payload.plotId)
+		return
+	end
 	ClientPlot.set(payload)
 	log("Assigned", payload.plotId, "size=", payload.size)
 end)

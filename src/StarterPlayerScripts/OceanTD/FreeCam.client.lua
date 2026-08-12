@@ -484,6 +484,9 @@ ContextActionService:BindActionAtPriority(DPAD_ACTION, function(_name, state, _i
 	if InventoryState.isOpen() then
 		return Enum.ContextActionResult.Pass
 	end
+	if playerGui:GetAttribute("OceanTD_SkillsBubblesOpen") == true then
+		return Enum.ContextActionResult.Pass
+	end
 	if PlacementController.isActive() or RelocateController.isActive() then
 		return Enum.ContextActionResult.Pass
 	end
@@ -537,6 +540,10 @@ local function flashDPadGlow()
 	if InventoryState.isOpen() or not dPadIcon then
 		return
 	end
+	-- Skills bubbles own the d-pad while open — don't stack a second white center glow.
+	if skillsBubblesOpen() then
+		return
+	end
 	local glow, sc = ensureDPadGlow()
 	if not glow or not sc then
 		return
@@ -553,13 +560,20 @@ local function flashDPadGlow()
 		if my == dPadGlowToken and glow.Parent then
 			glow.BackgroundTransparency = 1
 			sc.Scale = 0.15
+			glow.Visible = false
 		end
 	end)
 end
 
+local function skillsBubblesOpen(): boolean
+	return playerGui:GetAttribute("OceanTD_SkillsBubblesOpen") == true
+end
+
 UserInputService.InputBegan:Connect(function(input, _gameProcessed)
 	if isDPadKey(input.KeyCode) then
-		flashDPadGlow()
+		if not skillsBubblesOpen() then
+			flashDPadGlow()
+		end
 	end
 	if input.UserInputType == Enum.UserInputType.Keyboard then
 		if active then
@@ -673,8 +687,9 @@ local function syncDPadIcon()
 		return
 	end
 	-- Decorative dPad graphic: visible whenever backpack is closed (all input types).
-	-- (Previously gamepad-only, which hid it for mouse/touch play.)
-	local want = not InventoryState.isOpen()
+	-- Hide while skills bubbles own the screen (avoids a second white center dot).
+	local skillsOpen = playerGui:GetAttribute("OceanTD_SkillsBubblesOpen") == true
+	local want = not InventoryState.isOpen() and not skillsOpen
 	if want == dPadIconShown then
 		return
 	end
@@ -754,6 +769,9 @@ task.spawn(function()
 		syncDPadIcon()
 	end)
 	UserInputService.LastInputTypeChanged:Connect(function()
+		syncDPadIcon()
+	end)
+	playerGui:GetAttributeChangedSignal("OceanTD_SkillsBubblesOpen"):Connect(function()
 		syncDPadIcon()
 	end)
 

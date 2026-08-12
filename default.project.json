@@ -16,7 +16,15 @@
           "PlotRoster": { "$className": "RemoteEvent" },
           "WaveWatchPush": { "$className": "RemoteEvent" },
           "RequestPlace": { "$className": "RemoteFunction" },
-          "RequestPlotRoster": { "$className": "RemoteFunction" }
+          "RequestPlotRoster": { "$className": "RemoteFunction" },
+          "RequestSetPlotOutlineColor": { "$className": "RemoteFunction" },
+          "RequestUnlockSkillStage": { "$className": "RemoteFunction" },
+          "RequestGetSkillStages": { "$className": "RemoteFunction" },
+          "SkillStagesSync": { "$className": "RemoteEvent" },
+          "ReportFishFed": { "$className": "RemoteEvent" },
+          "PlotSizeChanged": { "$className": "RemoteEvent" },
+          "ReportPlotSizeCinematicDone": { "$className": "RemoteEvent" },
+          "RequestResetSkillStages": { "$className": "RemoteFunction" }
         }
       }
     },

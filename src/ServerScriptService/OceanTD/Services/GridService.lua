@@ -182,6 +182,32 @@ function GridService.snapshot(plotId: PlotId): { LayoutObject }
 	return layout
 end
 
+-- Keep world positions when plot bounds CFrame changes (Plot Size stage).
+function GridService.reframe(plotId: PlotId, oldCf: CFrame, newCf: CFrame): number
+	if oldCf == newCf then
+		return 0
+	end
+	local moved = 0
+	local pending: { CellData } = {}
+	for key, cell in pairs(cells) do
+		if cell.plotId == plotId then
+			cells[key] = nil
+			table.insert(pending, cell)
+		end
+	end
+	plotObjectCounts[plotId] = 0
+	for _, cell in ipairs(pending) do
+		local world = oldCf * Vector3.new(cell.lx, cell.ly, cell.lz)
+		local localPos = newCf:PointToObjectSpace(world)
+		local lx, ly, lz = localPos.X, localPos.Y, localPos.Z
+		local gx, gy, gz = GridMath.worldToGrid(localPos, Vector3.zero)
+		GridService.tryOccupy(plotId, cell.ownerUserId, cell.id, lx, ly, lz, gx, gy, gz)
+		moved += 1
+	end
+	log("Reframe", plotId, "objects=", moved)
+	return moved
+end
+
 function GridService.debugCellCount(): number
 	local n = 0
 	for _ in pairs(cells) do

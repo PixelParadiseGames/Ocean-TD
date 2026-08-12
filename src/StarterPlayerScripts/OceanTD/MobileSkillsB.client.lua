@@ -1,13 +1,28 @@
 --!strict
 --[[
 	Toggle MobileSkillsB from the left dPad Skills button.
-	StarterGui.MobileLeftUI.dPad.Skills → show/hide StarterGui.MobileSkillsB
+	While open: soft bubble physics; Skills button becomes pulsing red close (X / B).
+	Gamepad: DPad Right opens skills; B closes (power-up first, then bubbles).
+	Left stick moves bubble focus while open; A activates.
+	Power-up open: stick selects UNLOCK ↔ Close only; A activates selection.
 ]]
 
 local Players = game:GetService("Players")
+local ContextActionService = game:GetService("ContextActionService")
+local GuiService = game:GetService("GuiService")
+local RunService = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
 
 local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
+
+local SkillsBubbleSim = require(script.Parent:WaitForChild("SkillsBubbleSim"))
+local SkillPowerUpUI = require(script.Parent:WaitForChild("SkillPowerUpUI"))
+local InventoryState = require(script.Parent:WaitForChild("InventoryState"))
+
+local oceanRoot = game:GetService("ReplicatedStorage"):WaitForChild("OceanTD")
+local UiViewportTags = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiViewportTags"))
 
 local CLOSE_NAMES = {
 	Close = true,
@@ -19,6 +34,19 @@ local CLOSE_NAMES = {
 	Dismiss = true,
 }
 
+local STICK_DEAD = 0.55
+local STICK_COOLDOWN = 0.22
+local TOGGLE_COOLDOWN = 1.0
+local MOVE_SINK_ACTION = "_OceanTD_SkillsMoveSink"
+local LEFT_UI_SINK_ACTION = "_OceanTD_SkillsLeftUiDPadSink"
+local movementFrozen = false
+local savedAutoSelectGui: boolean? = nil
+local leftUiSelectableRestore: { [GuiObject]: boolean } = {}
+local cachedControls: any = nil
+local hiddenHudGuis: { { gui: GuiObject, wasVisible: boolean, scale: UIScale?, wasScale: number? } } = {}
+
+local SKILLS_OPEN_ATTR = "OceanTD_SkillsBubblesOpen"
+
 local function ancestorScreenGui(inst: Instance): ScreenGui?
 	if inst:IsA("ScreenGui") then
 		return inst
@@ -26,7 +54,308 @@ local function ancestorScreenGui(inst: Instance): ScreenGui?
 	return inst:FindFirstAncestorOfClass("ScreenGui")
 end
 
--- Full-size hit target on Skills (don't reuse nested Studio buttons — they may be tiny/inactive).
+local function isGamepadMode(): boolean
+	local t = UserInputService:GetLastInputType()
+	return t == Enum.UserInputType.Gamepad1
+		or t == Enum.UserInputType.Gamepad2
+		or t == Enum.UserInputType.Gamepad3
+		or t == Enum.UserInputType.Gamepad4
+end
+
+-- Never WaitForChild here — that blocked skills open/close by up to 5s.
+local function getPlayerControls(): any
+	if cachedControls then
+		return cachedControls
+	end
+	local ps = player:FindFirstChild("PlayerScripts")
+	local pm = ps and ps:FindFirstChild("PlayerModule")
+	if not pm then
+		return nil
+	end
+	local ok, controls = pcall(function()
+		return require(pm):GetControls()
+	end)
+	if ok and controls then
+		cachedControls = controls
+		return controls
+	end
+	return nil
+end
+
+task.spawn(function()
+	local ps = player:WaitForChild("PlayerScripts", 30)
+	if not ps then
+		return
+	end
+	local pm = ps:WaitForChild("PlayerModule", 30)
+	if not pm then
+		return
+	end
+	pcall(function()
+		cachedControls = require(pm):GetControls()
+	end)
+end)
+
+local function clearGuiSelection()
+	GuiService.SelectedObject = nil
+end
+
+local function setBubbleModeGuiNav(enabled: boolean)
+	-- Bubbles use custom focus — GuiService selection steals the stick and leaves a highlight.
+	if enabled then
+		if savedAutoSelectGui == nil then
+			savedAutoSelectGui = GuiService.AutoSelectGuiEnabled
+		end
+		GuiService.AutoSelectGuiEnabled = false
+		clearGuiSelection()
+	else
+		clearGuiSelection()
+		if savedAutoSelectGui ~= nil then
+			GuiService.AutoSelectGuiEnabled = savedAutoSelectGui
+			savedAutoSelectGui = nil
+		end
+	end
+end
+
+local function bindMoveSink(on: boolean)
+	ContextActionService:UnbindAction(MOVE_SINK_ACTION)
+	if not on then
+		return
+	end
+	-- Sink locomotion so left stick only drives bubble/UI focus while skills are open.
+	ContextActionService:BindActionAtPriority(
+		MOVE_SINK_ACTION,
+		function()
+			return Enum.ContextActionResult.Sink
+		end,
+		false,
+		Enum.ContextActionPriority.High.Value,
+		Enum.KeyCode.Thumbstick1,
+		Enum.KeyCode.W,
+		Enum.KeyCode.A,
+		Enum.KeyCode.S,
+		Enum.KeyCode.D,
+		Enum.KeyCode.Space
+	)
+end
+
+-- While skills are open, d-pad must not drive MobileLeftUI / FreeCam — only bubble/power-up UI.
+local function bindLeftUiDPadSink(on: boolean)
+	ContextActionService:UnbindAction(LEFT_UI_SINK_ACTION)
+	if not on then
+		return
+	end
+	ContextActionService:BindActionAtPriority(
+		LEFT_UI_SINK_ACTION,
+		function()
+			return Enum.ContextActionResult.Sink
+		end,
+		false,
+		Enum.ContextActionPriority.High.Value + 10,
+		Enum.KeyCode.DPadLeft,
+		Enum.KeyCode.DPadRight,
+		Enum.KeyCode.DPadUp,
+		Enum.KeyCode.DPadDown
+	)
+end
+
+local leftUiSelectableRestore: { [GuiObject]: boolean } = {}
+
+local function lockForeignSelectables(lock: boolean)
+	if lock then
+		for obj, _ in pairs(leftUiSelectableRestore) do
+			if obj.Parent then
+				obj.Selectable = true
+			end
+		end
+		table.clear(leftUiSelectableRestore)
+		for _, layer in ipairs(playerGui:GetChildren()) do
+			if not layer:IsA("LayerCollector") then
+				continue
+			end
+			local function consider(obj: Instance)
+				if obj:IsA("GuiObject") and obj.Selectable then
+					leftUiSelectableRestore[obj] = true
+					obj.Selectable = false
+				end
+			end
+			consider(layer)
+			for _, d in ipairs(layer:GetDescendants()) do
+				consider(d)
+			end
+		end
+	else
+		for obj, _ in pairs(leftUiSelectableRestore) do
+			if obj.Parent then
+				obj.Selectable = true
+			end
+		end
+		table.clear(leftUiSelectableRestore)
+	end
+end
+
+local function setMovementEnabled(on: boolean)
+	bindMoveSink(not on and isGamepadMode())
+	local controls = getPlayerControls()
+	pcall(function()
+		if controls then
+			if on then
+				controls:Enable()
+			else
+				controls:Disable()
+			end
+		end
+	end)
+	movementFrozen = not on
+end
+
+local QUICKBAR_HIDE_SLOTS = {
+	Slot4 = true, -- backpack
+	Slot5 = true, -- waves start/stop
+	Slot6 = true, -- skip wave
+	Slot7 = true, -- wave speed
+}
+
+local WAVE_HUD_NAMES = {
+	OceanTD_WaveHud = true,
+	OceanTD_WatchHud = true,
+}
+
+local function rememberHide(gui: GuiObject)
+	for _, entry in ipairs(hiddenHudGuis) do
+		if entry.gui == gui then
+			return
+		end
+	end
+	table.insert(hiddenHudGuis, {
+		gui = gui,
+		wasVisible = gui.Visible,
+		scale = nil,
+		wasScale = nil,
+	})
+	gui.Visible = false
+end
+
+local function restoreHiddenHud()
+	for _, entry in ipairs(hiddenHudGuis) do
+		local gui = entry.gui
+		if gui.Parent then
+			gui.Visible = entry.wasVisible
+		end
+	end
+	table.clear(hiddenHudGuis)
+end
+
+local function hideLeftUiExceptSkillsClose()
+	local left = playerGui:FindFirstChild("MobileLeftUI")
+	if not left then
+		return
+	end
+	local dPad = left:FindFirstChild("dPad")
+	if dPad then
+		for _, ch in ipairs(dPad:GetChildren()) do
+			-- dPadIcon is owned by FreeCam via OceanTD_SkillsBubblesOpen attribute.
+			if ch:IsA("GuiObject") and ch.Name ~= "Skills" and ch.Name ~= "dPadIcon" and ch.Name ~= "$DCount" then
+				rememberHide(ch)
+			end
+		end
+	end
+	for _, ch in ipairs(left:GetChildren()) do
+		if ch:IsA("GuiObject") and ch.Name ~= "dPad" then
+			rememberHide(ch)
+		end
+	end
+end
+
+local function hideQuickbarSlotsOnHud(hud: Instance)
+	local quickbar = hud:FindFirstChild("Quickbar")
+	if quickbar then
+		for _, ch in ipairs(quickbar:GetChildren()) do
+			if ch:IsA("GuiObject") and QUICKBAR_HIDE_SLOTS[ch.Name] then
+				rememberHide(ch)
+			end
+		end
+	end
+	local help = hud:FindFirstChild("QuickbarHelp")
+	if help and help:IsA("GuiObject") then
+		-- Hide the whole help strip (wave/backpack shortcut circles), not only named slots.
+		rememberHide(help)
+	elseif help then
+		for _, ch in ipairs(help:GetChildren()) do
+			if ch:IsA("GuiObject") and QUICKBAR_HIDE_SLOTS[ch.Name] then
+				rememberHide(ch)
+			end
+		end
+	end
+	for _, d in ipairs(hud:GetDescendants()) do
+		if d:IsA("GuiObject") and WAVE_HUD_NAMES[d.Name] then
+			rememberHide(d)
+		end
+	end
+end
+
+local function hideBackpackAndWaveUi()
+	local mobile = playerGui:FindFirstChild(UiViewportTags.MOBILE_RIGHT_HUD)
+	local p720 = playerGui:FindFirstChild(UiViewportTags.P720_RIGHT_HUD)
+	if mobile then
+		hideQuickbarSlotsOnHud(mobile)
+	end
+	if p720 then
+		hideQuickbarSlotsOnHud(p720)
+	end
+	-- Watch HUD can sit under either right HUD parent.
+	for _, ch in ipairs(playerGui:GetChildren()) do
+		if ch:IsA("GuiObject") and WAVE_HUD_NAMES[ch.Name] then
+			rememberHide(ch)
+		end
+	end
+end
+
+local function setSkillsOpenHud(hide: boolean)
+	if hide then
+		local already = playerGui:GetAttribute(SKILLS_OPEN_ATTR) == true
+		if already and #hiddenHudGuis > 0 then
+			return
+		end
+		restoreHiddenHud()
+		hideLeftUiExceptSkillsClose()
+		hideBackpackAndWaveUi()
+		playerGui:SetAttribute(SKILLS_OPEN_ATTR, true)
+	else
+		-- Always restore — never early-out; cinematic / ForceClose can desync the flag.
+		restoreHiddenHud()
+		playerGui:SetAttribute(SKILLS_OPEN_ATTR, false)
+	end
+end
+
+local function syncMovementFreeze(skillsOpen: boolean)
+	if skillsOpen then
+		lockForeignSelectables(true)
+		bindLeftUiDPadSink(true)
+		setSkillsOpenHud(true)
+		clearGuiSelection()
+		if isGamepadMode() then
+			setMovementEnabled(false)
+			setBubbleModeGuiNav(true)
+		else
+			bindMoveSink(false)
+			setMovementEnabled(true)
+			setBubbleModeGuiNav(false)
+		end
+	else
+		bindLeftUiDPadSink(false)
+		lockForeignSelectables(false)
+		setSkillsOpenHud(false)
+		bindMoveSink(false)
+		clearGuiSelection()
+		setBubbleModeGuiNav(false)
+		setMovementEnabled(true)
+		task.defer(function()
+			setMovementEnabled(true)
+		end)
+	end
+end
+
 local function ensureHitOverlay(host: GuiObject): GuiButton
 	local existing = host:FindFirstChild("_OceanTD_SkillsHit")
 	if existing and existing:IsA("GuiButton") then
@@ -41,6 +370,7 @@ local function ensureHitOverlay(host: GuiObject): GuiButton
 	made.Position = UDim2.fromScale(0, 0)
 	made.ZIndex = host.ZIndex + 20
 	made.Active = true
+	made.Selectable = false
 	made.AutoButtonColor = false
 	made.Parent = host
 	return made
@@ -63,11 +393,46 @@ task.spawn(function()
 		return
 	end
 
+	-- Optional: dPad.Right also toggles skills (blocked while backpack is open).
+	local rightBtn = dPad:FindFirstChild("Right")
+		or dPad:FindFirstChild("right")
+		or dPad:FindFirstChild("dPadRight")
+		or dPad:FindFirstChild("DPadRight")
+		or dPad:FindFirstChild("RightBTN")
+		or dPad:FindFirstChild("RightBtn")
+	if not rightBtn then
+		for _, ch in ipairs(dPad:GetChildren()) do
+			local n = string.lower(ch.Name)
+			if n == "right" or n == "dpadright" or string.find(n, "right", 1, true) then
+				rightBtn = ch
+				break
+			end
+		end
+	end
+
 	local panel = playerGui:WaitForChild("MobileSkillsB", 60)
 	if not panel or not (panel:IsA("ScreenGui") or panel:IsA("GuiObject")) then
 		warn("[Skills] PlayerGui.MobileSkillsB missing")
 		return
 	end
+
+	SkillPowerUpUI.bind(panel)
+	SkillsBubbleSim.setOnBubbleActivated(function(buttonName: string)
+		SkillsBubbleSim.clearGamepadFocus()
+		SkillPowerUpUI.openFromButtonName(buttonName)
+	end)
+	SkillPowerUpUI.setOnClosed(function()
+		clearGuiSelection()
+		-- Only return to bubble focus while skills stay open. Never re-hide HUD here —
+		-- PlotSize unlock calls close() before ForceClose finishes and that raced restore.
+		if open and isGamepadMode() then
+			lockForeignSelectables(true)
+			setBubbleModeGuiNav(true)
+			if SkillsBubbleSim.isRunning() then
+				SkillsBubbleSim.setGamepadFocus(1)
+			end
+		end
+	end)
 
 	local leftGui = ancestorScreenGui(left)
 	local panelGui: ScreenGui? = if panel:IsA("ScreenGui") then panel else ancestorScreenGui(panel)
@@ -75,47 +440,261 @@ task.spawn(function()
 
 	local open = false
 	local lastToggleAt = 0
-	local TOGGLE_DEBOUNCE = 0.15
+	local openToken = 0
+
+	local closeChrome: Frame? = nil
+	local closeLabel: TextLabel? = nil
+	local closeScale: UIScale? = nil
+	local pulseToken = 0
+	local stickCooldownUntil = 0
+	local stickWasOut = false
+	local hiddenSkillKids: { GuiObject } = {}
+
+	local function syncCloseLabel()
+		if closeLabel then
+			closeLabel.Text = if isGamepadMode() then "B" else "X"
+		end
+	end
+
+	local function stopClosePulse()
+		pulseToken += 1
+		if closeScale then
+			closeScale.Scale = 1
+		end
+	end
+
+	local function startClosePulse()
+		pulseToken += 1
+		local my = pulseToken
+		task.spawn(function()
+			while my == pulseToken and open and closeScale and closeChrome and closeChrome.Parent do
+				local up = TweenService:Create(
+					closeScale,
+					TweenInfo.new(0.45, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut),
+					{ Scale = 1.14 }
+				)
+				up:Play()
+				up.Completed:Wait()
+				if my ~= pulseToken then
+					return
+				end
+				local down = TweenService:Create(
+					closeScale,
+					TweenInfo.new(0.45, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut),
+					{ Scale = 1 }
+				)
+				down:Play()
+				down.Completed:Wait()
+			end
+		end)
+	end
+
+	local function hideSkillsBtnContent(hide: boolean)
+		if hide then
+			table.clear(hiddenSkillKids)
+			for _, ch in ipairs(skillsBtn:GetChildren()) do
+				if ch:IsA("GuiObject") and ch.Name ~= "_OceanTD_SkillsHit" and ch.Name ~= "_OceanTD_SkillsCloseChrome" then
+					if ch.Visible then
+						table.insert(hiddenSkillKids, ch)
+						ch.Visible = false
+					end
+				end
+			end
+			if skillsBtn:IsA("ImageButton") or skillsBtn:IsA("ImageLabel") then
+				(skillsBtn :: ImageButton).ImageTransparency = 1
+			end
+			if skillsBtn:IsA("GuiButton") or skillsBtn:IsA("Frame") then
+				-- Keep hit target; chrome covers art.
+			end
+		else
+			for _, ch in ipairs(hiddenSkillKids) do
+				if ch.Parent then
+					ch.Visible = true
+				end
+			end
+			table.clear(hiddenSkillKids)
+			if skillsBtn:IsA("ImageButton") or skillsBtn:IsA("ImageLabel") then
+				(skillsBtn :: ImageButton).ImageTransparency = 0
+			end
+		end
+	end
+
+	local function destroyCloseChrome()
+		stopClosePulse()
+		if closeChrome then
+			closeChrome:Destroy()
+			closeChrome = nil
+		end
+		closeLabel = nil
+		closeScale = nil
+		hideSkillsBtnContent(false)
+	end
+
+	local function ensureCloseChrome()
+		destroyCloseChrome()
+		hideSkillsBtnContent(true)
+
+		local chrome = Instance.new("Frame")
+		chrome.Name = "_OceanTD_SkillsCloseChrome"
+		chrome.BackgroundColor3 = Color3.fromRGB(220, 40, 50)
+		chrome.BorderSizePixel = 0
+		chrome.Size = UDim2.fromScale(1, 1)
+		chrome.Position = UDim2.fromScale(0, 0)
+		chrome.ZIndex = skillsBtn.ZIndex + 15
+		chrome.Active = false
+		chrome.Parent = skillsBtn
+		local corner = Instance.new("UICorner")
+		corner.CornerRadius = UDim.new(1, 0)
+		corner.Parent = chrome
+		local stroke = Instance.new("UIStroke")
+		stroke.Thickness = 2
+		stroke.Color = Color3.fromRGB(255, 255, 255)
+		stroke.Transparency = 0.15
+		stroke.Parent = chrome
+
+		local scale = Instance.new("UIScale")
+		scale.Scale = 1
+		scale.Parent = chrome
+
+		local lbl = Instance.new("TextLabel")
+		lbl.Name = "Glyph"
+		lbl.BackgroundTransparency = 1
+		lbl.Size = UDim2.fromScale(1, 1)
+		lbl.Font = Enum.Font.GothamBold
+		lbl.TextScaled = true
+		lbl.TextColor3 = Color3.fromRGB(255, 255, 255)
+		lbl.TextStrokeTransparency = 0.6
+		lbl.ZIndex = chrome.ZIndex + 1
+		lbl.Parent = chrome
+		local pad = Instance.new("UIPadding")
+		pad.PaddingTop = UDim.new(0.18, 0)
+		pad.PaddingBottom = UDim.new(0.18, 0)
+		pad.PaddingLeft = UDim.new(0.18, 0)
+		pad.PaddingRight = UDim.new(0.18, 0)
+		pad.Parent = lbl
+
+		closeChrome = chrome
+		closeLabel = lbl
+		closeScale = scale
+		syncCloseLabel()
+		startClosePulse()
+	end
 
 	local function applyOpen(want: boolean)
 		open = want
-		if panel:IsA("ScreenGui") then
-			(panel :: ScreenGui).Enabled = want
-		else
-			(panel :: GuiObject).Visible = want
-		end
+		openToken += 1
+		local myToken = openToken
+
 		if leftGui and panelGui then
 			if want then
+				panelGui.DisplayOrder = math.max(panelGui.DisplayOrder, 50)
 				leftGui.DisplayOrder = math.max(leftOrderBase, panelGui.DisplayOrder + 10)
 			else
 				leftGui.DisplayOrder = leftOrderBase
 			end
 		end
+
+		if want then
+			-- Bubbles first — never block on PlayerModule / freeze setup.
+			ensureCloseChrome()
+			SkillsBubbleSim.preHide(panel)
+			if panel:IsA("ScreenGui") then
+				(panel :: ScreenGui).Enabled = true
+			else
+				(panel :: GuiObject).Visible = true
+			end
+			SkillsBubbleSim.start(panel)
+			if isGamepadMode() and SkillsBubbleSim.isRunning() then
+				SkillsBubbleSim.setGamepadFocus(1)
+			end
+			syncMovementFreeze(true)
+		else
+			SkillsBubbleSim.clearGamepadFocus()
+			SkillPowerUpUI.close()
+			clearGuiSelection()
+			destroyCloseChrome()
+			if skillsBtn then
+				skillsBtn.Visible = true
+			end
+			SkillsBubbleSim.stop(function()
+				if myToken ~= openToken then
+					return
+				end
+				if panel:IsA("ScreenGui") then
+					(panel :: ScreenGui).Enabled = false
+				else
+					(panel :: GuiObject).Visible = false
+				end
+			end)
+			syncMovementFreeze(false)
+			-- Belt-and-suspenders: cinematic ForceClose can race HUD restore.
+			if skillsBtn then
+				skillsBtn.Visible = true
+			end
+			hideSkillsBtnContent(false)
+		end
+	end
+
+	local function canToggle(): boolean
+		local now = os.clock()
+		if now - lastToggleAt < TOGGLE_COOLDOWN then
+			return false
+		end
+		lastToggleAt = now
+		return true
 	end
 
 	local function toggle()
-		local now = os.clock()
-		if now - lastToggleAt < TOGGLE_DEBOUNCE then
+		if not canToggle() then
 			return
 		end
-		lastToggleAt = now
 		applyOpen(not open)
-		print("[Skills] toggle →", open)
 	end
 
 	local function closeOnly()
-		local now = os.clock()
-		if now - lastToggleAt < TOGGLE_DEBOUNCE then
+		-- Always run full teardown (even if open flag desynced after PlotSize cinematic).
+		lastToggleAt = os.clock()
+		applyOpen(false)
+	end
+
+	local function openFromDPadRight()
+		if InventoryState.isOpen() then
 			return
 		end
-		lastToggleAt = now
-		applyOpen(false)
+		-- DPad Right opens only; B closes.
+		if open then
+			return
+		end
+		if not canToggle() then
+			return
+		end
+		applyOpen(true)
 	end
 
 	applyOpen(false)
 
+	playerGui:GetAttributeChangedSignal("OceanTD_ForceCloseSkills"):Connect(function()
+		closeOnly()
+	end)
+
+	playerGui:GetAttributeChangedSignal("OceanTD_SkillsUiRestore"):Connect(function()
+		closeOnly()
+		if skillsBtn then
+			skillsBtn.Visible = true
+		end
+		hideSkillsBtnContent(false)
+		playerGui:SetAttribute(SKILLS_OPEN_ATTR, false)
+	end)
+
 	local hit = ensureHitOverlay(skillsBtn)
 	hit.Activated:Connect(toggle)
+
+	if rightBtn and rightBtn:IsA("GuiObject") then
+		local rightHit = ensureHitOverlay(rightBtn)
+		rightHit.Name = "_OceanTD_SkillsRightHit"
+		rightHit.Activated:Connect(openFromDPadRight)
+	end
+	-- No warn if missing: Skills button + gamepad DPadRight still work.
 
 	local function wireClose(btn: GuiButton)
 		if btn:GetAttribute("_OceanTD_SkillsCloseBound") == true then
@@ -137,5 +716,103 @@ task.spawn(function()
 		end
 	end)
 
-	print("[Skills] Ready — hit overlay on dPad.Skills")
+	UserInputService.LastInputTypeChanged:Connect(function()
+		if open then
+			syncCloseLabel()
+			SkillPowerUpUI.syncCloseGlyph()
+			syncMovementFreeze(true)
+			if isGamepadMode() and SkillsBubbleSim.isRunning() and SkillsBubbleSim.getGamepadFocus() < 1 then
+				SkillsBubbleSim.setGamepadFocus(1)
+			elseif not isGamepadMode() then
+				SkillsBubbleSim.clearGamepadFocus()
+			end
+		end
+	end)
+
+	UserInputService.InputBegan:Connect(function(input, _gameProcessed)
+		if input.KeyCode == Enum.KeyCode.DPadRight then
+			-- Opens skills only (B closes). Blocked while backpack is open.
+			openFromDPadRight()
+			return
+		end
+		if not open then
+			return
+		end
+		if input.KeyCode == Enum.KeyCode.ButtonB then
+			if SkillPowerUpUI.isConfirmOpen() then
+				SkillPowerUpUI.cancelConfirm()
+				return
+			end
+			if SkillPowerUpUI.isOpen() then
+				SkillPowerUpUI.close()
+				return
+			end
+			closeOnly()
+		elseif input.KeyCode == Enum.KeyCode.ButtonA then
+			if SkillPowerUpUI.isConfirmOpen() or SkillPowerUpUI.isOpen() then
+				-- GuiService.SelectedObject handles UNLOCK / Close / Cancel.
+				return
+			end
+			if SkillsBubbleSim.isRunning() then
+				SkillsBubbleSim.activateGamepadFocus()
+			end
+		elseif SkillPowerUpUI.isConfirmOpen() or SkillPowerUpUI.isOpen() then
+			-- Stick / DPad navigate GuiService selection only.
+			return
+		elseif input.KeyCode == Enum.KeyCode.DPadLeft then
+			SkillsBubbleSim.moveGamepadFocus(-1, 0)
+		elseif input.KeyCode == Enum.KeyCode.DPadUp then
+			SkillsBubbleSim.moveGamepadFocus(0, -1)
+		elseif input.KeyCode == Enum.KeyCode.DPadDown then
+			SkillsBubbleSim.moveGamepadFocus(0, 1)
+		end
+	end)
+
+	RunService.Heartbeat:Connect(function()
+		if not open or not isGamepadMode() or not SkillsBubbleSim.isRunning() then
+			stickWasOut = false
+			return
+		end
+		if SkillPowerUpUI.isConfirmOpen() or SkillPowerUpUI.isOpen() then
+			-- Modal owns stick via GuiService.SelectedObject.
+			stickWasOut = false
+			return
+		end
+		local ok, states = pcall(function()
+			return UserInputService:GetGamepadState(Enum.UserInputType.Gamepad1)
+		end)
+		if not ok or typeof(states) ~= "table" then
+			return
+		end
+		local stick: Vector2? = nil
+		for _, obj in ipairs(states) do
+			if obj.KeyCode == Enum.KeyCode.Thumbstick1 then
+				stick = Vector2.new(obj.Position.X, -obj.Position.Y) -- UI Y down
+				break
+			end
+		end
+		if not stick then
+			return
+		end
+		local mag = stick.Magnitude
+		if mag < STICK_DEAD then
+			stickWasOut = false
+			return
+		end
+		local now = os.clock()
+		if stickWasOut and now < stickCooldownUntil then
+			return
+		end
+		stickWasOut = true
+		stickCooldownUntil = now + STICK_COOLDOWN
+		if SkillsBubbleSim.getGamepadFocus() < 1 then
+			SkillsBubbleSim.setGamepadFocus(1)
+			return
+		end
+		SkillsBubbleSim.moveGamepadFocus(stick.X, stick.Y)
+	end)
+
+	print("[Skills] Ready — close chrome + gamepad bubble focus")
 end)
+
+playerGui:SetAttribute(SKILLS_OPEN_ATTR, false)

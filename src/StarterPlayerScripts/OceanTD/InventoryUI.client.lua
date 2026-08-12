@@ -49,6 +49,60 @@ local GREEN = Color3.fromRGB(40, 220, 110)
 local PANEL_WIDTH_SCALE = 0.33
 local SLOT4_GAP_PX = 8
 
+-- Left HUD chrome hidden while backpack is open (dPadIcon is owned by FreeCam).
+local hiddenLeftUiForBackpack: { { gui: GuiObject, wasVisible: boolean } } = {}
+
+local function rememberHideLeftForBackpack(gui: GuiObject)
+	for _, entry in ipairs(hiddenLeftUiForBackpack) do
+		if entry.gui == gui then
+			return
+		end
+	end
+	table.insert(hiddenLeftUiForBackpack, {
+		gui = gui,
+		wasVisible = gui.Visible,
+	})
+	gui.Visible = false
+end
+
+local function setLeftUiHiddenForBackpack(hide: boolean)
+	if hide then
+		if #hiddenLeftUiForBackpack > 0 then
+			return
+		end
+		local left = playerGui:FindFirstChild("MobileLeftUI")
+		if not left then
+			return
+		end
+		local dPad = left:FindFirstChild("dPad")
+		if dPad then
+			for _, ch in ipairs(dPad:GetChildren()) do
+				-- FreeCam syncs dPadIcon from InventoryState.isOpen().
+				if ch:IsA("GuiObject") and ch.Name ~= "dPadIcon" and ch.Name ~= "$DCount" then
+					rememberHideLeftForBackpack(ch)
+				end
+			end
+		end
+		for _, ch in ipairs(left:GetChildren()) do
+			if ch:IsA("GuiObject") and ch.Name ~= "dPad" then
+				rememberHideLeftForBackpack(ch)
+			end
+		end
+	else
+		-- Skills owns left UI while bubbles are open — don't fight that restore.
+		if playerGui:GetAttribute("OceanTD_SkillsBubblesOpen") == true then
+			table.clear(hiddenLeftUiForBackpack)
+			return
+		end
+		for _, entry in ipairs(hiddenLeftUiForBackpack) do
+			if entry.gui.Parent then
+				entry.gui.Visible = entry.wasVisible
+			end
+		end
+		table.clear(hiddenLeftUiForBackpack)
+	end
+end
+
 -- TEMP layout fill only. Set to 0 to show real ItemCatalog entries.
 -- Does not register fake items in ItemCatalog.
 local TEMP_BRAIN_CORAL_SLOT_COUNT = 24
@@ -1066,7 +1120,9 @@ local function refreshHelpSlotBadge()
 	end
 	local mode = getShortcutMode()
 	-- Hide help badge on touch, and while backpack is open (Slot4 shows the close letter).
-	if mode == "touch" or closeX.Visible or InventoryState.isOpen() then
+	if mode == "touch" or closeX.Visible or InventoryState.isOpen()
+		or playerGui:GetAttribute("OceanTD_SkillsBubblesOpen") == true
+	then
 		helpSlot4.Visible = false
 		return
 	end
@@ -1676,6 +1732,7 @@ local function playClose()
 end
 
 InventoryState.onOpenChanged(function(isOpen)
+	setLeftUiHiddenForBackpack(isOpen)
 	if isOpen then
 		if SkipWaveSlot.isConfirmActive() then
 			SkipWaveSlot.cancelConfirm()
@@ -1716,6 +1773,17 @@ InventoryState.onOpenChanged(function(isOpen)
 			SkipWaveSlot.refreshHelpBadge()
 			WaveSpeedSlot.refreshHelpBadge()
 		end)
+	end
+end)
+
+playerGui:GetAttributeChangedSignal("OceanTD_SkillsBubblesOpen"):Connect(function()
+	local skillsOpen = playerGui:GetAttribute("OceanTD_SkillsBubblesOpen") == true
+	if skillsOpen then
+		slot4.Visible = false
+		refreshHelpSlotBadge()
+	else
+		slot4.Visible = true
+		refreshHelpSlotBadge()
 	end
 end)
 
@@ -1800,12 +1868,16 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
 		toggleFromUser(true)
 		return
 	end
-	-- Wave summary FINISH: A / Enter dismisses when selected / open.
+	-- Wave summary: A / Enter activates selected (default CONTINUE); B / Esc = FINISH.
 	if WaveSlot.isSummaryOpen() then
 		if input.KeyCode == Enum.KeyCode.ButtonA
 			or input.KeyCode == Enum.KeyCode.Return
 			or input.KeyCode == Enum.KeyCode.KeypadEnter
 		then
+			WaveSlot.handleSummaryPrimaryConfirm()
+			return
+		end
+		if input.KeyCode == Enum.KeyCode.ButtonB or input.KeyCode == Enum.KeyCode.Escape then
 			WaveSlot.dismissSummary()
 			return
 		end

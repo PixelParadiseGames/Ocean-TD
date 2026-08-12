@@ -18,17 +18,22 @@ local C = {
 	FOOD_RISE_MIN = 2.15, -- was 1.15 (+ lead)
 	FOOD_RISE_MAX = FOOD_RISE_MAX,
 	FOOD_FRONT_LEAD = 2.4, -- meet at mouth, ahead along path tangent
-	FOOD_EAT_RADIUS_SQ = 49, -- 7^2 forgiveness vs prediction error
-	FOOD_EAT_Y = 5.5,
-	FOOD_SWAY_AMP = 1.6, -- lateral "current" at mid-flight (studs)
+	FOOD_EAT_RADIUS_SQ = 81, -- 9^2 — was 7^2; covers speed-surge + school wander miss
+	FOOD_EAT_Y = 7.0, -- was 5.5
+	FOOD_SWAY_AMP = 1.0, -- was 1.6; less mid-flight drift away from mouth
+	FOOD_HOME_START_U = 0.35, -- blend flight toward live mouth after this fraction
+	FOOD_END_GRACE_RADIUS_SQ = 144, -- 12^2 last-chance eat when flight ends
+	FOOD_END_GRACE_Y = 9.0,
 	DEFAULT_RELOAD = 3, -- matches BrainCoral (50% slower than original 2s)
 	TARGET_RANGE = TARGET_RANGE,
 	TARGET_RANGE_SQ = TARGET_RANGE * TARGET_RANGE,
 	-- Path-bucket targeting: corals only see fish in an arrival window along the route.
 	PATH_BUCKET_SIZE = 10, -- studs of path length per bucket
 	PATH_TARGET_LEAD_MAX = FISH_SPEED * FOOD_RISE_MAX + 12, -- fish this far before coral
-	PATH_TARGET_PAST = 8, -- slightly past coral still eligible
+	PATH_TARGET_PAST = 32, -- was 8; fish that slip past still get fed
 	PATH_PROJECT_STEP = 4, -- studs between samples when projecting coral→path
+	-- School stay readable: clamp dive below the path sample (studs).
+	FISH_MIN_PATH_Y = -1.25,
 	COMBAT_HZ = COMBAT_HZ,
 	COMBAT_DT = 1 / COMBAT_HZ,
 	PATH_SAMPLE_STEP = 1.5,
@@ -41,7 +46,7 @@ local C = {
 	WANDER_AMP_MAX = 7.25,
 	HASH_CELL = 30,
 	DEFAULT_FOOD_FILL = 1,
-	WAVE1_COUNT = 6,
+	WAVE1_COUNT = 3,
 	WAVE_COUNT_STEP = 4,
 	REEF_START_HEALTH = 10,
 	TANG_HUNGER = 4,
@@ -55,7 +60,7 @@ local C = {
 	HUNGER_BAR_GAP = 3 * 0.8,
 	HUNGER_BAR_PX_H = HUNGER_EMOJI_SIZE,
 	HUNGER_BAR_HEIGHT = 2.85 * 0.8, -- studs above fish
-	HUNGER_BAR_MAX_DIST = 220, -- LOD hide distance when not in danger
+	HUNGER_BAR_MAX_DIST = 0, -- 0 = always show hungry bars (was 220; hidden “ghost” fish)
 	HUNGER_BAR_DANGER_MAX_DIST = 0, -- 0 = no distance cull while flashing red
 	HAPPY_EMOJIS = { "😊", "😄", "😁", "😆", "🥰", "😍", "💖", "🤩" },
 	HAPPY_FLASH_ON = 2,
