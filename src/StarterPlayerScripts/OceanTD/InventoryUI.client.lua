@@ -1781,9 +1781,43 @@ playerGui:GetAttributeChangedSignal("OceanTD_SkillsBubblesOpen"):Connect(functio
 	if skillsOpen then
 		slot4.Visible = false
 		refreshHelpSlotBadge()
+		-- From build mode + Place More: keep InventoryState open, but hide backpack chrome
+		-- so skills bubbles + top-left close can show.
+		if InventoryState.isOpen() then
+			host.Visible = false
+			task.spawn(SavePlotSlot.playHide)
+			task.spawn(ClearPlotSlot.playHide)
+			task.spawn(UndoSlot.playHide)
+			local left = playerGui:FindFirstChild("MobileLeftUI")
+			local dPad = left and left:FindFirstChild("dPad")
+			local skills = dPad and dPad:FindFirstChild("Skills")
+			if skills and skills:IsA("GuiObject") then
+				skills.Visible = true
+				for i = #hiddenLeftUiForBackpack, 1, -1 do
+					if hiddenLeftUiForBackpack[i].gui == skills then
+						table.remove(hiddenLeftUiForBackpack, i)
+						break
+					end
+				end
+			end
+		end
 	else
 		slot4.Visible = true
 		refreshHelpSlotBadge()
+		if InventoryState.isOpen() then
+			host.Visible = true
+			applyDockedLayout()
+			task.spawn(SavePlotSlot.playReveal)
+			task.spawn(ClearPlotSlot.playReveal)
+			task.spawn(UndoSlot.playReveal)
+			-- Re-hide Skills with the rest of left UI while backpack stays open.
+			local left = playerGui:FindFirstChild("MobileLeftUI")
+			local dPad = left and left:FindFirstChild("dPad")
+			local skills = dPad and dPad:FindFirstChild("Skills")
+			if skills and skills:IsA("GuiObject") then
+				rememberHideLeftForBackpack(skills)
+			end
+		end
 	end
 end)
 

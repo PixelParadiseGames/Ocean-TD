@@ -104,6 +104,7 @@ pushRemote.OnClientEvent:Connect(function(payload)
 		hostUserId = num(payload.hostUserId, 0),
 		coralEpoch = num(payload.coralEpoch, 0),
 		kind = kind,
+		plotSizeStage = num(payload.plotSizeStage, 1),
 	}
 	lastPushAtByPlot[plotId] = os.clock()
 	if kind == "coral" then

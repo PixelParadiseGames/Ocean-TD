@@ -9,7 +9,10 @@ local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local SoundService = game:GetService("SoundService")
 local Workspace = game:GetService("Workspace")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
+local oceanRoot = ReplicatedStorage:WaitForChild("OceanTD")
+local SkillStages = require(oceanRoot:WaitForChild("Shared"):WaitForChild("SkillStages"))
 local ClientPlot = require(script.Parent:WaitForChild("ClientPlot"))
 
 local WaveEndVfx = {}
@@ -72,6 +75,11 @@ local heartHideToken = 0
 local heartHideUntil = 0
 local reefTickStreak = 0
 local rng = Random.new()
+
+-- Authored EndPoint sits at W8; plot-size routes end earlier — show a local heart at route end.
+local routeEndPosByPlot: { [string]: Vector3 } = {}
+local routeHeartCloneByPlot: { [string]: Instance } = {} -- EndPoint clone (or heart part)
+local hiddenSourceRootByPlot: { [string]: Instance } = {}
 
 function WaveEndVfx.bind(folderFn: () -> Folder)
 	getFolder = folderFn
@@ -138,21 +146,232 @@ end
 
 local heartByPlotId: { [string]: BasePart } = {}
 
-local function resolveEndHeartForPlot(plotId: string): BasePart?
-	local cached = heartByPlotId[plotId]
-	if cached and cached.Parent then
-		return cached
+local function setTreeLocalHidden(root: Instance, hidden: boolean)
+	local mod = if hidden then 1 else 0
+	if root:IsA("BasePart") then
+		root.LocalTransparencyModifier = mod
 	end
+	for _, d in ipairs(root:GetDescendants()) do
+		if d:IsA("BasePart") then
+			d.LocalTransparencyModifier = mod
+		end
+	end
+end
+
+local function destroyRouteHeartClone(plotId: string)
+	local clone = routeHeartCloneByPlot[plotId]
+	if clone then
+		clone:Destroy()
+		routeHeartCloneByPlot[plotId] = nil
+	end
+	local src = hiddenSourceRootByPlot[plotId]
+	if src and src.Parent then
+		setTreeLocalHidden(src, false)
+	end
+	hiddenSourceRootByPlot[plotId] = nil
+end
+
+local function prepareLocalHeartClone(inst: Instance)
+	for _, d in ipairs(inst:GetDescendants()) do
+		if d:IsA("BasePart") then
+			d.Anchored = true
+			d.CanCollide = false
+			d.CanQuery = false
+			d.CanTouch = false
+			d.CastShadow = false
+			d.LocalTransparencyModifier = 0
+		elseif d:IsA("WeldConstraint") or d:IsA("Weld") or d:IsA("Motor6D") then
+			d:Destroy()
+		end
+	end
+	if inst:IsA("BasePart") then
+		inst.Anchored = true
+		inst.CanCollide = false
+		inst.CanQuery = false
+		inst.CanTouch = false
+		inst.CastShadow = false
+		inst.LocalTransparencyModifier = 0
+	end
+end
+
+local function pivotOf(inst: Instance): CFrame
+	if inst:IsA("Model") then
+		return inst:GetPivot()
+	end
+	if inst:IsA("BasePart") then
+		return inst.CFrame
+	end
+	local p = inst:FindFirstChildWhichIsA("BasePart", true)
+	return if p then p.CFrame else CFrame.new()
+end
+
+local function setPivot(inst: Instance, cf: CFrame)
+	if inst:IsA("Model") then
+		inst:PivotTo(cf)
+	elseif inst:IsA("BasePart") then
+		inst.CFrame = cf
+	else
+		local heart = findHeartIn(inst)
+		if heart then
+			local delta = cf * pivotOf(inst):Inverse()
+			for _, d in ipairs(inst:GetDescendants()) do
+				if d:IsA("BasePart") then
+					d.CFrame = delta * d.CFrame
+				end
+			end
+		end
+	end
+end
+
+local function resolveSourceHeart(plotId: string): (Instance?, BasePart?)
 	local root = findPlotEndHeartRoot(plotId)
 	local heart = findHeartIn(root)
 	if heart then
 		heartByPlotId[plotId] = heart
-		endHeartPart = heart
-		endHeartPlotId = plotId
 	else
 		heartByPlotId[plotId] = nil
 	end
-	return heart
+	return root, heart
+end
+
+local function applyRouteHeartForPlot(plotId: string): BasePart?
+	local routeEnd = routeEndPosByPlot[plotId]
+	local sourceRoot, sourceHeart = resolveSourceHeart(plotId)
+	if not sourceHeart then
+		destroyRouteHeartClone(plotId)
+		return nil
+	end
+
+	-- No override → show authored heart in place.
+	if not routeEnd then
+		destroyRouteHeartClone(plotId)
+		endHeartPart = sourceHeart
+		endHeartPlotId = plotId
+		return sourceHeart
+	end
+
+	-- Hide authored EndPoint locally; show clone at the fish stop.
+	if sourceRoot then
+		setTreeLocalHidden(sourceRoot, true)
+		hiddenSourceRootByPlot[plotId] = sourceRoot
+	end
+
+	local clone = routeHeartCloneByPlot[plotId]
+	if not clone or not clone.Parent then
+		local template = sourceRoot or sourceHeart
+		clone = template:Clone()
+		clone.Name = "OceanTD_RouteHeart_" .. plotId
+		prepareLocalHeartClone(clone)
+		clone.Parent = resolveFolder()
+		routeHeartCloneByPlot[plotId] = clone
+	end
+
+	local cloneHeart = findHeartIn(clone) or (clone:IsA("BasePart") and clone or nil)
+	if not cloneHeart or not cloneHeart:IsA("BasePart") then
+		destroyRouteHeartClone(plotId)
+		endHeartPart = sourceHeart
+		endHeartPlotId = plotId
+		return sourceHeart
+	end
+
+	-- Translate whole EndPoint so the heart mesh sits on the route end.
+	local delta = routeEnd - cloneHeart.Position
+	setPivot(clone, CFrame.new(delta) * pivotOf(clone))
+
+	cloneHeart.Color = END_HEART_RED
+	cloneHeart.LocalTransparencyModifier = 0
+	endHeartPart = cloneHeart
+	endHeartPlotId = plotId
+	heartByPlotId[plotId] = cloneHeart
+	return cloneHeart
+end
+
+local function resolveEndHeartForPlot(plotId: string): BasePart?
+	local cached = heartByPlotId[plotId]
+	if cached and cached.Parent and routeEndPosByPlot[plotId] then
+		-- Prefer live route clone when we have a route end.
+		local clone = routeHeartCloneByPlot[plotId]
+		if clone and clone.Parent then
+			local h = findHeartIn(clone)
+			if h then
+				endHeartPart = h
+				endHeartPlotId = plotId
+				return h
+			end
+		end
+	end
+	return applyRouteHeartForPlot(plotId)
+end
+
+-- Place the visible reef heart at the wave path end (plot-size waypoint).
+function WaveEndVfx.setRouteEndWorldPos(worldPos: Vector3?, plotId: string?)
+	local plot = ClientPlot.get()
+	local id = plotId or (if plot then plot.plotId else "Plot1")
+	if worldPos then
+		routeEndPosByPlot[id] = worldPos
+	else
+		routeEndPosByPlot[id] = nil
+	end
+	applyRouteHeartForPlot(id)
+end
+
+function WaveEndVfx.clearRouteEnd(plotId: string?)
+	local plot = ClientPlot.get()
+	local id = plotId or (if plot then plot.plotId else nil)
+	if not id then
+		return
+	end
+	routeEndPosByPlot[id] = nil
+	destroyRouteHeartClone(id)
+	applyRouteHeartForPlot(id)
+end
+
+-- Place heart at W# for this Plot Size stage (works even when waves aren't running).
+function WaveEndVfx.syncToPlotSizeStage(stage: number?, plotId: string?)
+	local plot = ClientPlot.get()
+	local id = plotId or (if plot then plot.plotId else nil)
+	if not id then
+		return
+	end
+	local s = if stage ~= nil then SkillStages.clampStage(stage) else nil
+	if s == nil then
+		local ok, SkillPowerUpUI = pcall(function()
+			return require(script.Parent:WaitForChild("SkillPowerUpUI"))
+		end)
+		if ok and SkillPowerUpUI and typeof(SkillPowerUpUI.getStage) == "function" then
+			s = SkillPowerUpUI.getStage("PlotSize")
+		else
+			s = 1
+		end
+	end
+	local finalWp = SkillStages.plotSizeFinalWaypoint(s :: number)
+	local route = Workspace:FindFirstChild("WaveRoute")
+	local a = route and route:FindFirstChild("A")
+	local wpFolder = a and a:FindFirstChild("Waypoints")
+	if not wpFolder then
+		return
+	end
+	local w = wpFolder:FindFirstChild("W" .. tostring(finalWp))
+	if not (w and w:IsA("BasePart")) then
+		-- Fallback: scan indexed name variants
+		for _, ch in ipairs(wpFolder:GetDescendants()) do
+			if ch:IsA("BasePart") and ch.Name == "W" .. tostring(finalWp) then
+				w = ch
+				break
+			end
+		end
+	end
+	if not (w and w:IsA("BasePart")) then
+		return
+	end
+	local worldPos: Vector3
+	if id == "Plot1" or (plot and plot.plotId == id) then
+		worldPos = ClientPlot.remapFromPlot1(w.Position)
+	else
+		-- Foreign plot: need that plot's pose — leave to setRouteEndWorldPos from ghost path.
+		return
+	end
+	WaveEndVfx.setRouteEndWorldPos(worldPos, id)
 end
 
 function WaveEndVfx.getEndHeartPart(): BasePart?
@@ -166,6 +385,12 @@ function WaveEndVfx.getEndHeartPartForPlot(plotId: string): BasePart?
 end
 
 function WaveEndVfx.getEndHeartWorldPos(): Vector3?
+	local plot = ClientPlot.get()
+	local plotId = if plot then plot.plotId else "Plot1"
+	local routed = routeEndPosByPlot[plotId]
+	if routed then
+		return routed
+	end
 	local heart = WaveEndVfx.getEndHeartPart()
 	if heart then
 		return heart.Position
@@ -179,6 +404,10 @@ function WaveEndVfx.getEndHeartWorldPos(): Vector3?
 end
 
 function WaveEndVfx.getEndHeartWorldPosForPlot(plotId: string): Vector3?
+	local routed = routeEndPosByPlot[plotId]
+	if routed then
+		return routed
+	end
 	local heart = resolveEndHeartForPlot(plotId)
 	if heart then
 		return heart.Position
@@ -202,6 +431,7 @@ function WaveEndVfx.refreshLocalEndHeart()
 	if not plot then
 		return
 	end
+	-- Keep route-end overrides; re-apply clone against the current source heart.
 	if plot.plotId == "Plot1" then
 		resolveEndHeartForPlot("Plot1")
 		return
@@ -584,13 +814,19 @@ ClientPlot.onChanged(function(plot)
 	endHeartPart = nil
 	endHeartPlotId = nil
 	if plot then
+		-- Drop stale clones; caller / sync will re-place at the plot-size end.
+		for id in pairs(routeHeartCloneByPlot) do
+			destroyRouteHeartClone(id)
+		end
 		WaveEndVfx.refreshLocalEndHeart()
+		WaveEndVfx.syncToPlotSizeStage(nil, plot.plotId)
 	end
 end)
 
 task.defer(function()
 	if ClientPlot.get() then
 		WaveEndVfx.refreshLocalEndHeart()
+		WaveEndVfx.syncToPlotSizeStage()
 	end
 end)
 

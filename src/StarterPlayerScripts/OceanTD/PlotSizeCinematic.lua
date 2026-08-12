@@ -257,9 +257,57 @@ function PlotSizeCinematic.play(prevStage: number, newStage: number, opts: { ski
 	local cam = Workspace.CurrentCamera
 	local savedType: Enum.CameraType? = nil
 	local savedCf: CFrame? = nil
+	local savedSubject: Instance? = nil
+	local function restorePlayerCamera(tweenBack: boolean)
+		if skipCam then
+			return
+		end
+		cam = Workspace.CurrentCamera
+		if not cam then
+			return
+		end
+		local char = player.Character
+		local hum = char and char:FindFirstChildOfClass("Humanoid")
+		-- Always re-seat on the avatar — Scriptable cinematic can leave focus feeling "stuck".
+		if hum then
+			cam.CameraSubject = hum
+		elseif savedSubject then
+			cam.CameraSubject = savedSubject
+		end
+		if tweenBack and savedCf and my == token then
+			tweenCameraTo(savedCf, CAM_OUT_SEC, my)
+		end
+		local restore = savedType or Enum.CameraType.Custom
+		if restore == Enum.CameraType.Scriptable then
+			restore = Enum.CameraType.Custom
+		end
+		cam.CameraType = restore
+		-- Wave session uses Humanoid.CameraOffset; re-assert follow after Scriptable.
+		playerGui:SetAttribute("OceanTD_RestoreWaveCam", os.clock())
+	end
+
+	local function finishCinematic(okCommit: boolean)
+		if my == token then
+			busy = false
+		end
+		if okCommit then
+			pcall(function()
+				Remotes.get("ReportPlotSizeCinematicDone"):FireServer(newStage)
+			end)
+		end
+		playerGui:SetAttribute("OceanTD_SkillsUiRestore", os.clock())
+		local WaveEndVfx = require(script.Parent:WaitForChild("WaveEndVfx"))
+		WaveEndVfx.syncToPlotSizeStage(newStage)
+		local WaveSim = require(script.Parent:WaitForChild("WaveSim"))
+		if WaveSim.isRunning() then
+			WaveSim.rebuildRouteForPlotSize(newStage)
+		end
+	end
+
 	if cam and not skipCam then
 		savedType = cam.CameraType
 		savedCf = cam.CFrame
+		savedSubject = cam.CameraSubject
 		cam.CameraType = Enum.CameraType.Scriptable
 	end
 
@@ -271,18 +319,15 @@ function PlotSizeCinematic.play(prevStage: number, newStage: number, opts: { ski
 	if cam and camPart and focusPart and not skipCam then
 		local goal = camGoalCFrame(camPart, focusPart)
 		if not tweenCameraTo(goal, CAM_IN_SEC, my) then
-			busy = false
-			pcall(function()
-				Remotes.get("ReportPlotSizeCinematicDone"):FireServer(newStage)
-			end)
-			playerGui:SetAttribute("OceanTD_SkillsUiRestore", os.clock())
+			restorePlayerCamera(false)
+			finishCinematic(true)
 			return
 		end
 		local holdUntil = os.clock() + HOLD_SEC
 		while os.clock() < holdUntil do
 			if my ~= token then
-				busy = false
-				playerGui:SetAttribute("OceanTD_SkillsUiRestore", os.clock())
+				restorePlayerCamera(false)
+				finishCinematic(false)
 				return
 			end
 			cam.CFrame = goal
@@ -294,8 +339,8 @@ function PlotSizeCinematic.play(prevStage: number, newStage: number, opts: { ski
 	end
 
 	if my ~= token then
-		busy = false
-		playerGui:SetAttribute("OceanTD_SkillsUiRestore", os.clock())
+		restorePlayerCamera(false)
+		finishCinematic(false)
 		return
 	end
 
@@ -321,25 +366,12 @@ function PlotSizeCinematic.play(prevStage: number, newStage: number, opts: { ski
 		})
 	end
 
-	if cam and savedCf and not skipCam and my == token then
-		tweenCameraTo(savedCf, CAM_OUT_SEC, my)
-		if my == token then
-			local restore = savedType or Enum.CameraType.Custom
-			if restore == Enum.CameraType.Scriptable then
-				restore = Enum.CameraType.Custom
-			end
-			cam.CameraType = restore
-		end
-	end
-
 	if my == token then
-		busy = false
-		-- Commit server bounds after cinematic so PlotAssigned isn't dropped while busy.
-		pcall(function()
-			Remotes.get("ReportPlotSizeCinematicDone"):FireServer(newStage)
-		end)
-		-- Ensure Skills button / left HUD aren't stuck hidden after ForceClose races.
-		playerGui:SetAttribute("OceanTD_SkillsUiRestore", os.clock())
+		restorePlayerCamera(true)
+		finishCinematic(true)
+	else
+		restorePlayerCamera(false)
+		finishCinematic(false)
 	end
 end
 

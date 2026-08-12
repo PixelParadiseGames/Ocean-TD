@@ -1,7 +1,7 @@
 --!strict
 --[[
-	Power-up stage popup for MobileSkillsB skill bubbles.
-	Rebinds Studio PowerUpTemplate (show/hide); bubbles keep floating behind.
+	Power-up stage popup for MobileSkillsA skill bubbles.
+	Rebinds Studio PowerUpTemplate (show/hide); bubbles hide while this is open.
 ]]
 
 local Players = game:GetService("Players")
@@ -9,14 +9,20 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local GuiService = game:GetService("GuiService")
 local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
 
 local oceanRoot = ReplicatedStorage:WaitForChild("OceanTD")
 local Remotes = require(oceanRoot:WaitForChild("Remotes"))
 local SkillStages = require(oceanRoot:WaitForChild("Shared"):WaitForChild("SkillStages"))
+local SkillsBubbleSim = require(script.Parent:WaitForChild("SkillsBubbleSim"))
 
 local SkillPowerUpUI = {}
 
+local POWERUP_OPEN_ATTR = "OceanTD_SkillPowerUpOpen"
+
 local GREEN = Color3.fromRGB(40, 170, 70)
+local DESC_PULSE_GREEN = Color3.fromRGB(70, 255, 110)
+local DESC_PULSE_WHITE = Color3.new(1, 1, 1)
 local RED = Color3.fromRGB(220, 50, 55)
 local PANEL_BG = Color3.fromRGB(12, 28, 36)
 local POWERUP_Z = 500
@@ -52,10 +58,90 @@ local onClosedCb: (() -> ())? = nil
 local confirmUnlockBtn: GuiButton? = nil
 local confirmCancelBtn: GuiButton? = nil
 local confirmPrevSelected: GuiObject? = nil
+local unlockDescPulseConn: RBXScriptConnection? = nil
+local unlockDescPulseToken = 0
+local lastPowerUpClickAt = 0
 
 local unlockRf = Remotes.getFunction("RequestUnlockSkillStage")
 local getStagesRf = Remotes.getFunction("RequestGetSkillStages")
 local syncRemote = Remotes.get("SkillStagesSync")
+
+local function powerUpClickGuard(): boolean
+	local now = os.clock()
+	if now - lastPowerUpClickAt < 0.2 then
+		return false
+	end
+	lastPowerUpClickAt = now
+	return true
+end
+
+local function bindButtonPress(btn: GuiButton, attr: string, fn: () -> ())
+	if btn:GetAttribute(attr) == true then
+		return
+	end
+	btn:SetAttribute(attr, true)
+	btn.Activated:Connect(fn)
+	btn.MouseButton1Click:Connect(fn)
+end
+
+local function onClosePressed()
+	if not popupOpen or not powerUpClickGuard() then
+		return
+	end
+	if confirmGui then
+		hideConfirm()
+	else
+		SkillPowerUpUI.close()
+	end
+end
+
+local function onUnlockPressed()
+	if not popupOpen or not powerUpClickGuard() then
+		return
+	end
+	if confirmGui then
+		return
+	end
+	SkillPowerUpUI.requestUnlockNext()
+end
+
+local function stopUnlockDescPulse()
+	unlockDescPulseToken += 1
+	if unlockDescPulseConn then
+		unlockDescPulseConn:Disconnect()
+		unlockDescPulseConn = nil
+	end
+end
+
+local function rgbFontTag(c: Color3): string
+	return string.format(
+		"rgb(%d,%d,%d)",
+		math.floor(c.R * 255 + 0.5),
+		math.floor(c.G * 255 + 0.5),
+		math.floor(c.B * 255 + 0.5)
+	)
+end
+
+local function startUnlockDescPulse(skillId: string, buildRichText: (Color3) -> string)
+	stopUnlockDescPulse()
+	if not unlockDescLbl then
+		return
+	end
+	unlockDescLbl.RichText = true
+	unlockDescLbl.Visible = true
+	local token = unlockDescPulseToken
+	unlockDescPulseConn = RunService.Heartbeat:Connect(function()
+		if token ~= unlockDescPulseToken or not unlockDescLbl then
+			return
+		end
+		if not popupOpen or activeSkillId ~= skillId then
+			return
+		end
+		local u = (math.sin(os.clock() * math.pi * 1.35) + 1) * 0.5
+		local c = DESC_PULSE_GREEN:Lerp(DESC_PULSE_WHITE, u)
+		unlockDescLbl.Text = buildRichText(c)
+	end)
+end
 
 local function isGamepadMode(): boolean
 	local t = UserInputService:GetLastInputType()
@@ -135,19 +221,22 @@ local function beginGamepadNav()
 	end
 
 	local unlockOk = unlockBtn ~= nil and unlockBtn.Visible and unlockBtn.Active
-	if closeHitBtn then
+	local closeOk = closeHitBtn ~= nil and closeBtn ~= nil and closeBtn.Visible
+	if closeOk and closeHitBtn then
 		closeHitBtn.Selectable = true
 		closeHitBtn.Active = true
+	elseif closeHitBtn then
+		closeHitBtn.Selectable = false
 	end
 	if unlockOk and unlockBtn then
 		unlockBtn.Selectable = true
-		if closeHitBtn then
+		if closeOk and closeHitBtn then
 			linkTwoWay(unlockBtn, closeHitBtn)
 		else
 			clearNextSelection(unlockBtn)
 		end
 		GuiService.SelectedObject = unlockBtn
-	elseif closeHitBtn then
+	elseif closeOk and closeHitBtn then
 		clearNextSelection(closeHitBtn)
 		GuiService.SelectedObject = closeHitBtn
 	end
@@ -279,7 +368,7 @@ local function ensureCloseXVisible()
 		lbl.TextTransparency = 0
 		lbl.TextScaled = true
 		lbl.Active = false
-		lbl.ZIndex = math.max(closeBtn.ZIndex + 200, POWERUP_Z + 300)
+		lbl.ZIndex = math.max(closeBtn.ZIndex + 5, POWERUP_Z + 720)
 		lbl.Parent = closeBtn
 		local pad = Instance.new("UIPadding")
 		pad.PaddingTop = UDim.new(0.18, 0)
@@ -296,7 +385,8 @@ local function ensureCloseXVisible()
 		lbl.TextColor3 = Color3.new(1, 1, 1)
 		lbl.TextTransparency = 0
 		lbl.Visible = true
-		lbl.ZIndex = math.max(closeBtn.ZIndex + 200, POWERUP_Z + 300)
+		lbl.Active = false
+		lbl.ZIndex = math.max(closeBtn.ZIndex + 5, POWERUP_Z + 720)
 		lbl.Parent = closeBtn
 	end
 	syncCloseGlyph()
@@ -311,17 +401,22 @@ local function clearLockOverlays()
 end
 
 -- Global ZIndex: raise whole tree so popup sits above floating bubbles (Z ~20–90).
+-- Keep a flat +1 boost so we don't bury CloseBTN / UNLOCK under random TextButtons.
 local function raiseTreeAboveBubbles(root: GuiObject)
 	root.ZIndex = math.max(root.ZIndex, POWERUP_Z)
 	local base = root.ZIndex
 	for _, d in ipairs(root:GetDescendants()) do
-		if not d:IsA("GuiObject") then
-			continue
-		end
-		if d.Name == "_OceanTD_CloseX" or d:IsA("TextLabel") or d:IsA("TextButton") then
-			d.ZIndex = base + 80
-		else
+		if d:IsA("GuiObject") then
 			d.ZIndex = math.max(d.ZIndex, base + 1)
+		end
+	end
+end
+
+local function raiseInteractive(root: GuiObject, z: number)
+	root.ZIndex = z
+	for _, d in ipairs(root:GetDescendants()) do
+		if d:IsA("GuiObject") then
+			d.ZIndex = z + 1
 		end
 	end
 end
@@ -390,12 +485,44 @@ local function refreshTemplate()
 	if unlockDescLbl then
 		-- Describe the next unlock; if maxed, describe the current stage.
 		local descStage = nextS or stage
-		unlockDescLbl.Text = SkillStages.unlockDesc(activeSkillId, descStage)
-		unlockDescLbl.Visible = true
+		if activeSkillId == "PlaceMore" then
+			local newMax = SkillStages.placeMoreMaxAtStage(descStage)
+			startUnlockDescPulse("PlaceMore", function(c: Color3)
+				return string.format(
+					'<font color="%s">+20</font>  New Max: %d',
+					rgbFontTag(c),
+					newMax
+				)
+			end)
+		elseif activeSkillId == "EarnMore" then
+			local mult = SkillStages.clampStage(descStage)
+			if mult <= 1 then
+				stopUnlockDescPulse()
+				unlockDescLbl.RichText = false
+				unlockDescLbl.Text = SkillStages.unlockDesc(activeSkillId, descStage)
+				unlockDescLbl.Visible = true
+			else
+				startUnlockDescPulse("EarnMore", function(c: Color3)
+					return string.format(
+						'Get <font color="%s">%dx</font> per fish fed',
+						rgbFontTag(c),
+						mult
+					)
+				end)
+			end
+		else
+			stopUnlockDescPulse()
+			unlockDescLbl.RichText = false
+			unlockDescLbl.Text = SkillStages.unlockDesc(activeSkillId, descStage)
+			unlockDescLbl.Visible = true
+		end
 	end
 	if unlockBtn then
 		unlockBtn.Visible = nextS ~= nil
 		unlockBtn.Active = nextS ~= nil
+		if nextS ~= nil then
+			raiseInteractive(unlockBtn, POWERUP_Z + 650)
+		end
 		if unlockBtn:IsA("TextButton") or unlockBtn:IsA("ImageButton") then
 			(unlockBtn :: any).BackgroundColor3 = GREEN
 		end
@@ -426,6 +553,16 @@ local function refreshTemplate()
 		else
 			placeLockOn(sb)
 		end
+	end
+	-- Locks / stage chrome can cover UNLOCK — keep interactives above.
+	if closeBtn and popupOpen then
+		raiseInteractive(closeBtn, POWERUP_Z + 700)
+		if closeHitBtn then
+			closeHitBtn.ZIndex = POWERUP_Z + 710
+		end
+	end
+	if unlockBtn and unlockBtn.Visible and unlockBtn.Active then
+		raiseInteractive(unlockBtn, POWERUP_Z + 650)
 	end
 	if popupOpen then
 		beginGamepadNav()
@@ -527,6 +664,12 @@ local function doUnlockRemote()
 			-- ForceClose always tears down skills + powerup; avoid close() while open
 			-- so onClosed cannot race HUD restore mid-cinematic.
 			playerGui:SetAttribute("OceanTD_ForceCloseSkills", os.clock())
+			local WaveEndVfx = require(script.Parent:WaitForChild("WaveEndVfx"))
+			WaveEndVfx.syncToPlotSizeStage(stagesMap[skillId])
+			local WaveSim = require(script.Parent:WaitForChild("WaveSim"))
+			if WaveSim.isRunning() then
+				WaveSim.rebuildRouteForPlotSize(stagesMap[skillId])
+			end
 		end
 		return
 	end
@@ -635,6 +778,10 @@ local function showConfirmUnlock()
 	end
 end
 
+function SkillPowerUpUI.getStage(skillId: string): number
+	return currentStage(skillId)
+end
+
 function SkillPowerUpUI.requestUnlockNext()
 	if not activeSkillId or not popupOpen then
 		return
@@ -674,9 +821,15 @@ function SkillPowerUpUI.close()
 	hideConfirm()
 	popupOpen = false
 	activeSkillId = nil
+	stopUnlockDescPulse()
+	SkillsBubbleSim.setSuppressed(false)
+	playerGui:SetAttribute(POWERUP_OPEN_ATTR, false)
 	endGamepadNav()
 	stopCloseXOverlay()
 	clearLockOverlays()
+	if unlockDescLbl then
+		unlockDescLbl.RichText = false
+	end
 	if template then
 		template.Visible = false
 	end
@@ -705,20 +858,45 @@ function SkillPowerUpUI.open(skillId: string)
 	lastOpenAt = now
 	activeSkillId = skillId
 	popupOpen = true
+	SkillsBubbleSim.setSuppressed(true)
+	playerGui:SetAttribute(POWERUP_OPEN_ATTR, true)
 	template.Visible = true
 	raiseTreeAboveBubbles(template)
 	if closeBtn then
 		closeBtn.Visible = true
-		raiseTreeAboveBubbles(closeBtn)
-		closeBtn.ZIndex = math.max(closeBtn.ZIndex, POWERUP_Z + 50)
+		-- Must sit above PowerUpTemplate children or the white X never receives clicks.
+		raiseInteractive(closeBtn, POWERUP_Z + 700)
+		if closeBtn:IsA("GuiButton") then
+			(closeBtn :: GuiButton).Active = true
+		end
+		if closeHitBtn then
+			closeHitBtn.Active = true
+			closeHitBtn.Visible = true
+			closeHitBtn.ZIndex = POWERUP_Z + 710
+		end
 		ensureCloseXVisible()
 	else
-		warn("[SkillPowerUp] CloseBTN missing — add MobileSkillsB.dPad.CloseBTN")
+		warn("[SkillPowerUp] CloseBTN missing — add MobileSkillsA.dPad.CloseBTN")
+	end
+	if unlockBtn then
+		unlockBtn.Active = true
+		raiseInteractive(unlockBtn, POWERUP_Z + 650)
 	end
 	if lockedTemplate then
 		lockedTemplate.Visible = false
 	end
 	refreshTemplate() -- also beginGamepadNav
+	-- refreshTemplate can re-order stage chrome; keep interactives on top.
+	if closeBtn then
+		raiseInteractive(closeBtn, POWERUP_Z + 700)
+		if closeHitBtn then
+			closeHitBtn.ZIndex = POWERUP_Z + 710
+		end
+		ensureCloseXVisible()
+	end
+	if unlockBtn and unlockBtn.Visible then
+		raiseInteractive(unlockBtn, POWERUP_Z + 650)
+	end
 end
 
 function SkillPowerUpUI.openFromButtonName(buttonName: string)
@@ -741,7 +919,7 @@ function SkillPowerUpUI.bind(mobileSkillsRoot: Instance)
 	end
 	dPad = mobileSkillsRoot:FindFirstChild("dPad") or mobileSkillsRoot:FindFirstChild("dPad", true)
 	if not dPad then
-		warn("[SkillPowerUp] MobileSkillsB.dPad missing")
+		warn("[SkillPowerUp] MobileSkillsA.dPad missing")
 		return
 	end
 	local tmpl = dPad:FindFirstChild("PowerUpTemplate")
@@ -800,22 +978,19 @@ function SkillPowerUpUI.bind(mobileSkillsRoot: Instance)
 		end
 		closeHitBtn = closeHit :: GuiButton
 		closeHitBtn.Selectable = false
-		if not bound then
-			closeHitBtn.Activated:Connect(function()
-				SkillPowerUpUI.close()
-			end)
+		bindButtonPress(closeHitBtn, "_OceanTD_PowerUpCloseBound", onClosePressed)
+		if closeBtn:IsA("GuiButton") and closeBtn ~= closeHitBtn then
+			bindButtonPress(closeBtn :: GuiButton, "_OceanTD_PowerUpCloseBound", onClosePressed)
 		end
 	else
-		warn("[SkillPowerUp] CloseBTN missing under MobileSkillsB.dPad")
+		warn("[SkillPowerUp] CloseBTN missing under MobileSkillsA.dPad")
 	end
 
 	if unlockBtn then
 		unlockBtn.Selectable = false
 	end
-	if unlockBtn and not bound then
-		unlockBtn.Activated:Connect(function()
-			SkillPowerUpUI.requestUnlockNext()
-		end)
+	if unlockBtn then
+		bindButtonPress(unlockBtn, "_OceanTD_PowerUpUnlockBound", onUnlockPressed)
 	end
 	if unlockBtn then
 		if unlockBtn:IsA("GuiObject") then
@@ -840,6 +1015,8 @@ function SkillPowerUpUI.bind(mobileSkillsRoot: Instance)
 			if popupOpen then
 				refreshTemplate()
 			end
+			local WaveEndVfx = require(script.Parent:WaitForChild("WaveEndVfx"))
+			WaveEndVfx.syncToPlotSizeStage(currentStage("PlotSize"))
 		end
 	end)
 end
@@ -859,9 +1036,47 @@ UserInputService.LastInputTypeChanged:Connect(function()
 	end
 end)
 
--- Keyboard: Enter = Unlock; X closes popup (or Cancel when confirm is open).
+-- Keyboard: Enter = Unlock. X / B are owned by MobileSkillsA (power-up first, then bubbles).
+-- Pointer fallback: ZIndex fights can swallow Activated — resolve by hit list.
 UserInputService.InputBegan:Connect(function(input, gameProcessed)
-	if gameProcessed or not popupOpen then
+	if not popupOpen then
+		return
+	end
+	local isMouse = input.UserInputType == Enum.UserInputType.MouseButton1
+	local isTouch = input.UserInputType == Enum.UserInputType.Touch
+	if isMouse or isTouch then
+		local wx: number
+		local wy: number
+		if isMouse then
+			local m = UserInputService:GetMouseLocation()
+			local inset = GuiService:GetGuiInset()
+			wx, wy = m.X - inset.X, m.Y - inset.Y
+		else
+			wx, wy = input.Position.X, input.Position.Y
+		end
+		local objs = playerGui:GetGuiObjectsAtPosition(wx, wy)
+		for _, obj in ipairs(objs) do
+			if closeBtn and (obj == closeBtn or obj:IsDescendantOf(closeBtn)) then
+				onClosePressed()
+				return
+			end
+			if
+				unlockBtn
+				and unlockBtn.Visible
+				and unlockBtn.Active
+				and (obj == unlockBtn or obj:IsDescendantOf(unlockBtn))
+			then
+				onUnlockPressed()
+				return
+			end
+			-- First non-matching GUI under the cursor wins; don't dig through whole stack.
+			if obj:IsA("GuiButton") then
+				return
+			end
+		end
+		return
+	end
+	if gameProcessed then
 		return
 	end
 	if input.UserInputType ~= Enum.UserInputType.Keyboard then
@@ -874,14 +1089,6 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
 		else
 			SkillPowerUpUI.requestUnlockNext()
 		end
-		return
-	end
-	if key == Enum.KeyCode.X then
-		if confirmGui then
-			hideConfirm()
-		else
-			SkillPowerUpUI.close()
-		end
 	end
 end)
 
@@ -889,6 +1096,12 @@ syncRemote.OnClientEvent:Connect(function(payload)
 	applyStages(payload)
 	if popupOpen then
 		refreshTemplate()
+	end
+	local WaveEndVfx = require(script.Parent:WaitForChild("WaveEndVfx"))
+	WaveEndVfx.syncToPlotSizeStage(currentStage("PlotSize"))
+	local WaveSim = require(script.Parent:WaitForChild("WaveSim"))
+	if WaveSim.isRunning() then
+		WaveSim.rebuildRouteForPlotSize(currentStage("PlotSize"))
 	end
 end)
 

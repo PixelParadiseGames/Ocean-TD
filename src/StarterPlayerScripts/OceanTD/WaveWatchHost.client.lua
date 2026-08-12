@@ -13,6 +13,7 @@ local Remotes = require(oceanRoot:WaitForChild("Remotes"))
 
 local ClientPlot = require(script.Parent:WaitForChild("ClientPlot"))
 local WaveSim = require(script.Parent:WaitForChild("WaveSim"))
+local SkillPowerUpUI = require(script.Parent:WaitForChild("SkillPowerUpUI"))
 
 local player = Players.LocalPlayer
 local pushRemote = Remotes.get("WaveWatchPush")
@@ -57,6 +58,7 @@ local function buildPayload(kind: string): any?
 		hungerDanger = snap.hungerDanger,
 		hungryMissToken = snap.hungryMissToken,
 		coralEpoch = coralEpoch,
+		plotSizeStage = SkillPowerUpUI.getStage("PlotSize"),
 	}
 end
 

@@ -14,6 +14,7 @@ local GridMath = require(oceanShared:WaitForChild("GridMath"))
 local SpeciesCatalog = require(oceanShared:WaitForChild("SpeciesCatalog"))
 local CoralVisual = require(oceanShared:WaitForChild("CoralVisual"))
 local ItemCatalog = require(oceanShared:WaitForChild("ItemCatalog"))
+local SkillStages = require(oceanShared:WaitForChild("SkillStages"))
 
 local PlotService = require(script.Parent:WaitForChild("PlotService"))
 local GridService = require(script.Parent:WaitForChild("GridService"))
@@ -282,6 +283,12 @@ function PlacementService.place(player: Player, itemId: string, worldPos: Vector
 	local localPos = worldToPlotLocal(plotId, worldPos)
 	if not localPos then
 		return { ok = false, errorCode = "BadPlot" }
+	end
+
+	local placeMoreStage = PersistenceService.getSkillStage(player, "PlaceMore")
+	local placeMax = SkillStages.placeMoreMaxAtStage(placeMoreStage)
+	if GridService.getPlotCount(plotId) >= placeMax then
+		return { ok = false, errorCode = "PlaceCap" }
 	end
 
 	if shouldConsume then

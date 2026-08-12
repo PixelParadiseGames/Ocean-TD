@@ -1,10 +1,10 @@
 --!strict
 --[[
-	Toggle MobileSkillsB from the left dPad Skills button.
+	Toggle MobileSkillsA from the left dPad Skills button.
 	While open: soft bubble physics; Skills button becomes pulsing red close (X / B).
 	Gamepad: DPad Right opens skills; B closes (power-up first, then bubbles).
 	Left stick moves bubble focus while open; A activates.
-	Power-up open: stick selects UNLOCK ↔ Close only; A activates selection.
+	Power-up open: bubbles + left Skills close hidden; power-up CloseBTN stays; stick selects UNLOCK ↔ Close.
 ]]
 
 local Players = game:GetService("Players")
@@ -27,6 +27,8 @@ local UiViewportTags = require(oceanRoot:WaitForChild("Shared"):WaitForChild("Ui
 local CLOSE_NAMES = {
 	Close = true,
 	close = true,
+	CloseBTN = true,
+	CloseBtn = true,
 	X = true,
 	Exit = true,
 	Hide = true,
@@ -410,9 +412,9 @@ task.spawn(function()
 		end
 	end
 
-	local panel = playerGui:WaitForChild("MobileSkillsB", 60)
+	local panel = playerGui:WaitForChild("MobileSkillsA", 60)
 	if not panel or not (panel:IsA("ScreenGui") or panel:IsA("GuiObject")) then
-		warn("[Skills] PlayerGui.MobileSkillsB missing")
+		warn("[Skills] PlayerGui.MobileSkillsA missing")
 		return
 	end
 
@@ -596,6 +598,10 @@ task.spawn(function()
 
 		if want then
 			-- Bubbles first — never block on PlayerModule / freeze setup.
+			-- Backpack may have hidden Skills; force it visible for close chrome.
+			if skillsBtn then
+				skillsBtn.Visible = true
+			end
 			ensureCloseChrome()
 			SkillsBubbleSim.preHide(panel)
 			if panel:IsA("ScreenGui") then
@@ -677,6 +683,35 @@ task.spawn(function()
 		closeOnly()
 	end)
 
+	playerGui:GetAttributeChangedSignal("OceanTD_SkillPowerUpOpen"):Connect(function()
+		if playerGui:GetAttribute("OceanTD_SkillPowerUpOpen") == true then
+			-- Hide left Skills chrome (don't restore the Skills icon).
+			destroyCloseChrome()
+			if skillsBtn then
+				skillsBtn.Visible = false
+			end
+		elseif open then
+			if skillsBtn then
+				skillsBtn.Visible = true
+			end
+			ensureCloseChrome()
+			syncCloseLabel()
+		end
+	end)
+
+	playerGui:GetAttributeChangedSignal("OceanTD_ForceOpenSkills"):Connect(function()
+		local skillId = playerGui:GetAttribute("OceanTD_ForceOpenSkillId")
+		lastToggleAt = os.clock()
+		if not open then
+			applyOpen(true)
+		end
+		if typeof(skillId) == "string" and skillId ~= "" then
+			task.defer(function()
+				SkillPowerUpUI.open(skillId :: string)
+			end)
+		end
+	end)
+
 	playerGui:GetAttributeChangedSignal("OceanTD_SkillsUiRestore"):Connect(function()
 		closeOnly()
 		if skillsBtn then
@@ -702,7 +737,17 @@ task.spawn(function()
 		end
 		btn:SetAttribute("_OceanTD_SkillsCloseBound", true)
 		btn.Active = true
-		btn.Activated:Connect(closeOnly)
+		btn.Activated:Connect(function()
+			if SkillPowerUpUI.isConfirmOpen() then
+				SkillPowerUpUI.cancelConfirm()
+				return
+			end
+			if SkillPowerUpUI.isOpen() then
+				SkillPowerUpUI.close()
+				return
+			end
+			closeOnly()
+		end)
 	end
 
 	for _, desc in ipairs(panel:GetDescendants()) do
@@ -729,7 +774,7 @@ task.spawn(function()
 		end
 	end)
 
-	UserInputService.InputBegan:Connect(function(input, _gameProcessed)
+	UserInputService.InputBegan:Connect(function(input, gameProcessed)
 		if input.KeyCode == Enum.KeyCode.DPadRight then
 			-- Opens skills only (B closes). Blocked while backpack is open.
 			openFromDPadRight()
@@ -738,7 +783,8 @@ task.spawn(function()
 		if not open then
 			return
 		end
-		if input.KeyCode == Enum.KeyCode.ButtonB then
+		-- Keyboard X / gamepad B: close power-up first, then skills bubbles.
+		if input.KeyCode == Enum.KeyCode.X or input.KeyCode == Enum.KeyCode.ButtonB then
 			if SkillPowerUpUI.isConfirmOpen() then
 				SkillPowerUpUI.cancelConfirm()
 				return
@@ -748,7 +794,9 @@ task.spawn(function()
 				return
 			end
 			closeOnly()
-		elseif input.KeyCode == Enum.KeyCode.ButtonA then
+			return
+		end
+		if input.KeyCode == Enum.KeyCode.ButtonA then
 			if SkillPowerUpUI.isConfirmOpen() or SkillPowerUpUI.isOpen() then
 				-- GuiService.SelectedObject handles UNLOCK / Close / Cancel.
 				return

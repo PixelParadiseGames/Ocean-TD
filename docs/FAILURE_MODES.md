@@ -22,7 +22,7 @@ Document bugs we must not rediscover. Add a row when a nasty one ships.
 | Shared Studio outline for all players | One mesh tinted globally | Client builds OBB edges from `ClientPlot` / roster; never one global outline model |
 | Food flies into school but fish stay hungry | Aim used constant `FISH_SPEED` while fish surge ±15%; sway + tight eat radius → miss, no credit | Predict with live speed curve; late-flight home to mouth; larger eat / end grace (`WaveSim`) |
 | Hungry fish slip past ready corals / feel “invisible” | Targeting preferred *approaching* fish; `PATH_TARGET_PAST` too tight; dive bob buried fish; hunger bars LOD-hid | Prefer at/past stragglers; wider past window; world-range fallback; clamp dive; always-on hunger bars |
-| Skills PowerUpTemplate sucked into bubble sim | Collected every ImageButton under MobileSkillsB | Only `PlotSizeBTN` / `EarnMoreBTN` / `PlaceMoreBTN` become bubbles (`SkillStages`) |
+| Skills PowerUpTemplate sucked into bubble sim | Collected every ImageButton under MobileSkillsA | Only `PlotSizeBTN` / `EarnMoreBTN` / `PlaceMoreBTN` become bubbles (`SkillStages`) |
 | Lost / double $D after Robux | Client-trusted balance, or ProcessReceipt grant then failed save, or session save clobbering a receipt applied on another server | Server-only integer wallet; `PurchaseId` ledger; `NotProcessedYet` until persist; save merges unknown receipts; load-fail blocks save |
 
 ## Verify quickly

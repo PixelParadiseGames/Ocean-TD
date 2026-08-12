@@ -29,6 +29,11 @@ local buckets: { [string]: PlotBucket } = {}
 local folderConns: { [Instance]: { RBXScriptConnection } } = {}
 local rootConns: { RBXScriptConnection } = {}
 local started = false
+local changedEvent: BindableEvent = Instance.new("BindableEvent")
+
+local function fireChanged()
+	changedEvent:Fire()
+end
 
 local function getBucket(plotId: string): PlotBucket
 	local b = buckets[plotId]
@@ -78,6 +83,7 @@ local function addPart(plotId: string, part: BasePart)
 	bucket.partSet[part] = true
 	table.insert(bucket.parts, part)
 	assignGrid(plotId, bucket, part)
+	fireChanged()
 end
 
 local function removePart(plotId: string, part: BasePart)
@@ -93,6 +99,7 @@ local function removePart(plotId: string, part: BasePart)
 			break
 		end
 	end
+	fireChanged()
 end
 
 local function unhookFolder(folder: Instance)
@@ -243,6 +250,29 @@ function PlacedCoralIndex.getParts(plotId: string): { BasePart }
 		return {}
 	end
 	return bucket.parts
+end
+
+function PlacedCoralIndex.countLocal(): number
+	PlacedCoralIndex.ensure()
+	local plot = ClientPlot.get()
+	if not plot then
+		return 0
+	end
+	local bucket = buckets[plot.plotId]
+	if not bucket then
+		return 0
+	end
+	local n = 0
+	for _, part in ipairs(bucket.parts) do
+		if part.Parent then
+			n += 1
+		end
+	end
+	return n
+end
+
+function PlacedCoralIndex.onChanged(cb: () -> ()): RBXScriptConnection
+	return changedEvent.Event:Connect(cb)
 end
 
 function PlacedCoralIndex.getAtGrid(plotId: string, gx: number, gy: number, gz: number, ignore: BasePart?): BasePart?

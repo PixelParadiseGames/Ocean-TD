@@ -1,6 +1,6 @@
 --!strict
 --[[
-	Soft lava-lamp bubble physics for MobileSkillsB ImageButtons.
+	Soft lava-lamp bubble physics for MobileSkillsA ImageButtons.
 	Heartbeat only while open. Does not touch placement / other HUD systems.
 
 	Coords: physics + hits use GuiObject.AbsolutePosition space.
@@ -63,7 +63,7 @@ type Drag = {
 	moved: boolean,
 }
 
--- Studio BackgroundGradient: GuiObject and/or UIGradient under MobileSkillsB.
+-- Studio BackgroundGradient: GuiObject and/or UIGradient under MobileSkillsA.
 type BgFade = {
 	gui: GuiObject?,
 	gradient: UIGradient?,
@@ -77,6 +77,7 @@ local drags: { [InputObject]: Drag } = {}
 local dragged: { [Bubble]: boolean } = {}
 local mouseDragInput: InputObject? = nil
 local running = false
+local suppressed = false
 local closing = false
 local conn: RBXScriptConnection? = nil
 local inputConns: { RBXScriptConnection } = {}
@@ -538,13 +539,13 @@ local function finishDrag(input: InputObject)
 	d.bubble.vy *= RELEASE_VEL_SCALE
 	clampSpeed(d.bubble)
 	-- Drag steals GuiButton Activated on many clients — treat a tap as skill open.
-	if not d.moved and not closing and onBubbleActivated then
+	if not d.moved and not closing and not suppressed and onBubbleActivated then
 		onBubbleActivated(d.bubble.btn.Name)
 	end
 end
 
 local function beginDrag(b: Bubble, input: InputObject, wx: number, wy: number)
-	if dragged[b] or closing then
+	if suppressed or dragged[b] or closing then
 		return
 	end
 	-- Sync to true drawn center (AbsolutePosition) — no bob jump.
@@ -717,6 +718,7 @@ end
 
 function SkillsBubbleSim.stop(onDone: (() -> ())?)
 	stopToken += 1
+	suppressed = false
 	local my = stopToken
 	local function finish()
 		if my ~= stopToken then
@@ -761,6 +763,7 @@ end
 
 function SkillsBubbleSim.start(panel: Instance)
 	stopToken += 1
+	suppressed = false
 	running = false
 	closing = false
 	if conn then
@@ -798,7 +801,7 @@ function SkillsBubbleSim.start(panel: Instance)
 	-- Measure while temporarily visible — preHide sets Visible=false (AbsoluteSize can be 0).
 	local buttons = collectImageButtons(panel)
 	if #buttons == 0 then
-		warn("[SkillsBubbles] No ImageButtons under MobileSkillsB")
+		warn("[SkillsBubbles] No ImageButtons under MobileSkillsA")
 		return
 	end
 
@@ -888,8 +891,10 @@ function SkillsBubbleSim.start(panel: Instance)
 
 	table.insert(
 		inputConns,
-		UserInputService.InputBegan:Connect(function(input, _gp)
-			if not running or closing then
+		UserInputService.InputBegan:Connect(function(input, _gameProcessed)
+			-- Do not gate on gameProcessed: bubbles are GuiButtons, so clicks are
+			-- always "processed" and that blocked open. Suppression covers power-up.
+			if not running or closing or suppressed then
 				return
 			end
 			local isTouch = input.UserInputType == Enum.UserInputType.Touch
@@ -918,7 +923,7 @@ function SkillsBubbleSim.start(panel: Instance)
 	table.insert(
 		inputConns,
 		UserInputService.InputChanged:Connect(function(input, _gp)
-			if not running or closing then
+			if not running or closing or suppressed then
 				return
 			end
 			if input.UserInputType == Enum.UserInputType.Touch then
@@ -969,6 +974,44 @@ end
 
 function SkillsBubbleSim.isRunning(): boolean
 	return running
+end
+
+function SkillsBubbleSim.setSuppressed(value: boolean)
+	suppressed = value == true
+	if suppressed then
+		-- Cancel in-flight drags without firing bubble activate (was stealing Close/UNLOCK clicks).
+		for input, d in pairs(drags) do
+			dragged[d.bubble] = nil
+			drags[input] = nil
+		end
+		mouseDragInput = nil
+		SkillsBubbleSim.clearGamepadFocus()
+		for _, b in ipairs(bubbles) do
+			if b.btn.Parent then
+				b.btn.Active = false
+			end
+		end
+	else
+		for _, b in ipairs(bubbles) do
+			if b.btn.Parent then
+				b.btn.Active = true
+			end
+		end
+	end
+	if layer and layer.Parent then
+		layer.Visible = not suppressed
+	end
+	if bgFade and bgFade.gui and bgFade.gui.Parent then
+		if suppressed then
+			bgFade.gui.Visible = false
+		else
+			bgFade.gui.Visible = true
+		end
+	end
+end
+
+function SkillsBubbleSim.isSuppressed(): boolean
+	return suppressed
 end
 
 local function applyGamepadFocusVisual()
@@ -1062,7 +1105,7 @@ function SkillsBubbleSim.setOnBubbleActivated(cb: ((buttonName: string) -> ())?)
 end
 
 function SkillsBubbleSim.activateGamepadFocus(): boolean
-	if not running or closing then
+	if not running or closing or suppressed then
 		return false
 	end
 	if gamepadFocus < 1 or gamepadFocus > #bubbles then

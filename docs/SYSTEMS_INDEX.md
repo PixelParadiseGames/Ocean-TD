@@ -42,10 +42,10 @@ Update this file in the **same change** when you add or rename a system. If inde
 | PlacementBootstrap | Live | `src/StarterPlayerScripts/OceanTD/PlacementBootstrap.client.lua` | PlacementController | Requires controller on client boot |
 | UiIdleCycle | Live | `src/ReplicatedStorage/OceanTD/Shared/UiIdleCycle.lua` | — | Shared delay+dirty idle toggles / sequences (slots, close label) |
 | ForceLandscape | Live | `src/StarterPlayerScripts/OceanTD/ForceLandscape.client.lua` | — | Landscape only; no portrait mobile |
-| MobileSkillsB | Live | `src/StarterPlayerScripts/OceanTD/MobileSkillsB.client.lua` | `SkillsBubbleSim`, `SkillPowerUpUI`, Studio `MobileLeftUI.dPad.Skills`, `MobileSkillsB` | Toggle skills; pulsing X/B close; gamepad focus; skill bubbles open power-up |
+| MobileSkillsA | Live | `src/StarterPlayerScripts/OceanTD/MobileSkillsA.client.lua` | `SkillsBubbleSim`, `SkillPowerUpUI`, Studio `MobileLeftUI.dPad.Skills`, `MobileSkillsA` | Toggle skills; pulsing X/B close; gamepad focus; skill bubbles open power-up |
 | Skill power-up stages | Live | `SkillPowerUpUI.lua` | `SkillStages`, Persistence `skillStages`, PowerUpTemplate | Per-skill stages 1–8; rebind template; $D unlock (0 for test); CloseBTN hides popup only |
 | Plot Size grow | Live | `PlotSizeCinematic.lua` | `MasterPlotDecor.PlotSizes` templates, PlotService size | Unlock → cam ChangeSizeCam/Focus 1s → footprint tween → cam back 1s; join applies stage size |
-| SkillsBubbleSim | Live | `src/StarterPlayerScripts/OceanTD/SkillsBubbleSim.lua` | MobileSkillsB, SkillStages | Soft bubbles for PlotSize/EarnMore/PlaceMore BTNs only |
+| SkillsBubbleSim | Live | `src/StarterPlayerScripts/OceanTD/SkillsBubbleSim.lua` | MobileSkillsA, SkillStages | Soft bubbles for PlotSize/EarnMore/PlaceMore BTNs only |
 | PlotFrameContract | Live | `src/ReplicatedStorage/OceanTD/Shared/PlotFrameContract.lua` | RingMath, PlotService | Forbids runtime plot CFrame calibrate; boot drift check |
 | PlacedCoralIndex | Live | `src/StarterPlayerScripts/OceanTD/PlacedCoralIndex.lua` | ClientPlot, GridMath | Client grid index of `OceanTD_Placed`; place/relocate/wave gather |
 | WaveEntityPool | Live | `src/StarterPlayerScripts/OceanTD/WaveEntityPool.lua` | `ReplicatedStorage.Fish.*`, GreenArrows | Typed acquire/release for Tang (+ future kinds), food, arrows, ammo, SFX |

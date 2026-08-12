@@ -17,12 +17,14 @@ local SpeciesCatalog = require(oceanRoot:WaitForChild("Shared"):WaitForChild("Sp
 local UiTheme = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiTheme"))
 local CoralVisual = require(oceanRoot:WaitForChild("Shared"):WaitForChild("CoralVisual"))
 local UiHaptics = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiHaptics"))
+local SkillStages = require(oceanRoot:WaitForChild("Shared"):WaitForChild("SkillStages"))
 
 local ClientPlot = require(script.Parent:WaitForChild("ClientPlot"))
 local WaveEntityPool = require(script.Parent:WaitForChild("WaveEntityPool"))
 local WaveEndVfx = require(script.Parent:WaitForChild("WaveEndVfx"))
 local WaveStartVfx = require(script.Parent:WaitForChild("WaveStartVfx"))
 local WaveFeedPayout = require(script.Parent:WaitForChild("WaveFeedPayout"))
+local SkillPowerUpUI = require(script.Parent:WaitForChild("SkillPowerUpUI"))
 
 local WaveSim = {}
 
@@ -422,7 +424,7 @@ local function estimateSegLength(w0: Vector3, c: Vector3, w1: Vector3): number
 	return math.max(len, 0.01)
 end
 
-local function buildPath(): PathData?
+local function buildPath(plotSizeStageOverride: number?): PathData?
 	local root = Workspace:FindFirstChild("WaveRoute")
 	if not root then
 		warn("[WAVE] Workspace.WaveRoute missing")
@@ -453,6 +455,23 @@ local function buildPath(): PathData?
 	end
 	if #waypoints < 2 then
 		warn("[WAVE] Need W1..Wn (at least 2); found", #waypoints)
+		return nil
+	end
+
+	-- Plot Size stage truncates the route (stage 1 → W4 … stage 6+ → W8).
+	local plotSizeStage = if plotSizeStageOverride ~= nil
+		then SkillStages.clampStage(plotSizeStageOverride)
+		else SkillPowerUpUI.getStage("PlotSize")
+	local finalWp = SkillStages.plotSizeFinalWaypoint(plotSizeStage)
+	if finalWp < #waypoints then
+		local trimmed: { BasePart } = {}
+		for wi = 1, math.min(finalWp, #waypoints) do
+			table.insert(trimmed, waypoints[wi])
+		end
+		waypoints = trimmed
+	end
+	if #waypoints < 2 then
+		warn("[WAVE] PlotSize stage", plotSizeStage, "final W" .. tostring(finalWp), "left <2 waypoints")
 		return nil
 	end
 
@@ -502,20 +521,24 @@ local function buildPath(): PathData?
 	print(
 		"[WAVE] Path ready:",
 		#waypoints,
-		"waypoints,",
+		"waypoints (end W" .. tostring(#waypoints) .. "),",
 		#segments,
 		"curve segments, len=",
 		string.format("%.1f", total),
 		"plot=",
 		plotLabel,
+		"plotSizeStage=",
+		plotSizeStage,
 		"rigidRemap=true"
 	)
-	return {
+	local path = {
 		segments = segments,
 		totalLen = total,
 		endPos = wpPos(waypoints[#waypoints]),
 		waypointDists = waypointDists,
 	}
+	WaveEndVfx.setRouteEndWorldPos(path.endPos, if mirrored then mirrored.plotId else nil)
+	return path
 end
 
 local function samplePath(path: PathData, dist: number): (Vector3, Vector3)
@@ -2057,6 +2080,26 @@ function WaveSim.start(): boolean
 	notifyHud()
 	flushHud()
 	attachSimLoop(myToken)
+	return true
+end
+
+function WaveSim.rebuildRouteForPlotSize(plotSizeStage: number?): boolean
+	local p = buildPath(plotSizeStage)
+	if not p then
+		return false
+	end
+	pathData = p
+	-- Fish already past the new end finish there; others keep swimming on the longer/shorter route.
+	for _, agent in ipairs(fishList) do
+		if not agent.finished and agent.dist >= p.totalLen then
+			finishFish(agent)
+		end
+	end
+	if running then
+		refreshCoralPathProjections()
+		notifyHud()
+		flushHud()
+	end
 	return true
 end
 

@@ -20,6 +20,7 @@ export type WatchSnap = {
 	hostUserId: number,
 	coralEpoch: number?,
 	kind: string?,
+	plotSizeStage: number?,
 }
 
 local WaveWatchMode = {}

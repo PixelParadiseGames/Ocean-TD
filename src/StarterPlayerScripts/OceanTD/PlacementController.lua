@@ -34,6 +34,8 @@ local PlacedCoralIndex = require(script.Parent:WaitForChild("PlacedCoralIndex"))
 local PlaceVfx = require(script.Parent:WaitForChild("PlaceVfx"))
 local HandOrb = require(script.Parent:WaitForChild("HandOrb"))
 local SelectRing = require(script.Parent:WaitForChild("SelectRing"))
+local SkillPowerUpUI = require(script.Parent:WaitForChild("SkillPowerUpUI"))
+local SkillStages = require(oceanRoot:WaitForChild("Shared"):WaitForChild("SkillStages"))
 
 local PlacementController = {}
 
@@ -689,6 +691,10 @@ local function raycastAimThrottled(dt: number): Vector3?
 end
 
 local function evaluatePos(worldPos: Vector3): (boolean, string?)
+	local placeMax = SkillStages.placeMoreMaxAtStage(SkillPowerUpUI.getStage("PlaceMore"))
+	if PlacedCoralIndex.countLocal() >= placeMax then
+		return false, "Max Placed"
+	end
 	if not ClientPlot.isInside(worldPos) then
 		return false, "Out Of Plot"
 	end
@@ -1819,8 +1825,11 @@ local function commitPlace()
 		elseif ghost then
 			HandOrb.arm(ghost.Color)
 		end
-		if code == "OutOfPlot" or code == "SpotTaken" then
-			rejectReason = if code == "OutOfPlot" then "Out Of Plot" else "Spot Taken"
+		if code == "OutOfPlot" or code == "SpotTaken" or code == "PlaceCap" then
+			rejectReason = if code == "OutOfPlot"
+				then "Out Of Plot"
+				elseif code == "PlaceCap" then "Max Placed"
+				else "Spot Taken"
 			validSpot = false
 			if ghost then
 				ghost.Color = GHOST_INVALID_COLOR

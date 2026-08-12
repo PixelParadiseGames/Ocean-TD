@@ -2383,6 +2383,27 @@ function WaveSlot.mount(d: Deps)
 		end
 	end)
 
+	deps.playerGui:GetAttributeChangedSignal("OceanTD_RestoreWaveCam"):Connect(function()
+		local cam = Workspace.CurrentCamera
+		local char = Players.LocalPlayer.Character
+		local hum = char and char:FindFirstChildOfClass("Humanoid")
+		if cam and hum then
+			cam.CameraSubject = hum
+			if cam.CameraType == Enum.CameraType.Scriptable then
+				cam.CameraType = Enum.CameraType.Custom
+			end
+		end
+		if WaveSim.isRunning() then
+			if waveCamConn then
+				bakeWaveCameraOffset()
+			else
+				setWaveCameraActive(true)
+			end
+		else
+			clearWaveCameraOffset()
+		end
+	end)
+
 	UserInputService.LastInputTypeChanged:Connect(function()
 		WaveSlot.refreshHelpBadge()
 	end)

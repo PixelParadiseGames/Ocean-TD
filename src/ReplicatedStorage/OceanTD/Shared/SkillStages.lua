@@ -14,7 +14,7 @@ export type SkillId = string
 export type SkillDef = {
 	id: SkillId,
 	displayName: string,
-	buttonName: string, -- Studio ImageButton under MobileSkillsB.dPad
+	buttonName: string, -- Studio ImageButton under MobileSkillsA.dPad
 }
 
 local DEFS: { SkillDef } = {
@@ -105,8 +105,8 @@ function SkillStages.nextStage(current: number): number?
 	return c + 1
 end
 
--- Place More: stage 1 = 100 max coral; +20 max per stage.
-SkillStages.PLACE_MORE_BASE_MAX = 100
+-- Place More: stage 1 = 30 max coral; +20 max per stage.
+SkillStages.PLACE_MORE_BASE_MAX = 30
 SkillStages.PLACE_MORE_PER_STAGE = 20
 
 function SkillStages.placeMoreMaxAtStage(stage: number): number
@@ -117,6 +117,24 @@ end
 -- $D granted each time a fish hunger bar fills. Stage 1 = 1, stage 2 = 2×, …
 function SkillStages.earnMorePerFish(stage: number): number
 	return SkillStages.clampStage(stage)
+end
+
+-- Final WaveRoute waypoint index (W#) for this Plot Size stage.
+-- Stage 1 ends at W4; larger plots extend toward W8.
+local PLOT_SIZE_FINAL_WAYPOINT: { [number]: number } = {
+	[1] = 4,
+	[2] = 5,
+	[3] = 6,
+	[4] = 6,
+	[5] = 7,
+	[6] = 8,
+	[7] = 8,
+	[8] = 8,
+}
+
+function SkillStages.plotSizeFinalWaypoint(stage: number): number
+	local s = SkillStages.clampStage(stage)
+	return PLOT_SIZE_FINAL_WAYPOINT[s] or PLOT_SIZE_FINAL_WAYPOINT[1]
 end
 
 -- Studio: MasterPlotDecor.PlotSizes.MasterTerrainBoxSTART / 2..7 / MAX

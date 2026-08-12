@@ -15,6 +15,7 @@ local Workspace = game:GetService("Workspace")
 
 local oceanRoot = ReplicatedStorage:WaitForChild("OceanTD")
 local UiTheme = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiTheme"))
+local SkillStages = require(oceanRoot:WaitForChild("Shared"):WaitForChild("SkillStages"))
 
 local ClientPlot = require(script.Parent:WaitForChild("ClientPlot"))
 local WaveEntityPool = require(script.Parent:WaitForChild("WaveEntityPool"))
@@ -186,7 +187,7 @@ local function estimateSegLength(w0: Vector3, c: Vector3, w1: Vector3): number
 	return math.max(len, 0.01)
 end
 
-local function buildPath(targetCf: CFrame, targetPlotId: string, targetSize: Vector3): PathData?
+local function buildPath(targetCf: CFrame, targetPlotId: string, targetSize: Vector3, plotSizeStage: number?): PathData?
 	local plot1 = ClientPlot.getPlot1CFrame()
 	if not plot1 then
 		return nil
@@ -207,6 +208,17 @@ local function buildPath(targetCf: CFrame, targetPlotId: string, targetSize: Vec
 		end
 		table.insert(waypoints, w)
 		i += 1
+	end
+	if #waypoints < 2 then
+		return nil
+	end
+	local finalWp = SkillStages.plotSizeFinalWaypoint(plotSizeStage or 1)
+	if finalWp < #waypoints then
+		local trimmed: { BasePart } = {}
+		for wi = 1, math.min(finalWp, #waypoints) do
+			table.insert(trimmed, waypoints[wi])
+		end
+		waypoints = trimmed
 	end
 	if #waypoints < 2 then
 		return nil
@@ -880,6 +892,9 @@ local function hardClear()
 	end
 	destroyArrowPreview()
 	clearFish()
+	if activePlotId then
+		WaveEndVfx.clearRouteEnd(activePlotId)
+	end
 	if folder then
 		folder:Destroy()
 		folder = nil
@@ -904,12 +919,16 @@ function WaveGhostSim.stop(fade: boolean?)
 	end
 	destroyArrowPreview()
 	local f = folder
+	local plotId = activePlotId
 	activePlotId = nil
 	activePlotCf = nil
 	pathData = nil
 	waveSpawning = false
 	spawnQueue = 0
 	startedThisWave = false
+	if plotId then
+		WaveEndVfx.clearRouteEnd(plotId)
+	end
 	if f and f.Parent and doFade then
 		for _, d in ipairs(f:GetDescendants()) do
 			if d:IsA("BasePart") then
@@ -957,10 +976,11 @@ function WaveGhostSim.apply(snap: WaveWatchMode.WatchSnap, plotCf: CFrame, kind:
 	if pathData == nil or plotChanged then
 		hardClear()
 		local size = plotSize or Vector3.new(64, 32, 64)
-		pathData = buildPath(plotCf, snap.plotId, size)
+		pathData = buildPath(plotCf, snap.plotId, size, snap.plotSizeStage)
 		if not pathData then
 			return
 		end
+		WaveEndVfx.setRouteEndWorldPos(pathData.endPos, snap.plotId)
 		activePlotId = snap.plotId
 		activePlotCf = plotCf
 		ensureFolder()
