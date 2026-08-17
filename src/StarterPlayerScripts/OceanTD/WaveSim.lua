@@ -1878,6 +1878,36 @@ function WaveSim.getHudSnapshot(): HudSnapshot
 	}
 end
 
+-- Furthest along the route among fish that still need food (wave-1 cam focus).
+function WaveSim.getFurthestUnfedFish(): { id: number, position: Vector3 }?
+	local best: FishAgent? = nil
+	for _, f in ipairs(fishList) do
+		if f.finished or f.hunger >= f.maxHunger then
+			continue
+		end
+		if not f.root.Parent then
+			continue
+		end
+		if not best or f.dist > best.dist then
+			best = f
+		end
+	end
+	if not best then
+		return nil
+	end
+	return { id = best.id, position = best.root.Position }
+end
+
+-- Live world pose for a fish still on the path (fed or hungry).
+function WaveSim.getFishPosition(id: number): Vector3?
+	for _, f in ipairs(fishList) do
+		if f.id == id and not f.finished and f.root.Parent then
+			return f.root.Position
+		end
+	end
+	return nil
+end
+
 -- Happy emojis on fully-fed fish still in the wave (for finish firework).
 function WaveSim.getFinishEmojis(): { string }
 	local out: { string } = {}

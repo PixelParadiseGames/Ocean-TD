@@ -23,6 +23,7 @@ local UiViewportTags = require(oceanRoot:WaitForChild("Shared"):WaitForChild("Ui
 local InventoryState = require(script.Parent:WaitForChild("InventoryState"))
 local WaveSim = require(script.Parent:WaitForChild("WaveSim"))
 local WaveSummaryUi = require(script.Parent:WaitForChild("WaveSummaryUi"))
+local Wave1FishCam = require(script.Parent:WaitForChild("Wave1FishCam"))
 
 local WaveSlot = {}
 
@@ -1372,14 +1373,58 @@ local function setHudVisible(on: boolean)
 	end
 end
 
+local function userCamCycleBusy(): boolean
+	local m = deps.playerGui:GetAttribute("OceanTD_CamCycleMode")
+	return m == "freecam" or m == "fishcam"
+end
+
+local function syncWave1FishCam(snap: WaveSim.HudSnapshot)
+	-- FreeCam / FishCam cycle owns Scriptable cam — don't fight it.
+	if userCamCycleBusy() then
+		if Wave1FishCam.isBusy() then
+			Wave1FishCam.stopImmediate()
+		end
+		if waveCamConn then
+			setWaveCameraActive(false)
+		end
+		return
+	end
+	if snap.running and snap.wave == 1 then
+		-- Fish focus owns CameraSubject; keep Humanoid.CameraOffset off.
+		if waveCamConn then
+			setWaveCameraActive(false)
+		end
+		Wave1FishCam.setActive(true)
+		return
+	end
+	if Wave1FishCam.isBusy() then
+		Wave1FishCam.restoreToAvatar(function()
+			if userCamCycleBusy() then
+				return
+			end
+			if WaveSim.isRunning() then
+				setWaveCameraActive(true)
+			else
+				setWaveCameraActive(false)
+			end
+		end)
+		return
+	end
+	if snap.running then
+		setWaveCameraActive(true)
+	else
+		setWaveCameraActive(false)
+	end
+end
+
 local function updateHud(snap: WaveSim.HudSnapshot)
 	ensureHud()
 	if not snap.running then
 		setHudVisible(false)
-		setWaveCameraActive(false)
+		syncWave1FishCam(snap)
 		return
 	end
-	setWaveCameraActive(true)
+	syncWave1FishCam(snap)
 	setHudVisible(true)
 	local prog = math.clamp(snap.feedProgress or 0, 0, 1)
 	if hudWaveFill then
@@ -2260,7 +2305,9 @@ function WaveSlot.mount(d: Deps)
 
 	WaveSim.onHud(updateHud)
 	WaveSim.onStopped(function(summary)
-		setWaveCameraActive(false)
+		Wave1FishCam.restoreToAvatar(function()
+			setWaveCameraActive(false)
+		end)
 		applyIcon(false)
 		if stopConfirmActive then
 			WaveSlot.hideStopConfirm()
@@ -2274,6 +2321,9 @@ function WaveSlot.mount(d: Deps)
 	end)
 
 	deps.playerGui:GetAttributeChangedSignal("OceanTD_RestoreWaveCam"):Connect(function()
+		if userCamCycleBusy() then
+			return
+		end
 		local cam = Workspace.CurrentCamera
 		local char = Players.LocalPlayer.Character
 		local hum = char and char:FindFirstChildOfClass("Humanoid")
@@ -2284,13 +2334,35 @@ function WaveSlot.mount(d: Deps)
 			end
 		end
 		if WaveSim.isRunning() then
-			if waveCamConn then
+			local snap = WaveSim.getHudSnapshot()
+			if snap.wave == 1 then
+				Wave1FishCam.stopImmediate()
+				setWaveCameraActive(false)
+				Wave1FishCam.setActive(true)
+			elseif waveCamConn then
 				bakeWaveCameraOffset()
 			else
 				setWaveCameraActive(true)
 			end
 		else
+			Wave1FishCam.stopImmediate()
 			clearWaveCameraOffset()
+		end
+	end)
+
+	deps.playerGui:GetAttributeChangedSignal("OceanTD_CamCycleMode"):Connect(function()
+		-- Returning to default cam: re-apply wave-1 fish cam / wave offset if needed.
+		if userCamCycleBusy() then
+			if Wave1FishCam.isBusy() then
+				Wave1FishCam.stopImmediate()
+			end
+			if waveCamConn then
+				setWaveCameraActive(false)
+			end
+			return
+		end
+		if WaveSim.isRunning() then
+			syncWave1FishCam(WaveSim.getHudSnapshot())
 		end
 	end)
 
