@@ -503,6 +503,16 @@ function PersistenceService.tryUnlockSkillStage(player: Player, skillId: string)
 	if cash < cost then
 		return { ok = false, stage = current, prevStage = current, errorCode = "CantAfford", sandDollars = cash }
 	end
+	-- Earn More / Place More require Plot Size stage 2+.
+	if SkillStages.isLockedUntilPlotSize(skillId, SkillStages.clampStage(profile.skillStages.PlotSize)) then
+		return {
+			ok = false,
+			stage = current,
+			prevStage = current,
+			errorCode = "PlotSizeGate",
+			sandDollars = cash,
+		}
+	end
 	profile.currencies.sandDollars = cash - cost
 	profile.skillStages[skillId] = nextStage
 	PersistenceService.syncSandDollarsAttribute(player)

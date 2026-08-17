@@ -46,8 +46,11 @@ local RED = Color3.fromRGB(220, 50, 55)
 local DARK_RED = Color3.fromRGB(120, 10, 20)
 local BRIGHT_YELLOW = Color3.fromRGB(255, 230, 40)
 local GREEN = Color3.fromRGB(40, 220, 110)
-local PANEL_WIDTH_SCALE = 0.33
+local PANEL_WIDTH_SCALE = 0.231 -- ~30% narrower than prior 0.33
 local SLOT4_GAP_PX = 8
+-- Keep yellow panel stroke inside the HUD (ClipsDescendants + flush-right was cutting it off).
+local PANEL_STROKE_PAD = 3
+local PANEL_STROKE_THICKNESS = 1.5
 
 -- Left HUD chrome hidden while backpack is open (dPadIcon is owned by FreeCam).
 local hiddenLeftUiForBackpack: { { gui: GuiObject, wasVisible: boolean } } = {}
@@ -598,14 +601,16 @@ panel.AnchorPoint = Vector2.new(1, 0)
 panel.BackgroundColor3 = Color3.fromRGB(12, 18, 28)
 panel.BackgroundTransparency = 0.12
 panel.BorderSizePixel = 0
-panel.ClipsDescendants = true
+-- Clip list contents on ScrollRoot; leave panel unclipped so UIStroke isn't cropped.
+panel.ClipsDescendants = false
 panel.Parent = host
 
 Instance.new("UICorner", panel).CornerRadius = UDim.new(0, 12)
 
 local panelStroke = Instance.new("UIStroke")
 panelStroke.Color = BRIGHT_YELLOW
-panelStroke.Thickness = 1.5
+panelStroke.Thickness = PANEL_STROKE_THICKNESS
+panelStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
 panelStroke.Parent = panel
 
 local uiScale = Instance.new("UIScale")
@@ -617,6 +622,7 @@ scrollRoot.Name = "ScrollRoot"
 scrollRoot.BackgroundTransparency = 1
 scrollRoot.Position = UDim2.new(0, 8, 0, 8)
 scrollRoot.Size = UDim2.new(1, -16, 1, -16)
+scrollRoot.ClipsDescendants = true
 scrollRoot.Parent = panel
 
 local scroll = Instance.new("ScrollingFrame")
@@ -635,10 +641,10 @@ scroll.ElasticBehavior = Enum.ElasticBehavior.Always
 scroll.Parent = scrollRoot
 
 local grid = Instance.new("UIGridLayout")
-grid.Name = "Grid3"
+grid.Name = "Grid2"
 grid.CellPadding = UDim2.fromOffset(10, 14)
 grid.SortOrder = Enum.SortOrder.LayoutOrder
-grid.FillDirectionMaxCells = 3
+grid.FillDirectionMaxCells = 2
 grid.Parent = scroll
 
 local gridPad = Instance.new("UIPadding")
@@ -671,12 +677,12 @@ local function refreshGridCellSize()
 	if width <= 1 then
 		return
 	end
-	-- 3 columns: padding L/R (6 each) + 2 horizontal gaps (CellPadding 10).
+	-- 2 columns: padding L/R (6 each) + 1 horizontal gap (CellPadding 10).
 	local hPad = 12
 	local gap = 10
 	local bar = scroll.ScrollBarThickness
-	local usable = width - hPad - gap * 2 - bar
-	local cell = math.floor(usable / 3)
+	local usable = width - hPad - gap - bar
+	local cell = math.floor(usable / 2)
 	if UiViewportTags.is720p(UiViewportTags.readViewport()) then
 		-- Stretch cells to fill the wider 720p panel (no 120px cap).
 		cell = math.max(56, cell)
@@ -715,8 +721,9 @@ end
 local function applyDockedLayout()
 	local right, top, width, height = dockRect()
 	panel.AnchorPoint = Vector2.new(1, 0)
-	panel.Position = UDim2.fromOffset(right, top)
-	panel.Size = UDim2.fromOffset(width, height)
+	-- Inset from the HUD right edge so the outer stroke stays visible.
+	panel.Position = UDim2.fromOffset(right - PANEL_STROKE_PAD, top)
+	panel.Size = UDim2.fromOffset(math.max(40, width - PANEL_STROKE_PAD), height)
 	uiScale.Scale = 1
 	refreshGridCellSize()
 end
@@ -1498,7 +1505,11 @@ local function makeItemButton(def, layoutOrder: number, instanceSuffix: string?)
 					gesture = "pull"
 					clearAllPulses()
 					startPulse(stroke)
-					PlacementController.notifyPointerDownFromBackpack(def.id, now)
+					PlacementController.notifyPointerDownFromBackpack(
+						def.id,
+						now,
+						input.UserInputType == Enum.UserInputType.Touch
+					)
 				end
 			end
 			if gesture == "scroll" then
@@ -1683,6 +1694,8 @@ local function playOpen()
 
 	local center = slotCenterLocal()
 	local right, top, width, height = dockRect()
+	local dockW = math.max(40, width - PANEL_STROKE_PAD)
+	local dockRight = right - PANEL_STROKE_PAD
 
 	panel.AnchorPoint = Vector2.new(0.5, 0.5)
 	panel.Position = UDim2.fromOffset(center.X, center.Y)
@@ -1691,8 +1704,8 @@ local function playOpen()
 
 	local t1 = TweenService:Create(uiScale, TWEEN_OPEN, { Scale = 1 })
 	local t2 = TweenService:Create(panel, TWEEN_OPEN, {
-		Position = UDim2.fromOffset(right - width * 0.5, top + height * 0.5),
-		Size = UDim2.fromOffset(width, height),
+		Position = UDim2.fromOffset(dockRight - dockW * 0.5, top + height * 0.5),
+		Size = UDim2.fromOffset(dockW, height),
 	})
 	t1:Play()
 	t2:Play()
@@ -1711,10 +1724,12 @@ local function playClose()
 	unequipBackpackShovel()
 	local center = slotCenterLocal()
 	local right, top, width, height = dockRect()
+	local dockW = math.max(40, width - PANEL_STROKE_PAD)
+	local dockRight = right - PANEL_STROKE_PAD
 
 	panel.AnchorPoint = Vector2.new(0.5, 0.5)
-	panel.Position = UDim2.fromOffset(right - width * 0.5, top + height * 0.5)
-	panel.Size = UDim2.fromOffset(width, height)
+	panel.Position = UDim2.fromOffset(dockRight - dockW * 0.5, top + height * 0.5)
+	panel.Size = UDim2.fromOffset(dockW, height)
 
 	local t1 = TweenService:Create(uiScale, TWEEN_CLOSE, { Scale = 0.08 })
 	local t2 = TweenService:Create(panel, TWEEN_CLOSE, {

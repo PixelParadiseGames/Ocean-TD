@@ -216,4 +216,18 @@ function SkillStages.unlockDesc(skillId: string, stage: number): string
 	return ""
 end
 
+-- Earn More / Place More stay gated until Plot Size reaches this stage.
+SkillStages.PLOT_SIZE_GATE_STAGE = 2
+
+function SkillStages.isGatedByPlotSize(skillId: string): boolean
+	return skillId == "EarnMore" or skillId == "PlaceMore"
+end
+
+function SkillStages.isLockedUntilPlotSize(skillId: string, plotSizeStage: number): boolean
+	if not SkillStages.isGatedByPlotSize(skillId) then
+		return false
+	end
+	return SkillStages.clampStage(plotSizeStage) < SkillStages.PLOT_SIZE_GATE_STAGE
+end
+
 return SkillStages

@@ -111,6 +111,82 @@ local bgTweenConn: RBXScriptConnection? = nil
 local gamepadFocus = 0 -- 1-based; 0 = none
 local focusStroke: UIStroke? = nil
 local onBubbleActivated: ((buttonName: string) -> ())? = nil
+local readSkillStage: (string) -> number
+local rejectFxToken = 0
+
+-- Orbit locks on EarnMore / PlaceMore until Plot Size stage 2.
+local LOCK_IMAGE = "rbxassetid://105420423737825"
+local LOCK_SIZE_PX = 30
+local LOCK_ORBIT_SPEED = 1.35 -- rad/sec
+local LOCK_ORBIT_FRAC = 0.62 -- of bubble radius
+
+type OrbitLock = {
+	bubble: Bubble,
+	icon: ImageLabel,
+	angle: number,
+}
+
+local orbitLocks: { OrbitLock } = {}
+
+local function clearOrbitLocks()
+	for _, o in ipairs(orbitLocks) do
+		if o.icon.Parent then
+			o.icon:Destroy()
+		end
+	end
+	table.clear(orbitLocks)
+end
+
+local function skillIdForBubble(b: Bubble): string?
+	local def = SkillStages.fromButtonName(b.btn.Name)
+	return if def then def.id else nil
+end
+
+local function syncOrbitLocks()
+	clearOrbitLocks()
+	if not running then
+		return
+	end
+	local plotStage = readSkillStage("PlotSize")
+	local rng = Random.new()
+	for _, b in ipairs(bubbles) do
+		local id = skillIdForBubble(b)
+		if id and SkillStages.isLockedUntilPlotSize(id, plotStage) and b.btn.Parent then
+			local old = b.btn:FindFirstChild("OceanTD_SkillGateLock")
+			if old then
+				old:Destroy()
+			end
+			local icon = Instance.new("ImageLabel")
+			icon.Name = "OceanTD_SkillGateLock"
+			icon.BackgroundTransparency = 1
+			icon.Image = LOCK_IMAGE
+			icon.Size = UDim2.fromOffset(LOCK_SIZE_PX, LOCK_SIZE_PX)
+			icon.AnchorPoint = Vector2.new(0.5, 0.5)
+			icon.Position = UDim2.fromScale(0.5, 0.5)
+			icon.ZIndex = math.max(b.btn.ZIndex + 8, 90)
+			icon.Active = false
+			icon.Parent = b.btn
+			table.insert(orbitLocks, {
+				bubble = b,
+				icon = icon,
+				angle = rng:NextNumber(0, math.pi * 2),
+			})
+		end
+	end
+end
+
+local function updateOrbitLocks(dt: number)
+	for _, o in ipairs(orbitLocks) do
+		if not o.icon.Parent or not o.bubble.btn.Parent then
+			continue
+		end
+		o.angle += LOCK_ORBIT_SPEED * dt
+		local r = math.max(14, o.bubble.radius * LOCK_ORBIT_FRAC)
+		local ox = math.cos(o.angle) * r
+		local oy = math.sin(o.angle) * r
+		o.icon.Position = UDim2.new(0.5, ox, 0.5, oy)
+	end
+end
 
 local function clearGamepadFocusVisual()
 	if focusStroke then
@@ -318,7 +394,7 @@ local function applyBubbleLayoutSnap(btn: GuiButton, snap: BubbleLayoutSnap)
 	end
 end
 
-local function readSkillStage(skillId: string): number
+readSkillStage = function(skillId: string): number
 	local ok, ui = pcall(function()
 		return require(script.Parent:WaitForChild("SkillPowerUpUI"))
 	end)
@@ -783,6 +859,10 @@ local function restoreBubbles()
 		if sc then
 			sc:Destroy()
 		end
+		local lock = btn:FindFirstChild("OceanTD_SkillGateLock")
+		if lock then
+			lock:Destroy()
+		end
 		if btn.Parent then
 			btn.Visible = true
 			btn.Parent = b.origParent
@@ -792,6 +872,7 @@ local function restoreBubbles()
 			setBubbleZ(btn, b.origZ)
 		end
 	end
+	clearOrbitLocks()
 	table.clear(bubbles)
 end
 
@@ -869,6 +950,7 @@ end
 
 function SkillsBubbleSim.stop(onDone: (() -> ())?)
 	stopToken += 1
+	rejectFxToken += 1
 	suppressed = false
 	local my = stopToken
 	local function finish()
@@ -1122,8 +1204,10 @@ function SkillsBubbleSim.start(panel: Instance)
 			physAcc -= PHYS_DT
 			physStep(PHYS_DT)
 		end
+		updateOrbitLocks(dt)
 	end)
 
+	syncOrbitLocks()
 	playPopIn()
 	print("[SkillsBubbles] Started", #bubbles, "bubbles")
 end
@@ -1198,6 +1282,7 @@ function SkillsBubbleSim.refreshStageLayouts()
 		b.mass = r
 		writeBubble(b)
 	end
+	syncOrbitLocks()
 end
 
 local function applyGamepadFocusVisual()
@@ -1288,6 +1373,97 @@ end
 
 function SkillsBubbleSim.setOnBubbleActivated(cb: ((buttonName: string) -> ())?)
 	onBubbleActivated = cb
+end
+
+-- Locked skill tap: flash that bubble's labels red; unlocked bubbles grow then shrink over 2s.
+local REJECT_FX_SEC = 2
+local REJECT_RED = Color3.fromRGB(255, 45, 50)
+local REJECT_GROW_SCALE = 2 -- 2× current size (skipped if skill is already max stage)
+local REJECT_HALF_SEC = REJECT_FX_SEC * 0.5
+local REJECT_UP_INFO = TweenInfo.new(REJECT_HALF_SEC, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+local REJECT_DOWN_INFO = TweenInfo.new(REJECT_HALF_SEC, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
+
+function SkillsBubbleSim.playLockedRejectFx(skillId: string)
+	if not running or closing or suppressed or #bubbles == 0 then
+		return
+	end
+	rejectFxToken += 1
+	local token = rejectFxToken
+	local plotStage = readSkillStage("PlotSize")
+
+	local locked: Bubble? = nil
+	local growTargets: { Bubble } = {}
+	for _, b in ipairs(bubbles) do
+		if not b.btn.Parent then
+			continue
+		end
+		local id = skillIdForBubble(b)
+		if not id then
+			continue
+		end
+		if id == skillId then
+			locked = b
+		elseif not SkillStages.isLockedUntilPlotSize(id, plotStage) then
+			-- Already at max stage layout — don't enlarge the circle further.
+			if readSkillStage(id) < SkillStages.MAX_STAGE then
+				table.insert(growTargets, b)
+			end
+		end
+	end
+
+	type SavedColor = { lbl: TextLabel, color: Color3 }
+	local saved: { SavedColor } = {}
+	if locked then
+		for _, lbl in ipairs(collectBubbleLabels(locked.btn)) do
+			table.insert(saved, { lbl = lbl, color = lbl.TextColor3 })
+		end
+	end
+
+	for _, b in ipairs(growTargets) do
+		if b.scale.Parent then
+			b.scale.Scale = 1
+			local scaleObj = b.scale
+			local up = TweenService:Create(scaleObj, REJECT_UP_INFO, { Scale = REJECT_GROW_SCALE })
+			up:Play()
+			up.Completed:Connect(function()
+				if token ~= rejectFxToken or not scaleObj.Parent then
+					return
+				end
+				TweenService:Create(scaleObj, REJECT_DOWN_INFO, { Scale = 1 }):Play()
+			end)
+		end
+	end
+
+	local t0 = os.clock()
+	task.spawn(function()
+		while token == rejectFxToken and (os.clock() - t0) < REJECT_FX_SEC do
+			if not running or closing or suppressed then
+				break
+			end
+			local elapsed = os.clock() - t0
+			-- ~2.5 flashes/sec between original and bright red.
+			local flash = (math.sin(elapsed * math.pi * 5) + 1) * 0.5
+			for _, s in ipairs(saved) do
+				if s.lbl.Parent then
+					s.lbl.TextColor3 = s.color:Lerp(REJECT_RED, 0.25 + flash * 0.75)
+				end
+			end
+			task.wait()
+		end
+		if token ~= rejectFxToken then
+			return
+		end
+		for _, s in ipairs(saved) do
+			if s.lbl.Parent then
+				s.lbl.TextColor3 = s.color
+			end
+		end
+		for _, b in ipairs(growTargets) do
+			if b.scale.Parent then
+				b.scale.Scale = 1
+			end
+		end
+	end)
 end
 
 function SkillsBubbleSim.activateGamepadFocus(): boolean

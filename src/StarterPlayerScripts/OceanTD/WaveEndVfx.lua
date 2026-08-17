@@ -17,6 +17,9 @@ local ClientPlot = require(script.Parent:WaitForChild("ClientPlot"))
 
 local WaveEndVfx = {}
 
+-- While true, stage/plot sync must not snap the reef heart (Plot Size cinematic owns it).
+local routeHeartDriveLocked = false
+
 local REEF_TICK_SOUND_ID = "rbxassetid://128707491647978"
 local REEF_TICK_PITCH_START = 1.2
 local REEF_TICK_PITCH_STEP = 0.09
@@ -303,7 +306,43 @@ local function resolveEndHeartForPlot(plotId: string): BasePart?
 	return applyRouteHeartForPlot(plotId)
 end
 
+local function waypointWorldForStage(stage: number, plotId: string): Vector3?
+	local s = SkillStages.clampStage(stage)
+	local finalWp = SkillStages.plotSizeFinalWaypoint(s)
+	local route = Workspace:FindFirstChild("WaveRoute")
+	local a = route and route:FindFirstChild("A")
+	local wpFolder = a and a:FindFirstChild("Waypoints")
+	if not wpFolder then
+		return nil
+	end
+	local w: Instance? = wpFolder:FindFirstChild("W" .. tostring(finalWp))
+	if not (w and w:IsA("BasePart")) then
+		for _, ch in ipairs(wpFolder:GetDescendants()) do
+			if ch:IsA("BasePart") and ch.Name == "W" .. tostring(finalWp) then
+				w = ch
+				break
+			end
+		end
+	end
+	if not (w and w:IsA("BasePart")) then
+		return nil
+	end
+	local plot = ClientPlot.get()
+	if plotId == "Plot1" or (plot and plot.plotId == plotId) then
+		return ClientPlot.remapFromPlot1((w :: BasePart).Position)
+	end
+	return nil
+end
+
 -- Place the visible reef heart at the wave path end (plot-size waypoint).
+function WaveEndVfx.setRouteHeartDriveLocked(locked: boolean)
+	routeHeartDriveLocked = locked == true
+end
+
+function WaveEndVfx.isRouteHeartDriveLocked(): boolean
+	return routeHeartDriveLocked
+end
+
 function WaveEndVfx.setRouteEndWorldPos(worldPos: Vector3?, plotId: string?)
 	local plot = ClientPlot.get()
 	local id = plotId or (if plot then plot.plotId else "Plot1")
@@ -313,6 +352,15 @@ function WaveEndVfx.setRouteEndWorldPos(worldPos: Vector3?, plotId: string?)
 		routeEndPosByPlot[id] = nil
 	end
 	applyRouteHeartForPlot(id)
+end
+
+function WaveEndVfx.getRouteEndWorldPosForStage(stage: number, plotId: string?): Vector3?
+	local plot = ClientPlot.get()
+	local id = plotId or (if plot then plot.plotId else nil)
+	if not id then
+		return nil
+	end
+	return waypointWorldForStage(stage, id)
 end
 
 function WaveEndVfx.clearRouteEnd(plotId: string?)
@@ -328,6 +376,9 @@ end
 
 -- Place heart at W# for this Plot Size stage (works even when waves aren't running).
 function WaveEndVfx.syncToPlotSizeStage(stage: number?, plotId: string?)
+	if routeHeartDriveLocked then
+		return
+	end
 	local plot = ClientPlot.get()
 	local id = plotId or (if plot then plot.plotId else nil)
 	if not id then
@@ -344,31 +395,8 @@ function WaveEndVfx.syncToPlotSizeStage(stage: number?, plotId: string?)
 			s = 1
 		end
 	end
-	local finalWp = SkillStages.plotSizeFinalWaypoint(s :: number)
-	local route = Workspace:FindFirstChild("WaveRoute")
-	local a = route and route:FindFirstChild("A")
-	local wpFolder = a and a:FindFirstChild("Waypoints")
-	if not wpFolder then
-		return
-	end
-	local w = wpFolder:FindFirstChild("W" .. tostring(finalWp))
-	if not (w and w:IsA("BasePart")) then
-		-- Fallback: scan indexed name variants
-		for _, ch in ipairs(wpFolder:GetDescendants()) do
-			if ch:IsA("BasePart") and ch.Name == "W" .. tostring(finalWp) then
-				w = ch
-				break
-			end
-		end
-	end
-	if not (w and w:IsA("BasePart")) then
-		return
-	end
-	local worldPos: Vector3
-	if id == "Plot1" or (plot and plot.plotId == id) then
-		worldPos = ClientPlot.remapFromPlot1(w.Position)
-	else
-		-- Foreign plot: need that plot's pose — leave to setRouteEndWorldPos from ghost path.
+	local worldPos = waypointWorldForStage(s :: number, id)
+	if not worldPos then
 		return
 	end
 	WaveEndVfx.setRouteEndWorldPos(worldPos, id)
@@ -810,6 +838,10 @@ function WaveEndVfx.playReefHealthTicks(amount: number, endPos: Vector3?, tintHe
 end
 
 ClientPlot.onChanged(function(plot)
+	-- Plot Size grow updates ClientPlot every frame; don't tear down / re-snap the heart.
+	if routeHeartDriveLocked then
+		return
+	end
 	table.clear(heartByPlotId)
 	endHeartPart = nil
 	endHeartPlotId = nil

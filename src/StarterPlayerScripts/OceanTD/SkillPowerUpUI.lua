@@ -662,6 +662,17 @@ local function doUnlockRemote()
 		return
 	end
 	if result.ok == true then
+		if skillId == "PlotSize" then
+			-- Lock before SkillStagesSync arrives (fires before PlotSizeChanged) so the heart
+			-- stays at the old route end until PlotSizeCinematic tweens it.
+			local WaveEndVfx = require(script.Parent:WaitForChild("WaveEndVfx"))
+			local prevStage = SkillStages.clampStage(result.prevStage or (result.stage - 1))
+			WaveEndVfx.setRouteHeartDriveLocked(true)
+			local park = WaveEndVfx.getRouteEndWorldPosForStage(prevStage)
+			if park then
+				WaveEndVfx.setRouteEndWorldPos(park)
+			end
+		end
 		stagesMap[skillId] = SkillStages.clampStage(result.stage)
 		hideConfirm()
 		refreshTemplate()
@@ -669,12 +680,6 @@ local function doUnlockRemote()
 			-- ForceClose always tears down skills + powerup; avoid close() while open
 			-- so onClosed cannot race HUD restore mid-cinematic.
 			playerGui:SetAttribute("OceanTD_ForceCloseSkills", os.clock())
-			local WaveEndVfx = require(script.Parent:WaitForChild("WaveEndVfx"))
-			WaveEndVfx.syncToPlotSizeStage(stagesMap[skillId])
-			local WaveSim = require(script.Parent:WaitForChild("WaveSim"))
-			if WaveSim.isRunning() then
-				WaveSim.rebuildRouteForPlotSize(stagesMap[skillId])
-			end
 		else
 			SkillsBubbleSim.refreshStageLayouts()
 		end
@@ -685,6 +690,8 @@ local function doUnlockRemote()
 		showToast("Collect More $D")
 	elseif code == "Maxed" then
 		showToast("Max Stage")
+	elseif code == "PlotSizeGate" then
+		showToast("Unlock Plot Size Stage 2 first")
 	else
 		showToast("Can't unlock")
 	end
@@ -856,6 +863,10 @@ function SkillPowerUpUI.open(skillId: string)
 	local def = SkillStages.get(skillId)
 	if not def then
 		warn("[SkillPowerUp] Unknown skill", skillId)
+		return
+	end
+	if SkillStages.isLockedUntilPlotSize(skillId, currentStage("PlotSize")) then
+		SkillsBubbleSim.playLockedRejectFx(skillId)
 		return
 	end
 	local now = os.clock()
@@ -1105,6 +1116,14 @@ syncRemote.OnClientEvent:Connect(function(payload)
 		refreshTemplate()
 	end
 	local WaveEndVfx = require(script.Parent:WaitForChild("WaveEndVfx"))
+	-- Plot Size cinematic owns heart + live route until the grow tween finishes.
+	if WaveEndVfx.isRouteHeartDriveLocked() then
+		return
+	end
+	local PlotSizeCinematic = require(script.Parent:WaitForChild("PlotSizeCinematic"))
+	if PlotSizeCinematic.isBusy() then
+		return
+	end
 	WaveEndVfx.syncToPlotSizeStage(currentStage("PlotSize"))
 	local WaveSim = require(script.Parent:WaitForChild("WaveSim"))
 	if WaveSim.isRunning() then

@@ -3,7 +3,7 @@
 	Plot Size unlock cinematic:
 	1) Close skills bubbles
 	2) Camera → ChangeSizeCam looking at ChangeSizeCamFocus, hold 1s
-	3) Tween translucent plot footprint old→new size
+	3) Tween translucent plot footprint old→new size (reef heart moves with it)
 	4) Camera restore over 1s
 
 	Also hides Studio PlotSizes template boxes (keep cams).
@@ -170,8 +170,14 @@ local function tweenGrowBox(
 	fromCf: CFrame,
 	toCf: CFrame,
 	duration: number,
-	my: number
+	my: number,
+	heartFrom: Vector3?,
+	heartTo: Vector3?
 )
+	local WaveEndVfx = require(script.Parent:WaitForChild("WaveEndVfx"))
+	if heartFrom then
+		WaveEndVfx.setRouteEndWorldPos(heartFrom)
+	end
 	local t0 = os.clock()
 	while os.clock() - t0 < duration do
 		if my ~= token or not part.Parent then
@@ -181,6 +187,9 @@ local function tweenGrowBox(
 		local e = 1 - (1 - u) * (1 - u)
 		part.Size = fromSize:Lerp(toSize, e)
 		part.CFrame = fromCf:Lerp(toCf, e)
+		if heartFrom and heartTo then
+			WaveEndVfx.setRouteEndWorldPos(heartFrom:Lerp(heartTo, e))
+		end
 		local plot = ClientPlot.get()
 		if plot then
 			ClientPlot.set({
@@ -197,6 +206,9 @@ local function tweenGrowBox(
 	if part.Parent and my == token then
 		part.Size = toSize
 		part.CFrame = toCf
+		if heartTo then
+			WaveEndVfx.setRouteEndWorldPos(heartTo)
+		end
 	end
 end
 
@@ -224,6 +236,13 @@ function PlotSizeCinematic.play(prevStage: number, newStage: number, opts: { ski
 	local my = token
 	local skipCam = opts ~= nil and opts.skipCamera == true
 	local poses = if opts then opts.poses else nil
+
+	local WaveEndVfx = require(script.Parent:WaitForChild("WaveEndVfx"))
+	WaveEndVfx.setRouteHeartDriveLocked(true)
+	local parkFrom = WaveEndVfx.getRouteEndWorldPosForStage(prevStage)
+	if parkFrom then
+		WaveEndVfx.setRouteEndWorldPos(parkFrom)
+	end
 
 	playerGui:SetAttribute("OceanTD_PlotSizeCinematicBusy", true)
 	forceCloseSkills()
@@ -294,22 +313,24 @@ function PlotSizeCinematic.play(prevStage: number, newStage: number, opts: { ski
 	end
 
 	local function finishCinematic(okCommit: boolean)
-		if my == token then
-			busy = false
-		end
-		playerGui:SetAttribute("OceanTD_PlotSizeCinematicBusy", false)
-		if okCommit then
-			pcall(function()
-				Remotes.get("ReportPlotSizeCinematicDone"):FireServer(newStage)
-			end)
-		end
-		playerGui:SetAttribute("OceanTD_SkillsUiRestore", os.clock())
 		local WaveEndVfx = require(script.Parent:WaitForChild("WaveEndVfx"))
+		-- Unlock then snap to final stage end (tween already parked there on success).
+		WaveEndVfx.setRouteHeartDriveLocked(false)
 		WaveEndVfx.syncToPlotSizeStage(newStage)
 		local WaveSim = require(script.Parent:WaitForChild("WaveSim"))
 		if WaveSim.isRunning() then
 			WaveSim.rebuildRouteForPlotSize(newStage)
 		end
+		if okCommit then
+			pcall(function()
+				Remotes.get("ReportPlotSizeCinematicDone"):FireServer(newStage)
+			end)
+		end
+		if my == token then
+			busy = false
+		end
+		playerGui:SetAttribute("OceanTD_PlotSizeCinematicBusy", false)
+		playerGui:SetAttribute("OceanTD_SkillsUiRestore", os.clock())
 	end
 
 	if cam and not skipCam then
@@ -353,8 +374,12 @@ function PlotSizeCinematic.play(prevStage: number, newStage: number, opts: { ski
 	end
 
 	-- Grow tween is the first time the outline leaves the old stage size.
+	-- Move the reef heart old→new route end in lockstep with the footprint.
+	local WaveEndVfx = require(script.Parent:WaitForChild("WaveEndVfx"))
+	local heartFrom = WaveEndVfx.getRouteEndWorldPosForStage(prevStage)
+	local heartTo = WaveEndVfx.getRouteEndWorldPosForStage(newStage)
 	local box = makeGrowBox(fromCf, fromSize)
-	tweenGrowBox(box, fromSize, toSize, fromCf, toCf, GROW_SEC, my)
+	tweenGrowBox(box, fromSize, toSize, fromCf, toCf, GROW_SEC, my, heartFrom, heartTo)
 	if box.Parent then
 		local fade = TweenService:Create(box, TweenInfo.new(0.35), { Transparency = 1 })
 		fade:Play()

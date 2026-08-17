@@ -22,7 +22,9 @@ local SkillPowerUpUI = require(script.Parent:WaitForChild("SkillPowerUpUI"))
 local WaveSlot = require(script.Parent:WaitForChild("WaveSlot"))
 
 local SKILLS_OPEN_ATTR = "OceanTD_SkillsBubblesOpen"
-local PLUS_SIZE = 44
+local ROW_H = 44
+local PLUS_CIRCLE = math.floor(ROW_H * 0.6 + 0.5) -- 40% smaller green circle
+local PLUS_TEXT_SIZE = 30 -- keep glyph size when circle shrinks
 local GREEN = Color3.fromRGB(45, 190, 75)
 
 local sg = Instance.new("ScreenGui")
@@ -37,7 +39,7 @@ local row = Instance.new("Frame")
 row.Name = "Row"
 row.AnchorPoint = Vector2.new(0.5, 1)
 row.Position = UDim2.new(0.5, 0, 1, -28)
-row.Size = UDim2.fromOffset(320, PLUS_SIZE)
+row.Size = UDim2.fromOffset(320, ROW_H)
 row.BackgroundTransparency = 1
 row.Parent = sg
 
@@ -52,7 +54,7 @@ layout.Parent = row
 local countLabel = Instance.new("TextLabel")
 countLabel.Name = "Count"
 countLabel.BackgroundTransparency = 1
-countLabel.Size = UDim2.fromOffset(220, PLUS_SIZE)
+countLabel.Size = UDim2.fromOffset(220, ROW_H)
 countLabel.Font = UiTheme.Font
 countLabel.TextSize = 26
 countLabel.TextColor3 = Color3.new(1, 1, 1)
@@ -65,13 +67,10 @@ countLabel.Parent = row
 
 local plusBtn = Instance.new("TextButton")
 plusBtn.Name = "PlaceMorePlus"
-plusBtn.Size = UDim2.fromOffset(PLUS_SIZE, PLUS_SIZE)
+plusBtn.Size = UDim2.fromOffset(PLUS_CIRCLE, PLUS_CIRCLE)
 plusBtn.BackgroundColor3 = GREEN
 plusBtn.BorderSizePixel = 0
-plusBtn.Font = UiTheme.Font
-plusBtn.TextSize = 30
-plusBtn.TextColor3 = Color3.new(1, 1, 1)
-plusBtn.Text = "+"
+plusBtn.Text = ""
 plusBtn.AutoButtonColor = true
 plusBtn.LayoutOrder = 2
 plusBtn.Parent = row
@@ -79,11 +78,24 @@ local plusCorner = Instance.new("UICorner")
 plusCorner.CornerRadius = UDim.new(1, 0)
 plusCorner.Parent = plusBtn
 local plusStroke = Instance.new("UIStroke")
-plusStroke.Thickness = 3
+plusStroke.Thickness = 2
 plusStroke.Color = Color3.fromRGB(120, 255, 90)
 plusStroke.Transparency = 0
 plusStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
 plusStroke.Parent = plusBtn
+-- Separate glyph so TextSize stays 30 while the circle shrinks; nudge up for optical center.
+local plusGlyph = Instance.new("TextLabel")
+plusGlyph.Name = "Glyph"
+plusGlyph.BackgroundTransparency = 1
+plusGlyph.Size = UDim2.fromScale(1, 1)
+plusGlyph.AnchorPoint = Vector2.new(0.5, 0.5)
+plusGlyph.Position = UDim2.new(0.5, 0, 0.5, -1)
+plusGlyph.Font = UiTheme.Font
+plusGlyph.TextSize = PLUS_TEXT_SIZE
+plusGlyph.TextColor3 = Color3.new(1, 1, 1)
+plusGlyph.Text = "+"
+plusGlyph.ZIndex = 2
+plusGlyph.Parent = plusBtn
 
 local function placeMax(): number
 	return SkillStages.placeMoreMaxAtStage(SkillPowerUpUI.getStage("PlaceMore"))

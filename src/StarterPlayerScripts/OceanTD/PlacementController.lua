@@ -23,7 +23,6 @@ local Remotes = require(oceanRoot:WaitForChild("Remotes"))
 local CoralVisual = require(oceanRoot:WaitForChild("Shared"):WaitForChild("CoralVisual"))
 local SpeciesCatalog = require(oceanRoot:WaitForChild("Shared"):WaitForChild("SpeciesCatalog"))
 local ItemCatalog = require(oceanRoot:WaitForChild("Shared"):WaitForChild("ItemCatalog"))
-local GridMath = require(oceanRoot:WaitForChild("Shared"):WaitForChild("GridMath"))
 local UiTheme = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiTheme"))
 local UiCircles = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiCircles"))
 local UiHaptics = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiHaptics"))
@@ -35,6 +34,9 @@ local PlaceVfx = require(script.Parent:WaitForChild("PlaceVfx"))
 local HandOrb = require(script.Parent:WaitForChild("HandOrb"))
 local SelectRing = require(script.Parent:WaitForChild("SelectRing"))
 local SkillPowerUpUI = require(script.Parent:WaitForChild("SkillPowerUpUI"))
+local PlaceConfirmHitTest = require(script.Parent:WaitForChild("PlaceConfirmHitTest"))
+local PlaceConfirmChrome = require(script.Parent:WaitForChild("PlaceConfirmChrome"))
+local PlaceAimScreen = require(script.Parent:WaitForChild("PlaceAimScreen"))
 local SkillStages = require(oceanRoot:WaitForChild("Shared"):WaitForChild("SkillStages"))
 
 local PlacementController = {}
@@ -51,6 +53,8 @@ local warnLabel: TextLabel? = nil
 local moveHintImage: ImageLabel? = nil
 local moveHintBillboard: BillboardGui? = nil
 local confirmGui: ScreenGui? = nil
+local chromeBillboard: BillboardGui? = nil
+local chromeAdorneePart: BasePart? = nil
 local checkBtn: TextButton? = nil
 local cancelBtn: TextButton? = nil
 local confirmPos: Vector3? = nil -- ground anchor under finger (actual place pos)
@@ -65,11 +69,13 @@ local backpackDrag = false -- pointer-driven aim from backpack pull
 local aimFingerDown = false -- world drag after tap-select (mobile/PC)
 local confirmDragging = false
 local confirmPressOrigin: Vector2? = nil -- nil while pressing ✓/X
-local chromeScreenPos: Vector2? = nil -- move-icon aim freeze; ✓/X use top-center
+local chromeScreenPos: Vector2? = nil -- move-icon aim freeze; ✓/X sit on torso
 local aimPinnedToCenter = false
 local aimPinnedToHand = false -- ghost starts in the right hand until the player aims
 local aimPinOrigin: Vector2? = nil
 local AIM_UNPIN_PX = 14
+-- True only while the active place pointer is a touch finger (not mouse / LastInputType guesses).
+local aimRaiseForTouch = false
 local moveHintScale: UIScale? = nil
 local moveHintPulseToken = 0
 -- Gamepad: left stick aims; A places immediately (no park/confirm); B returns to list.
@@ -98,15 +104,7 @@ end
 
 -- Screen stack around the 2D aim point (cursor / raised touch aim), not the 3D
 -- projection — ground hits often draw below the cursor and dragged all chrome down.
--- ✓/X above aim+ghost, move icon directly under the ghost.
 local MOVE_ICON_SIZE = 48
-local GHOST_SCREEN_RADIUS_PX = 30 -- clears the ball so chrome isn't on top of it
-local MOVE_BELOW_GHOST_PX = 4
-local BTN_ABOVE_GHOST_PX = 4
--- Touch-only: raise ghost/plant above the finger.
-local GHOST_SCREEN_OFFSET_Y = 105
--- Mouse/gamepad: match relocate — aim above cursor so ball + move icon center on it.
-local AIM_VISUAL_CENTER_OFFSET_Y = 56
 local MOVE_ICON_IMAGE = "rbxassetid://345081302"
 local MOVE_HINT_PULSE_SPEED = 4
 local MOVE_HINT_SCALE_IN_SEC = 0.35
@@ -142,6 +140,7 @@ local pendingArmSlotScreen: Vector2? = nil
 local queuedSwitchItemId: string? = nil
 -- ✓/X press owned by confirm chrome (blocks AIM from parking the ghost on that click).
 local chromeBtnPointerDown = false
+local chromePressTarget: string? = nil -- "check" | "cancel"
 
 -- Forward decls so confirm UI can wire before bodies are assigned.
 local onCheck: () -> ()
@@ -173,7 +172,7 @@ local DEFAULT_WALK_SPEED = 16
 local DEFAULT_JUMP_POWER = 50
 local DEFAULT_JUMP_HEIGHT = 7.2
 local CONFIRM_DRAG_PX = 28 -- ignore tiny finger jitter before moving parked ghost
-local BTN_SIZE = 75 -- 60 × 1.25; tap target above top-center
+local BTN_SIZE = 52 -- min tappable chrome; PlaceConfirmChrome also floors at 52px
 
 local function log(...: any)
 	print("[PLACE]", ...)
@@ -440,6 +439,14 @@ local function destroyConfirmUi()
 		moveHintBillboard:Destroy()
 		moveHintBillboard = nil
 	end
+	if chromeBillboard then
+		chromeBillboard:Destroy()
+		chromeBillboard = nil
+	end
+	if chromeAdorneePart then
+		chromeAdorneePart:Destroy()
+		chromeAdorneePart = nil
+	end
 	if confirmGui then
 		confirmGui:Destroy()
 		confirmGui = nil
@@ -448,6 +455,8 @@ local function destroyConfirmUi()
 	cancelBtn = nil
 	moveHintImage = nil
 	moveHintScale = nil
+	chromePressTarget = nil
+	chromeBtnPointerDown = false
 end
 
 local function findBlockingCoral(worldPos: Vector3): BasePart?
@@ -520,13 +529,7 @@ local function syncBlockFlashForAim(worldPos: Vector3?)
 	setBlockFlash(findBlockingCoral(worldPos))
 end
 
-local function raycastPointer(screenPos: Vector2): Vector3?
-	local cam = Workspace.CurrentCamera
-	if not cam then
-		return nil
-	end
-	-- screenPos must be GetMouseLocation / ScreenPoint space (full window, includes top bar).
-	local ray = cam:ScreenPointToRay(screenPos.X, screenPos.Y)
+local function preparePlaceRayParams()
 	if not placeRayParams then
 		placeRayParams = RaycastParams.new()
 		placeRayParams.FilterType = Enum.RaycastFilterType.Exclude
@@ -546,86 +549,64 @@ local function raycastPointer(screenPos: Vector2): Vector3?
 		table.insert(exclude, player.Character)
 	end
 	placeRayParams.FilterDescendantsInstances = exclude
-	local result = Workspace:Raycast(ray.Origin, ray.Direction * 800, placeRayParams)
-	if result then
-		return result.Position
+end
+
+local function castPlaceRay(origin: Vector3, direction: Vector3): Vector3?
+	preparePlaceRayParams()
+	local hit = Workspace:Raycast(origin, direction.Unit * 800, placeRayParams)
+	if hit then
+		return hit.Position
 	end
 	local plot = ClientPlot.get()
 	if plot then
-		local origin = plot.cframe.Position
-		local t = (origin.Y - ray.Origin.Y) / ray.Direction.Y
+		local plotOrigin = plot.cframe.Position
+		local t = (plotOrigin.Y - origin.Y) / direction.Y
 		if t == t and t > 0 then
-			return ray.Origin + ray.Direction * t
+			return origin + direction.Unit * t
 		end
 	end
 	return nil
 end
 
--- Finger / chrome aim point (GetMouseLocation space — ignores GuiInset).
-local function getAimScreenPos(): Vector2
-	if gamepadPlacement and gamepadCursor then
-		return gamepadCursor
+local function raycastPointer(screenPos: Vector2): Vector3?
+	local cam = Workspace.CurrentCamera
+	if not cam then
+		return nil
 	end
-	if aimPinnedToCenter then
-		local cam = Workspace.CurrentCamera
-		if cam then
-			-- Same space as GetMouseLocation / IgnoreGuiInset ScreenGui offsets (do NOT add GuiInset).
-			local vp = cam.ViewportSize
-			return Vector2.new(vp.X * 0.5, vp.Y * 0.5)
-		end
-	end
-	return UserInputService:GetMouseLocation()
+	-- ScreenPointToRay matches GetMouseLocation (inset-inclusive).
+	local ray = cam:ScreenPointToRay(screenPos.X, screenPos.Y)
+	return castPlaceRay(ray.Origin, ray.Direction)
 end
 
--- Ghost + plant aim point. On touch, raise above the finger so the ghost isn't covered.
--- Mouse / gamepad: same offset as relocate (ball center + move icon under the cursor).
+-- Finger / chrome aim point helpers live in PlaceAimScreen (register budget).
 local function getPlaceAimScreenPos(): Vector2
-	local finger = getAimScreenPos()
-	if UserInputService:GetLastInputType() == Enum.UserInputType.Touch then
-		return Vector2.new(finger.X, finger.Y - GHOST_SCREEN_OFFSET_Y)
+	return PlaceAimScreen.getPlaceAimPos(gamepadPlacement, gamepadCursor, aimPinnedToCenter, aimRaiseForTouch)
+end
+
+local function notePlacePointerInput(input: InputObject)
+	if input.UserInputType == Enum.UserInputType.Touch then
+		aimRaiseForTouch = true
+	elseif input.UserInputType == Enum.UserInputType.MouseButton1
+		or input.UserInputType == Enum.UserInputType.MouseButton2
+		or input.UserInputType == Enum.UserInputType.MouseMovement
+		or input.UserInputType == Enum.UserInputType.MouseWheel
+		or input.UserInputType == Enum.UserInputType.Gamepad1
+		or input.KeyCode == Enum.KeyCode.Thumbstick1
+	then
+		aimRaiseForTouch = false
 	end
-	return Vector2.new(finger.X, finger.Y - AIM_VISUAL_CENTER_OFFSET_Y)
 end
 
 local function resetGamepadCursor()
-	local cam = Workspace.CurrentCamera
-	if cam then
-		local inset = GuiService:GetGuiInset()
-		local vp = cam.ViewportSize
-		gamepadCursor = Vector2.new(vp.X * 0.5 + inset.X, vp.Y * 0.5 + inset.Y)
-	else
-		gamepadCursor = UserInputService:GetMouseLocation()
-	end
+	gamepadCursor = PlaceAimScreen.resetGamepadCursor()
 end
 
 local function readThumbstick1(): Vector2
-	local ok, states = pcall(function()
-		return UserInputService:GetGamepadState(Enum.UserInputType.Gamepad1)
-	end)
-	if not ok or typeof(states) ~= "table" then
-		return Vector2.zero
-	end
-	for _, input in ipairs(states :: { InputObject }) do
-		if input.KeyCode == Enum.KeyCode.Thumbstick1 then
-			-- Stick Y is inverted vs screen Y.
-			return Vector2.new(input.Position.X, -input.Position.Y)
-		end
-	end
-	return Vector2.zero
+	return PlaceAimScreen.readThumbstick1()
 end
 
 local function clampGamepadCursor(pos: Vector2): Vector2
-	local cam = Workspace.CurrentCamera
-	if not cam then
-		return pos
-	end
-	local inset = GuiService:GetGuiInset()
-	local vp = cam.ViewportSize
-	local minX = inset.X + 8
-	local maxX = inset.X + vp.X - 8
-	local minY = inset.Y + 8
-	local maxY = inset.Y + vp.Y - 8
-	return Vector2.new(math.clamp(pos.X, minX, maxX), math.clamp(pos.Y, minY, maxY))
+	return PlaceAimScreen.clampGamepadCursor(pos)
 end
 
 local function setCheckGlyphText(text: string)
@@ -669,6 +650,13 @@ local function fireGamepadReturnToList()
 end
 
 local function raycastForPlace(): Vector3?
+	-- Mouse: PlayerMouse.UnitRay tracks the hardware cursor (incl. Scriptable cam).
+	-- Touch / gamepad keep screen-point rays (touch uses the above-finger aim pos).
+	if not gamepadPlacement and not PlaceAimScreen.isTouchAim(aimRaiseForTouch, gamepadPlacement) then
+		local mouse = player:GetMouse()
+		local unit = mouse.UnitRay
+		return castPlaceRay(unit.Origin, unit.Direction)
+	end
 	return raycastPointer(getPlaceAimScreenPos())
 end
 
@@ -761,9 +749,29 @@ detachMoveHintToScreen = function()
 	end
 end
 
--- World-anchored mode: stays centered on the ghost on every device (no GuiInset drift).
+-- Touch: world-anchored on the ghost. Mouse (live aim only): pin to GetMouseLocation
+-- so the icon can't drift above the hardware cursor. Parked confirm stays on the ghost.
 attachMoveHintToGhost = function()
 	if not moveHintImage or not ghost or not ghost.Parent then
+		return
+	end
+	local liveMouseAim = (mode == MODE_AIM or confirmDragging or aimFingerDown or backpackDrag)
+		and not gamepadPlacement
+		and not PlaceAimScreen.isTouchAim(aimRaiseForTouch, gamepadPlacement)
+	if liveMouseAim then
+		detachMoveHintToScreen()
+		if not confirmGui then
+			return
+		end
+		local m = UserInputService:GetMouseLocation()
+		-- ScreenInsets.None → full window; Position matches GetMouseLocation (do not subtract GuiInset).
+		moveHintImage.AnchorPoint = Vector2.new(0.5, 0.5)
+		moveHintImage.Size = UDim2.fromOffset(MOVE_ICON_SIZE, MOVE_ICON_SIZE)
+		moveHintImage.Position = UDim2.fromOffset(m.X, m.Y)
+		moveHintImage.Visible = true
+		if moveHintImage.Parent ~= confirmGui then
+			moveHintImage.Parent = confirmGui
+		end
 		return
 	end
 	if moveHintBillboard and moveHintBillboard.Parent and moveHintBillboard.Adornee == ghost then
@@ -941,26 +949,7 @@ local function updateGhostAt(anchorPos: Vector3)
 	syncConfirmButtons()
 end
 
--- Screen position for ✓ / X: top center (IgnoreGuiInset space).
-local function getPlaceChromeScreenPos(): Vector2
-	local vp = if camera then camera.ViewportSize else Vector2.new(800, 600)
-	local inset = GuiService:GetGuiInset()
-	return Vector2.new(vp.X * 0.5, inset.Y + 20)
-end
-
-local function layoutPlaceChromeAt(chrome: Vector2, size: number?)
-	local s = size or BTN_SIZE
-	if checkBtn then
-		checkBtn.AnchorPoint = Vector2.new(1, 0)
-		checkBtn.Size = UDim2.fromOffset(s, s)
-		checkBtn.Position = UDim2.fromOffset(chrome.X - 6, chrome.Y)
-	end
-	if cancelBtn then
-		cancelBtn.AnchorPoint = Vector2.new(0, 0)
-		cancelBtn.Size = UDim2.fromOffset(s, s)
-		cancelBtn.Position = UDim2.fromOffset(chrome.X + 6, chrome.Y)
-	end
-end
+-- Chrome layout/hit-test live in PlaceConfirmChrome / PlaceConfirmHitTest (register budget).
 
 local function syncConfirmButtonsImpl()
 	-- Intro owns button tween layout; once parked, always sync ✓ visibility.
@@ -975,9 +964,9 @@ local function syncConfirmButtonsImpl()
 	local aiming = mode == MODE_AIM or confirmDragging or aimFingerDown or backpackDrag or aimPinnedToHand
 	if aiming or not chromeScreenPos then
 		if aimPinnedToHand and ghost then
-			-- Ghost is on the hand — project the ghost itself, not the mouse.
-			if camera then
-				local sp, _ = camera:WorldToViewportPoint(ghost.Position)
+			local cam = Workspace.CurrentCamera
+			if cam then
+				local sp, _ = cam:WorldToViewportPoint(ghost.Position)
 				if sp.Z > 0 then
 					chromeScreenPos = Vector2.new(sp.X, sp.Y)
 				else
@@ -993,16 +982,23 @@ local function syncConfirmButtonsImpl()
 
 	if moveHintImage then
 		moveHintImage.Visible = true
-		-- Billboard tracks the ghost center in world space (fixes mobile ScreenGui inset drift).
 		attachMoveHintToGhost()
 	end
 
-	-- ✓ / X sit top-center (not on the avatar).
-	layoutPlaceChromeAt(getPlaceChromeScreenPos())
-	-- Touch/mouse: ✓ after park (Confirm). Gamepad: ✓ while aiming (place immediately).
+	-- Visibility first so torso layout can center X-only vs ✓+X pair.
 	checkBtn.Visible = validSpot and (mode == MODE_CONFIRM or gamepadPlacement)
 	cancelBtn.Visible = true
-	-- Cycle labels 1s each: X ↔ CANCEL, ✓ ↔ Enter/A/CONFIRM.
+	local bb, adornee = PlaceConfirmChrome.layoutOnTorso(
+		BTN_SIZE,
+		playerGui,
+		confirmGui,
+		chromeBillboard,
+		chromeAdorneePart,
+		checkBtn,
+		cancelBtn
+	)
+	chromeBillboard = bb
+	chromeAdorneePart = adornee
 	local showWord = (math.floor(os.clock()) % 2) == 1
 	cancelBtn.Text = if showWord then "CANCEL" else "X"
 	cancelBtn.TextStrokeColor3 = if showWord then Color3.fromRGB(60, 15, 18) else Color3.new(1, 1, 1)
@@ -1034,8 +1030,8 @@ local function makeConfirmUiImpl()
 	local gui = Instance.new("ScreenGui")
 	gui.Name = "OceanTD_PlaceConfirm"
 	gui.ResetOnSpawn = false
-	gui.IgnoreGuiInset = true -- match WorldToViewportPoint / GetMouseLocation
-	gui.ClipToDeviceSafeArea = false -- allow ✓/X near screen edges
+	gui.IgnoreGuiInset = true -- ScreenInsets.None; Position = GetMouseLocation
+	gui.ClipToDeviceSafeArea = false
 	pcall(function()
 		(gui :: any).ScreenInsets = Enum.ScreenInsets.None
 	end)
@@ -1109,7 +1105,13 @@ local function makeConfirmUiImpl()
 	cancelBtn = roundBtn("X", Color3.fromRGB(200, 50, 50), false)
 	applyGamepadButtonLabels()
 
-	local function markChromePointerDown()
+	local function markChromePointerDown(target: string)
+		-- Only a press that *starts* on ✓/X counts. Sliding onto the button mid-drag
+		-- (common on phone when releasing over Cancel) must not steal the gesture.
+		if aimFingerDown or backpackDrag or confirmDragging or confirmPressOrigin ~= nil then
+			return
+		end
+		chromePressTarget = target
 		chromeBtnPointerDown = true
 		aimFingerDown = false
 		confirmPressOrigin = nil
@@ -1117,26 +1119,23 @@ local function makeConfirmUiImpl()
 	end
 
 	-- MouseButton1Down fires on the button; also blocks ghost-aim if UIS already peeked.
-	checkBtn.MouseButton1Down:Connect(markChromePointerDown)
-	cancelBtn.MouseButton1Down:Connect(markChromePointerDown)
+	checkBtn.MouseButton1Down:Connect(function()
+		markChromePointerDown("check")
+	end)
+	cancelBtn.MouseButton1Down:Connect(function()
+		markChromePointerDown("cancel")
+	end)
 	checkBtn.InputBegan:Connect(function(input)
 		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-			markChromePointerDown()
+			markChromePointerDown("check")
 		end
 	end)
 	cancelBtn.InputBegan:Connect(function(input)
 		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-			markChromePointerDown()
+			markChromePointerDown("cancel")
 		end
 	end)
-
-	-- MouseButton1Click is more reliable than Activated alone on touch.
-	checkBtn.MouseButton1Click:Connect(function()
-		onCheck()
-	end)
-	cancelBtn.MouseButton1Click:Connect(function()
-		onCancel()
-	end)
+	-- Clicks are committed in UserInputService.InputEnded (BillboardGui Click is flaky).
 end
 makeConfirmUi = makeConfirmUiImpl
 
@@ -1223,19 +1222,31 @@ local function detachGhostForSwitch(): (BasePart?, ImageLabel?, ScreenGui?)
 	end
 	stopMoveHintAttract()
 
-	-- Ensure the live X stays usable and parked top-center (not mid-flash / not flying).
+	-- Ensure the live X stays usable and parked on torso (not mid-flash / not flying).
 	if cancelBtn then
 		cancelBtn.BackgroundColor3 = Color3.fromRGB(200, 50, 50)
 		cancelBtn.AutoButtonColor = true
 		cancelBtn.Active = true
 		cancelBtn.Visible = true
 		cancelBtn.BackgroundTransparency = 0
-		layoutPlaceChromeAt(getPlaceChromeScreenPos())
 	end
 	if checkBtn then
 		checkBtn.Visible = false
 		checkBtn.BackgroundTransparency = 0
 		checkBtn.Active = true
+	end
+	do
+		local bb, adornee = PlaceConfirmChrome.layoutOnTorso(
+			BTN_SIZE,
+			playerGui,
+			confirmGui,
+			chromeBillboard,
+			chromeAdorneePart,
+			checkBtn,
+			cancelBtn
+		)
+		chromeBillboard = bb
+		chromeAdorneePart = adornee
 	end
 
 	return g, outMove, outGui
@@ -1339,6 +1350,22 @@ local function playDisarmOutro(thenExit: () -> ())
 	local checkStartSize = if checkBtn then checkBtn.AbsoluteSize.X else BTN_SIZE
 	local moveStartSize = if moveHintImage then moveHintImage.AbsoluteSize.X else MOVE_ICON_SIZE
 
+	-- Park buttons in ScreenGui space for the fly-out (AbsolutePosition → Position).
+	if confirmGui then
+		if cancelBtn then
+			cancelBtn.Parent = confirmGui
+			cancelBtn.AnchorPoint = Vector2.new(0.5, 0.5)
+			cancelBtn.Position = UDim2.fromOffset(cancelStart.X, cancelStart.Y)
+		end
+		if checkBtn then
+			checkBtn.Parent = confirmGui
+			checkBtn.AnchorPoint = Vector2.new(0.5, 0.5)
+			if checkStart then
+				checkBtn.Position = UDim2.fromOffset(checkStart.X, checkStart.Y)
+			end
+		end
+	end
+
 	-- Ghost flies toward a near-camera point under the item slot so it reads as UI suck-in.
 	local endWorld = worldPos
 	if camera and ghostStartPos then
@@ -1420,6 +1447,13 @@ startAimLoop = function()
 		if mode ~= MODE_AIM then
 			return
 		end
+		-- Sticky Touch LastInputType must not keep raising once the mouse is aiming.
+		do
+			local last = UserInputService:GetLastInputType()
+			if last ~= Enum.UserInputType.Touch then
+				aimRaiseForTouch = false
+			end
+		end
 		keepCameraFrozen()
 		if postPlaceWaiting or armIntroAnimating then
 			return
@@ -1497,7 +1531,7 @@ startAimLoop = function()
 end
 
 -- Tween ghost + move icon from the backpack item cell into the avatar's hand.
--- keepChromePinned: leave ✓/X at top-center (used when swapping corals).
+-- keepChromePinned: leave ✓/X at torso (used when swapping corals).
 local function playArmIntroFromSlot(itemId: string, seedColor: Color3, onDone: () -> (), keepChromePinned: boolean?)
 	stopArmIntro()
 	armIntroAnimating = true
@@ -1538,10 +1572,9 @@ local function playArmIntroFromSlot(itemId: string, seedColor: Color3, onDone: (
 	makeConfirmUi()
 	setMoveHintVisible(true)
 
-	local chromePos = getPlaceChromeScreenPos()
-	-- Swap path: park X at top-center immediately; only ghost + move fly in.
+	local chromePos = PlaceConfirmChrome.screenPos(chromeAdorneePart)
+	-- Swap path: park X on torso immediately; only ghost + move fly in.
 	if keepChromePinned then
-		layoutPlaceChromeAt(chromePos)
 		if cancelBtn then
 			cancelBtn.Visible = true
 			cancelBtn.BackgroundColor3 = Color3.fromRGB(200, 50, 50)
@@ -1551,6 +1584,19 @@ local function playArmIntroFromSlot(itemId: string, seedColor: Color3, onDone: (
 		end
 		if checkBtn then
 			checkBtn.Visible = false
+		end
+		do
+			local bb, adornee = PlaceConfirmChrome.layoutOnTorso(
+				BTN_SIZE,
+				playerGui,
+				confirmGui,
+				chromeBillboard,
+				chromeAdorneePart,
+				checkBtn,
+				cancelBtn
+			)
+			chromeBillboard = bb
+			chromeAdorneePart = adornee
 		end
 	end
 
@@ -1577,7 +1623,7 @@ local function playArmIntroFromSlot(itemId: string, seedColor: Color3, onDone: (
 				handScreen = Vector2.new(sp.X, sp.Y)
 			end
 		end
-		chromePos = getPlaceChromeScreenPos()
+		chromePos = PlaceConfirmChrome.screenPos(chromeAdorneePart)
 
 		local u = math.clamp((os.clock() - t0) / ARM_INTRO_SEC, 0, 1)
 		local a = 1 - (1 - u) * (1 - u)
@@ -1603,18 +1649,30 @@ local function playArmIntroFromSlot(itemId: string, seedColor: Color3, onDone: (
 		end
 
 		if keepChromePinned then
-			layoutPlaceChromeAt(chromePos)
 			if cancelBtn and cancelBtn.Parent then
 				cancelBtn.Visible = true
 			end
 			if checkBtn and checkBtn.Parent then
 				checkBtn.Visible = false
 			end
+			do
+				local bb, adornee = PlaceConfirmChrome.layoutOnTorso(
+					BTN_SIZE,
+					playerGui,
+					confirmGui,
+					chromeBillboard,
+					chromeAdorneePart,
+					checkBtn,
+					cancelBtn
+				)
+				chromeBillboard = bb
+				chromeAdorneePart = adornee
+			end
 		else
-			-- Fly ✓/X from backpack cell toward top-center chrome.
+			-- Fly ✓/X from backpack cell toward torso chrome.
 			local btnTravel = slotScreen:Lerp(chromePos, a)
 			local bsize = BTN_SIZE * math.max(scale, 0.35)
-			layoutPlaceChromeAt(btnTravel, bsize)
+			PlaceConfirmChrome.layoutAt(btnTravel, bsize, confirmGui, chromeBillboard, checkBtn, cancelBtn)
 			if cancelBtn and cancelBtn.Parent then
 				cancelBtn.Visible = true
 			end
@@ -1632,7 +1690,25 @@ local function playArmIntroFromSlot(itemId: string, seedColor: Color3, onDone: (
 			if moveHintImage then
 				moveHintImage.Size = UDim2.fromOffset(MOVE_ICON_SIZE, MOVE_ICON_SIZE)
 			end
-			layoutPlaceChromeAt(getPlaceChromeScreenPos())
+			if checkBtn then
+				checkBtn.Visible = false
+			end
+			if cancelBtn then
+				cancelBtn.Visible = true
+			end
+			do
+				local bb, adornee = PlaceConfirmChrome.layoutOnTorso(
+					BTN_SIZE,
+					playerGui,
+					confirmGui,
+					chromeBillboard,
+					chromeAdorneePart,
+					checkBtn,
+					cancelBtn
+				)
+				chromeBillboard = bb
+				chromeAdorneePart = adornee
+			end
 			local color = ghostBaseColor or seedColor
 			HandOrb.arm(color)
 			aimPinnedToHand = true
@@ -1658,6 +1734,14 @@ beginAim = function(itemId: string, scaleIn: boolean?, keepChromePinned: boolean
 	aimPinnedToCenter = false
 	aimPinnedToHand = true
 	aimPinOrigin = UserInputService:GetMouseLocation()
+	-- Default: mouse centers on cursor. Touch raise only when the selecting input was touch.
+	aimRaiseForTouch = false
+	do
+		local last = UserInputService:GetLastInputType()
+		if last == Enum.UserInputType.Touch then
+			aimRaiseForTouch = true
+		end
+	end
 
 	local spId = getSpeciesIdForItem(itemId)
 	local sp = spId and SpeciesCatalog.get(spId)
@@ -1722,6 +1806,7 @@ local function beginAimFromDrag(itemId: string)
 	aimPinnedToHand = false
 	aimPinOrigin = nil
 	pendingGhostScaleIn = true
+	aimRaiseForTouch = UserInputService:GetLastInputType() == Enum.UserInputType.Touch
 
 	local spId = getSpeciesIdForItem(itemId)
 	local sp = spId and SpeciesCatalog.get(spId)
@@ -2021,7 +2106,7 @@ function PlacementController.beginForItem(itemId: string)
 		chromeBtnPointerDown = false
 		postPlaceWaiting = false
 
-		-- Keep the same X at top-center; only ghost + move icon crossfade.
+		-- Keep the same X at torso; only ghost + move icon crossfade.
 		beginAim(nextId, nil, true)
 		return
 	end
@@ -2046,11 +2131,14 @@ function PlacementController.forceExit()
 end
 
 -- Drag-out from backpack (mobile) / click-drop (PC)
-function PlacementController.notifyPointerDownFromBackpack(itemId: string, _screenPos: Vector2)
+function PlacementController.notifyPointerDownFromBackpack(itemId: string, _screenPos: Vector2, fromTouch: boolean?)
 	PlacementController.setGamepadPlacement(false)
+	aimRaiseForTouch = fromTouch == true
 	local function startDrag()
 		beginAimFromDrag(itemId)
 		backpackDrag = true
+		-- beginAimFromDrag may overwrite from LastInputType — keep the caller's pointer kind.
+		aimRaiseForTouch = fromTouch == true
 		local pos = raycastForPlace()
 		if pos then
 			updateGhostAt(pos)
@@ -2124,67 +2212,12 @@ InventoryState.onOpenChanged(function(isOpen)
 	end
 end)
 
--- Screen space for hit tests: GetMouseLocation matches IgnoreGuiInset ScreenGuis.
-local function pointerScreenPos(_input: InputObject): Vector2
-	return UserInputService:GetMouseLocation()
-end
-
-local function isOverConfirmButton(screenPos: Vector2): boolean
-	if chromeBtnPointerDown then
-		return true
-	end
-	local function hit(btn: GuiObject?): boolean
-		if not btn or not btn.Visible then
-			return false
-		end
-		local p = btn.AbsolutePosition
-		local s = btn.AbsoluteSize
-		-- Pad so AIM-mode clicks on the circle edge still count (not stolen as ghost-drag).
-		local pad = 18
-		return screenPos.X >= p.X - pad
-			and screenPos.X <= p.X + s.X + pad
-			and screenPos.Y >= p.Y - pad
-			and screenPos.Y <= p.Y + s.Y + pad
-	end
-	if hit(checkBtn) or hit(cancelBtn) then
-		return true
-	end
-	-- Authoritative under-cursor check (handles pin-mode AbsolutePosition quirks).
-	if confirmGui then
-		local function underChrome(x: number, y: number): boolean
-			local ok, objs = pcall(function()
-				return playerGui:GetGuiObjectsAtPosition(x, y)
-			end)
-			if not ok or typeof(objs) ~= "table" then
-				return false
-			end
-			for _, obj in ipairs(objs) do
-				if cancelBtn and (obj == cancelBtn or obj:IsDescendantOf(cancelBtn)) then
-					return true
-				end
-				if checkBtn and checkBtn.Visible and (obj == checkBtn or obj:IsDescendantOf(checkBtn)) then
-					return true
-				end
-			end
-			return false
-		end
-		if underChrome(screenPos.X, screenPos.Y) then
-			return true
-		end
-		local inset = GuiService:GetGuiInset()
-		if inset.X ~= 0 or inset.Y ~= 0 then
-			if underChrome(screenPos.X - inset.X, screenPos.Y - inset.Y) then
-				return true
-			end
-			if underChrome(screenPos.X + inset.X, screenPos.Y + inset.Y) then
-				return true
-			end
-		end
-	end
-	return false
-end
+-- Hit tests live in PlaceConfirmHitTest (register budget).
 
 table.insert(inputConns, UserInputService.InputBegan:Connect(function(input, _processed)
+	if mode ~= MODE_OFF then
+		notePlacePointerInput(input)
+	end
 	if mode == MODE_OFF then
 		return
 	end
@@ -2200,8 +2233,10 @@ table.insert(inputConns, UserInputService.InputBegan:Connect(function(input, _pr
 		local isMouse = input.UserInputType == Enum.UserInputType.MouseButton1
 		local isTouch = input.UserInputType == Enum.UserInputType.Touch
 		if isMouse or isTouch then
-			local screenPos = pointerScreenPos(input)
-			if isOverConfirmButton(screenPos) then
+			local screenPos = PlaceConfirmHitTest.pointerScreenPos(input)
+			local target = PlaceConfirmHitTest.resolveTarget(screenPos, checkBtn, cancelBtn, playerGui)
+			if target then
+				chromePressTarget = target
 				chromeBtnPointerDown = true
 			end
 		end
@@ -2246,14 +2281,16 @@ table.insert(inputConns, UserInputService.InputBegan:Connect(function(input, _pr
 		return
 	end
 
-	local screenPos = pointerScreenPos(input)
+	local screenPos = PlaceConfirmHitTest.pointerScreenPos(input)
 
-	-- ✓ / X own the press: never start a ghost drag (lets MouseButton1Click fire).
-	-- Must win over AIM even when `processed` is false (common on first pin-mode click).
-	if isOverConfirmButton(screenPos) then
+	-- ✓ / X own the press: never start a ghost drag.
+	-- BillboardGui often skips MouseButton1Click — commit happens on InputEnded.
+	local chromeTarget = PlaceConfirmHitTest.resolveTarget(screenPos, checkBtn, cancelBtn, playerGui)
+	if chromeTarget then
 		confirmPressOrigin = nil
 		confirmDragging = false
 		aimFingerDown = false
+		chromePressTarget = chromeTarget
 		chromeBtnPointerDown = true
 		return
 	end
@@ -2287,13 +2324,16 @@ table.insert(inputConns, UserInputService.InputBegan:Connect(function(input, _pr
 end))
 
 table.insert(inputConns, UserInputService.InputChanged:Connect(function(input, _processed)
+	if mode ~= MODE_OFF then
+		notePlacePointerInput(input)
+	end
 	if postPlaceWaiting or mode == MODE_OFF or disarmAnimating or chromeBtnPointerDown then
 		return
 	end
 	if input.UserInputType ~= Enum.UserInputType.MouseMovement and input.UserInputType ~= Enum.UserInputType.Touch then
 		return
 	end
-	local now = pointerScreenPos(input)
+	local now = PlaceConfirmHitTest.pointerScreenPos(input)
 	if mode == MODE_AIM and (aimFingerDown or backpackDrag) then
 		local pos = raycastForPlace()
 		if pos then
@@ -2323,13 +2363,20 @@ table.insert(inputConns, UserInputService.InputEnded:Connect(function(input, _pr
 	if input.UserInputType ~= Enum.UserInputType.MouseButton1 and input.UserInputType ~= Enum.UserInputType.Touch then
 		return
 	end
-	local screenPos = pointerScreenPos(input)
-	-- Cancel/check press: never park the ghost on release.
-	if chromeBtnPointerDown or isOverConfirmButton(screenPos) then
+	local screenPos = PlaceConfirmHitTest.pointerScreenPos(input)
+	-- Cancel/check press: commit on release (BillboardGui MouseButton1Click is unreliable).
+	if chromeBtnPointerDown then
+		local target = chromePressTarget
 		chromeBtnPointerDown = false
+		chromePressTarget = nil
 		aimFingerDown = false
 		confirmPressOrigin = nil
 		confirmDragging = false
+		if target == "check" then
+			onCheck()
+		elseif target == "cancel" then
+			onCancel()
+		end
 		return
 	end
 	if disarmAnimating then
@@ -2337,11 +2384,11 @@ table.insert(inputConns, UserInputService.InputEnded:Connect(function(input, _pr
 	end
 	if mode == MODE_AIM and aimFingerDown then
 		aimFingerDown = false
-		if not isOverConfirmButton(screenPos) then
-			local pos = placeAnchor or raycastForPlace()
-			if pos then
-				enterConfirm(pos)
-			end
+		-- Park where the finger lifted — even if release is over ✓/X. Cancel/confirm
+		-- only run when the press *started* on those buttons (chromeBtnPointerDown).
+		local pos = placeAnchor or raycastForPlace()
+		if pos then
+			enterConfirm(pos)
 		end
 		return
 	end
