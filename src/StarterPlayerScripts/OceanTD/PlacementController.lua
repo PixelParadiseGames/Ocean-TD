@@ -67,6 +67,8 @@ local blockFlashBaseMaterial: Enum.Material? = nil
 local blockFlashBaseColor: Color3? = nil
 local backpackDrag = false -- pointer-driven aim from backpack pull
 local aimFingerDown = false -- world drag after tap-select (mobile/PC)
+-- Press started during AIM (including on the backpack). Park on lift unless still on the backpack.
+local placePointerHeld = false
 local confirmDragging = false
 local confirmPressOrigin: Vector2? = nil -- nil while pressing ✓/X
 local chromeScreenPos: Vector2? = nil -- move-icon aim freeze; ✓/X sit on torso
@@ -115,7 +117,8 @@ local CHECK_BRIGHT_GREEN = Color3.fromRGB(90, 255, 120)
 local CHECK_HUNTER_GREEN = Color3.fromRGB(35, 85, 45)
 local CANCEL_FLASH_RED = Color3.fromRGB(255, 70, 70)
 local DISARM_SCALE_SEC = 1
-local ARM_INTRO_SEC = 0.7
+local ARM_INTRO_SEC = 0.38
+local ARM_INTRO_START_SCALE = 0.22
 local POST_PLACE_GHOST_DELAY = 1
 local GHOST_SCALE_IN_SEC = 0.5
 
@@ -130,6 +133,7 @@ local disarmAnimating = false
 local disarmConn: RBXScriptConnection? = nil
 local armIntroAnimating = false
 local armIntroConn: RBXScriptConnection? = nil
+local armIntroFullSize: Vector3? = nil
 -- Parallel item-switch: old ghost/UI flies home while the new one flies out.
 local outgoingConn: RBXScriptConnection? = nil
 local outgoingGhost: BasePart? = nil
@@ -578,12 +582,39 @@ local function raycastPointer(screenPos: Vector2): Vector3?
 	return castPlaceRay(ray.Origin, ray.Direction)
 end
 
+-- Park on finger-up: use this release's screen pos, then last ghost, never fail silently.
+local function resolveParkPos(screenPos: Vector2?): Vector3?
+	if screenPos then
+		local raised = PlaceAimScreen.raiseIfTouch(screenPos, aimRaiseForTouch, gamepadPlacement)
+		local hit = raycastPointer(raised)
+		if hit then
+			return hit
+		end
+		if raised ~= screenPos then
+			hit = raycastPointer(screenPos)
+			if hit then
+				return hit
+			end
+		end
+	end
+	if placeAnchor then
+		return placeAnchor
+	end
+	if ghost then
+		return ghost.Position
+	end
+	return nil
+end
+
 -- Finger / chrome aim point helpers live in PlaceAimScreen (register budget).
 local function getPlaceAimScreenPos(): Vector2
 	return PlaceAimScreen.getPlaceAimPos(gamepadPlacement, gamepadCursor, aimPinnedToCenter, aimRaiseForTouch)
 end
 
 local function notePlacePointerInput(input: InputObject)
+	if PlaceAimScreen.isEmulatedMouse(input) then
+		return
+	end
 	if input.UserInputType == Enum.UserInputType.Touch then
 		aimRaiseForTouch = true
 	elseif input.UserInputType == Enum.UserInputType.MouseButton1
@@ -1439,6 +1470,53 @@ stopArmIntro = function()
 	armIntroAnimating = false
 end
 
+-- Finger left the backpack during the slot→hand fly-in: snap to aim under the pointer.
+local function abortArmIntroToAim(screenPos: Vector2)
+	if not armIntroAnimating then
+		return
+	end
+	stopArmIntro()
+	if ghost and ghost.Parent and armIntroFullSize then
+		ghost.Size = armIntroFullSize
+		ghost.Transparency = 0.4
+	end
+	if moveHintImage then
+		moveHintImage.Size = UDim2.fromOffset(MOVE_ICON_SIZE, MOVE_ICON_SIZE)
+	end
+	if checkBtn then
+		checkBtn.Visible = false
+	end
+	if cancelBtn then
+		cancelBtn.Visible = true
+	end
+	do
+		local bb, adornee = PlaceConfirmChrome.layoutOnTorso(
+			BTN_SIZE,
+			playerGui,
+			confirmGui,
+			chromeBillboard,
+			chromeAdorneePart,
+			checkBtn,
+			cancelBtn
+		)
+		chromeBillboard = bb
+		chromeAdorneePart = adornee
+	end
+	local color = ghostBaseColor
+	if color then
+		HandOrb.arm(color)
+	end
+	aimFingerDown = true
+	releaseHandPin()
+	startMoveHintAttract()
+	startAimLoop()
+	local pos = resolveParkPos(screenPos)
+	if pos then
+		updateGhostAt(pos)
+	end
+	syncConfirmButtons()
+end
+
 startAimLoop = function()
 	stopAimLoop()
 	aimRayAccum = 0
@@ -1568,7 +1646,8 @@ local function playArmIntroFromSlot(itemId: string, seedColor: Color3, onDone: (
 	end
 
 	local fullSize = ghostPart.Size
-	ghostPart.Size = fullSize * 0.08
+	armIntroFullSize = fullSize
+	ghostPart.Size = fullSize * ARM_INTRO_START_SCALE
 	makeConfirmUi()
 	setMoveHintVisible(true)
 
@@ -1627,7 +1706,7 @@ local function playArmIntroFromSlot(itemId: string, seedColor: Color3, onDone: (
 
 		local u = math.clamp((os.clock() - t0) / ARM_INTRO_SEC, 0, 1)
 		local a = 1 - (1 - u) * (1 - u)
-		local scale = 0.08 + 0.92 * a
+		local scale = ARM_INTRO_START_SCALE + (1 - ARM_INTRO_START_SCALE) * a
 
 		if ghostPart.Parent then
 			ghostPart.Size = fullSize * scale
@@ -1713,6 +1792,11 @@ local function playArmIntroFromSlot(itemId: string, seedColor: Color3, onDone: (
 			HandOrb.arm(color)
 			aimPinnedToHand = true
 			aimPinOrigin = UserInputService:GetMouseLocation()
+			-- Finger still down off the backpack: treat as an aim drag so lift parks + shows ✓.
+			if placePointerHeld and not InventoryState.isPointerOverBackpack(aimPinOrigin) then
+				aimFingerDown = true
+				releaseHandPin()
+			end
 			startMoveHintAttract()
 			syncConfirmButtons()
 			onDone()
@@ -1838,6 +1922,7 @@ local function exitPlacement(clearArmed: boolean)
 	mode = MODE_OFF
 	backpackDrag = false
 	aimFingerDown = false
+	placePointerHeld = false
 	confirmDragging = false
 	confirmPressOrigin = nil
 	chromeScreenPos = nil
@@ -1993,11 +2078,16 @@ local function enterConfirm(worldPos: Vector3)
 	if armIntroAnimating then
 		stopArmIntro()
 	end
+	if ghost and ghost.Parent and armIntroFullSize then
+		ghost.Size = armIntroFullSize
+		ghost.Transparency = 0.4
+	end
 	mode = MODE_CONFIRM
 	backpackDrag = false
 	confirmDragging = false
 	confirmPressOrigin = nil
 	aimFingerDown = false
+	placePointerHeld = false
 	aimPinnedToHand = false
 	aimPinnedToCenter = false
 	confirmPos = worldPos
@@ -2018,6 +2108,32 @@ local function enterConfirm(worldPos: Vector3)
 	end)
 	syncConfirmButtons()
 	log("Confirm mode", if validSpot then "valid" else (rejectReason or "invalid"))
+end
+
+-- World press (or drag off the backpack): show ✓ while the finger is still down, then drag to slide.
+local function parkAtPointer(screenPos: Vector2)
+	if gamepadPlacement then
+		return
+	end
+	if armIntroAnimating then
+		abortArmIntroToAim(screenPos)
+	else
+		releaseHandPin()
+	end
+	local pos = resolveParkPos(screenPos)
+	if not pos then
+		aimFingerDown = true
+		placePointerHeld = true
+		return
+	end
+	if mode ~= MODE_CONFIRM then
+		enterConfirm(pos)
+	else
+		confirmPos = pos
+		updateGhostAt(pos)
+	end
+	confirmPressOrigin = screenPos
+	confirmDragging = true
 end
 
 function PlacementController.isActive(): boolean
@@ -2137,6 +2253,8 @@ function PlacementController.notifyPointerDownFromBackpack(itemId: string, _scre
 	local function startDrag()
 		beginAimFromDrag(itemId)
 		backpackDrag = true
+		aimFingerDown = true
+		placePointerHeld = true
 		-- beginAimFromDrag may overwrite from LastInputType — keep the caller's pointer kind.
 		aimRaiseForTouch = fromTouch == true
 		local pos = raycastForPlace()
@@ -2148,29 +2266,46 @@ function PlacementController.notifyPointerDownFromBackpack(itemId: string, _scre
 		if disarmAnimating then
 			return
 		end
+		-- Pulling the same coral during the slot→hand fly-in: follow the finger.
+		-- Don't fly the ghost home first or the lift can happen before AIM is ready and ✓ never shows.
+		if armIntroAnimating and (armedItemId == nil or armedItemId == itemId) then
+			parkAtPointer(_screenPos)
+			backpackDrag = true
+			aimFingerDown = true
+			placePointerHeld = true
+			aimRaiseForTouch = fromTouch == true
+			return
+		end
 		playDisarmOutro(function()
 			exitPlacement(false)
 			startDrag()
+			parkAtPointer(_screenPos)
 		end)
 		return
 	end
 	startDrag()
+	parkAtPointer(_screenPos)
 end
 
 function PlacementController.notifyPointerMove(_screenPos: Vector2)
-	if mode ~= MODE_AIM then
+	if mode ~= MODE_AIM and mode ~= MODE_CONFIRM then
 		return
 	end
 	local pos = raycastForPlace()
 	if pos then
+		if mode == MODE_CONFIRM then
+			confirmPos = pos
+		end
 		updateGhostAt(pos)
 	end
 end
 
 function PlacementController.notifyPointerUp(_screenPos: Vector2)
 	if mode == MODE_AIM then
-		local pos = placeAnchor or raycastForPlace()
 		backpackDrag = false
+		aimFingerDown = false
+		placePointerHeld = false
+		local pos = resolveParkPos(_screenPos)
 		if pos then
 			enterConfirm(pos)
 		end
@@ -2215,8 +2350,12 @@ end)
 -- Hit tests live in PlaceConfirmHitTest (register budget).
 
 table.insert(inputConns, UserInputService.InputBegan:Connect(function(input, _processed)
+	PlaceAimScreen.trackTouch(input, false)
 	if mode ~= MODE_OFF then
 		notePlacePointerInput(input)
+	end
+	if PlaceAimScreen.isEmulatedMouse(input) then
+		return
 	end
 	if mode == MODE_OFF then
 		return
@@ -2238,6 +2377,13 @@ table.insert(inputConns, UserInputService.InputBegan:Connect(function(input, _pr
 			if target then
 				chromePressTarget = target
 				chromeBtnPointerDown = true
+			else
+				-- Remember the press even if it starts on the backpack (drag-off parks).
+				placePointerHeld = true
+				aimRaiseForTouch = isTouch
+				if not InventoryState.isPointerOverBackpack(screenPos) then
+					parkAtPointer(screenPos)
+				end
 			end
 		end
 		return
@@ -2299,6 +2445,7 @@ table.insert(inputConns, UserInputService.InputBegan:Connect(function(input, _pr
 		confirmPressOrigin = nil
 		confirmDragging = false
 		aimFingerDown = false
+		placePointerHeld = true
 		return
 	end
 	-- Ignore gameProcessed for world aim/park: HUD/quickbar often marks clicks processed
@@ -2310,22 +2457,18 @@ table.insert(inputConns, UserInputService.InputBegan:Connect(function(input, _pr
 		return
 	end
 
-	-- Aim: hold + slide moves ghost (tap-select then drag on mobile). Park on release.
+	-- Aim / intro: world press parks immediately so ✓ shows while the finger is still down.
 	if mode == MODE_AIM and not backpackDrag then
-		aimFingerDown = true
-		aimPinnedToCenter = false
-		releaseHandPin()
-		aimPinOrigin = nil
-		local pos = raycastForPlace()
-		if pos then
-			updateGhostAt(pos)
-		end
+		parkAtPointer(screenPos)
 	end
 end))
 
 table.insert(inputConns, UserInputService.InputChanged:Connect(function(input, _processed)
 	if mode ~= MODE_OFF then
 		notePlacePointerInput(input)
+	end
+	if PlaceAimScreen.isEmulatedMouse(input) then
+		return
 	end
 	if postPlaceWaiting or mode == MODE_OFF or disarmAnimating or chromeBtnPointerDown then
 		return
@@ -2334,8 +2477,20 @@ table.insert(inputConns, UserInputService.InputChanged:Connect(function(input, _
 		return
 	end
 	local now = PlaceConfirmHitTest.pointerScreenPos(input)
+	if armIntroAnimating then
+		if (placePointerHeld or aimFingerDown) and not InventoryState.isPointerOverBackpack(now) then
+			parkAtPointer(now)
+		end
+		return
+	end
+	if mode == MODE_AIM and placePointerHeld and not aimFingerDown and not backpackDrag then
+		if not InventoryState.isPointerOverBackpack(now) then
+			parkAtPointer(now)
+			return
+		end
+	end
 	if mode == MODE_AIM and (aimFingerDown or backpackDrag) then
-		local pos = raycastForPlace()
+		local pos = resolveParkPos(now)
 		if pos then
 			updateGhostAt(pos)
 		end
@@ -2348,7 +2503,7 @@ table.insert(inputConns, UserInputService.InputChanged:Connect(function(input, _
 			end
 			confirmDragging = true
 		end
-		local pos = raycastForPlace()
+		local pos = resolveParkPos(now)
 		if pos then
 			confirmPos = pos
 			updateGhostAt(pos)
@@ -2357,6 +2512,10 @@ table.insert(inputConns, UserInputService.InputChanged:Connect(function(input, _
 end))
 
 table.insert(inputConns, UserInputService.InputEnded:Connect(function(input, _processed)
+	if PlaceAimScreen.isEmulatedMouse(input) then
+		return
+	end
+	PlaceAimScreen.trackTouch(input, true)
 	if postPlaceWaiting or mode == MODE_OFF then
 		return
 	end
@@ -2370,6 +2529,7 @@ table.insert(inputConns, UserInputService.InputEnded:Connect(function(input, _pr
 		chromeBtnPointerDown = false
 		chromePressTarget = nil
 		aimFingerDown = false
+		placePointerHeld = false
 		confirmPressOrigin = nil
 		confirmDragging = false
 		if target == "check" then
@@ -2382,11 +2542,20 @@ table.insert(inputConns, UserInputService.InputEnded:Connect(function(input, _pr
 	if disarmAnimating then
 		return
 	end
-	if mode == MODE_AIM and aimFingerDown then
+	if mode == MODE_AIM then
+		local overBackpack = InventoryState.isPointerOverBackpack(screenPos)
+		local ghostOnPlot = not aimPinnedToHand
+		local shouldPark = aimFingerDown or backpackDrag or ghostOnPlot or (placePointerHeld and not overBackpack)
 		aimFingerDown = false
+		backpackDrag = false
+		placePointerHeld = false
+		-- Select-tap lift is still on the backpack with the coral in-hand — don't park.
+		if (overBackpack and not ghostOnPlot) or not shouldPark then
+			return
+		end
 		-- Park where the finger lifted — even if release is over ✓/X. Cancel/confirm
 		-- only run when the press *started* on those buttons (chromeBtnPointerDown).
-		local pos = placeAnchor or raycastForPlace()
+		local pos = resolveParkPos(screenPos)
 		if pos then
 			enterConfirm(pos)
 		end

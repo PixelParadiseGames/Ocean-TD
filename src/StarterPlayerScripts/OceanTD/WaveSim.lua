@@ -23,6 +23,7 @@ local ClientPlot = require(script.Parent:WaitForChild("ClientPlot"))
 local WaveEntityPool = require(script.Parent:WaitForChild("WaveEntityPool"))
 local WaveEndVfx = require(script.Parent:WaitForChild("WaveEndVfx"))
 local WaveStartVfx = require(script.Parent:WaitForChild("WaveStartVfx"))
+local Wave1LeadArrow = require(script.Parent:WaitForChild("Wave1LeadArrow"))
 local WaveFeedPayout = require(script.Parent:WaitForChild("WaveFeedPayout"))
 local SkillPowerUpUI = require(script.Parent:WaitForChild("SkillPowerUpUI"))
 
@@ -1422,6 +1423,14 @@ local function beginWave(wave: number)
 	if path and #path.segments > 0 then
 		WaveStartVfx.play(wave, path.segments[1].w0)
 	end
+	if wave == 1 then
+		Wave1LeadArrow.start(function()
+			local fish = WaveSim.getFurthestLiveFish()
+			return if fish then fish.position else nil
+		end)
+	else
+		Wave1LeadArrow.stop()
+	end
 	notifyHud()
 end
 
@@ -1805,6 +1814,7 @@ local function hardCleanup()
 	waveSpawning = false
 	destroyArrowPreview()
 	WaveStartVfx.cancel()
+	Wave1LeadArrow.stop()
 end
 
 -- Wipe current wave entities without scoring hearts / fishFed, then start the next wave.
@@ -1886,6 +1896,23 @@ function WaveSim.getFurthestUnfedFish(): { id: number, position: Vector3 }?
 			continue
 		end
 		if not f.root.Parent then
+			continue
+		end
+		if not best or f.dist > best.dist then
+			best = f
+		end
+	end
+	if not best then
+		return nil
+	end
+	return { id = best.id, position = best.root.Position }
+end
+
+-- Furthest along the route among fish still swimming (fed or hungry).
+function WaveSim.getFurthestLiveFish(): { id: number, position: Vector3 }?
+	local best: FishAgent? = nil
+	for _, f in ipairs(fishList) do
+		if f.finished or not f.root.Parent then
 			continue
 		end
 		if not best or f.dist > best.dist then

@@ -1520,14 +1520,8 @@ local function makeItemButton(def, layoutOrder: number, instanceSuffix: string?)
 		end)
 
 		endConn = UserInputService.InputEnded:Connect(function(ended)
-			if input.UserInputType == Enum.UserInputType.Touch then
-				if ended.UserInputType ~= Enum.UserInputType.Touch then
-					return
-				end
-			else
-				if ended.UserInputType ~= Enum.UserInputType.MouseButton1 then
-					return
-				end
+			if ended ~= input then
+				return
 			end
 			moveConn:Disconnect()
 			endConn:Disconnect()

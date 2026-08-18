@@ -9,7 +9,19 @@ local UserInputService = game:GetService("UserInputService")
 
 local PlaceConfirmHitTest = {}
 
-function PlaceConfirmHitTest.pointerScreenPos(_input: InputObject?): Vector2
+function PlaceConfirmHitTest.pointerScreenPos(input: InputObject?): Vector2
+	-- GetMouseLocation stays on the backpack tap during a follow-up touch, so ✓ never parked.
+	-- Touch / mouse Input.Position is GUI space; ScreenPointToRay wants inset-inclusive.
+	if input then
+		local t = input.UserInputType
+		if t == Enum.UserInputType.Touch
+			or t == Enum.UserInputType.MouseButton1
+			or t == Enum.UserInputType.MouseMovement
+		then
+			local inset = GuiService:GetGuiInset()
+			return Vector2.new(input.Position.X + inset.X, input.Position.Y + inset.Y)
+		end
+	end
 	return UserInputService:GetMouseLocation()
 end
 

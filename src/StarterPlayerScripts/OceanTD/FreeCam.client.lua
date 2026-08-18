@@ -30,8 +30,8 @@ local RelocateController = require(script.Parent:WaitForChild("RelocateControlle
 local WaveSim = require(script.Parent:WaitForChild("WaveSim"))
 local Wave1FishCam = require(script.Parent:WaitForChild("Wave1FishCam"))
 
-local RED = Color3.fromRGB(220, 50, 55)
-local GREEN = Color3.fromRGB(40, 220, 110)
+local RED = Color3.fromRGB(255, 40, 40)
+local GREEN = Color3.fromRGB(40, 255, 70)
 local FISH_CYAN = Color3.fromRGB(40, 200, 220)
 local STROKE_NAME = "_OceanTD_FreeCamStroke"
 local STROKE_THICK = 3
@@ -42,7 +42,8 @@ local DPAD_ACTION = "OceanTD_FreeCamDPad"
 local MARGIN = 0.75
 local SKY_CAM_NAME = "SkyCam"
 local SKY_FOCUS_NAME = "SkyCamFocus"
-local FISH_FOLLOW_RATE = 4.2
+local FISH_DAMP_RATE = 0.95 -- same-fish damper; filters path twitches
+local FISH_CAM_RATE = 1.7 -- camera body follow (slower than look-at focus)
 local FISH_SWITCH_SEC = 3.5
 local FISH_CHASE_DIST = 31.2 -- 20% farther than 26 at closest
 local FISH_CHASE_HEIGHT = 12
@@ -113,6 +114,7 @@ local touchMoveVec = Vector2.zero -- -1..1
 local lookTouch: InputObject? = nil
 local lookTouchLast = Vector2.zero
 local mouseLookLast: Vector2? = nil
+local touchDownCount = 0
 
 local keysDown: { [Enum.KeyCode]: boolean } = {}
 local moveStick = Vector2.zero
@@ -125,6 +127,7 @@ local cachedPlotId: string? = nil
 -- FishCam follow (waves on)
 local fishTargetId: number? = nil
 local fishFocusPos = Vector3.zero
+local fishDampPos = Vector3.zero
 local fishSwitchFrom = Vector3.zero
 local fishSwitchTo = Vector3.zero
 local fishSwitchT0 = 0
@@ -294,8 +297,8 @@ local function applyIconChrome(icon: ModeIcon, relativeTo: CamMode, collapsed: b
 	icon.root.Visible = true
 	icon.stroke.Enabled = true
 	icon.stroke.Thickness = if isActive then STROKE_THICK + 1 else STROKE_THICK
-	icon.stroke.Color = icon.brand
-	icon.stroke.Transparency = if isActive then 0 elseif collapsed then 0.7 else 0.35
+	icon.stroke.Color = if isActive then GREEN else RED
+	icon.stroke.Transparency = 0
 	icon.root.Rotation = 0
 end
 
@@ -536,6 +539,10 @@ local function isFishCamLook(): boolean
 end
 
 local function isMouseLookHeld(): boolean
+	-- Touch is emulated as MouseButton1; GetMouseLocation jumps during touch and fights look.
+	if touchDownCount > 0 then
+		return false
+	end
 	return UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1)
 		or UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton2)
 end
@@ -695,6 +702,7 @@ local function resetFishFollowState(seed: Vector3?)
 	fishTargetId = nil
 	fishSwitching = false
 	fishFocusPos = seed or camPos
+	fishDampPos = fishFocusPos
 	fishSwitchFrom = fishFocusPos
 	fishSwitchTo = fishFocusPos
 	resetFishOrbitClock()
@@ -728,6 +736,10 @@ local function fishChaseOffset(dt: number): Vector3
 end
 
 local function applyLookDelta(dx: number, dy: number)
+	-- Ignore one-frame spikes (touch/mouse emulation jumps) that invert the view.
+	if math.abs(dx) > 1.2 or math.abs(dy) > 1.2 then
+		return
+	end
 	if mode == "fishcam" and WaveSim.isRunning() then
 		-- Steer around the fish; auto orbit continues from this heading.
 		fishOrbitAngle -= dx
@@ -740,6 +752,7 @@ end
 
 local function tickMouseDragLook()
 	-- GetMouseDelta is 0 with a free cursor — track screen position instead.
+	-- Never mix this with touch: emulated cursor coords fight the finger look.
 	if not isFishCamLook() or not isMouseLookHeld() then
 		mouseLookLast = nil
 		return
@@ -748,7 +761,7 @@ local function tickMouseDragLook()
 	local prev = mouseLookLast
 	if prev then
 		local d = loc - prev
-		if d.Magnitude > 0.5 then
+		if d.Magnitude > 0.5 and d.Magnitude < 180 then
 			applyLookDelta(d.X * LOOK_SENS_MOUSE, d.Y * LOOK_SENS_MOUSE)
 		end
 	end
@@ -890,22 +903,26 @@ local function tickFishFollow(dt: number)
 		end
 	end
 
+	-- Damp the live fish pose so path jerks don't snap the camera.
+	local dampA = 1 - math.exp(-FISH_DAMP_RATE * math.max(dt, 0))
+	fishDampPos = fishDampPos:Lerp(goal, dampA)
+
 	if fishSwitching then
 		local u = math.clamp((os.clock() - fishSwitchT0) / FISH_SWITCH_SEC, 0, 1)
 		local e = u * u * (3 - 2 * u)
+		fishSwitchTo = fishDampPos
 		fishFocusPos = fishSwitchFrom:Lerp(fishSwitchTo, e)
 		if u >= 1 then
 			fishSwitching = false
-			fishFocusPos = fishSwitchTo
+			fishFocusPos = fishDampPos
 		end
 	else
-		local a = 1 - math.exp(-FISH_FOLLOW_RATE * math.max(dt, 0))
-		fishFocusPos = fishFocusPos:Lerp(goal, a)
+		fishFocusPos = fishDampPos
 	end
 
-	-- Slow orbit (20s/rev at close, up to 3x slower far) + distance breathe while waves run.
+	-- Slow orbit + extra camera-body damper so look stays stable.
 	local desired = fishFocusPos + fishChaseOffset(dt)
-	local aCam = 1 - math.exp(-FISH_FOLLOW_RATE * math.max(dt, 0))
+	local aCam = 1 - math.exp(-FISH_CAM_RATE * math.max(dt, 0))
 	camPos = camPos:Lerp(desired, aCam)
 	cam.CameraType = Enum.CameraType.Scriptable
 	cam.CFrame = lookAtFocus(fishFocusPos)
@@ -1040,6 +1057,7 @@ setMode = function(nextMode: CamMode)
 				local fish = WaveSim.getFurthestUnfedFish()
 				if fish then
 					fishFocusPos = fish.position
+					fishDampPos = fish.position
 					fishTargetId = fish.id
 					camPos = fish.position + fishChaseOffset(0)
 					cam.CFrame = lookAtFocus(fishFocusPos)
@@ -1163,6 +1181,9 @@ local function flashDPadGlow()
 end
 
 UserInputService.InputBegan:Connect(function(input, _gameProcessed)
+	if input.UserInputType == Enum.UserInputType.Touch then
+		touchDownCount += 1
+	end
 	if isDPadKey(input.KeyCode) then
 		if not skillsBubblesOpen() then
 			flashDPadGlow()
@@ -1183,7 +1204,7 @@ UserInputService.InputBegan:Connect(function(input, _gameProcessed)
 			or input.UserInputType == Enum.UserInputType.MouseButton2
 		)
 	then
-		if not isOverCamCycleButton(input.Position) then
+		if touchDownCount == 0 and not isOverCamCycleButton(input.Position) then
 			mouseLookLast = mouseScreenPos()
 		end
 		return
@@ -1229,7 +1250,9 @@ UserInputService.InputChanged:Connect(function(input, _gameProcessed)
 			local pos = Vector2.new(input.Position.X, input.Position.Y)
 			local delta = pos - lookTouchLast
 			lookTouchLast = pos
-			applyLookDelta(delta.X * LOOK_SENS_TOUCH, delta.Y * LOOK_SENS_TOUCH)
+			if delta.Magnitude < 180 then
+				applyLookDelta(delta.X * LOOK_SENS_TOUCH, delta.Y * LOOK_SENS_TOUCH)
+			end
 			return
 		end
 		if input == moveTouch then
@@ -1239,6 +1262,9 @@ UserInputService.InputChanged:Connect(function(input, _gameProcessed)
 end)
 
 UserInputService.InputEnded:Connect(function(input, _gameProcessed)
+	if input.UserInputType == Enum.UserInputType.Touch then
+		touchDownCount = math.max(0, touchDownCount - 1)
+	end
 	if input.UserInputType == Enum.UserInputType.Keyboard then
 		keysDown[input.KeyCode] = nil
 	end

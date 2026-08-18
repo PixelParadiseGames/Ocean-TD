@@ -10,8 +10,36 @@ local Workspace = game:GetService("Workspace")
 local PlaceAimScreen = {}
 
 local GHOST_SCREEN_OFFSET_Y = 105
+local touchHeld = 0
+
+function PlaceAimScreen.trackTouch(input: InputObject, ended: boolean)
+	if input.UserInputType ~= Enum.UserInputType.Touch then
+		return
+	end
+	if ended then
+		touchHeld = math.max(0, touchHeld - 1)
+	else
+		touchHeld += 1
+	end
+end
+
+function PlaceAimScreen.touchHeld(): boolean
+	return touchHeld > 0
+end
+
+-- Roblox synthesizes MouseButton1 / MouseMovement while a finger is down.
+function PlaceAimScreen.isEmulatedMouse(input: InputObject): boolean
+	if touchHeld <= 0 then
+		return false
+	end
+	local t = input.UserInputType
+	return t == Enum.UserInputType.MouseButton1 or t == Enum.UserInputType.MouseMovement
+end
 
 function PlaceAimScreen.notePointer(input: InputObject, state: { raiseForTouch: boolean, gamepadPlacement: boolean })
+	if PlaceAimScreen.isEmulatedMouse(input) then
+		return
+	end
 	if input.UserInputType == Enum.UserInputType.Touch then
 		state.raiseForTouch = true
 	elseif input.UserInputType == Enum.UserInputType.MouseButton1
@@ -25,12 +53,25 @@ function PlaceAimScreen.notePointer(input: InputObject, state: { raiseForTouch: 
 	end
 end
 
+function PlaceAimScreen.raiseIfTouch(pos: Vector2, raiseForTouch: boolean, gamepadPlacement: boolean): Vector2
+	if gamepadPlacement then
+		return pos
+	end
+	-- Prefer the live finger flag so LastInputType flicker on release still parks.
+	if raiseForTouch or PlaceAimScreen.isTouchAim(raiseForTouch, gamepadPlacement) then
+		return Vector2.new(pos.X, pos.Y - GHOST_SCREEN_OFFSET_Y)
+	end
+	return pos
+end
+
 function PlaceAimScreen.isTouchAim(_raiseForTouch: boolean, gamepadPlacement: boolean): boolean
 	if gamepadPlacement then
 		return false
 	end
-	-- Only real Touch last-input raises. raiseForTouch alone used to keep the
-	-- 105px lift after LastInputType flipped to Keyboard/Focus/etc.
+	-- A live finger must win: LastInputType often flips to Mouse while touching.
+	if touchHeld > 0 then
+		return true
+	end
 	return UserInputService:GetLastInputType() == Enum.UserInputType.Touch
 end
 
