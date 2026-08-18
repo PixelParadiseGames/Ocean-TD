@@ -33,7 +33,7 @@ local HEART_LIGHT_RANGE = 50
 local HEART_LIGHT_BRIGHTNESS = 0.9
 local HEART_GUI_ORDER = 2600 -- above happy-exit billboards
 local HAPPY_EXIT_SEC = 1.4
-local HAPPY_EXIT_START_SCALE = 0.5 -- half size at spawn; grows to 1× near the player
+local HAPPY_EXIT_START_SCALE = 0.06 -- tiny at the heart; grows to 1× at the player
 local HAPPY_EXIT_FAN_STUDS = 18 -- lateral spread at arrival
 local HAPPY_EXIT_SOUND_ID = "rbxassetid://138571475125488"
 local HAPPY_EXIT_PITCH_MIN = 0.82
@@ -672,12 +672,9 @@ function WaveEndVfx.pulseHappyExit(emoji: string, at: Vector3)
 	bb.AlwaysOnTop = true
 	bb.LightInfluence = 0
 	bb.MaxDistance = 2000
-	bb.Size = UDim2.fromScale(HEART_LOSS_MAX_STUDS, HEART_LOSS_MAX_STUDS)
+	local startStuds = HEART_LOSS_MAX_STUDS * HAPPY_EXIT_START_SCALE
+	bb.Size = UDim2.fromScale(startStuds, startStuds)
 	bb.Parent = anchor
-
-	local scale = Instance.new("UIScale")
-	scale.Scale = HAPPY_EXIT_START_SCALE
-	scale.Parent = bb
 
 	local lbl = Instance.new("TextLabel")
 	lbl.BackgroundTransparency = 1
@@ -695,8 +692,15 @@ function WaveEndVfx.pulseHappyExit(emoji: string, at: Vector3)
 		local u = math.clamp((os.clock() - t0) / HAPPY_EXIT_SEC, 0, 1)
 		local ease = 1 - (1 - u) * (1 - u)
 		local goal = characterAimPos(startPos) + fanSide + fanUp
-		anchor.CFrame = CFrame.new(startPos:Lerp(goal, ease))
-		scale.Scale = HAPPY_EXIT_START_SCALE + (1 - HAPPY_EXIT_START_SCALE) * ease
+		local pos = startPos:Lerp(goal, ease)
+		anchor.CFrame = CFrame.new(pos)
+		-- Grow with remaining distance to the player (not just elapsed time).
+		local startDist = (startPos - goal).Magnitude
+		local dist = (pos - goal).Magnitude
+		local approach = if startDist > 1 then 1 - math.clamp(dist / startDist, 0, 1) else ease
+		local grow = approach * approach
+		local studs = HEART_LOSS_MAX_STUDS * (HAPPY_EXIT_START_SCALE + (1 - HAPPY_EXIT_START_SCALE) * grow)
+		bb.Size = UDim2.fromScale(studs, studs)
 		lbl.TextTransparency = u
 		lbl.TextStrokeTransparency = 0.4 + 0.6 * u
 		if u >= 1 then

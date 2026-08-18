@@ -22,6 +22,7 @@ local UiViewportTags = require(oceanRoot:WaitForChild("Shared"):WaitForChild("Ui
 
 local InventoryState = require(script.Parent:WaitForChild("InventoryState"))
 local WaveSim = require(script.Parent:WaitForChild("WaveSim"))
+local WaveSimConsts = require(script.Parent:WaitForChild("WaveSimConsts"))
 local WaveSummaryUi = require(script.Parent:WaitForChild("WaveSummaryUi"))
 
 local WaveSlot = {}
@@ -76,6 +77,7 @@ local hudReefFill: Frame? = nil
 local hudReefLabel: TextLabel? = nil
 local hudReefPlus: TextButton? = nil
 local hudTime: TextLabel? = nil
+local hudFishNeed: TextLabel? = nil
 local hudLayoutConn: RBXScriptConnection? = nil
 local finishFlashToken = 0
 local feedCompleteUi = false
@@ -1248,7 +1250,7 @@ local function ensureHud()
 	local timeLabel = Instance.new("TextLabel")
 	timeLabel.Name = "Time"
 	timeLabel.BackgroundTransparency = 1
-	timeLabel.Size = UDim2.new(1, -4, 0, LINE_H)
+	timeLabel.Size = UDim2.new(0.55, -4, 0, LINE_H)
 	timeLabel.Position = UDim2.fromOffset(0, waveY + BAR_H + 4)
 	timeLabel.Font = UiTheme.Font
 	timeLabel.TextSize = 15
@@ -1261,6 +1263,24 @@ local function ensureHud()
 	timeLabel.ZIndex = 26
 	timeLabel.Parent = f
 	hudTime = timeLabel
+
+	local fishNeed = Instance.new("TextLabel")
+	fishNeed.Name = "FishNeed"
+	fishNeed.BackgroundTransparency = 1
+	fishNeed.Size = UDim2.new(0.45, -4, 0, LINE_H)
+	fishNeed.Position = UDim2.fromOffset(0, waveY + BAR_H + 4)
+	fishNeed.Font = UiTheme.Font
+	fishNeed.TextSize = 15
+	fishNeed.TextColor3 = Color3.new(1, 1, 1)
+	fishNeed.TextStrokeTransparency = 0.35
+	fishNeed.TextStrokeColor3 = Color3.new(0, 0, 0)
+	fishNeed.TextXAlignment = Enum.TextXAlignment.Left
+	fishNeed.TextYAlignment = Enum.TextYAlignment.Center
+	fishNeed.TextTruncate = Enum.TextTruncate.None
+	fishNeed.ZIndex = 26
+	fishNeed.Text = "🍴:2 🐟:0"
+	fishNeed.Parent = f
+	hudFishNeed = fishNeed
 end
 
 local function applyWaveHudScale(root: GuiObject): number
@@ -1467,6 +1487,11 @@ local function updateHud(snap: WaveSim.HudSnapshot)
 	end
 	if hudTime then
 		hudTime.Text = "⏱️" .. WaveSim.formatClock(snap.elapsedSec)
+	end
+	if hudFishNeed then
+		local need = WaveSimConsts.tangHungerForWave(snap.wave)
+		local fishCount = math.max(snap.fishTotal or 0, 0)
+		hudFishNeed.Text = "🍴:" .. tostring(need) .. " 🐟:" .. tostring(fishCount)
 	end
 end
 

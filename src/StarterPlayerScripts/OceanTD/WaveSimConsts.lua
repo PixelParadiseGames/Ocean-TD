@@ -38,6 +38,8 @@ local C = {
 	COMBAT_DT = 1 / COMBAT_HZ,
 	PATH_SAMPLE_STEP = 1.5,
 	STAGGER_SEC = 0.4,
+	STAGGER_MIN_SEC = 0.16, -- cap so late waves still read as separate fish
+	STAGGER_PER_WAVE_MULT = 0.985, -- each wave spawns ~1.5% faster
 	LATERAL_SPREAD = 7.5, -- base left/right spread across the school
 	VERT_SPREAD = 2.8, -- base height spread
 	BOB_AMP_MIN = 2.5,
@@ -49,9 +51,9 @@ local C = {
 	WAVE1_COUNT = 3,
 	WAVE_COUNT_STEP = 4,
 	REEF_START_HEALTH = 10,
-	TANG_HUNGER = 4,
-	TANG_HUNGER_EARLY = 2, -- waves 1–10
-	EARLY_HUNGER_WAVE_MAX = 10,
+	TANG_HUNGER_BASE = 2, -- waves 1–10
+	HUNGER_EVERY_WAVES = 10,
+	HUNGER_PER_TIER = 2, -- +2 food to fill the bar every 10 waves
 	FOOD_RADIUS = 0.65,
 	AMMO_RADIUS = 0.75,
 	HUNGER_BAR_PX_W = 40 * 0.8,
@@ -91,5 +93,11 @@ local C = {
 	-- Soften G1 breaks between independent quadratic segments (lateral offset snaps without this).
 	TANGENT_BLEND_STUDS = 5,
 }
+
+function C.tangHungerForWave(wave: number): number
+	local w = math.max(1, math.floor(wave))
+	local tier = math.floor((w - 1) / C.HUNGER_EVERY_WAVES)
+	return C.TANG_HUNGER_BASE + tier * C.HUNGER_PER_TIER
+end
 
 return C

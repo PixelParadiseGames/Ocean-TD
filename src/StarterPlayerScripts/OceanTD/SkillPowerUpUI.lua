@@ -27,6 +27,7 @@ local RED = Color3.fromRGB(220, 50, 55)
 local PANEL_BG = Color3.fromRGB(12, 28, 36)
 local POWERUP_Z = 500
 local CLOSE_X_PULSE = TweenInfo.new(0.85, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true)
+local UNLOCK_STROKE_THICKNESS = 2
 
 local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
@@ -60,6 +61,8 @@ local confirmCancelBtn: GuiButton? = nil
 local confirmPrevSelected: GuiObject? = nil
 local unlockDescPulseConn: RBXScriptConnection? = nil
 local unlockDescPulseToken = 0
+local unlockBtnPulseConn: RBXScriptConnection? = nil
+local unlockBtnPulseToken = 0
 local lastPowerUpClickAt = 0
 
 local unlockRf = Remotes.getFunction("RequestUnlockSkillStage")
@@ -111,6 +114,50 @@ local function stopUnlockDescPulse()
 		unlockDescPulseConn:Disconnect()
 		unlockDescPulseConn = nil
 	end
+end
+
+local function stopUnlockBtnPulse()
+	unlockBtnPulseToken += 1
+	if unlockBtnPulseConn then
+		unlockBtnPulseConn:Disconnect()
+		unlockBtnPulseConn = nil
+	end
+end
+
+local function applyUnlockStroke(btn: GuiObject)
+	local stroke = btn:FindFirstChild("_OceanTD_UnlockStroke")
+	if not (stroke and stroke:IsA("UIStroke")) then
+		stroke = Instance.new("UIStroke")
+		stroke.Name = "_OceanTD_UnlockStroke"
+		stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+		stroke.LineJoinMode = Enum.LineJoinMode.Round
+		stroke.Parent = btn
+	end
+	stroke.Thickness = UNLOCK_STROKE_THICKNESS
+	stroke.Color = DESC_PULSE_GREEN
+	stroke.Enabled = true
+end
+
+local function startUnlockBtnPulse()
+	stopUnlockBtnPulse()
+	if not unlockBtn then
+		return
+	end
+	applyUnlockStroke(unlockBtn)
+	local token = unlockBtnPulseToken
+	unlockBtnPulseConn = RunService.Heartbeat:Connect(function()
+		if token ~= unlockBtnPulseToken or not unlockBtn or not popupOpen then
+			return
+		end
+		if not unlockBtn.Visible or not unlockBtn.Active then
+			return
+		end
+		local u = (math.sin(os.clock() * math.pi * 1.35) + 1) * 0.5
+		local c = GREEN:Lerp(DESC_PULSE_GREEN, u)
+		if unlockBtn:IsA("GuiObject") then
+			(unlockBtn :: GuiObject).BackgroundColor3 = c
+		end
+	end)
 end
 
 local function rgbFontTag(c: Color3): string
@@ -490,13 +537,25 @@ local function refreshTemplate()
 		local descStage = nextS or stage
 		if activeSkillId == "PlaceMore" then
 			local newMax = SkillStages.placeMoreMaxAtStage(descStage)
-			startUnlockDescPulse("PlaceMore", function(c: Color3)
-				return string.format(
-					'<font color="%s">+20</font>  New Max: %d',
-					rgbFontTag(c),
-					newMax
-				)
-			end)
+			if nextS == nil then
+				startUnlockDescPulse("PlaceMore", function(c: Color3)
+					return string.format(
+						'Max: <font color="%s">%d</font>',
+						rgbFontTag(c),
+						newMax
+					)
+				end)
+			else
+				local inc = SkillStages.placeMoreIncrementAtStage(descStage)
+				startUnlockDescPulse("PlaceMore", function(c: Color3)
+					return string.format(
+						'<font color="%s">+%d</font>  New Max: %d',
+						rgbFontTag(c),
+						inc,
+						newMax
+					)
+				end)
+			end
 		elseif activeSkillId == "EarnMore" then
 			local mult = SkillStages.clampStage(descStage)
 			if mult <= 1 then
@@ -525,9 +584,14 @@ local function refreshTemplate()
 		unlockBtn.Active = nextS ~= nil
 		if nextS ~= nil then
 			raiseInteractive(unlockBtn, POWERUP_Z + 650)
+			startUnlockBtnPulse()
+		else
+			stopUnlockBtnPulse()
 		end
 		if unlockBtn:IsA("TextButton") or unlockBtn:IsA("ImageButton") then
-			(unlockBtn :: any).BackgroundColor3 = GREEN
+			if nextS == nil then
+				(unlockBtn :: any).BackgroundColor3 = GREEN
+			end
 		end
 		local textChild = unlockBtn:FindFirstChildWhichIsA("TextLabel", true)
 		if unlockBtn:IsA("TextButton") then
@@ -767,6 +831,7 @@ local function showConfirmUnlock()
 	local uc = Instance.new("UICorner")
 	uc.CornerRadius = UDim.new(0, 10)
 	uc.Parent = unlock
+	applyUnlockStroke(unlock)
 	unlock.Activated:Connect(doUnlockRemote)
 
 	local cancel = Instance.new("TextButton")
@@ -836,6 +901,7 @@ function SkillPowerUpUI.close()
 	popupOpen = false
 	activeSkillId = nil
 	stopUnlockDescPulse()
+	stopUnlockBtnPulse()
 	SkillsBubbleSim.setSuppressed(false)
 	playerGui:SetAttribute(POWERUP_OPEN_ATTR, false)
 	endGamepadNav()
@@ -1013,6 +1079,7 @@ function SkillPowerUpUI.bind(mobileSkillsRoot: Instance)
 	if unlockBtn then
 		if unlockBtn:IsA("GuiObject") then
 			(unlockBtn :: GuiObject).BackgroundColor3 = GREEN
+			applyUnlockStroke(unlockBtn)
 		end
 		if unlockBtn:IsA("TextButton") then
 			(unlockBtn :: TextButton).TextColor3 = Color3.new(1, 1, 1)

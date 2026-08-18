@@ -10,17 +10,11 @@ local UserInputService = game:GetService("UserInputService")
 local PlaceConfirmHitTest = {}
 
 function PlaceConfirmHitTest.pointerScreenPos(input: InputObject?): Vector2
-	-- GetMouseLocation stays on the backpack tap during a follow-up touch, so ✓ never parked.
-	-- Touch / mouse Input.Position is GUI space; ScreenPointToRay wants inset-inclusive.
-	if input then
-		local t = input.UserInputType
-		if t == Enum.UserInputType.Touch
-			or t == Enum.UserInputType.MouseButton1
-			or t == Enum.UserInputType.MouseMovement
-		then
-			local inset = GuiService:GetGuiInset()
-			return Vector2.new(input.Position.X + inset.X, input.Position.Y + inset.Y)
-		end
+	-- Touch Input.Position is GUI space; ScreenPointToRay / GetMouseLocation are inset-inclusive.
+	-- Mouse Input.Position already matches GetMouseLocation — adding inset parks the coral below the cursor.
+	if input and input.UserInputType == Enum.UserInputType.Touch then
+		local inset = GuiService:GetGuiInset()
+		return Vector2.new(input.Position.X + inset.X, input.Position.Y + inset.Y)
 	end
 	return UserInputService:GetMouseLocation()
 end
@@ -31,23 +25,34 @@ function PlaceConfirmHitTest.resolveTarget(
 	cancelBtn: GuiObject?,
 	playerGui: PlayerGui
 ): string?
+	-- Round chrome: hit the disc, not a padded square. Extra inset probes used to
+	-- treat plot clicks near X as Cancel on PC.
 	local function hit(btn: GuiObject?): boolean
 		if not btn or not btn.Visible then
 			return false
 		end
 		local p = btn.AbsolutePosition
 		local s = btn.AbsoluteSize
-		local pad = 18
-		local inset = GuiService:GetGuiInset()
-		local x = screenPos.X - inset.X
-		local y = screenPos.Y - inset.Y
-		if x >= p.X - pad and x <= p.X + s.X + pad and y >= p.Y - pad and y <= p.Y + s.Y + pad then
+		if s.X < 1 or s.Y < 1 then
+			return false
+		end
+		local cx = p.X + s.X * 0.5
+		local cy = p.Y + s.Y * 0.5
+		local r = math.max(s.X, s.Y) * 0.5
+		local r2 = r * r
+		local function inside(x: number, y: number): boolean
+			local dx = x - cx
+			local dy = y - cy
+			return dx * dx + dy * dy <= r2
+		end
+		if inside(screenPos.X, screenPos.Y) then
 			return true
 		end
-		return screenPos.X >= p.X - pad
-			and screenPos.X <= p.X + s.X + pad
-			and screenPos.Y >= p.Y - pad
-			and screenPos.Y <= p.Y + s.Y + pad
+		local inset = GuiService:GetGuiInset()
+		if inset.X ~= 0 or inset.Y ~= 0 then
+			return inside(screenPos.X - inset.X, screenPos.Y - inset.Y)
+		end
+		return false
 	end
 	if hit(checkBtn) then
 		return "check"
@@ -79,10 +84,6 @@ function PlaceConfirmHitTest.resolveTarget(
 	local inset = GuiService:GetGuiInset()
 	if inset.X ~= 0 or inset.Y ~= 0 then
 		hitTarget = underChrome(screenPos.X - inset.X, screenPos.Y - inset.Y)
-		if hitTarget then
-			return hitTarget
-		end
-		hitTarget = underChrome(screenPos.X + inset.X, screenPos.Y + inset.Y)
 		if hitTarget then
 			return hitTarget
 		end

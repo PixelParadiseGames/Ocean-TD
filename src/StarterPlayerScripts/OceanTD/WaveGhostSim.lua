@@ -279,13 +279,6 @@ local function getGreenArrowsTemplate(): Instance?
 	return arrows
 end
 
-local function tangHungerForWave(wave: number): number
-	if wave <= C.EARLY_HUNGER_WAVE_MAX then
-		return C.TANG_HUNGER_EARLY
-	end
-	return C.TANG_HUNGER
-end
-
 local function waveFishCount(wave: number): number
 	return C.WAVE1_COUNT + (wave - 1) * C.WAVE_COUNT_STEP
 end
@@ -453,7 +446,7 @@ local function spawnFishAt(path: PathData, dist: number, wave: number, hungerFra
 		return nil
 	end
 	clone.Parent = ensureFolder()
-	local maxH = tangHungerForWave(wave)
+	local maxH = C.tangHungerForWave(wave)
 	local hunger = math.floor(maxH * math.clamp(hungerFrac or 0, 0, 0.95))
 	local bb, fill, _bar, fork, happy, _scale, stroke = makeHungerBillboard(root)
 	if lodFar then

@@ -1142,6 +1142,10 @@ local function makeConfirmUiImpl()
 		if aimFingerDown or backpackDrag or confirmDragging or confirmPressOrigin ~= nil then
 			return
 		end
+		local screenPos = UserInputService:GetMouseLocation()
+		if PlaceConfirmHitTest.resolveTarget(screenPos, checkBtn, cancelBtn, playerGui) ~= target then
+			return
+		end
 		chromePressTarget = target
 		chromeBtnPointerDown = true
 		aimFingerDown = false
@@ -2120,7 +2124,13 @@ local function parkAtPointer(screenPos: Vector2)
 	else
 		releaseHandPin()
 	end
-	local pos = resolveParkPos(screenPos)
+	-- Mouse click: same hardware ray as click-drag. resolveParkPos is for touch (raised finger).
+	local pos: Vector3?
+	if PlaceAimScreen.touchHeld() or PlaceAimScreen.shouldRaiseGhost(aimRaiseForTouch, gamepadPlacement) then
+		pos = resolveParkPos(screenPos)
+	else
+		pos = raycastForPlace() or resolveParkPos(screenPos)
+	end
 	if not pos then
 		aimFingerDown = true
 		placePointerHeld = true
@@ -2452,6 +2462,12 @@ table.insert(inputConns, UserInputService.InputBegan:Connect(function(input, _pr
 	-- even when the press is meant for the plot, which left ghosts stuck without ✓.
 
 	if mode == MODE_CONFIRM then
+		-- Mouse: click elsewhere re-parks immediately (Spot Taken / invalid stays until you move).
+		-- Touch still press-then-drag so a tap on the plot doesn't jump the ghost.
+		if isMouse then
+			parkAtPointer(screenPos)
+			return
+		end
 		confirmPressOrigin = screenPos
 		confirmDragging = false
 		return
@@ -2490,7 +2506,7 @@ table.insert(inputConns, UserInputService.InputChanged:Connect(function(input, _
 		end
 	end
 	if mode == MODE_AIM and (aimFingerDown or backpackDrag) then
-		local pos = resolveParkPos(now)
+		local pos = raycastForPlace()
 		if pos then
 			updateGhostAt(pos)
 		end
@@ -2503,7 +2519,7 @@ table.insert(inputConns, UserInputService.InputChanged:Connect(function(input, _
 			end
 			confirmDragging = true
 		end
-		local pos = resolveParkPos(now)
+		local pos = raycastForPlace()
 		if pos then
 			confirmPos = pos
 			updateGhostAt(pos)

@@ -1,0 +1,46 @@
+newmtl Meshescrabeyes1Mtl
+Material Color
+Ka 0.373615 0.368591 0.383775
+Kd 0.373615 0.368591 0.383775
+Ks 0.0336986 0.0332455 0.034615 
+
+d 1
+
+Ns 0
+
+newmtl Body1Mtl
+Material Color
+Ka 0.625345 0 0.000367136
+Kd 0.625345 0 0.000367136
+Ks 0.014714 0 8.6385e-06 
+
+d 1
+
+Ns 0
+
+map_Ka Body1_diff.png
+map_Kd Body1_diff.png
+map_d Body1_diff.png
+
+map_Bump Body1_nmap.png
+
+map_Ns Body1_spec.png
+
+newmtl Lleg31Mtl
+Material Color
+Ka 0.804559 0 0.000107187
+Kd 0.804559 0 0.000107187
+Ks 0.0189308 0 2.52206e-06 
+
+d 1
+
+Ns 0
+
+map_Ka Body1_diff.png
+map_Kd Body1_diff.png
+map_d Body1_diff.png
+
+map_Bump Body1_nmap.png
+
+map_Ns Body1_spec.png
+

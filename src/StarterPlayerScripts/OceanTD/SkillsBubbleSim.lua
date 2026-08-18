@@ -446,6 +446,65 @@ local function applyStageLayoutsToSkillButtons(panel: Instance, buttons: { GuiBu
 	hideLayoutOnlyButtons(panel)
 end
 
+local function waitForGuiLayout(token: number): boolean
+	-- Hidden/just-shown buttons often report AbsolutePosition 0,0 for a frame.
+	RunService.Heartbeat:Wait()
+	if token ~= stopToken then
+		return false
+	end
+	RunService.Heartbeat:Wait()
+	return token == stopToken
+end
+
+local function readButtonAbs(btn: GuiButton): (Vector2, Vector2)
+	local absPos = btn.AbsolutePosition
+	local absSize = btn.AbsoluteSize
+	if absSize.X >= 1 and absSize.Y >= 1 then
+		return absPos, absSize
+	end
+	local sz = btn.Size
+	absSize = Vector2.new(math.max(sz.X.Offset, 64), math.max(sz.Y.Offset, 64))
+	local parentGui = btn.Parent
+	if parentGui and parentGui:IsA("GuiObject") then
+		local pAbs = parentGui.AbsolutePosition
+		absPos = Vector2.new(
+			pAbs.X + parentGui.AbsoluteSize.X * btn.Position.X.Scale + btn.Position.X.Offset,
+			pAbs.Y + parentGui.AbsoluteSize.Y * btn.Position.Y.Scale + btn.Position.Y.Offset
+		)
+	end
+	return absPos, absSize
+end
+
+local function scatterClusteredBubbles()
+	if #bubbles < 2 then
+		return
+	end
+	local minX, maxX = bubbles[1].x, bubbles[1].x
+	local minY, maxY = bubbles[1].y, bubbles[1].y
+	for i = 2, #bubbles do
+		local b = bubbles[i]
+		minX = math.min(minX, b.x)
+		maxX = math.max(maxX, b.x)
+		minY = math.min(minY, b.y)
+		maxY = math.max(maxY, b.y)
+	end
+	if (maxX - minX) > 48 or (maxY - minY) > 48 then
+		return
+	end
+	local ox, oy = playOrigin()
+	local sw = screenSize()
+	local cx = ox + sw.X * 0.5
+	local cy = oy + sw.Y * 0.45
+	local spread = math.min(sw.X, sw.Y) * 0.2
+	for i, b in ipairs(bubbles) do
+		local a = ((i - 1) / #bubbles) * math.pi * 2 - math.pi * 0.5
+		b.x = cx + math.cos(a) * spread
+		b.y = cy + math.sin(a) * spread
+		b.vx = 0
+		b.vy = 0
+	end
+end
+
 local function ensureLayer(sg: ScreenGui): Frame
 	local existing = sg:FindFirstChild("_OceanTD_BubbleLayer")
 	if existing and existing:IsA("Frame") then
@@ -1043,23 +1102,16 @@ function SkillsBubbleSim.start(panel: Instance)
 	-- Stage → Studio template size/label placement (skill text stays on the skill BTN).
 	applyStageLayoutsToSkillButtons(panel, buttons)
 
-	for i, btn in ipairs(buttons) do
+	local myStart = stopToken
+	for _, btn in ipairs(buttons) do
 		btn.Visible = true
-		local absPos = btn.AbsolutePosition
-		local absSize = btn.AbsoluteSize
-		if absSize.X < 1 or absSize.Y < 1 then
-			-- Fallback: Studio UDim2 offset size if AbsoluteSize not laid out yet.
-			local sz = btn.Size
-			absSize = Vector2.new(math.max(sz.X.Offset, 64), math.max(sz.Y.Offset, 64))
-			local parentGui = btn.Parent
-			if parentGui and parentGui:IsA("GuiObject") then
-				local pAbs = parentGui.AbsolutePosition
-				absPos = Vector2.new(
-					pAbs.X + parentGui.AbsoluteSize.X * btn.Position.X.Scale + btn.Position.X.Offset,
-					pAbs.Y + parentGui.AbsoluteSize.Y * btn.Position.Y.Scale + btn.Position.Y.Offset
-				)
-			end
-		end
+	end
+	if not waitForGuiLayout(myStart) then
+		return
+	end
+
+	for i, btn in ipairs(buttons) do
+		local absPos, absSize = readButtonAbs(btn)
 		if absSize.X < 1 or absSize.Y < 1 then
 			continue
 		end
@@ -1125,6 +1177,10 @@ function SkillsBubbleSim.start(panel: Instance)
 	if #bubbles == 0 then
 		warn("[SkillsBubbles] No laid-out ImageButtons (zero AbsoluteSize)")
 		return
+	end
+	scatterClusteredBubbles()
+	for _, b in ipairs(bubbles) do
+		writeBubble(b)
 	end
 
 	table.insert(

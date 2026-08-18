@@ -138,13 +138,32 @@ function SkillStages.nextStage(current: number): number?
 	return c + 1
 end
 
--- Place More: stage 1 = 30 max coral; +20 max per stage.
+-- Place More max placed coral by stage. Stages 1–4 ramp gently; 5–8 ramp hard to 1000 cap.
 SkillStages.PLACE_MORE_BASE_MAX = 30
-SkillStages.PLACE_MORE_PER_STAGE = 20
+SkillStages.PLACE_MORE_MAX_STAGE = 1000
+
+local PLACE_MORE_MAX_BY_STAGE: { [number]: number } = {
+	[1] = 30,
+	[2] = 50,
+	[3] = 90,
+	[4] = 150,
+	[5] = 280,
+	[6] = 450,
+	[7] = 700,
+	[8] = 1000,
+}
 
 function SkillStages.placeMoreMaxAtStage(stage: number): number
 	local s = SkillStages.clampStage(stage)
-	return SkillStages.PLACE_MORE_BASE_MAX + (s - 1) * SkillStages.PLACE_MORE_PER_STAGE
+	return PLACE_MORE_MAX_BY_STAGE[s] or PLACE_MORE_MAX_BY_STAGE[1]
+end
+
+function SkillStages.placeMoreIncrementAtStage(stage: number): number
+	local s = SkillStages.clampStage(stage)
+	if s <= 1 then
+		return 0
+	end
+	return SkillStages.placeMoreMaxAtStage(s) - SkillStages.placeMoreMaxAtStage(s - 1)
 end
 
 -- $D granted each time a fish hunger bar fills. Stage 1 = 1, stage 2 = 2×, …
@@ -153,10 +172,10 @@ function SkillStages.earnMorePerFish(stage: number): number
 end
 
 -- Final WaveRoute waypoint index (W#) for this Plot Size stage.
--- Stage 1 ends at W4; larger plots extend toward W8.
+-- Stages 1–2 end at W4; larger plots extend toward W8.
 local PLOT_SIZE_FINAL_WAYPOINT: { [number]: number } = {
 	[1] = 4,
-	[2] = 5,
+	[2] = 4,
 	[3] = 6,
 	[4] = 6,
 	[5] = 7,
@@ -204,8 +223,12 @@ function SkillStages.unlockDesc(skillId: string, stage: number): string
 		return "Bigger area you can plant coral"
 	end
 	if skillId == "PlaceMore" then
+		if SkillStages.nextStage(s) == nil then
+			return "Max: " .. tostring(SkillStages.placeMoreMaxAtStage(s))
+		end
+		local inc = SkillStages.placeMoreIncrementAtStage(s)
 		local newMax = SkillStages.placeMoreMaxAtStage(s)
-		return "+20  New Max: " .. tostring(newMax)
+		return "+" .. tostring(inc) .. "  New Max: " .. tostring(newMax)
 	end
 	if skillId == "EarnMore" then
 		if s <= 1 then

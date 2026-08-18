@@ -53,26 +53,31 @@ function PlaceAimScreen.notePointer(input: InputObject, state: { raiseForTouch: 
 	end
 end
 
-function PlaceAimScreen.raiseIfTouch(pos: Vector2, raiseForTouch: boolean, gamepadPlacement: boolean): Vector2
+function PlaceAimScreen.shouldRaiseGhost(raiseForTouch: boolean, gamepadPlacement: boolean): boolean
 	if gamepadPlacement then
-		return pos
+		return false
 	end
-	-- Prefer the live finger flag so LastInputType flicker on release still parks.
-	if raiseForTouch or PlaceAimScreen.isTouchAim(raiseForTouch, gamepadPlacement) then
+	-- Live finger only — never treat sticky LastInputType Touch as touch aim on PC mouse.
+	if touchHeld > 0 then
+		return true
+	end
+	-- Touch release frame: aimRaiseForTouch still set before InputEnded clears it.
+	return raiseForTouch
+end
+
+function PlaceAimScreen.raiseIfTouch(pos: Vector2, raiseForTouch: boolean, gamepadPlacement: boolean): Vector2
+	if PlaceAimScreen.shouldRaiseGhost(raiseForTouch, gamepadPlacement) then
 		return Vector2.new(pos.X, pos.Y - GHOST_SCREEN_OFFSET_Y)
 	end
 	return pos
 end
 
-function PlaceAimScreen.isTouchAim(_raiseForTouch: boolean, gamepadPlacement: boolean): boolean
+function PlaceAimScreen.isTouchAim(raiseForTouch: boolean, gamepadPlacement: boolean): boolean
 	if gamepadPlacement then
 		return false
 	end
-	-- A live finger must win: LastInputType often flips to Mouse while touching.
-	if touchHeld > 0 then
-		return true
-	end
-	return UserInputService:GetLastInputType() == Enum.UserInputType.Touch
+	-- Billboard + raised raycasts only while a finger is actually down.
+	return touchHeld > 0
 end
 
 function PlaceAimScreen.getAimPos(gamepadPlacement: boolean, gamepadCursor: Vector2?, aimPinnedToCenter: boolean): Vector2
@@ -102,7 +107,7 @@ function PlaceAimScreen.getPlaceAimPos(
 	end
 	-- Touch only: raise so the ghost isn't covered by the finger.
 	-- Mouse / pen / keyboard: exact cursor (never the touch raise).
-	if PlaceAimScreen.isTouchAim(raiseForTouch, gamepadPlacement) then
+	if PlaceAimScreen.shouldRaiseGhost(raiseForTouch, gamepadPlacement) then
 		return Vector2.new(finger.X, finger.Y - GHOST_SCREEN_OFFSET_Y)
 	end
 	return finger

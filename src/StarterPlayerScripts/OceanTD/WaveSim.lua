@@ -232,13 +232,6 @@ local lastHudMissToken = 0
 local hungryMissToken = 0
 local lastHudFishFull = -1
 
-local function tangHungerForWave(wave: number): number
-	if wave <= C.EARLY_HUNGER_WAVE_MAX then
-		return C.TANG_HUNGER_EARLY
-	end
-	return C.TANG_HUNGER
-end
-
 local function notifyHud()
 	hudDirty = true
 end
@@ -460,7 +453,7 @@ local function buildPath(plotSizeStageOverride: number?): PathData?
 		return nil
 	end
 
-	-- Plot Size stage truncates the route (stage 1 → W4 … stage 6+ → W8).
+	-- Plot Size stage truncates the route (stage 1–2 → W4 … stage 6+ → W8).
 	local plotSizeStage = if plotSizeStageOverride ~= nil
 		then SkillStages.clampStage(plotSizeStageOverride)
 		else SkillPowerUpUI.getStage("PlotSize")
@@ -1361,7 +1354,7 @@ local function spawnOneFish(spawnIndex: number)
 		speedPhase = speedPhase,
 		speedFreq = speedFreq,
 		hunger = 0,
-		maxHunger = tangHungerForWave(waveIndex),
+		maxHunger = C.tangHungerForWave(waveIndex),
 		finished = false,
 		billboard = nil :: any,
 		fill = nil :: any,
@@ -1404,6 +1397,12 @@ end
 
 local function waveFishCount(wave: number): number
 	return C.WAVE1_COUNT + (wave - 1) * C.WAVE_COUNT_STEP
+end
+
+local function spawnGapForWave(wave: number): number
+	local w = math.max(1, math.floor(wave))
+	local gap = C.STAGGER_SEC * (C.STAGGER_PER_WAVE_MULT ^ (w - 1))
+	return math.max(C.STAGGER_MIN_SEC, gap)
 end
 
 local function beginWave(wave: number)
@@ -2055,7 +2054,7 @@ local function attachSimLoop(myToken: number)
 				spawnOneFish(idx)
 				spawnQueue -= 1
 				-- Slight random gap so the school reads as a parade, not a metronome.
-				spawnDelay = C.STAGGER_SEC * fishRng:NextNumber(0.7, 1.35)
+				spawnDelay = spawnGapForWave(waveIndex) * fishRng:NextNumber(0.7, 1.35)
 				if spawnQueue <= 0 then
 					waveSpawning = false
 				end
