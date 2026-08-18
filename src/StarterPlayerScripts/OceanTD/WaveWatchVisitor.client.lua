@@ -99,6 +99,7 @@ pushRemote.OnClientEvent:Connect(function(payload)
 		hungryMissToken = num(payload.hungryMissToken, 0),
 		fishFull = num(payload.fishFull, 0),
 		fishTotal = num(payload.fishTotal, 0),
+		crabTotal = num(payload.crabTotal, 0),
 		speedMult = num(payload.speedMult, 1),
 		plotId = plotId,
 		hostUserId = num(payload.hostUserId, 0),

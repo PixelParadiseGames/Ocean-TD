@@ -121,6 +121,10 @@ end
 function CoralVisual.applyRestLook(part: BasePart)
 	local mat, color = CoralVisual.readRestLook(part)
 	part.Material = mat
+	if part:GetAttribute("OceanTD_CrabStunned") == true then
+		part.Color = Color3.new(1, 1, 1)
+		return
+	end
 	part.Color = color
 end
 

@@ -89,6 +89,43 @@ local C = {
 	TANG_YAW = math.rad(-90),
 	TANG_PITCH = 0,
 	TANG_ROLL = 0,
+	-- Hungry crabs on WaveRoute.GroundA (wave 5+).
+	CRAB_FIRST_WAVE = 5,
+	CRAB_COUNT_MAX = 3, -- roll 0..this each wave
+	CRAB_HUNGER_MULT = 10, -- max hunger = fish hunger × this
+	CRAB_SPEED_MULT = 0.75, -- 25% slower than Tang (between sprints)
+	CRAB_SPRINT_MULT_MIN = 1.55,
+	CRAB_SPRINT_MULT_MAX = 2.7,
+	CRAB_SPRINT_DUR_MIN = 0.4,
+	CRAB_SPRINT_DUR_MAX = 1.9,
+	CRAB_SPRINT_REST_MIN = 0.3,
+	CRAB_SPRINT_REST_MAX = 1.25,
+	CRAB_ROUTE_NAME = "GroundA",
+	-- Sideways scuttle: mesh forward (eyes/claws) faces across the path, not along it.
+	CRAB_YAW = math.rad(90),
+	CRAB_PITCH = 0,
+	CRAB_ROLL = 0,
+	CRAB_GROUND_CLEARANCE = 1.85, -- Root above seafloor (not glued to waypoint Y)
+	CRAB_GROUND_FOLLOW = 7, -- smooth Y so voxel stairs don't pop
+	CRAB_RAY_UP = 28,
+	CRAB_RAY_DOWN = 90,
+	CRAB_ANIM_PHASE_RATE = 1.5,
+	CRAB_ANIM_LIFT = 0.3,
+	CRAB_ANIM_MIN_SPEED = 0.5,
+	CRAB_ANIM_FADE_SPEED = 2,
+	CRAB_STAGGER_MIN = 1, -- extra crabs spawn this many seconds after the previous
+	CRAB_STAGGER_MAX = 4,
+	CRAB_CORAL_PAUSE_SEC = 3, -- ShellHitbox touch: sit still while zap VFX plays
+	CRAB_ZAP_COUNT = 30,
+	CRAB_ZAP_EMOJI = "💥⚡",
+	CRAB_ZAP_START_STUDS = 1.6,
+	CRAB_ZAP_END_STUDS = 7.5,
+	CRAB_STUN_FADE_SEC = 0.75,
+	CRAB_FIGHT_RADIUS = 0.9,
+	CRAB_FIGHT_HOP = 0.62,
+	CRAB_FIGHT_SPIN = math.rad(155), -- rad/sec while zapping a coral
+	CRAB_FIGHT_YAW_WOBBLE = math.rad(32),
+	CRAB_FIGHT_PITCH = math.rad(14),
 	TURN_RATE = 14, -- higher = snappier yaw toward path tangent
 	-- Soften G1 breaks between independent quadratic segments (lateral offset snaps without this).
 	TANGENT_BLEND_STUDS = 5,
@@ -98,6 +135,14 @@ function C.tangHungerForWave(wave: number): number
 	local w = math.max(1, math.floor(wave))
 	local tier = math.floor((w - 1) / C.HUNGER_EVERY_WAVES)
 	return C.TANG_HUNGER_BASE + tier * C.HUNGER_PER_TIER
+end
+
+function C.crabHungerForWave(wave: number): number
+	return C.tangHungerForWave(wave) * C.CRAB_HUNGER_MULT
+end
+
+function C.crabSlotForWave(wave: number): number
+	return if wave >= C.CRAB_FIRST_WAVE then 1 else 0
 end
 
 return C

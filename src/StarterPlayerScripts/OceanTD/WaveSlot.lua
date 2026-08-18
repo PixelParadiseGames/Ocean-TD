@@ -85,6 +85,8 @@ local lastHungryMissToken = -1
 local fillHurtToken = 0
 local lastFishFull = 0
 local lastFishTotal = 0
+local lastCrabTotal = 0
+local lastWaveIndex = 0
 local lastReefHealth = -1
 local lastReefMax = 10
 
@@ -497,7 +499,7 @@ local function refreshForkLabel()
 		hudBarFork.Text = "100%"
 		return
 	end
-	hudBarFork.Text = string.format("%d of %d", lastFishFull, lastFishTotal)
+	hudBarFork.Text = string.format("%d of %d", lastFishFull, lastFishTotal + lastCrabTotal)
 end
 
 local function refreshRightForkEmoji()
@@ -1250,8 +1252,9 @@ local function ensureHud()
 	local timeLabel = Instance.new("TextLabel")
 	timeLabel.Name = "Time"
 	timeLabel.BackgroundTransparency = 1
-	timeLabel.Size = UDim2.new(0.55, -4, 0, LINE_H)
-	timeLabel.Position = UDim2.fromOffset(0, waveY + BAR_H + 4)
+	timeLabel.Size = UDim2.new(0.38, -4, 0, LINE_H)
+	timeLabel.Position = UDim2.new(1, 0, 0, waveY + BAR_H + 4)
+	timeLabel.AnchorPoint = Vector2.new(1, 0)
 	timeLabel.Font = UiTheme.Font
 	timeLabel.TextSize = 15
 	timeLabel.TextColor3 = Color3.new(1, 1, 1)
@@ -1267,7 +1270,7 @@ local function ensureHud()
 	local fishNeed = Instance.new("TextLabel")
 	fishNeed.Name = "FishNeed"
 	fishNeed.BackgroundTransparency = 1
-	fishNeed.Size = UDim2.new(0.45, -4, 0, LINE_H)
+	fishNeed.Size = UDim2.new(0.62, -4, 0, LINE_H)
 	fishNeed.Position = UDim2.fromOffset(0, waveY + BAR_H + 4)
 	fishNeed.Font = UiTheme.Font
 	fishNeed.TextSize = 15
@@ -1430,6 +1433,8 @@ local function updateHud(snap: WaveSim.HudSnapshot)
 	refreshReefHudLabels()
 	lastFishFull = snap.fishFull or 0
 	lastFishTotal = snap.fishTotal or 0
+	lastCrabTotal = math.max(0, snap.crabTotal or 0)
+	lastWaveIndex = snap.wave or 0
 	local complete = snap.feedComplete == true
 	local danger = snap.hungerDanger == true
 	if hudWaveLabel then
@@ -1491,7 +1496,12 @@ local function updateHud(snap: WaveSim.HudSnapshot)
 	if hudFishNeed then
 		local need = WaveSimConsts.tangHungerForWave(snap.wave)
 		local fishCount = math.max(snap.fishTotal or 0, 0)
-		hudFishNeed.Text = "🍴:" .. tostring(need) .. " 🐟:" .. tostring(fishCount)
+		local line = "🍴:" .. tostring(need) .. " 🐟:" .. tostring(fishCount)
+		local crabs = math.max(0, snap.crabTotal or 0)
+		if crabs > 0 then
+			line ..= " 🦀:" .. tostring(crabs)
+		end
+		hudFishNeed.Text = line
 	end
 end
 

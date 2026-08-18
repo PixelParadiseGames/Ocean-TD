@@ -281,7 +281,7 @@ local function applySnap(snap: WaveWatchMode.WatchSnap)
 		end
 	end
 	if forkLabel then
-		forkLabel.Text = tostring(snap.fishFull or 0) .. " of " .. tostring(snap.fishTotal or 0)
+		forkLabel.Text = tostring(snap.fishFull or 0) .. " of " .. tostring((snap.fishTotal or 0) + (snap.crabTotal or 0))
 	end
 	if timeLabel then
 		timeLabel.Text = "⏱️" .. WaveSim.formatClock(snap.elapsedSec or 0)

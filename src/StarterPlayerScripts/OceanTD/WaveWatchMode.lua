@@ -15,6 +15,7 @@ export type WatchSnap = {
 	hungryMissToken: number,
 	fishFull: number,
 	fishTotal: number,
+	crabTotal: number?,
 	speedMult: number,
 	plotId: string,
 	hostUserId: number,

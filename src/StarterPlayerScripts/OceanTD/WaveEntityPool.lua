@@ -2,7 +2,7 @@
 --[[
 	Typed acquire/release pools for wave visuals (client-local).
 
-	Fish are keyed by species kind (first: "Tang"). Future critters = new kind +
+	Fish are keyed by species kind (first: "Tang", crabs: "CrabTemplate"). Future critters = new kind +
 	ReplicatedStorage.Fish.<Kind> template — same acquireFish/releaseFish API.
 
 	Also pools food orbs, green-arrow sets, ammo balls, and short SFX clones.
@@ -14,6 +14,7 @@ local SoundService = game:GetService("SoundService")
 local WaveEntityPool = {}
 
 WaveEntityPool.FISH_TANG = "Tang"
+WaveEntityPool.FISH_CRAB = "CrabTemplate"
 
 local MAX_FISH_PER_KIND = 48
 local MAX_FOOD = 64
@@ -56,6 +57,50 @@ local function prepareLocalFxInstance(inst: Instance)
 			d.CanQuery = false
 			d.CastShadow = false
 		end
+	end
+	if inst:IsA("BasePart") then
+		inst.Anchored = true
+		inst.CanCollide = false
+		inst.CanTouch = false
+		inst.CanQuery = false
+		inst.CastShadow = false
+	end
+end
+
+-- Root stays anchored so Pivot/CFrame drives the assembly; welded legs stay
+-- unanchored so C0 walk-cycle offsets actually move them.
+local function prepareCrabInstance(inst: Instance)
+	local root = findPrimary(inst)
+	if inst:IsA("Model") then
+		local named = inst:FindFirstChild("RootPart")
+		if named and named:IsA("BasePart") then
+			root = named
+			inst.PrimaryPart = named
+		elseif root and not inst.PrimaryPart then
+			inst.PrimaryPart = root
+		end
+	end
+	local toDestroy: { Instance } = {}
+	for _, d in ipairs(inst:GetDescendants()) do
+		if d:IsA("BasePart") then
+			d.CanCollide = false
+			d.CanTouch = false
+			d.CanQuery = false
+			d.CastShadow = false
+			if d == root then
+				d.Anchored = true
+			else
+				d.Anchored = false
+				d.Massless = true
+			end
+		elseif d:IsA("Script") or d:IsA("LocalScript") then
+			d.Disabled = true
+		elseif d:IsA("Seat") or d:IsA("VehicleSeat") or d:IsA("Humanoid") then
+			table.insert(toDestroy, d)
+		end
+	end
+	for _, d in ipairs(toDestroy) do
+		d:Destroy()
 	end
 	if inst:IsA("BasePart") then
 		inst.Anchored = true
@@ -111,7 +156,11 @@ local function newFishFromTemplate(kind: string): (Instance?, BasePart?)
 		return nil, nil
 	end
 	local clone = tmpl:Clone()
-	prepareLocalFxInstance(clone)
+	if kind == WaveEntityPool.FISH_CRAB then
+		prepareCrabInstance(clone)
+	else
+		prepareLocalFxInstance(clone)
+	end
 	local root = findPrimary(clone)
 	if not root then
 		clone:Destroy()
