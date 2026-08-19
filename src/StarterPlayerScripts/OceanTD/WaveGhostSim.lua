@@ -70,6 +70,7 @@ type GhostFish = {
 	crabAnim: any?,
 	shellHitbox: BasePart?,
 	pauseUntil: number?,
+	stunSkullPart: BasePart?,
 	crabSprint: any?,
 }
 
@@ -300,8 +301,11 @@ local function waveFishCount(wave: number): number
 	return C.WAVE1_COUNT + (wave - 1) * C.WAVE_COUNT_STEP
 end
 
-local function makeHungerBillboard(adornee: BasePart): (BillboardGui, Frame, Frame, TextLabel, TextLabel, UIScale, UIStroke?)
-	local totalW = C.HUNGER_EMOJI_SIZE + C.HUNGER_BAR_GAP + C.HUNGER_BAR_PX_W
+local function makeHungerBillboard(adornee: BasePart, hungryGlyphs: string?): (BillboardGui, Frame, Frame, TextLabel, TextLabel, UIScale, UIStroke?)
+	local glyphs = hungryGlyphs or "🍴"
+	local glyphN = utf8.len(glyphs) or 1
+	local emojiW = C.HUNGER_EMOJI_SIZE * glyphN
+	local totalW = emojiW + C.HUNGER_BAR_GAP + C.HUNGER_BAR_PX_W
 	local bb = Instance.new("BillboardGui")
 	bb.Name = "HungerBar"
 	bb.Size = UDim2.fromOffset(totalW, C.HUNGER_BAR_PX_H)
@@ -356,11 +360,12 @@ local function makeHungerBillboard(adornee: BasePart): (BillboardGui, Frame, Fra
 	fork.BackgroundTransparency = 1
 	fork.AnchorPoint = Vector2.new(0, 0.5)
 	fork.Position = UDim2.new(0, 0, 0.5, 0)
-	fork.Size = UDim2.fromOffset(C.HUNGER_EMOJI_SIZE, C.HUNGER_EMOJI_SIZE)
+	fork.Size = UDim2.fromOffset(emojiW, C.HUNGER_EMOJI_SIZE)
 	fork.Font = Enum.Font.SourceSansBold
-	fork.Text = "🍴"
+	fork.Text = glyphs
 	fork.TextSize = C.HUNGER_EMOJI_SIZE
 	fork.TextScaled = false
+	fork.TextXAlignment = Enum.TextXAlignment.Left
 	fork.ZIndex = 4
 	fork.Parent = bb
 
@@ -368,7 +373,7 @@ local function makeHungerBillboard(adornee: BasePart): (BillboardGui, Frame, Fra
 	happy.Name = "Happy"
 	happy.BackgroundTransparency = 1
 	happy.AnchorPoint = Vector2.new(0, 0.5)
-	happy.Position = UDim2.new(0, 0, 0.5, 0)
+	happy.Position = UDim2.new(0, emojiW - C.HUNGER_EMOJI_SIZE, 0.5, 0)
 	happy.Size = UDim2.fromOffset(C.HUNGER_EMOJI_SIZE, C.HUNGER_EMOJI_SIZE)
 	happy.Font = Enum.Font.SourceSansBold
 	happy.Text = C.HAPPY_EMOJIS[1]
@@ -530,7 +535,7 @@ local function spawnCrabAt(path: WaveCrab.PathData, dist: number, wave: number, 
 	clone.Parent = ensureFolder()
 	local maxH = WaveCrab.hungerForWave(wave)
 	local hunger = math.floor(maxH * math.clamp(hungerFrac or 0, 0, 0.95))
-	local bb, fill, _bar, fork, happy, _scale, stroke = makeHungerBillboard(root)
+	local bb, fill, _bar, fork, happy, _scale, stroke = makeHungerBillboard(root, "⚡🍴")
 	if lodFar then
 		bb.Enabled = false
 	end
@@ -564,6 +569,7 @@ local function spawnCrabAt(path: WaveCrab.PathData, dist: number, wave: number, 
 		crabAnim = anim,
 		shellHitbox = WaveCrab.findShell(clone),
 		pauseUntil = nil,
+		stunSkullPart = nil,
 		crabSprint = WaveCrab.newSprint(),
 	}
 	nextFishId += 1
@@ -964,11 +970,8 @@ local function tick(dt: number)
 			spawnFishAt(pathData, 0, waveIndex, 0)
 			if first and pathDataGround then
 				if waveCrabExpected > 0 then
-					spawnCrabAt(pathDataGround, 0, waveIndex, 0)
-					crabSpawnQueue = waveCrabExpected - 1
-					crabSpawnDelay = if crabSpawnQueue > 0
-						then rng:NextNumber(C.CRAB_STAGGER_MIN, C.CRAB_STAGGER_MAX)
-						else 0
+					crabSpawnQueue = waveCrabExpected
+					crabSpawnDelay = rng:NextNumber(C.CRAB_FIRST_DELAY_MIN, C.CRAB_FIRST_DELAY_MAX)
 				end
 			end
 			spawnQueue -= 1
@@ -1006,8 +1009,36 @@ local function tick(dt: number)
 				WaveEntityPool.releaseFish(WaveEntityPool.FISH_CRAB, agent.model)
 				continue
 			end
-			local paused = agent.pauseUntil ~= nil and os.clock() < (agent.pauseUntil :: number)
+			local wasFighting = agent.pauseUntil ~= nil
+			local paused = wasFighting and os.clock() < (agent.pauseUntil :: number)
+			if paused and agent.hunger >= agent.maxHunger then
+				local part = agent.stunSkullPart
+				agent.stunSkullPart = nil
+				agent.pauseUntil = nil
+				if part then
+					stunnedCorals[part] = nil
+					if part.Parent then
+						WaveCrab.clearCoralStun(part, true)
+					end
+					coralDirty = true
+				end
+				paused = false
+				wasFighting = false
+			end
 			if not paused then
+				if wasFighting then
+					local skullPart = agent.stunSkullPart
+					agent.stunSkullPart = nil
+					if skullPart and agent.hunger < agent.maxHunger then
+						WaveCrab.playDeathSkullFromCoral(skullPart)
+					elseif skullPart then
+						stunnedCorals[skullPart] = nil
+						if skullPart.Parent then
+							WaveCrab.clearCoralStun(skullPart, true)
+						end
+						coralDirty = true
+					end
+				end
 				agent.pauseUntil = nil
 				local sprint = agent.crabSprint
 				if sprint then
@@ -1035,7 +1066,7 @@ local function tick(dt: number)
 				else
 					setFishCFrame(agent, pos, tang, simDt)
 				end
-				if not paused then
+				if agent.hunger < agent.maxHunger and not paused then
 					local shell = agent.shellHitbox
 					if shell then
 						if coralDirty or coralCachePlot ~= activePlotId then
@@ -1052,6 +1083,7 @@ local function tick(dt: number)
 								WaveCrab.stunCoralPart(part)
 								coralDirty = true
 								agent.pauseUntil = os.clock() + C.CRAB_CORAL_PAUSE_SEC
+								agent.stunSkullPart = part
 								local follow = agent
 								local fallback = pos + Vector3.new(0, 2.2, 0)
 								WaveCrab.playZapBurst(ensureFolder(), function()

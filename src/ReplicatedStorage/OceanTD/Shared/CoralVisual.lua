@@ -1,4 +1,4 @@
--- Shared coral / placeable visuals. Optimized for many instances (simple Part, no shadow, no collide).
+-- Shared coral / placeable visuals. Optimized for many instances (simple Part, no shadow).
 
 local SpeciesCatalog = require(script.Parent.SpeciesCatalog)
 
@@ -11,11 +11,12 @@ export type VisualOptions = {
 	diameter: number?, -- overrides species default (e.g. BrainCoral 2..5)
 }
 
-local BRAIN_DIAMETER_MIN = 2
-local BRAIN_DIAMETER_MAX = 5
+local BRAIN_DIAMETER_MIN = 1.5
+local BRAIN_DIAMETER_MAX = 9
 
 function CoralVisual.randomBrainDiameter(): number
-	return BRAIN_DIAMETER_MIN + math.random() * (BRAIN_DIAMETER_MAX - BRAIN_DIAMETER_MIN)
+	-- New placements are Small band (1.5–4).
+	return 1.5 + math.random() * (4 - 1.5)
 end
 
 function CoralVisual.sanitizeBrainDiameter(raw: any): number
@@ -121,6 +122,11 @@ end
 function CoralVisual.applyRestLook(part: BasePart)
 	local mat, color = CoralVisual.readRestLook(part)
 	part.Material = mat
+	local speciesId = part:GetAttribute("OceanTD_SpeciesId")
+	local def = if typeof(speciesId) == "string" then SpeciesCatalog.get(speciesId) else nil
+	if def then
+		part.CanCollide = def.canCollide
+	end
 	if part:GetAttribute("OceanTD_CrabStunned") == true then
 		part.Color = Color3.new(1, 1, 1)
 		return

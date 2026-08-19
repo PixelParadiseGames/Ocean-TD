@@ -1281,7 +1281,7 @@ local function ensureHud()
 	fishNeed.TextYAlignment = Enum.TextYAlignment.Center
 	fishNeed.TextTruncate = Enum.TextTruncate.None
 	fishNeed.ZIndex = 26
-	fishNeed.Text = "🍴:2 🐟:0"
+	fishNeed.Text = "🍴:2x 🐟:0"
 	fishNeed.Parent = f
 	hudFishNeed = fishNeed
 end
@@ -1496,7 +1496,7 @@ local function updateHud(snap: WaveSim.HudSnapshot)
 	if hudFishNeed then
 		local need = WaveSimConsts.tangHungerForWave(snap.wave)
 		local fishCount = math.max(snap.fishTotal or 0, 0)
-		local line = "🍴:" .. tostring(need) .. " 🐟:" .. tostring(fishCount)
+		local line = "🍴:" .. tostring(need) .. "x 🐟:" .. tostring(fishCount)
 		local crabs = math.max(0, snap.crabTotal or 0)
 		if crabs > 0 then
 			line ..= " 🦀:" .. tostring(crabs)

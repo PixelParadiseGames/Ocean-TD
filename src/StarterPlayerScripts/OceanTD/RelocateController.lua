@@ -2,7 +2,7 @@
 --[[
 	Relocate a previously placed coral while the backpack is open.
 	Click coral → move icon + X scale up from its center.
-	X (unmoved) → close tool. Drag → show ✓. ✓ saves; X after drag reverts.
+	X (unmoved) → close tool. Drag → show ✓. ✓ saves and closes; X after drag reverts.
 ]]
 
 local Players = game:GetService("Players")
@@ -62,7 +62,10 @@ local HOVER_HINT_SIZE = 32
 local GAMEPAD_STICK_DEADZONE = 0.22
 local GAMEPAD_AIM_SPEED = 343 -- px/sec at full deflection
 
-local active = false
+local cinematicHold = false
+local inspectModal = false
+local activeChanged = Instance.new("BindableEvent")
+local r1WhileActive: (() -> boolean)? = nil
 local busy = false
 local introAnimating = false
 local gamepadRelocate = false
@@ -104,6 +107,7 @@ local chromeBtnDown = false
 local fingerDown = false
 local pressOrigin: Vector2? = nil
 local dragging = false
+local grabFromMoveIcon = false
 
 local frozen = false
 local savedWalkSpeed = 16
@@ -311,6 +315,26 @@ local function unfreeze()
 	savedCameraCFrame = nil
 end
 
+local function bindFreezeAction()
+	ContextActionService:UnbindAction(FREEZE_ACTION)
+	local sinkKeys: { Enum.KeyCode } = {
+		Enum.KeyCode.W,
+		Enum.KeyCode.A,
+		Enum.KeyCode.S,
+		Enum.KeyCode.D,
+		Enum.KeyCode.Space,
+	}
+	if not inspectModal then
+		table.insert(sinkKeys, Enum.KeyCode.ButtonA)
+	end
+	if gamepadRelocate then
+		table.insert(sinkKeys, Enum.KeyCode.Thumbstick1)
+	end
+	ContextActionService:BindActionAtPriority(FREEZE_ACTION, function()
+		return Enum.ContextActionResult.Sink
+	end, false, Enum.ContextActionPriority.High.Value, table.unpack(sinkKeys))
+end
+
 local function freeze()
 	if frozen then
 		if camera and savedCameraCFrame then
@@ -353,27 +377,17 @@ local function freeze()
 		savedCameraCFrame = camera.CFrame
 		camera.CameraType = Enum.CameraType.Scriptable
 	end
-	-- Keyboard always. Sink ButtonA so confirm doesn't queue a jump. Thumbstick1 only while
-	-- gamepad relocate (don't bind on touch — unbinding Thumbstick1 can break mobile movement).
-	local sinkKeys: { Enum.KeyCode } = {
-		Enum.KeyCode.W,
-		Enum.KeyCode.A,
-		Enum.KeyCode.S,
-		Enum.KeyCode.D,
-		Enum.KeyCode.Space,
-		Enum.KeyCode.ButtonA,
-	}
-	if gamepadRelocate then
-		table.insert(sinkKeys, Enum.KeyCode.Thumbstick1)
-	end
-	ContextActionService:BindActionAtPriority(FREEZE_ACTION, function()
-		return Enum.ContextActionResult.Sink
-	end, false, Enum.ContextActionPriority.High.Value, table.unpack(sinkKeys))
+	bindFreezeAction()
 end
 
 local function keepCameraFrozen()
-	if camera and savedCameraCFrame then
-		camera.CFrame = savedCameraCFrame
+	if cinematicHold then
+		return
+	end
+	local cam = Workspace.CurrentCamera
+	if cam and savedCameraCFrame then
+		cam.CameraType = Enum.CameraType.Scriptable
+		cam.CFrame = savedCameraCFrame
 	end
 end
 
@@ -504,6 +518,7 @@ local function makeUi()
 		fingerDown = false
 		pressOrigin = nil
 		dragging = false
+		grabFromMoveIcon = false
 	end
 	checkBtn.MouseButton1Down:Connect(markDown)
 	cancelBtn.MouseButton1Down:Connect(markDown)
@@ -528,7 +543,8 @@ local function attachMoveIcon(adornee: BasePart)
 	local bb = Instance.new("BillboardGui")
 	bb.Name = "OceanTD_RelocateMove"
 	bb.AlwaysOnTop = true
-	bb.Active = false
+	-- Active so a press on the handle is a GUI hit; InputBegan still starts the drag.
+	bb.Active = true
 	bb.LightInfluence = 0
 	bb.Size = UDim2.fromOffset(MOVE_ICON_SIZE, MOVE_ICON_SIZE)
 	bb.MaxDistance = 2000
@@ -539,6 +555,7 @@ local function attachMoveIcon(adornee: BasePart)
 	img.Size = UDim2.fromScale(1, 1)
 	img.Image = MOVE_ICON_IMAGE
 	img.ScaleType = Enum.ScaleType.Fit
+	img.Active = true
 	img.Parent = bb
 	local scale = Instance.new("UIScale")
 	scale.Name = "IntroScale"
@@ -1350,11 +1367,62 @@ local function clearState()
 	fingerDown = false
 	pressOrigin = nil
 	dragging = false
+	grabFromMoveIcon = false
+	cinematicHold = false
+	inspectModal = false
 	unfreeze()
+	activeChanged:Fire(false, nil)
 end
 
 function RelocateController.isActive(): boolean
 	return active
+end
+
+function RelocateController.getSelectedPart(): BasePart?
+	return part
+end
+
+function RelocateController.onActiveChanged(cb: (boolean, BasePart?) -> ()): RBXScriptConnection
+	return activeChanged.Event:Connect(cb)
+end
+
+function RelocateController.setCinematicHold(on: boolean)
+	cinematicHold = on
+	if on then
+		busy = true
+	else
+		busy = false
+	end
+end
+
+function RelocateController.setInspectModal(on: boolean)
+	inspectModal = on
+	if frozen then
+		bindFreezeAction()
+	end
+end
+
+function RelocateController.setR1WhileActiveHandler(cb: (() -> boolean)?)
+	r1WhileActive = cb
+end
+
+function RelocateController.getSavedCameraCFrame(): CFrame?
+	return savedCameraCFrame
+end
+
+function RelocateController.setLiveCameraCFrame(cf: CFrame)
+	local cam = Workspace.CurrentCamera
+	if cam then
+		cam.CameraType = Enum.CameraType.Scriptable
+		cam.CFrame = cf
+	end
+end
+
+function RelocateController.refreshSelectRing()
+	if part then
+		SelectRing.ensure(selectRing, part, playerGui)
+		SelectRing.pulse(selectRing)
+	end
 end
 
 function RelocateController.clearHoverHighlight()
@@ -1431,6 +1499,7 @@ function RelocateController.beginRecycleConfirm()
 	fingerDown = false
 	dragging = false
 	pressOrigin = nil
+	grabFromMoveIcon = false
 	syncChrome()
 	log("Recycle confirm")
 end
@@ -1570,6 +1639,7 @@ local function commitRecycle()
 			fingerDown = false
 			pressOrigin = nil
 			dragging = false
+			grabFromMoveIcon = false
 			log("Recycled", creditedId, "seeds=", result.seedCount)
 		end)
 	else
@@ -1612,22 +1682,13 @@ function RelocateController.commit()
 			PlacedCoralIndex.reindex(part)
 			if typeof(result.placeId) == "string" and result.placeId ~= "" then
 				part:SetAttribute("OceanTD_PlaceId", result.placeId)
-				placeId = result.placeId
 			elseif placeId ~= "" then
 				part:SetAttribute("OceanTD_PlaceId", placeId)
 			end
-			-- Stay on this coral: reset move state so recycle returns until the next drag.
-			originPos = finalPos
 		end
 		PlaceVfx.playVisuals(toPos, baseColor or Color3.fromRGB(100, 200, 255))
-		hasMoved = false
-		validSpot = true
-		rejectReason = nil
-		busy = false
-		recycleSlideU = 0
-		recycleSlideActive = false
-		syncChrome()
 		log("Saved move")
+		clearState()
 	else
 		local code = typeof(result) == "table" and result.errorCode or "Reject"
 		log("Move rejected", code)
@@ -1700,6 +1761,11 @@ function RelocateController.begin(target: BasePart)
 	introAnimating = false
 	recycleSlideU = 0
 	recycleSlideActive = false
+	chromeBtnDown = false
+	fingerDown = false
+	pressOrigin = nil
+	dragging = false
+	grabFromMoveIcon = false
 	local existingId = target:GetAttribute("OceanTD_PlaceId")
 	placeId = if typeof(existingId) == "string" then existingId else ""
 
@@ -1729,6 +1795,7 @@ function RelocateController.begin(target: BasePart)
 		syncChrome()
 	end
 	log("Begin", itemId, if gamepadRelocate then "gamepad" else "pointer")
+	activeChanged:Fire(true, target)
 end
 
 local function tryBeginFromPick(screenPos: Vector2): boolean
@@ -1749,32 +1816,89 @@ local function tryBeginFromPick(screenPos: Vector2): boolean
 	return true
 end
 
+local function guiObjectHit(obj: GuiObject?, screenPos: Vector2, pad: number): boolean
+	if not obj or not obj.Visible then
+		return false
+	end
+	local p = obj.AbsolutePosition
+	local s = obj.AbsoluteSize
+	if s.X < 1 or s.Y < 1 then
+		return false
+	end
+	local function inside(x: number, y: number): boolean
+		return x >= p.X - pad
+			and x <= p.X + s.X + pad
+			and y >= p.Y - pad
+			and y <= p.Y + s.Y + pad
+	end
+	if inside(screenPos.X, screenPos.Y) then
+		return true
+	end
+	local inset = GuiService:GetGuiInset()
+	if inset.X ~= 0 or inset.Y ~= 0 then
+		return inside(screenPos.X - inset.X, screenPos.Y - inset.Y)
+	end
+	return false
+end
+
+local function isOverMoveIcon(screenPos: Vector2): boolean
+	if moveBillboard and not moveBillboard.Enabled then
+		return false
+	end
+	if guiObjectHit(moveIcon, screenPos, 10) then
+		return true
+	end
+	local function probe(x: number, y: number): boolean
+		local ok, objs = pcall(function()
+			return playerGui:GetGuiObjectsAtPosition(x, y)
+		end)
+		if not ok or typeof(objs) ~= "table" then
+			return false
+		end
+		for _, obj in ipairs(objs) do
+			if obj == moveIcon then
+				return true
+			end
+			if moveBillboard and (obj == moveBillboard or obj:IsDescendantOf(moveBillboard)) then
+				return true
+			end
+		end
+		return false
+	end
+	if probe(screenPos.X, screenPos.Y) then
+		return true
+	end
+	local inset = GuiService:GetGuiInset()
+	if inset.X ~= 0 or inset.Y ~= 0 then
+		return probe(screenPos.X - inset.X, screenPos.Y - inset.Y)
+	end
+	return false
+end
+
 local function isOverChrome(screenPos: Vector2): boolean
 	if chromeBtnDown then
 		return true
 	end
-	local function hit(btn: GuiObject?): boolean
-		if not btn or not btn.Visible then
-			return false
-		end
-		local p = btn.AbsolutePosition
-		local s = btn.AbsoluteSize
-		local pad = 12
-		return screenPos.X >= p.X - pad
-			and screenPos.X <= p.X + s.X + pad
-			and screenPos.Y >= p.Y - pad
-			and screenPos.Y <= p.Y + s.Y + pad
-	end
-	return hit(checkBtn) or hit(cancelBtn) or hit(recycleBtn)
+	return guiObjectHit(checkBtn, screenPos, 12)
+		or guiObjectHit(cancelBtn, screenPos, 12)
+		or guiObjectHit(recycleBtn, screenPos, 12)
 end
 
-table.insert(inputConns, UserInputService.InputBegan:Connect(function(input, processed)
+table.insert(inputConns, UserInputService.InputBegan:Connect(function(input, _processed)
 	local isMouse = input.UserInputType == Enum.UserInputType.MouseButton1
 	local isTouch = input.UserInputType == Enum.UserInputType.Touch
 
 	if active then
+		if inspectModal then
+			return
+		end
 		if busy then
 			return
+		end
+		if input.KeyCode == Enum.KeyCode.ButtonR1 then
+			if r1WhileActive and r1WhileActive() then
+				return
+			end
 		end
 		if input.KeyCode == Enum.KeyCode.Escape or input.KeyCode == Enum.KeyCode.X or input.KeyCode == Enum.KeyCode.ButtonB then
 			RelocateController.cancel()
@@ -1797,23 +1921,25 @@ table.insert(inputConns, UserInputService.InputBegan:Connect(function(input, pro
 			return
 		end
 		local screenPos = pointerScreenPos()
-		if isOverChrome(screenPos) then
+		-- Move handle wins over ✓/X/recycle so grabbing the icon starts a drag.
+		local grabHandle = isOverMoveIcon(screenPos)
+		if not grabHandle and isOverChrome(screenPos) then
 			chromeBtnDown = true
 			return
 		end
 		if InventoryState.isPointerOverBackpack(screenPos) then
 			return
 		end
-		if processed then
-			return
-		end
+		-- Ignore `processed`: the move-icon BillboardGui / HUD often mark the press
+		-- processed, which blocked drag until you clicked empty ground.
 		-- Lock drag while confirming recycle.
 		if recyclePending then
 			return
 		end
 		fingerDown = true
 		pressOrigin = screenPos
-		dragging = false
+		dragging = grabHandle
+		grabFromMoveIcon = grabHandle
 		return
 	end
 
@@ -1874,7 +2000,13 @@ table.insert(inputConns, UserInputService.InputChanged:Connect(function(input, _
 	if not dragging and not fingerDown then
 		return
 	end
-	local pos = raycastTerrain(aimScreenPos())
+	-- Grabbing the on-coral handle: ray at the cursor so the icon stays under the pointer.
+	-- Skip until the pointer actually moves so a click on the icon doesn't snap the coral.
+	if grabFromMoveIcon and pressOrigin and (now - pressOrigin).Magnitude < 2 then
+		return
+	end
+	local aim = if grabFromMoveIcon then now else aimScreenPos()
+	local pos = raycastTerrain(aim)
 	if pos then
 		updateAt(pos)
 	end
@@ -1889,6 +2021,7 @@ table.insert(inputConns, UserInputService.InputEnded:Connect(function(input, _pr
 	fingerDown = false
 	pressOrigin = nil
 	dragging = false
+	grabFromMoveIcon = false
 
 	-- Tap fallback: if press didn't open the tool (processed/ray miss), try again on release.
 	if not active and not PlacementController.isActive() and pendingPick and pendingPickScreen then

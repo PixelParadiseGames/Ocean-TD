@@ -91,6 +91,28 @@ function PlaceConfirmHitTest.resolveTarget(
 	return nil
 end
 
+function PlaceConfirmHitTest.isOverGui(screenPos: Vector2, obj: GuiObject?): boolean
+	if not obj or not obj.Visible then
+		return false
+	end
+	local p = obj.AbsolutePosition
+	local s = obj.AbsoluteSize
+	if s.X < 1 or s.Y < 1 then
+		return false
+	end
+	local function inside(x: number, y: number): boolean
+		return x >= p.X and x <= p.X + s.X and y >= p.Y and y <= p.Y + s.Y
+	end
+	if inside(screenPos.X, screenPos.Y) then
+		return true
+	end
+	local inset = GuiService:GetGuiInset()
+	if inset.X ~= 0 or inset.Y ~= 0 then
+		return inside(screenPos.X - inset.X, screenPos.Y - inset.Y)
+	end
+	return false
+end
+
 function PlaceConfirmHitTest.isOver(
 	screenPos: Vector2,
 	chromeBtnPointerDown: boolean,

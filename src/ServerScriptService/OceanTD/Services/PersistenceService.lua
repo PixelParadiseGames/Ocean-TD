@@ -106,6 +106,14 @@ local function sanitizeLayout(raw: any): { LayoutObject }
 			if diameter and diameter > 0 then
 				entry.diameter = diameter
 			end
+			local sizeTier = tonumber(obj.sizeTier)
+			if sizeTier then
+				entry.sizeTier = math.clamp(math.floor(sizeTier), 1, 3)
+			end
+			local sizeClass = tonumber(obj.sizeClass)
+			if sizeClass then
+				entry.sizeClass = math.clamp(math.floor(sizeClass), 1, 3)
+			end
 			table.insert(layout, entry)
 		end
 	end
@@ -124,6 +132,8 @@ local function cloneLayout(layout: { LayoutObject }): { LayoutObject }
 			gy = obj.gy,
 			gz = obj.gz,
 			diameter = obj.diameter,
+			sizeTier = obj.sizeTier,
+			sizeClass = obj.sizeClass,
 		})
 	end
 	return out

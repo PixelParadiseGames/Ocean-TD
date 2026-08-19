@@ -19,6 +19,8 @@ export type CellData = {
 	ownerUserId: number,
 	plotId: PlotId,
 	diameter: number?,
+	sizeTier: number?,
+	sizeClass: number?,
 }
 
 local GridService = {}
@@ -95,7 +97,9 @@ function GridService.tryOccupy(
 	gx: number?,
 	gy: number?,
 	gz: number?,
-	diameter: number?
+	diameter: number?,
+	sizeTier: number?,
+	sizeClass: number?
 ): (boolean, string?)
 	local rx, ry, rz, key = resolveGridKey(plotId, lx, ly, lz, gx, gy, gz)
 	if cells[key] then
@@ -112,9 +116,30 @@ function GridService.tryOccupy(
 		ownerUserId = ownerUserId,
 		plotId = plotId,
 		diameter = if typeof(diameter) == "number" and diameter > 0 then diameter else nil,
+		sizeTier = if typeof(sizeTier) == "number" then math.clamp(math.floor(sizeTier), 1, 3) else nil,
+		sizeClass = if typeof(sizeClass) == "number" then math.clamp(math.floor(sizeClass), 1, 3) else nil,
 	}
 	plotObjectCounts[plotId] = (plotObjectCounts[plotId] or 0) + 1
 	return true, nil
+end
+
+function GridService.setSizeAtGrid(
+	plotId: PlotId,
+	gx: number,
+	gy: number,
+	gz: number,
+	diameter: number,
+	sizeTier: number,
+	sizeClass: number
+): boolean
+	local cell = GridService.getCellAtGrid(plotId, gx, gy, gz)
+	if not cell then
+		return false
+	end
+	cell.diameter = diameter
+	cell.sizeTier = sizeTier
+	cell.sizeClass = sizeClass
+	return true
 end
 
 function GridService.vacate(
@@ -149,7 +174,9 @@ function GridService.hydrate(plotId: PlotId, ownerUserId: number, layout: { Layo
 			local gy = tonumber(obj.gy)
 			local gz = tonumber(obj.gz)
 			local diameter = tonumber(obj.diameter)
-			local ok = GridService.tryOccupy(plotId, ownerUserId, obj.id, lx, ly, lz, gx, gy, gz, diameter)
+			local sizeTier = tonumber(obj.sizeTier)
+			local sizeClass = tonumber(obj.sizeClass)
+			local ok = GridService.tryOccupy(plotId, ownerUserId, obj.id, lx, ly, lz, gx, gy, gz, diameter, sizeTier, sizeClass)
 			if ok then
 				count += 1
 			end
@@ -180,6 +207,8 @@ function GridService.snapshot(plotId: PlotId): { LayoutObject }
 				gy = cell.gy,
 				gz = cell.gz,
 				diameter = cell.diameter,
+				sizeTier = cell.sizeTier,
+				sizeClass = cell.sizeClass,
 			})
 		end
 	end
@@ -206,7 +235,7 @@ function GridService.reframe(plotId: PlotId, oldCf: CFrame, newCf: CFrame): numb
 		local localPos = newCf:PointToObjectSpace(world)
 		local lx, ly, lz = localPos.X, localPos.Y, localPos.Z
 		local gx, gy, gz = GridMath.worldToGrid(localPos, Vector3.zero)
-		GridService.tryOccupy(plotId, cell.ownerUserId, cell.id, lx, ly, lz, gx, gy, gz)
+		GridService.tryOccupy(plotId, cell.ownerUserId, cell.id, lx, ly, lz, gx, gy, gz, cell.diameter, cell.sizeTier, cell.sizeClass)
 		moved += 1
 	end
 	log("Reframe", plotId, "objects=", moved)

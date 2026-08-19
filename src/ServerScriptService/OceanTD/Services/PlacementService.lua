@@ -13,6 +13,7 @@ local oceanShared = ReplicatedStorage:WaitForChild("OceanTD"):WaitForChild("Shar
 local GridMath = require(oceanShared:WaitForChild("GridMath"))
 local SpeciesCatalog = require(oceanShared:WaitForChild("SpeciesCatalog"))
 local CoralVisual = require(oceanShared:WaitForChild("CoralVisual"))
+local CoralSize = require(oceanShared:WaitForChild("CoralSize"))
 local ItemCatalog = require(oceanShared:WaitForChild("ItemCatalog"))
 local SkillStages = require(oceanShared:WaitForChild("SkillStages"))
 
@@ -31,6 +32,8 @@ type LayoutObject = {
 	gy: number?,
 	gz: number?,
 	diameter: number?,
+	sizeTier: number?,
+	sizeClass: number?,
 }
 
 export type PlaceResult = {
@@ -181,6 +184,9 @@ function PlacementService.hydrateVisuals(plotId: string, boundsCFrame: CFrame)
 		if visual then
 			visual:SetAttribute("OceanTD_ItemId", cell.id)
 			visual:SetAttribute("OceanTD_SpeciesId", species.speciesId)
+			local class = CoralSize.clampTier(cell.sizeClass or CoralSize.classFromDiameter(cell.diameter or 4))
+			local tier = CoralSize.clampTier(cell.sizeTier or class)
+			CoralSize.applyToPart(visual, cell.diameter or visual.Size.X, class, tier)
 		end
 	end)
 	log("Hydrated visuals", plotId)
@@ -197,7 +203,9 @@ function PlacementService.placeFromSave(
 	gy: number?,
 	gz: number?,
 	consumeSeed: boolean?,
-	diameter: number?
+	diameter: number?,
+	sizeTier: number?,
+	sizeClass: number?
 ): PlaceResult
 	local shouldConsume = consumeSeed == true
 	local item = ItemCatalog.get(itemId)
@@ -239,7 +247,9 @@ function PlacementService.placeFromSave(
 		gx,
 		gy,
 		gz,
-		diameter
+		diameter,
+		sizeTier,
+		sizeClass
 	)
 	if not occupied then
 		if shouldConsume then
@@ -262,6 +272,9 @@ function PlacementService.placeFromSave(
 	visual:SetAttribute("OceanTD_PlaceId", placeId)
 	visual:SetAttribute("OceanTD_ItemId", itemId)
 	visual:SetAttribute("OceanTD_SpeciesId", species.speciesId)
+	local class = CoralSize.clampTier(sizeClass or CoralSize.classFromDiameter(diameter or visual.Size.X))
+	local tier = CoralSize.clampTier(sizeTier or class)
+	CoralSize.applyToPart(visual, diameter or visual.Size.X, class, tier)
 
 	return {
 		ok = true,
@@ -330,7 +343,9 @@ function PlacementService.place(
 		gx,
 		gy,
 		gz,
-		diameter
+		diameter,
+		1,
+		1
 	)
 	if not occupied then
 		if shouldConsume then
@@ -354,6 +369,7 @@ function PlacementService.place(
 	visual:SetAttribute("OceanTD_PlaceId", placeId)
 	visual:SetAttribute("OceanTD_ItemId", itemId)
 	visual:SetAttribute("OceanTD_SpeciesId", species.speciesId)
+	CoralSize.applyToPart(visual, diameter or visual.Size.X, 1, 1)
 
 	if not suppressUndoRecord then
 		UndoService.push(player, {
@@ -468,7 +484,9 @@ function PlacementService.move(
 		tgx,
 		tgy,
 		tgz,
-		cell.diameter
+		cell.diameter,
+		cell.sizeTier,
+		cell.sizeClass
 	)
 	if not occupied then
 		-- Roll back vacate so the coral isn't lost from the grid.
@@ -482,7 +500,9 @@ function PlacementService.move(
 			fgx,
 			fgy,
 			fgz,
-			cell.diameter
+			cell.diameter,
+			cell.sizeTier,
+			cell.sizeClass
 		)
 		return { ok = false, errorCode = occupyErr or "SpotTaken" }
 	end
@@ -751,7 +771,9 @@ function PlacementService.applyLayout(player: Player, layout: { LayoutObject }):
 			obj.gy,
 			obj.gz,
 			true,
-			obj.diameter
+			obj.diameter,
+			obj.sizeTier,
+			obj.sizeClass
 		)
 		if result.ok then
 			placed += 1
@@ -888,6 +910,60 @@ function PlacementService.undoLast(player: Player): UndoResult
 	UndoService.push(player, step)
 	warnPlace("Undo failed", step.kind, err, "for", player.Name)
 	return { ok = false, errorCode = err or "UndoFail", kind = step.kind }
+end
+
+function PlacementService.setCoralSize(
+	player: Player,
+	placeId: string,
+	targetClass: number,
+	unlockNext: boolean
+): { ok: boolean, errorCode: string?, diameter: number?, sizeClass: number?, sizeTier: number? }
+	if typeof(placeId) ~= "string" or placeId == "" then
+		return { ok = false, errorCode = "BadRequest" }
+	end
+	if not PlayerSession.canSave(player) then
+		return { ok = false, errorCode = "NotReady" }
+	end
+	local plotId = PlotService.getOwnerPlotId(player)
+	if not plotId then
+		return { ok = false, errorCode = "NoPlot" }
+	end
+	local visual = findVisualByPlaceId(plotId, placeId)
+	if not visual then
+		return { ok = false, errorCode = "Missing" }
+	end
+	local _curD, _curClass, tier = CoralSize.readFromPart(visual)
+	local want = CoralSize.clampTier(targetClass)
+	local newTier = tier
+	if unlockNext then
+		local nxt = CoralSize.nextUnlock(tier)
+		if not nxt then
+			return { ok = false, errorCode = "Maxed" }
+		end
+		if want ~= nxt then
+			want = nxt
+		end
+		newTier = nxt
+	elseif want > tier then
+		return { ok = false, errorCode = "Locked" }
+	end
+	local newDiam = CoralSize.randomDiameter(want)
+	local slot = PlotService.getSlot(plotId)
+	if not slot then
+		return { ok = false, errorCode = "BadPlot" }
+	end
+	local localPos = GridMath.worldToPlotLocal(visual.Position, slot.cframe)
+	local gx, gy, gz = GridMath.worldToGrid(localPos, Vector3.zero)
+	if not GridService.setSizeAtGrid(plotId, gx, gy, gz, newDiam, newTier, want) then
+		return { ok = false, errorCode = "Missing" }
+	end
+	-- Client plays the scale cinematic; persist attributes now so a leave/rejoin matches.
+	visual:SetAttribute("OceanTD_Diameter", newDiam)
+	visual:SetAttribute("OceanTD_SizeClass", want)
+	visual:SetAttribute("OceanTD_SizeTier", newTier)
+	PersistenceService.save(player, GridService.snapshot(plotId))
+	log("Size", placeId, "class", want, "tier", newTier, "d", newDiam)
+	return { ok = true, diameter = newDiam, sizeClass = want, sizeTier = newTier }
 end
 
 function PlacementService.init()

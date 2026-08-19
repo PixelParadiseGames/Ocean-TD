@@ -2462,6 +2462,12 @@ table.insert(inputConns, UserInputService.InputBegan:Connect(function(input, _pr
 	-- even when the press is meant for the plot, which left ghosts stuck without ✓.
 
 	if mode == MODE_CONFIRM then
+		-- Move icon is a grab handle: drag from it (don't wait for a second plot click).
+		if PlaceConfirmHitTest.isOverGui(screenPos, moveHintImage) then
+			confirmPressOrigin = screenPos
+			confirmDragging = true
+			return
+		end
 		-- Mouse: click elsewhere re-parks immediately (Spot Taken / invalid stays until you move).
 		-- Touch still press-then-drag so a tap on the plot doesn't jump the ghost.
 		if isMouse then

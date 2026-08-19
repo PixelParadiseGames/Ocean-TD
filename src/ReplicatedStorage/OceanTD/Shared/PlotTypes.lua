@@ -23,8 +23,12 @@ export type LayoutObject = {
 	gx: number?,
 	gy: number?,
 	gz: number?,
-	-- Optional visual diameter (BrainCoral random 2..5). Missing → species default.
+	-- Optional visual diameter (BrainCoral size bands). Missing → species default.
 	diameter: number?,
+	-- Max unlocked size band 1=S 2=M 3=L. Missing → inferred from diameter.
+	sizeTier: number?,
+	-- Current size band (may be smaller than sizeTier if player switched down).
+	sizeClass: number?,
 }
 
 export type PlotSaveSlot = {

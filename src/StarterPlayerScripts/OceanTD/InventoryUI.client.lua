@@ -30,6 +30,7 @@ local UiPopupScale = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiPo
 local InventoryState = require(script.Parent:WaitForChild("InventoryState"))
 local PlacementController = require(script.Parent:WaitForChild("PlacementController"))
 local RelocateController = require(script.Parent:WaitForChild("RelocateController"))
+local CoralInspectPanel = require(script.Parent:WaitForChild("CoralInspectPanel"))
 local LocalShovel = require(script.Parent:WaitForChild("LocalShovel"))
 local HandOrb = require(script.Parent:WaitForChild("HandOrb"))
 local ClearPlotSlot = require(script.Parent:WaitForChild("ClearPlotSlot"))
@@ -639,6 +640,8 @@ scroll.Active = true
 scroll.ScrollingEnabled = true
 scroll.ElasticBehavior = Enum.ElasticBehavior.Always
 scroll.Parent = scrollRoot
+
+CoralInspectPanel.bind(panel, scrollRoot)
 
 local grid = Instance.new("UIGridLayout")
 grid.Name = "Grid2"

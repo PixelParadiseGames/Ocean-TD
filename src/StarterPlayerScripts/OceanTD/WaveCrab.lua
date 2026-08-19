@@ -1,6 +1,7 @@
 --!strict
 --[[
-	GroundA hungry crabs (wave 5+): 0–3 per wave, 10× fish hunger, sprint bursts on GroundA.
+	GroundA hungry crabs (wave 5+): hunger 10× fish, sprint bursts on GroundA.
+	Counts: W5–10 0–1, W11–20 1–3, W21–40 2–4, W41+ 3–6.
 	Weld tripod walk (not IK). Path is never trimmed by Plot Size.
 ]]
 
@@ -186,7 +187,11 @@ function WaveCrab.rollCount(wave: number): number
 	if not WaveCrab.shouldSpawn(wave) then
 		return 0
 	end
-	return sprintRng:NextInteger(0, C.CRAB_COUNT_MAX)
+	local lo, hi = C.crabCountRangeForWave(wave)
+	if hi <= 0 then
+		return 0
+	end
+	return sprintRng:NextInteger(lo, hi)
 end
 
 function WaveCrab.hungerForWave(wave: number): number
@@ -467,6 +472,72 @@ function WaveCrab.stunCoralPart(part: BasePart)
 	part.Color = Color3.new(1, 1, 1)
 end
 
+function WaveCrab.playDeathSkullFromCoral(part: BasePart)
+	if not part.Parent then
+		return
+	end
+	local top = math.max(part.Size.X, part.Size.Y, part.Size.Z) * 0.28
+	WaveCrab.playDeathSkull(part.Position + Vector3.new(0, top, 0))
+end
+
+function WaveCrab.playDeathSkull(worldPos: Vector3)
+	local parent: Instance = Workspace.CurrentCamera or Workspace
+	local dur = C.CRAB_SKULL_SEC
+	local anchor = Instance.new("Part")
+	anchor.Name = "OceanTD_CrabSkull"
+	anchor.Anchored = true
+	anchor.CanCollide = false
+	anchor.CanQuery = false
+	anchor.CanTouch = false
+	anchor.CastShadow = false
+	anchor.Transparency = 1
+	anchor.Size = Vector3.new(0.2, 0.2, 0.2)
+	anchor.CFrame = CFrame.new(worldPos)
+	anchor.Parent = parent
+
+	local bb = Instance.new("BillboardGui")
+	bb.Name = "Skull"
+	bb.Adornee = anchor
+	bb.AlwaysOnTop = true
+	bb.LightInfluence = 0
+	bb.MaxDistance = 2000
+	bb.Size = UDim2.fromScale(C.CRAB_SKULL_START_STUDS, C.CRAB_SKULL_START_STUDS)
+	bb.Parent = anchor
+
+	local lbl = Instance.new("TextLabel")
+	lbl.BackgroundTransparency = 1
+	lbl.Size = UDim2.fromScale(1, 1)
+	lbl.Font = Enum.Font.SourceSansBold
+	lbl.Text = C.CRAB_SKULL_EMOJI
+	lbl.TextScaled = true
+	lbl.TextTransparency = 0
+	lbl.TextStrokeTransparency = 0.4
+	lbl.TextStrokeColor3 = Color3.fromRGB(20, 10, 10)
+	lbl.Parent = bb
+
+	local t0 = os.clock()
+	local conn: RBXScriptConnection
+	conn = RunService.Heartbeat:Connect(function()
+		if not anchor.Parent then
+			conn:Disconnect()
+			return
+		end
+		local u = math.clamp((os.clock() - t0) / dur, 0, 1)
+		local grow = 1 - (1 - u) * (1 - u)
+		local rise = u -- slow linear lift
+		local studs = C.CRAB_SKULL_START_STUDS + (C.CRAB_SKULL_END_STUDS - C.CRAB_SKULL_START_STUDS) * grow
+		anchor.CFrame = CFrame.new(worldPos + Vector3.new(0, C.CRAB_SKULL_RISE * rise, 0))
+		bb.Size = UDim2.fromScale(studs, studs)
+		local fade = if u > 0.42 then math.clamp((u - 0.42) / 0.58, 0, 1) else 0
+		lbl.TextTransparency = fade
+		lbl.TextStrokeTransparency = 0.4 + 0.6 * fade
+		if u >= 1 then
+			conn:Disconnect()
+			anchor:Destroy()
+		end
+	end)
+end
+
 function WaveCrab.clearCoralStun(part: BasePart, fade: boolean)
 	part:SetAttribute("OceanTD_CrabStunned", nil)
 	local _, color = CoralVisual.readRestLook(part)
@@ -488,14 +559,56 @@ function WaveCrab.playZapBurst(parent: Instance, follow: () -> Vector3)
 		lbl: TextLabel,
 		spin: number,
 		dir: Vector3,
+		startStuds: number,
+		endStuds: number,
+		trans: number,
+		pulse: number,
+		pulseOff: number,
+		life: number,
 	}
 	local zaps: { Zap } = {}
 	local origin0 = follow()
+
+	local function spawnBubble(at: Vector3)
+		local size = rng:NextNumber(C.CRAB_ZAP_BUBBLE_SIZE_MIN, C.CRAB_ZAP_BUBBLE_SIZE_MAX)
+		local p = Instance.new("Part")
+		p.Name = "OceanTD_CrabBubble"
+		p.Shape = Enum.PartType.Ball
+		p.Material = Enum.Material.Glass
+		p.Color = C.CRAB_ZAP_BUBBLE_COLOR
+		p.Transparency = rng:NextNumber(C.CRAB_ZAP_BUBBLE_TRANS_MIN, C.CRAB_ZAP_BUBBLE_TRANS_MAX)
+		p.Size = Vector3.new(size, size, size)
+		p.Anchored = true
+		p.Massless = true
+		p.CanCollide = false
+		p.CanQuery = false
+		p.CanTouch = false
+		p.CastShadow = false
+		local spawnOff = Vector3.new(rng:NextNumber(-1.1, 1.1), rng:NextNumber(0, 0.55), rng:NextNumber(-1.1, 1.1))
+		local startPos = at + spawnOff
+		p.CFrame = CFrame.new(startPos)
+		p.Parent = parent
+		local rise = C.CRAB_ZAP_BUBBLE_RISE_MIN + rng:NextNumber() * C.CRAB_ZAP_BUBBLE_RISE_SPAN
+		local drift = Vector3.new(rng:NextNumber(-1.2, 1.2), rise, rng:NextNumber(-1.2, 1.2))
+		local life = C.CRAB_ZAP_BUBBLE_LIFE
+		TweenService:Create(p, TweenInfo.new(life, Enum.EasingStyle.Sine, Enum.EasingDirection.Out), {
+			CFrame = CFrame.new(startPos + drift),
+			Transparency = 1,
+		}):Play()
+		task.delay(life + 0.15, function()
+			if p.Parent then
+				p:Destroy()
+			end
+		end)
+	end
+
 	for _ = 1, C.CRAB_ZAP_COUNT do
 		local yaw = rng:NextNumber(0, math.pi * 2)
 		local pitch = rng:NextNumber(-0.15, 1.15)
 		local reach = rng:NextNumber(2.2, 9.5)
 		local dir = Vector3.new(math.cos(yaw) * math.cos(pitch), math.sin(pitch) + 0.55, math.sin(yaw) * math.cos(pitch)) * reach
+		local startStuds = rng:NextNumber(C.CRAB_ZAP_START_STUDS, C.CRAB_ZAP_START_STUDS_MAX)
+		local endStuds = rng:NextNumber(math.max(startStuds, C.CRAB_ZAP_END_STUDS), C.CRAB_ZAP_END_STUDS_MAX)
 		local anchor = Instance.new("Part")
 		anchor.Name = "OceanTD_CrabZap"
 		anchor.Anchored = true
@@ -514,9 +627,10 @@ function WaveCrab.playZapBurst(parent: Instance, follow: () -> Vector3)
 		bb.AlwaysOnTop = true
 		bb.LightInfluence = 0
 		bb.MaxDistance = 2000
-		bb.Size = UDim2.fromScale(C.CRAB_ZAP_START_STUDS, C.CRAB_ZAP_START_STUDS)
+		bb.Size = UDim2.fromScale(startStuds, startStuds)
 		bb.Parent = anchor
 
+		local trans = rng:NextNumber(C.CRAB_ZAP_TRANS_MIN, C.CRAB_ZAP_TRANS_MAX)
 		local lbl = Instance.new("TextLabel")
 		lbl.BackgroundTransparency = 1
 		lbl.Size = UDim2.fromScale(1, 1)
@@ -524,7 +638,8 @@ function WaveCrab.playZapBurst(parent: Instance, follow: () -> Vector3)
 		lbl.Text = C.CRAB_ZAP_EMOJI
 		lbl.TextScaled = true
 		lbl.Rotation = rng:NextNumber(0, 360)
-		lbl.TextStrokeTransparency = 0.35
+		lbl.TextTransparency = trans
+		lbl.TextStrokeTransparency = 0.35 + 0.4 * trans
 		lbl.TextStrokeColor3 = Color3.fromRGB(40, 10, 0)
 		lbl.Parent = bb
 
@@ -534,25 +649,49 @@ function WaveCrab.playZapBurst(parent: Instance, follow: () -> Vector3)
 			lbl = lbl,
 			spin = rng:NextNumber(180, 520) * (if rng:NextNumber() < 0.5 then -1 else 1),
 			dir = dir,
+			startStuds = startStuds,
+			endStuds = endStuds,
+			trans = trans,
+			pulse = rng:NextNumber(2.2, 5.5),
+			pulseOff = rng:NextNumber(0, math.pi * 2),
+			life = rng:NextNumber(C.CRAB_ZAP_LIFE_MIN, C.CRAB_ZAP_LIFE_MAX),
 		})
 	end
 
+	for _ = 1, C.CRAB_ZAP_BUBBLE_COUNT do
+		spawnBubble(origin0)
+	end
+
 	local t0 = os.clock()
+	local nextBubbleAt = t0 + rng:NextNumber(0.08, 0.18)
 	local conn: RBXScriptConnection
 	conn = RunService.Heartbeat:Connect(function(dt)
-		local u = math.clamp((os.clock() - t0) / dur, 0, 1)
-		local ease = 1 - (1 - u) * (1 - u)
+		local now = os.clock()
+		local u = math.clamp((now - t0) / dur, 0, 1)
 		local origin = follow()
-		local studs = C.CRAB_ZAP_START_STUDS + (C.CRAB_ZAP_END_STUDS - C.CRAB_ZAP_START_STUDS) * ease
-		local fade = if u > 0.72 then math.clamp((u - 0.72) / 0.28, 0, 1) else 0
+		if u < 0.78 and now >= nextBubbleAt then
+			spawnBubble(origin)
+			nextBubbleAt = now + rng:NextNumber(0.07, 0.2)
+		end
 		for _, z in ipairs(zaps) do
 			if not z.anchor.Parent then
 				continue
 			end
+			local zu = math.clamp((now - t0) / z.life, 0, 1)
+			if zu >= 1 then
+				z.anchor:Destroy()
+				continue
+			end
+			local ease = 1 - (1 - zu) * (1 - zu)
+			local fade = if zu > 0.72 then math.clamp((zu - 0.72) / 0.28, 0, 1) else 0
 			z.lbl.Rotation += z.spin * dt
 			z.anchor.CFrame = CFrame.new(origin + z.dir * ease)
+			local studs = z.startStuds + (z.endStuds - z.startStuds) * ease
 			z.bb.Size = UDim2.fromScale(studs, studs)
-			z.lbl.TextTransparency = fade
+			local pulse = 0.5 + 0.5 * math.sin(now * z.pulse + z.pulseOff)
+			local liveT = z.trans + (C.CRAB_ZAP_TRANS_MAX - z.trans) * pulse * 0.45
+			liveT = math.clamp(liveT, C.CRAB_ZAP_TRANS_MIN, C.CRAB_ZAP_TRANS_MAX)
+			z.lbl.TextTransparency = liveT + (1 - liveT) * fade
 			z.lbl.TextStrokeTransparency = 0.35 + 0.65 * fade
 		end
 		if u >= 1 then

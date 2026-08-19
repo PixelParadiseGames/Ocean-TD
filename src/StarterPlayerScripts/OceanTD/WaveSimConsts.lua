@@ -24,7 +24,7 @@ local C = {
 	FOOD_HOME_START_U = 0.35, -- blend flight toward live mouth after this fraction
 	FOOD_END_GRACE_RADIUS_SQ = 144, -- 12^2 last-chance eat when flight ends
 	FOOD_END_GRACE_Y = 9.0,
-	DEFAULT_RELOAD = 3, -- matches BrainCoral (50% slower than original 2s)
+	DEFAULT_RELOAD = 6, -- matches BrainCoral (half as fast as previous 3s)
 	TARGET_RANGE = TARGET_RANGE,
 	TARGET_RANGE_SQ = TARGET_RANGE * TARGET_RANGE,
 	-- Path-bucket targeting: corals only see fish in an arrival window along the route.
@@ -49,7 +49,7 @@ local C = {
 	HASH_CELL = 30,
 	DEFAULT_FOOD_FILL = 1,
 	WAVE1_COUNT = 3,
-	WAVE_COUNT_STEP = 4,
+	WAVE_COUNT_STEP = 2,
 	REEF_START_HEALTH = 10,
 	TANG_HUNGER_BASE = 2, -- waves 1–10
 	HUNGER_EVERY_WAVES = 10,
@@ -91,7 +91,6 @@ local C = {
 	TANG_ROLL = 0,
 	-- Hungry crabs on WaveRoute.GroundA (wave 5+).
 	CRAB_FIRST_WAVE = 5,
-	CRAB_COUNT_MAX = 3, -- roll 0..this each wave
 	CRAB_HUNGER_MULT = 10, -- max hunger = fish hunger × this
 	CRAB_SPEED_MULT = 0.75, -- 25% slower than Tang (between sprints)
 	CRAB_SPRINT_MULT_MIN = 1.55,
@@ -113,13 +112,35 @@ local C = {
 	CRAB_ANIM_LIFT = 0.3,
 	CRAB_ANIM_MIN_SPEED = 0.5,
 	CRAB_ANIM_FADE_SPEED = 2,
-	CRAB_STAGGER_MIN = 1, -- extra crabs spawn this many seconds after the previous
-	CRAB_STAGGER_MAX = 4,
+	CRAB_STAGGER_MIN = 0.75, -- extra crabs spawn this many seconds after the previous
+	CRAB_STAGGER_MAX = 4.5,
+	CRAB_FIRST_DELAY_MIN = 0.15, -- first crab after the first fish
+	CRAB_FIRST_DELAY_MAX = 1.8,
 	CRAB_CORAL_PAUSE_SEC = 3, -- ShellHitbox touch: sit still while zap VFX plays
 	CRAB_ZAP_COUNT = 30,
 	CRAB_ZAP_EMOJI = "💥⚡",
-	CRAB_ZAP_START_STUDS = 1.6,
-	CRAB_ZAP_END_STUDS = 7.5,
+	CRAB_ZAP_LIFE_MIN = 1,
+	CRAB_ZAP_LIFE_MAX = 3,
+	CRAB_ZAP_START_STUDS = 0.2,
+	CRAB_ZAP_START_STUDS_MAX = 1.2,
+	CRAB_ZAP_END_STUDS = 1.2,
+	CRAB_ZAP_END_STUDS_MAX = 6.5,
+	CRAB_ZAP_TRANS_MIN = 0,
+	CRAB_ZAP_TRANS_MAX = 0.5,
+	CRAB_ZAP_BUBBLE_COUNT = 16,
+	CRAB_ZAP_BUBBLE_SIZE_MIN = 0.2,
+	CRAB_ZAP_BUBBLE_SIZE_MAX = 3.40, -- 2× previous 1.70
+	CRAB_ZAP_BUBBLE_LIFE = 27, -- 3× previous 9s
+	CRAB_ZAP_BUBBLE_RISE_MIN = 40.5, -- 3× previous 13.5
+	CRAB_ZAP_BUBBLE_RISE_SPAN = 31.5, -- 3× previous 10.5
+	CRAB_ZAP_BUBBLE_TRANS_MIN = 0.05, -- less transparent than before (was 0.2)
+	CRAB_ZAP_BUBBLE_TRANS_MAX = 0.5,
+	CRAB_ZAP_BUBBLE_COLOR = Color3.fromRGB(125, 200, 255), -- light blue
+	CRAB_SKULL_EMOJI = "💀",
+	CRAB_SKULL_SEC = 2.4,
+	CRAB_SKULL_START_STUDS = 0.35,
+	CRAB_SKULL_END_STUDS = 9.18, -- 70% larger than 5.4
+	CRAB_SKULL_RISE = 8.1, -- was 6.2
 	CRAB_STUN_FADE_SEC = 0.75,
 	CRAB_FIGHT_RADIUS = 0.9,
 	CRAB_FIGHT_HOP = 0.62,
@@ -141,8 +162,27 @@ function C.crabHungerForWave(wave: number): number
 	return C.tangHungerForWave(wave) * C.CRAB_HUNGER_MULT
 end
 
+-- Inclusive min/max crabs rolled for this wave.
+function C.crabCountRangeForWave(wave: number): (number, number)
+	local w = math.max(1, math.floor(wave))
+	if w < C.CRAB_FIRST_WAVE then
+		return 0, 0
+	end
+	if w <= 10 then
+		return 0, 1
+	end
+	if w <= 20 then
+		return 1, 3
+	end
+	if w <= 40 then
+		return 2, 4
+	end
+	return 3, 6 -- 41+
+end
+
 function C.crabSlotForWave(wave: number): number
-	return if wave >= C.CRAB_FIRST_WAVE then 1 else 0
+	local _, hi = C.crabCountRangeForWave(wave)
+	return hi
 end
 
 return C

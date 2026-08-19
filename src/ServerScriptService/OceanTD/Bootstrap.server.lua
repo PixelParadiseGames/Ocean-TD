@@ -369,3 +369,15 @@ requestResetSkillStages.OnServerInvoke = function(player: Player)
 	end
 	return { ok = true, skillStages = stages }
 end
+
+local requestCoralSize = Remotes.getFunction("RequestCoralSize")
+requestCoralSize.OnServerInvoke = function(player: Player, placeId: any, targetClass: any, unlockNext: any)
+	if typeof(placeId) ~= "string" then
+		return { ok = false, errorCode = "BadRequest" }
+	end
+	local want = tonumber(targetClass)
+	if typeof(want) ~= "number" then
+		return { ok = false, errorCode = "BadRequest" }
+	end
+	return PlacementService.setCoralSize(player, placeId, want, unlockNext == true)
+end

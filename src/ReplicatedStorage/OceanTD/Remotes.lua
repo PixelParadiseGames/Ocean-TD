@@ -38,6 +38,7 @@ local REMOTE_FUNCTIONS = {
 	"RequestUnlockSkillStage",
 	"RequestGetSkillStages",
 	"RequestResetSkillStages",
+	"RequestCoralSize",
 }
 
 local function getRoot(): Instance
