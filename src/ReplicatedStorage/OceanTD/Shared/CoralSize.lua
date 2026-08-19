@@ -84,4 +84,50 @@ function CoralSize.labelFor(tier: number): string
 	return "Small"
 end
 
+export type SizeStats = {
+	range: number,
+	reload: number,
+	food: number,
+	defense: number,
+}
+
+CoralSize.STATS = {
+	[1] = { range = 30, reload = 6, food = 1, defense = 2 },
+	[2] = { range = 60, reload = 4, food = 2, defense = 3 },
+	[3] = { range = 80, reload = 2, food = 3, defense = 4 },
+}
+
+function CoralSize.statsFor(class: number): SizeStats
+	return CoralSize.STATS[CoralSize.clampTier(class)]
+end
+
+function CoralSize.ammoSizeScale(foodCount: number): number
+	if foodCount >= 2 then
+		return 0.8
+	end
+	return 1
+end
+
+-- Local offsets from coral center (Y up). 2 = side by side; 3 = triangle, same height.
+function CoralSize.ammoLocalOffsets(foodCount: number, coralRadius: number, ammoRadius: number): { Vector3 }
+	local y = coralRadius + ammoRadius
+	local n = math.clamp(math.floor(foodCount), 1, 3)
+	if n <= 1 then
+		return { Vector3.new(0, y, 0) }
+	end
+	if n == 2 then
+		local s = ammoRadius * 1.2
+		return {
+			Vector3.new(-s, y, 0),
+			Vector3.new(s, y, 0),
+		}
+	end
+	local s = ammoRadius * 2.05
+	return {
+		Vector3.new(0, y, s),
+		Vector3.new(-s * 0.866, y, -s * 0.5),
+		Vector3.new(s * 0.866, y, -s * 0.5),
+	}
+end
+
 return CoralSize

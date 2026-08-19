@@ -298,16 +298,17 @@ function WaveCrab.facingCFrame(pos: Vector3, move: Vector3): CFrame
 	return CFrame.lookAt(pos, pos + look, Vector3.yAxis) * CFrame.Angles(C.CRAB_PITCH, C.CRAB_YAW, C.CRAB_ROLL)
 end
 
-function WaveCrab.pauseElapsed(pauseUntil: number?): number
+function WaveCrab.pauseElapsed(pauseUntil: number?, pauseDur: number?): number
 	if pauseUntil == nil then
 		return 0
 	end
-	return math.clamp(C.CRAB_CORAL_PAUSE_SEC - math.max(0, pauseUntil - os.clock()), 0, C.CRAB_CORAL_PAUSE_SEC)
+	local dur = if typeof(pauseDur) == "number" and pauseDur > 0 then pauseDur else C.CRAB_CORAL_PAUSE_SEC
+	return math.clamp(dur - math.max(0, pauseUntil - os.clock()), 0, dur)
 end
 
 -- Bounce + spin in place during the coral zap (settles in the last fraction of the pause).
-function WaveCrab.applyFightPose(root: BasePart, anim: AnimHandle?, pathPos: Vector3, pathTang: Vector3, dt: number, elapsed: number, id: number)
-	local dur = C.CRAB_CORAL_PAUSE_SEC
+function WaveCrab.applyFightPose(root: BasePart, anim: AnimHandle?, pathPos: Vector3, pathTang: Vector3, dt: number, elapsed: number, id: number, pauseDur: number?)
+	local dur = if typeof(pauseDur) == "number" and pauseDur > 0 then pauseDur else C.CRAB_CORAL_PAUSE_SEC
 	local fade = 1
 	if elapsed > dur * 0.8 then
 		fade = math.clamp(1 - (elapsed - dur * 0.8) / math.max(dur * 0.2, 1e-3), 0, 1)
@@ -550,9 +551,9 @@ function WaveCrab.clearCoralStun(part: BasePart, fade: boolean)
 	end
 end
 
-function WaveCrab.playZapBurst(parent: Instance, follow: () -> Vector3)
+function WaveCrab.playZapBurst(parent: Instance, follow: () -> Vector3, pauseDur: number?)
 	local rng = Random.new()
-	local dur = C.CRAB_CORAL_PAUSE_SEC
+	local dur = if typeof(pauseDur) == "number" and pauseDur > 0 then pauseDur else C.CRAB_CORAL_PAUSE_SEC
 	type Zap = {
 		anchor: BasePart,
 		bb: BillboardGui,
@@ -584,14 +585,14 @@ function WaveCrab.playZapBurst(parent: Instance, follow: () -> Vector3)
 		p.CanQuery = false
 		p.CanTouch = false
 		p.CastShadow = false
-		local spawnOff = Vector3.new(rng:NextNumber(-1.1, 1.1), rng:NextNumber(0, 0.55), rng:NextNumber(-1.1, 1.1))
+		local spawnOff = Vector3.new(rng:NextNumber(-1.1, 1.1), rng:NextNumber(0, 0.4), rng:NextNumber(-1.1, 1.1))
 		local startPos = at + spawnOff
 		p.CFrame = CFrame.new(startPos)
 		p.Parent = parent
 		local rise = C.CRAB_ZAP_BUBBLE_RISE_MIN + rng:NextNumber() * C.CRAB_ZAP_BUBBLE_RISE_SPAN
 		local drift = Vector3.new(rng:NextNumber(-1.2, 1.2), rise, rng:NextNumber(-1.2, 1.2))
 		local life = C.CRAB_ZAP_BUBBLE_LIFE
-		TweenService:Create(p, TweenInfo.new(life, Enum.EasingStyle.Sine, Enum.EasingDirection.Out), {
+		TweenService:Create(p, TweenInfo.new(life, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
 			CFrame = CFrame.new(startPos + drift),
 			Transparency = 1,
 		}):Play()

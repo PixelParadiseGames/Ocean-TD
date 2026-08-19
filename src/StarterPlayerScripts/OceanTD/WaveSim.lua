@@ -16,6 +16,7 @@ local ItemCatalog = require(oceanRoot:WaitForChild("Shared"):WaitForChild("ItemC
 local SpeciesCatalog = require(oceanRoot:WaitForChild("Shared"):WaitForChild("SpeciesCatalog"))
 local UiTheme = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiTheme"))
 local CoralVisual = require(oceanRoot:WaitForChild("Shared"):WaitForChild("CoralVisual"))
+local CoralSize = require(oceanRoot:WaitForChild("Shared"):WaitForChild("CoralSize"))
 local UiHaptics = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiHaptics"))
 local SkillStages = require(oceanRoot:WaitForChild("Shared"):WaitForChild("SkillStages"))
 
@@ -128,6 +129,7 @@ type FishAgent = {
 	crabAnim: any?,
 	shellHitbox: BasePart?,
 	pauseUntil: number?,
+	pauseDur: number?,
 	stunSkullPart: BasePart?,
 	crabSprint: any?,
 }
@@ -137,13 +139,19 @@ type CoralAgent = {
 	color: Color3,
 	reloadSec: number,
 	foodFill: number,
+	foodCount: number,
+	range: number,
+	rangeSq: number,
+	defenseSec: number,
 	diameter: number,
 	readyAt: number,
 	ammo: BasePart?,
+	ammoSlots: { BasePart },
 	ammoSizeMult: number, -- 0.70..0.99 — each neon food is 1–30% smaller
 	growing: boolean,
 	growT0: number,
 	busy: boolean, -- projectile in flight
+	shotsOut: number,
 	pathDist: number, -- nearest distance along WaveRoute
 	pathSideDist: number, -- world distance from that path point
 	stunned: boolean, -- crab ShellHitbox hit; white, no food until next wave
@@ -1047,11 +1055,23 @@ local function updateHungerVisual(agent: FishAgent)
 	notifyHud()
 end
 
+local function applySizeStats(coral: CoralAgent)
+	local _d, class = CoralSize.readFromPart(coral.part)
+	local st = CoralSize.statsFor(class)
+	coral.foodCount = st.food
+	coral.range = st.range
+	coral.rangeSq = st.range * st.range
+	coral.defenseSec = st.defense
+	coral.reloadSec = st.reload
+	coral.foodFill = 1
+end
+
 local function destroyAmmo(coral: CoralAgent)
-	if coral.ammo then
-		WaveEntityPool.releaseAmmo(coral.ammo)
-		coral.ammo = nil
+	for _, p in ipairs(coral.ammoSlots) do
+		WaveEntityPool.releaseAmmo(p)
 	end
+	table.clear(coral.ammoSlots)
+	coral.ammo = nil
 	-- Do not clear coral.growing here — createAmmo calls this while starting a grow.
 end
 
@@ -1061,38 +1081,55 @@ local function rollAmmoSizeMult(): number
 end
 
 local function ammoFullDiameter(coral: CoralAgent): number
-	return C.AMMO_RADIUS * 2 * coral.ammoSizeMult
+	applySizeStats(coral)
+	return C.AMMO_RADIUS * 2 * coral.ammoSizeMult * CoralSize.ammoSizeScale(coral.foodCount)
 end
 
-local function ammoWorldPos(coral: CoralAgent): Vector3
-	-- Live size: upgraded corals are taller, so food sits on the current crown.
+local function ammoWorldPos(coral: CoralAgent, slot: number?): Vector3
+	applySizeStats(coral)
 	local d = math.max(coral.part.Size.X, coral.part.Size.Y, coral.part.Size.Z)
 	local r = d * 0.5
-	local ammoR = C.AMMO_RADIUS * coral.ammoSizeMult
-	return coral.part.Position + Vector3.new(0, r + ammoR, 0)
+	local ammoR = C.AMMO_RADIUS * coral.ammoSizeMult * CoralSize.ammoSizeScale(coral.foodCount)
+	local nVis = #coral.ammoSlots
+	if nVis < 1 then
+		nVis = coral.foodCount
+	end
+	local offs = CoralSize.ammoLocalOffsets(nVis, r, ammoR)
+	local i = math.clamp(slot or 1, 1, #offs)
+	return coral.part.Position + offs[i]
+end
+
+local function parkAmmo(coral: CoralAgent)
+	for i, p in ipairs(coral.ammoSlots) do
+		if p.Parent then
+			p.CFrame = CFrame.new(ammoWorldPos(coral, i))
+		end
+	end
 end
 
 local function createAmmo(coral: CoralAgent, scale: number)
 	if coral.stunned then
 		return
 	end
-	if coral.ammo and coral.ammo.Parent then
-		WaveEntityPool.releaseAmmo(coral.ammo)
-		coral.ammo = nil
-	end
+	destroyAmmo(coral)
 	local clamped = math.clamp(scale, 0.08, 1)
 	-- New orb (grow start or instant full): pick a random 1–30% smaller size.
 	if clamped <= 0.08 or clamped >= 1 then
 		coral.ammoSizeMult = rollAmmoSizeMult()
 	end
+	applySizeStats(coral)
 	local s = ammoFullDiameter(coral) * clamped
-	local p = WaveEntityPool.acquireAmmo(ensureFolder(), coral.color, s)
-	p.CFrame = CFrame.new(ammoWorldPos(coral))
-	coral.ammo = p
+	local n = coral.foodCount
+	for _ = 1, n do
+		local p = WaveEntityPool.acquireAmmo(ensureFolder(), coral.color, s)
+		table.insert(coral.ammoSlots, p)
+	end
+	parkAmmo(coral)
+	coral.ammo = coral.ammoSlots[1]
 end
 
 local function startAmmoGrow(coral: CoralAgent)
-	if coral.stunned then
+	if coral.stunned or coral.growing or #coral.ammoSlots > 0 then
 		return
 	end
 	createAmmo(coral, 0.08)
@@ -1111,17 +1148,25 @@ local function tickAmmoGrow(now: number)
 		if u >= 1 then
 			coral.growing = false
 			coral.readyAt = now
-			if coral.ammo and coral.ammo.Parent then
+			if #coral.ammoSlots > 0 then
 				local s = ammoFullDiameter(coral)
-				coral.ammo.Size = Vector3.new(s, s, s)
-				coral.ammo.CFrame = CFrame.new(ammoWorldPos(coral))
+				for i, p in ipairs(coral.ammoSlots) do
+					if p.Parent then
+						p.Size = Vector3.new(s, s, s)
+						p.CFrame = CFrame.new(ammoWorldPos(coral, i))
+					end
+				end
 			else
 				createAmmo(coral, 1)
 			end
-		elseif coral.ammo and coral.ammo.Parent then
+		elseif #coral.ammoSlots > 0 then
 			local s = ammoFullDiameter(coral) * math.max(0.08, u)
-			coral.ammo.Size = Vector3.new(s, s, s)
-			coral.ammo.CFrame = CFrame.new(ammoWorldPos(coral))
+			for i, p in ipairs(coral.ammoSlots) do
+				if p.Parent then
+					p.Size = Vector3.new(s, s, s)
+					p.CFrame = CFrame.new(ammoWorldPos(coral, i))
+				end
+			end
 		end
 	end
 end
@@ -1157,27 +1202,33 @@ local function makeCoralAgent(part: BasePart): CoralAgent?
 		reload = species.reloadSec or C.DEFAULT_RELOAD
 		fillAmt = species.foodFill or C.DEFAULT_FOOD_FILL
 	end
-	local agent = {
+	local agent: CoralAgent = {
 		part = part,
 		color = select(2, CoralVisual.readRestLook(part)),
 		reloadSec = reload,
 		foodFill = fillAmt,
+		foodCount = 1,
+		range = C.TARGET_RANGE,
+		rangeSq = C.TARGET_RANGE_SQ,
+		defenseSec = 2,
 		diameter = diameter,
 		readyAt = 0,
 		ammo = nil,
+		ammoSlots = {},
 		ammoSizeMult = 1,
 		growing = false,
 		growT0 = 0,
 		busy = false,
+		shotsOut = 0,
 		pathDist = 0,
 		pathSideDist = 0,
 		stunned = false,
 	}
+	applySizeStats(agent)
 	part:GetPropertyChangedSignal("Size"):Connect(function()
 		agent.diameter = math.max(part.Size.X, part.Size.Y, part.Size.Z)
-		if agent.ammo and agent.ammo.Parent then
-			agent.ammo.CFrame = CFrame.new(ammoWorldPos(agent))
-		end
+		applySizeStats(agent)
+		parkAmmo(agent)
 	end)
 	return agent
 end
@@ -1299,15 +1350,9 @@ local function syncCorals(sessionStart: boolean)
 		-- Prefer rest look for shot color (ignore transient hover/relocate neon wash).
 		local _, restColor = CoralVisual.readRestLook(c.part)
 		c.color = restColor
-		local speciesId = c.part:GetAttribute("OceanTD_SpeciesId")
-		local species = SpeciesCatalog.get(if typeof(speciesId) == "string" then speciesId else "BrainCoral")
-		if species then
-			c.reloadSec = species.reloadSec or C.DEFAULT_RELOAD
-		end
 		c.diameter = math.max(c.part.Size.X, c.part.Size.Y, c.part.Size.Z)
-		if c.ammo and c.ammo.Parent then
-			c.ammo.CFrame = CFrame.new(ammoWorldPos(c))
-		end
+		applySizeStats(c)
+		parkAmmo(c)
 	end
 	-- Full reproject only when arming a wave session (path is live); new places project above.
 	if sessionStart then
@@ -1641,14 +1686,15 @@ local function findClosestHungryFish(coral: CoralAgent): FishAgent?
 	end
 	local fill = coral.foodFill
 	local cd = coral.pathDist
-	local d0 = math.max(0, cd - C.PATH_TARGET_LEAD_MAX)
+	local lead = math.max(C.PATH_TARGET_LEAD_MAX, coral.range)
+	local d0 = math.max(0, cd - lead)
 	local d1 = math.min(path.totalLen, cd + C.PATH_TARGET_PAST)
 	local b0 = math.floor(d0 / C.PATH_BUCKET_SIZE) + 1
 	local b1 = math.floor(d1 / C.PATH_BUCKET_SIZE) + 1
 	local origin = coral.part.Position
 	local best: FishAgent? = nil
-	local bestScore = C.TARGET_RANGE_SQ
-	local laneOk = coral.pathSideDist <= C.TARGET_RANGE + C.LATERAL_SPREAD
+	local bestScore = coral.rangeSq
+	local laneOk = coral.pathSideDist <= coral.range + C.LATERAL_SPREAD
 
 	local function consider(f: FishAgent)
 		if not fishNeedsFood(f, fill) then
@@ -1659,7 +1705,7 @@ local function findClosestHungryFish(coral: CoralAgent): FishAgent?
 		local dy = fp.Y - origin.Y
 		local dz = fp.Z - origin.Z
 		local d2 = dx * dx + dy * dy + dz * dz
-		if d2 > C.TARGET_RANGE_SQ then
+		if d2 > coral.rangeSq then
 			return
 		end
 		local score = d2
@@ -1811,7 +1857,14 @@ local function foodFlightPos(shot: FoodShot, u: number, meetPos: Vector3): Vecto
 end
 
 local function fireShot(coral: CoralAgent, target: FishAgent)
-	local start = ammoWorldPos(coral)
+	local orb = coral.ammoSlots[1]
+	local start = if orb then orb.Position else ammoWorldPos(coral, 1)
+	if orb then
+		WaveEntityPool.releaseAmmo(orb)
+		table.remove(coral.ammoSlots, 1)
+		coral.ammo = coral.ammoSlots[1]
+		parkAmmo(coral)
+	end
 	local fp = target.root.Position
 	local flatX = fp.X - start.X
 	local flatZ = fp.Z - start.Z
@@ -1827,8 +1880,7 @@ local function fireShot(coral: CoralAgent, target: FishAgent)
 		duration = math.clamp(duration * 0.65, C.FOOD_RISE_MIN * 0.75, C.FOOD_RISE_MAX)
 	end
 
-	coral.busy = true
-	destroyAmmo(coral)
+	coral.shotsOut += 1
 	target.incomingFood += coral.foodFill
 	local part = acquireFoodPart()
 	part.Color = coral.color
@@ -1860,8 +1912,11 @@ end
 local function finishShot(shot: FoodShot, fed: boolean)
 	shot.alive = false
 	local coral = shot.coral
-	coral.busy = false
-	startAmmoGrow(coral)
+	coral.shotsOut = math.max(0, coral.shotsOut - 1)
+	if coral.shotsOut <= 0 and #coral.ammoSlots == 0 then
+		coral.busy = false
+		startAmmoGrow(coral)
+	end
 	local target = shot.target
 	clearShotTarget(shot)
 	if fed and target and not target.finished and target.hunger < target.maxHunger then
@@ -1893,10 +1948,13 @@ local function tickCombat()
 	end
 	rebuildFishPathBuckets()
 	for _, coral in ipairs(coralList) do
-		if coral.stunned or coral.busy or coral.growing then
+		if coral.stunned or coral.growing then
 			continue
 		end
 		if now < coral.readyAt then
+			continue
+		end
+		if #coral.ammoSlots == 0 then
 			continue
 		end
 		local target = findClosestHungryFish(coral)
@@ -2069,8 +2127,9 @@ local function tickFish(dt: number)
 					pos,
 					tang,
 					dt,
-					WaveCrab.pauseElapsed(agent.pauseUntil),
-					agent.id
+					WaveCrab.pauseElapsed(agent.pauseUntil, agent.pauseDur),
+					agent.id,
+					agent.pauseDur
 				)
 			else
 				setFishCFrame(agent, pos, tang, dt)
@@ -2089,15 +2148,20 @@ local function tickFish(dt: number)
 						end
 						if WaveCrab.shellOverlapsCoral(shell, coral.part) then
 							stunCoralFromCrab(coral)
-							agent.pauseUntil = os.clock() + C.CRAB_CORAL_PAUSE_SEC
+							agent.pauseDur = coral.defenseSec
+							agent.pauseUntil = os.clock() + coral.defenseSec
 							agent.stunSkullPart = coral.part
 							local follow = agent
 							WaveCrab.playZapBurst(ensureFolder(), function()
 								if follow.finished or not follow.root.Parent then
-									return pos + Vector3.new(0, 2.2, 0)
+									return pos
 								end
-								return follow.root.Position + Vector3.new(0, 2.2, 0)
-							end)
+								local shellNow = follow.shellHitbox
+								if shellNow and shellNow.Parent then
+									return shellNow.Position
+								end
+								return follow.root.Position
+							end, coral.defenseSec)
 							break
 						end
 					end

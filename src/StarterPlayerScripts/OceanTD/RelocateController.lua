@@ -31,6 +31,7 @@ local PlacedCoralIndex = require(script.Parent:WaitForChild("PlacedCoralIndex"))
 local PlaceVfx = require(script.Parent:WaitForChild("PlaceVfx"))
 local PlacementController = require(script.Parent:WaitForChild("PlacementController"))
 local SelectRing = require(script.Parent:WaitForChild("SelectRing"))
+local PlaceConfirmChrome = require(script.Parent:WaitForChild("PlaceConfirmChrome"))
 
 local RelocateController = {}
 
@@ -103,6 +104,8 @@ local recycleIcon: ImageLabel? = nil
 local recyclePlus: TextLabel? = nil
 local moveBillboard: BillboardGui? = nil
 local moveIcon: ImageLabel? = nil
+local waistBb: BillboardGui? = nil
+local waistAdornee: BasePart? = nil
 local chromeBtnDown = false
 local fingerDown = false
 local pressOrigin: Vector2? = nil
@@ -408,14 +411,86 @@ local function aimScreenPos(): Vector2
 end
 
 local function worldToScreen(world: Vector3): Vector2?
-	if not camera then
+	local cam = Workspace.CurrentCamera
+	if not cam then
 		return nil
 	end
-	local sp, _ = camera:WorldToViewportPoint(world)
+	local sp, _ = cam:WorldToViewportPoint(world)
 	if sp.Z <= 0 then
 		return nil
 	end
 	return Vector2.new(sp.X, sp.Y)
+end
+
+local WAIST_BB_DIST = 28
+
+local function hideWaistChrome()
+	if waistBb then
+		waistBb.Enabled = false
+	end
+	if gui then
+		if checkBtn then
+			checkBtn.Parent = gui
+		end
+		if cancelBtn then
+			cancelBtn.Parent = gui
+		end
+	end
+end
+
+local function layoutWaistChrome(btnPx: number, showCheck: boolean): boolean
+	local adornee = PlaceConfirmChrome.ensureAdornee(waistAdornee)
+	waistAdornee = adornee
+	if not adornee or not checkBtn or not cancelBtn then
+		hideWaistChrome()
+		return false
+	end
+	local bb = waistBb
+	if not bb or not bb.Parent then
+		bb = Instance.new("BillboardGui")
+		bb.Name = "OceanTD_RelocateWaistChrome"
+		bb.AlwaysOnTop = true
+		bb.LightInfluence = 0
+		bb.MaxDistance = 1000
+		bb.Active = true
+		bb.ResetOnSpawn = false
+		bb.Parent = playerGui
+		pcall(function()
+			(bb :: any).DistanceUpperLimit = WAIST_BB_DIST
+		end)
+		waistBb = bb
+	end
+	bb.Adornee = adornee
+	bb.Enabled = true
+	bb.StudsOffsetWorldSpace = Vector3.zero
+	bb.StudsOffset = Vector3.zero
+	bb.ExtentsOffsetWorldSpace = Vector3.zero
+	local gap = 10
+	if showCheck then
+		bb.Size = UDim2.fromOffset(btnPx * 2 + gap * 2 + 8, btnPx + 8)
+	else
+		bb.Size = UDim2.fromOffset(btnPx + 8, btnPx + 8)
+	end
+	if checkBtn.Parent ~= bb then
+		checkBtn.Parent = bb
+	end
+	if cancelBtn.Parent ~= bb then
+		cancelBtn.Parent = bb
+	end
+	checkBtn.Size = UDim2.fromOffset(btnPx, btnPx)
+	cancelBtn.Size = UDim2.fromOffset(btnPx, btnPx)
+	if showCheck then
+		checkBtn.AnchorPoint = Vector2.new(1, 0.5)
+		checkBtn.Position = UDim2.new(0.5, -gap * 0.5, 0.5, 0)
+		cancelBtn.AnchorPoint = Vector2.new(0, 0.5)
+		cancelBtn.Position = UDim2.new(0.5, gap * 0.5, 0.5, 0)
+	else
+		cancelBtn.AnchorPoint = Vector2.new(0.5, 0.5)
+		cancelBtn.Position = UDim2.fromScale(0.5, 0.5)
+		checkBtn.AnchorPoint = Vector2.new(0.5, 0.5)
+		checkBtn.Position = UDim2.fromScale(0.5, 0.5)
+	end
+	return true
 end
 
 local function destroyUi()
@@ -425,6 +500,14 @@ local function destroyUi()
 		moveBillboard = nil
 	end
 	moveIcon = nil
+	if waistBb then
+		waistBb:Destroy()
+		waistBb = nil
+	end
+	if waistAdornee then
+		waistAdornee:Destroy()
+		waistAdornee = nil
+	end
 	if gui then
 		gui:Destroy()
 		gui = nil
@@ -1067,30 +1150,29 @@ local function syncChrome()
 	local showIdleClose = (not hasMoved) and (not recyclePending) and idleCloseReady
 	local showCancel = hasMoved or recyclePending or showIdleClose
 	cancelBtn.Visible = showCancel
-	cancelBtn.Size = UDim2.fromOffset(BTN_SIZE, BTN_SIZE)
 	local tipLetter = if gamepadRelocate then "B" else "X"
 	local showWord = (math.floor((os.clock() - gamepadChromeT0) / HOVER_HINT_PERIOD) % 2) == 1
-	if hasMoved or recyclePending then
-		-- Right side: cancel the pending move / recycle.
+	checkBtn.Visible = (hasMoved and validSpot) or recyclePending
+
+	if recyclePending then
+		hideWaistChrome()
+		cancelBtn.Size = UDim2.fromOffset(BTN_SIZE, BTN_SIZE)
+		checkBtn.Size = UDim2.fromOffset(BTN_SIZE, BTN_SIZE)
 		cancelBtn.AnchorPoint = Vector2.new(0, 1)
 		cancelBtn.Position = UDim2.fromOffset(cx + 6, cy)
+		checkBtn.AnchorPoint = Vector2.new(1, 1)
+		checkBtn.Position = UDim2.fromOffset(cx - 6, cy)
 		cancelBtn.Text = if showWord then "CANCEL" else tipLetter
 		cancelBtn.TextStrokeColor3 = if showWord then Color3.fromRGB(60, 15, 18) else Color3.new(1, 1, 1)
 		cancelBtn.TextStrokeTransparency = 0
 	else
-		-- Idle close: left of coral (recycle stays on the right).
-		cancelBtn.AnchorPoint = Vector2.new(1, 1)
-		cancelBtn.Position = UDim2.fromOffset(cx - 6, cy)
-		cancelBtn.Text = if showWord then "CLOSE" else tipLetter
+		local sz = if hasMoved then math.floor(BTN_SIZE * 0.8 + 0.5) else BTN_SIZE
+		layoutWaistChrome(sz, checkBtn.Visible)
+		cancelBtn.Text = if showWord then (if hasMoved then "CANCEL" else "CLOSE") else tipLetter
 		cancelBtn.TextStrokeColor3 = if showWord then Color3.fromRGB(60, 15, 18) else Color3.new(1, 1, 1)
 		cancelBtn.TextStrokeTransparency = 0
 	end
 
-	-- ✓ for move confirm, or for recycle confirm.
-	checkBtn.Visible = (hasMoved and validSpot) or recyclePending
-	checkBtn.AnchorPoint = Vector2.new(1, 1)
-	checkBtn.Position = UDim2.fromOffset(cx - 6, cy)
-	checkBtn.Size = UDim2.fromOffset(BTN_SIZE, BTN_SIZE)
 	if checkBtn.Visible then
 		local confirmWord = if isUsingGamepad() then "A" else "Enter"
 		-- Touch has no keyboard tip — keep CONFIRM.
@@ -1930,10 +2012,12 @@ table.insert(inputConns, UserInputService.InputBegan:Connect(function(input, _pr
 		if InventoryState.isPointerOverBackpack(screenPos) then
 			return
 		end
-		-- Ignore `processed`: the move-icon BillboardGui / HUD often mark the press
-		-- processed, which blocked drag until you clicked empty ground.
-		-- Lock drag while confirming recycle.
 		if recyclePending then
+			return
+		end
+		local other = pickPlacedCoral(screenPos)
+		if other and other ~= part then
+			RelocateController.begin(other)
 			return
 		end
 		fingerDown = true

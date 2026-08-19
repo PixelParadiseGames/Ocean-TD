@@ -7,7 +7,6 @@ local RunService = game:GetService("RunService")
 local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
 local SoundService = game:GetService("SoundService")
-local TextService = game:GetService("TextService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local player = Players.LocalPlayer
@@ -30,9 +29,14 @@ local PULSE_GREEN = Color3.fromRGB(70, 255, 110)
 local STROKE_DARK = Color3.fromRGB(16, 80, 32)
 local ACTIVE_GREEN = Color3.fromRGB(40, 255, 90)
 local WHITE = Color3.new(1, 1, 1)
+local STAT_GREY = Color3.fromRGB(200, 200, 205)
 local RED = Color3.fromRGB(220, 50, 55)
 local PANEL_BG = Color3.fromRGB(12, 28, 36)
 local GROW_SOUND_ID = "rbxassetid://134057288"
+
+local function pulseWave(): number
+	return (math.sin(os.clock() * math.pi * 2) + 1) * 0.5
+end
 
 local LETTERS = { "S", "M", "L" }
 local WORDS = { "Small", "Medium", "Large" }
@@ -44,10 +48,16 @@ local nameLbl: TextLabel? = nil
 local upgradeBtn: TextButton? = nil
 local h1s: { TextButton } = {}
 local h2s: { TextLabel } = {}
+local h3s: { Frame } = {}
+local h3Labels: { { TextLabel } } = {}
 local confirmGui: ScreenGui? = nil
 local pulseConn: RBXScriptConnection? = nil
 local hintConn: RBXScriptConnection? = nil
 local confirmStrokeConn: RBXScriptConnection? = nil
+local sizeFlashConn: RBXScriptConnection? = nil
+local rangeFolder: Folder? = nil
+local rangeBb: BillboardGui? = nil
+local rangeFollow: RBXScriptConnection? = nil
 local cineToken = 0
 local bound = false
 
@@ -90,6 +100,114 @@ local function selectedPart(): BasePart?
 	return RelocateController.getSelectedPart()
 end
 
+local RANGE_SPIN = { 0.55, -0.7, 0.4, -0.5, 0.62, -0.38 }
+local RANGE_PHASE = { 0, 1.05, 2.1, 3.15, 4.2, 5.25 }
+local RANGE_RING_N = 6
+local RANGE_DASH_N = 14
+-- Six evenly spaced great-circle axes (cuboctahedron). Shared tumble keeps gaps.
+local RANGE_NORMALS = {
+	Vector3.new(1, 1, 0),
+	Vector3.new(1, -1, 0),
+	Vector3.new(1, 0, 1),
+	Vector3.new(1, 0, -1),
+	Vector3.new(0, 1, 1),
+	Vector3.new(0, 1, -1),
+}
+
+local function hideRangeRing()
+	if rangeFollow then
+		rangeFollow:Disconnect()
+		rangeFollow = nil
+	end
+	if rangeFolder then
+		rangeFolder:Destroy()
+		rangeFolder = nil
+	end
+	if rangeBb then
+		rangeBb:Destroy()
+		rangeBb = nil
+	end
+end
+
+local function ringBasis(ri: number, spin: number): CFrame
+	local n = RANGE_NORMALS[ri] or Vector3.yAxis
+	n = n.Unit
+	local spinA = spin * (RANGE_SPIN[ri] or 0.5) + (RANGE_PHASE[ri] or 0)
+	local tumble = CFrame.Angles(spin * 0.11, spin * 0.17, spin * 0.07)
+	local up = if math.abs(n.Y) > 0.92 then Vector3.xAxis else Vector3.yAxis
+	return tumble * CFrame.lookAt(Vector3.zero, n, up) * CFrame.Angles(0, 0, spinA)
+end
+
+local function poseRangeRings(part: BasePart, folder: Folder, range: number, spin: number, grow: number)
+	local pos = part.Position
+	local s = math.clamp(grow, 0, 1)
+	s = 1 - (1 - s) * (1 - s)
+	local r = range * s
+	local thick = 0.55 * math.max(s, 0.15)
+	local arcLen = math.max(2.2, (2 * math.pi * range / RANGE_DASH_N) * 0.5) * s
+	for _, dash in ipairs(folder:GetChildren()) do
+		if not dash:IsA("BasePart") then
+			continue
+		end
+		local ri = dash:GetAttribute("Ring")
+		local di = dash:GetAttribute("Dash")
+		if typeof(ri) ~= "number" or typeof(di) ~= "number" then
+			continue
+		end
+		local ang = ((di - 1) / RANGE_DASH_N) * math.pi * 2 + spin * (RANGE_SPIN[ri] or 1)
+		dash.Size = Vector3.new(math.max(0.05, arcLen), thick, thick)
+		dash.CFrame = CFrame.new(pos)
+			* ringBasis(ri, spin)
+			* CFrame.Angles(0, 0, ang)
+			* CFrame.new(r, 0, 0)
+			* CFrame.Angles(0, 0, math.pi * 0.5)
+	end
+end
+
+local function showRangeRing(part: BasePart)
+	if rangeFolder and rangeFolder.Parent then
+		return
+	end
+	hideRangeRing()
+	local folder = Instance.new("Folder")
+	folder.Name = "OceanTD_RangeRing"
+	folder.Parent = workspace
+	for ri = 1, RANGE_RING_N do
+		for di = 1, RANGE_DASH_N do
+			local dash = Instance.new("Part")
+			dash.Name = "Dash"
+			dash.Anchored = true
+			dash.CanCollide = false
+			dash.CanQuery = false
+			dash.CanTouch = false
+			dash.CastShadow = false
+			dash.Material = Enum.Material.Neon
+			dash.Color = ACTIVE_GREEN
+			dash.Transparency = 0.05
+			dash:SetAttribute("Ring", ri)
+			dash:SetAttribute("Dash", di)
+			dash.Parent = folder
+		end
+	end
+	rangeFolder = folder
+	local spin = 0
+	local growT = 0
+	local _d0, class0 = CoralSize.readFromPart(part)
+	poseRangeRings(part, folder, CoralSize.statsFor(class0).range, spin, 0)
+	rangeFollow = RunService.Heartbeat:Connect(function(dt)
+		local p = selectedPart()
+		local f = rangeFolder
+		if not p or not p.Parent or not f or not f.Parent then
+			hideRangeRing()
+			return
+		end
+		spin += dt
+		growT += dt
+		local _dd, cls = CoralSize.readFromPart(p)
+		poseRangeRings(p, f, CoralSize.statsFor(cls).range, spin, growT / 2)
+	end)
+end
+
 local function hideConfirm()
 	RelocateController.setInspectModal(false)
 	if confirmStrokeConn then
@@ -103,7 +221,14 @@ local function hideConfirm()
 	GuiService.SelectedObject = nil
 end
 
-local function stopPulses()
+local function stopSizeFlash()
+	if sizeFlashConn then
+		sizeFlashConn:Disconnect()
+		sizeFlashConn = nil
+	end
+end
+
+local function stopUpgradeFx()
 	if pulseConn then
 		pulseConn:Disconnect()
 		pulseConn = nil
@@ -114,38 +239,118 @@ local function stopPulses()
 	end
 end
 
+local function stopPulses()
+	stopUpgradeFx()
+	stopSizeFlash()
+end
+
+local STAT_ICONS = { "↔️", "🍴", "🔄", "🛡️" }
+
+local function statValues(st: CoralSize.SizeStats): { number }
+	return { st.range, st.food, st.reload, st.defense }
+end
+
+local function formatStatLine(icon: string, n: number, asDelta: boolean): string
+	if asDelta then
+		if n > 0 then
+			return string.format("%s : +%d", icon, n)
+		end
+		return string.format("%s : %d", icon, n)
+	end
+	return string.format("%s : %d", icon, n)
+end
+
+local function setActiveCircleStroke(btn: GuiObject, on: boolean)
+	local stroke = btn:FindFirstChild("_SizeActiveStroke")
+	if on then
+		if not (stroke and stroke:IsA("UIStroke")) then
+			stroke = Instance.new("UIStroke")
+			stroke.Name = "_SizeActiveStroke"
+			stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+			stroke.LineJoinMode = Enum.LineJoinMode.Round
+			stroke.Parent = btn
+		end
+		stroke.Thickness = 3
+		stroke.Color = WHITE
+		stroke.Enabled = true
+	elseif stroke and stroke:IsA("UIStroke") then
+		stroke.Enabled = false
+	end
+end
+
+local function paintStatColumn(i: number, asDelta: boolean, fromClass: number?, isActive: boolean)
+	local labels = h3Labels[i]
+	if not labels then
+		return
+	end
+	local vals = statValues(CoralSize.statsFor(i))
+	local fromVals = if asDelta and fromClass then statValues(CoralSize.statsFor(fromClass)) else nil
+	for k, n in ipairs(vals) do
+		if fromVals then
+			n = n - fromVals[k]
+		end
+		labels[k].Text = formatStatLine(STAT_ICONS[k], n, asDelta)
+		if asDelta then
+			labels[k].TextColor3 = ACTIVE_GREEN
+		elseif isActive then
+			labels[k].TextColor3 = WHITE
+		else
+			labels[k].TextColor3 = STAT_GREY
+		end
+	end
+end
+
 local function refreshSizeColors()
 	local part = selectedPart()
 	if not part then
 		return
 	end
 	local _d, class, tier = CoralSize.readFromPart(part)
+	local nxt = CoralSize.nextUnlock(tier)
+	stopSizeFlash()
 	for i = 1, 3 do
-		local on = class == i
-		local col = if on then ACTIVE_GREEN else WHITE
-		if h1s[i] then
-			h1s[i].TextColor3 = col
-			h1s[i].Active = true
+		local locked = i > tier
+		local isNext = nxt == i
+		local btn = h1s[i]
+		if btn then
+			btn.Active = true
+			btn.TextColor3 = WHITE
+			if isNext then
+				btn.BackgroundColor3 = RED
+			elseif locked then
+				btn.BackgroundColor3 = RED
+			elseif i == class then
+				btn.BackgroundColor3 = ACTIVE_GREEN
+			else
+				btn.BackgroundColor3 = GREEN
+			end
+			setActiveCircleStroke(btn, i == class)
 		end
 		if h2s[i] then
-			h2s[i].TextColor3 = col
+			h2s[i].TextColor3 = WHITE
 		end
-		if i > tier then
-			-- locked: still white unless current (can't be current if locked)
-			if h1s[i] then
-				h1s[i].TextColor3 = WHITE
-			end
-			if h2s[i] then
-				h2s[i].TextColor3 = WHITE
-			end
-		end
+		paintStatColumn(i, false, nil, i == class)
 	end
-	local nxt = CoralSize.nextUnlock(tier)
+	if nxt and h1s[nxt] then
+		local flashBtn = h1s[nxt]
+		local flashIdx = nxt
+		local fromClass = class
+		local t0 = os.clock()
+		sizeFlashConn = RunService.Heartbeat:Connect(function()
+			if not flashBtn.Parent then
+				return
+			end
+			flashBtn.BackgroundColor3 = RED:Lerp(PULSE_GREEN, pulseWave())
+			local showDelta = math.floor((os.clock() - t0) / 2) % 2 == 1
+			paintStatColumn(flashIdx, showDelta, fromClass, false)
+		end)
+	end
 	if upgradeBtn then
 		upgradeBtn.Visible = nxt ~= nil
 		upgradeBtn.Active = nxt ~= nil
 		upgradeBtn.Text = "UPGRADE"
 	end
+	showRangeRing(part)
 end
 
 local function tweenSize(part: BasePart, fromD: number, toD: number, sec: number)
@@ -357,7 +562,7 @@ local function showConfirmUnlock()
 	title.BackgroundTransparency = 1
 	title.Size = UDim2.new(1, -24, 0, 56)
 	title.Position = UDim2.fromOffset(12, 20)
-	title.Font = Enum.Font.GothamBold
+	title.Font = UiTheme.Font
 	title.TextSize = 26
 	title.TextColor3 = Color3.fromRGB(240, 248, 255)
 	title.Text = "Unlock " .. CoralSize.labelFor(nxt)
@@ -367,7 +572,7 @@ local function showConfirmUnlock()
 	local unlock = Instance.new("TextButton")
 	unlock.Name = "UNLOCK"
 	unlock.Text = "UNLOCK"
-	unlock.Font = Enum.Font.GothamBold
+	unlock.Font = UiTheme.Font
 	unlock.TextSize = 20
 	unlock.TextColor3 = WHITE
 	unlock.BackgroundColor3 = GREEN
@@ -408,7 +613,7 @@ local function showConfirmUnlock()
 	local cancel = Instance.new("TextButton")
 	cancel.Name = "CANCEL"
 	cancel.Text = "CANCEL"
-	cancel.Font = Enum.Font.GothamBold
+	cancel.Font = UiTheme.Font
 	cancel.TextSize = 18
 	cancel.TextColor3 = WHITE
 	cancel.BackgroundColor3 = RED
@@ -449,7 +654,7 @@ local function onLetter(i: number)
 end
 
 local function startUpgradeFx()
-	stopPulses()
+	stopUpgradeFx()
 	local btn = upgradeBtn
 	if not btn then
 		return
@@ -459,8 +664,7 @@ local function startUpgradeFx()
 		if not upgradeBtn or not upgradeBtn.Visible then
 			return
 		end
-		local u = (math.sin(os.clock() * math.pi * 1.35) + 1) * 0.5
-		upgradeBtn.BackgroundColor3 = GREEN:Lerp(PULSE_GREEN, u)
+		upgradeBtn.BackgroundColor3 = GREEN:Lerp(PULSE_GREEN, pulseWave())
 	end)
 	hintConn = RunService.Heartbeat:Connect(function()
 		if not upgradeBtn or not upgradeBtn.Visible or not isGamepad() then
@@ -499,9 +703,11 @@ local function setVisible(on: boolean)
 			fillHeader(part)
 			refreshSizeColors()
 			startUpgradeFx()
+			showRangeRing(part)
 		end
 	else
 		stopPulses()
+		hideRangeRing()
 		hideConfirm()
 		cineToken += 1
 	end
@@ -531,7 +737,7 @@ function CoralInspectPanel.bind(panel: GuiObject, catalogFrame: GuiObject)
 
 	local row1 = Instance.new("Frame")
 	row1.BackgroundTransparency = 1
-	row1.Size = UDim2.new(1, 0, 0.28, 0)
+	row1.Size = UDim2.new(1, 0, 0.22, 0)
 	row1.LayoutOrder = 1
 	row1.Parent = frame
 
@@ -566,23 +772,29 @@ function CoralInspectPanel.bind(panel: GuiObject, catalogFrame: GuiObject)
 
 	local upRow = Instance.new("Frame")
 	upRow.BackgroundTransparency = 1
-	upRow.Size = UDim2.new(1, 0, 0.22, 0)
+	upRow.Size = UDim2.new(1, 0, 0.18, 0)
 	upRow.LayoutOrder = 2
 	upRow.Parent = frame
 
 	local up = Instance.new("TextButton")
 	up.Name = "UPGRADE"
 	up.Text = "UPGRADE"
-	up.Font = Enum.Font.GothamBold
+	up.Font = UiTheme.Font
 	up.TextScaled = true
 	up.TextColor3 = WHITE
 	up.BackgroundColor3 = GREEN
 	up.BorderSizePixel = 0
 	up.AnchorPoint = Vector2.new(0.5, 0.5)
 	up.Position = UDim2.fromScale(0.5, 0.5)
-	up.Size = UDim2.new(0.9, 0, 1, 0)
+	up.Size = UDim2.new(0.9, 0, 0.7, 0)
 	up.AutoButtonColor = true
 	up.Parent = upRow
+	local upPad = Instance.new("UIPadding")
+	upPad.PaddingLeft = UDim.new(0.05, 0)
+	upPad.PaddingRight = UDim.new(0.05, 0)
+	upPad.PaddingTop = UDim.new(0.05, 0)
+	upPad.PaddingBottom = UDim.new(0.05, 0)
+	upPad.Parent = up
 	local uc = Instance.new("UICorner")
 	uc.CornerRadius = UDim.new(0, 10)
 	uc.Parent = up
@@ -594,7 +806,7 @@ function CoralInspectPanel.bind(panel: GuiObject, catalogFrame: GuiObject)
 
 	local row3 = Instance.new("Frame")
 	row3.BackgroundTransparency = 1
-	row3.Size = UDim2.new(1, 0, 0.44, 0)
+	row3.Size = UDim2.new(1, 0, 0.55, 0)
 	row3.LayoutOrder = 3
 	row3.Parent = frame
 	local sizeGrid = Instance.new("UIGridLayout")
@@ -612,67 +824,104 @@ function CoralInspectPanel.bind(panel: GuiObject, catalogFrame: GuiObject)
 		cell.LayoutOrder = i
 		cell.Parent = row3
 		local letter = Instance.new("TextButton")
-		letter.BackgroundTransparency = 1
-		letter.Size = UDim2.new(1, 0, 0.62, 0)
-		letter.Font = Enum.Font.GothamBold
+		letter.BackgroundColor3 = GREEN
+		letter.BackgroundTransparency = 0
+		letter.BorderSizePixel = 0
+		letter.AnchorPoint = Vector2.new(0.5, 0)
+		letter.Position = UDim2.new(0.5, 0, 0, 2)
+		letter.Size = UDim2.fromOffset(48, 48)
+		letter.Font = UiTheme.Font
 		letter.Text = LETTERS[i]
 		letter.TextColor3 = WHITE
-		letter.TextScaled = false
+		letter.TextScaled = true
 		letter.AutoButtonColor = false
 		letter.Parent = cell
+		UiCircles.ensure(letter)
 		h1s[i] = letter
 		local word = Instance.new("TextLabel")
 		word.BackgroundTransparency = 1
-		word.Position = UDim2.new(0, 0, 0.62, 0)
-		word.Size = UDim2.new(1, 0, 0.38, 0)
-		word.Font = Enum.Font.GothamBold
+		word.AnchorPoint = Vector2.new(0.5, 0)
+		word.Position = UDim2.new(0.5, 0, 0, 54)
+		word.Size = UDim2.new(1, -4, 0, 16)
+		word.Font = UiTheme.Font
 		word.Text = WORDS[i]
 		word.TextColor3 = WHITE
 		word.TextScaled = false
 		word.Parent = cell
 		h2s[i] = word
+		local vals = statValues(CoralSize.statsFor(i))
+		local stats = Instance.new("Frame")
+		stats.BackgroundTransparency = 1
+		stats.AnchorPoint = Vector2.new(0.5, 0)
+		stats.Position = UDim2.new(0.5, 0, 0, 72)
+		stats.Size = UDim2.new(1, -2, 0, 45)
+		stats.Parent = cell
+		local statsLay = Instance.new("UIListLayout")
+		statsLay.FillDirection = Enum.FillDirection.Vertical
+		statsLay.HorizontalAlignment = Enum.HorizontalAlignment.Center
+		statsLay.SortOrder = Enum.SortOrder.LayoutOrder
+		statsLay.Padding = UDim.new(0, 0)
+		statsLay.Parent = stats
+		local labels: { TextLabel } = {}
+		for li, n in ipairs(vals) do
+			local row = Instance.new("TextLabel")
+			row.BackgroundTransparency = 1
+			row.Size = UDim2.new(1, 0, 0, 15)
+			row.LayoutOrder = li
+			row.Font = UiTheme.Font
+			row.Text = formatStatLine(STAT_ICONS[li], n, false)
+			row.TextColor3 = WHITE
+			row.TextSize = 13
+			row.TextXAlignment = Enum.TextXAlignment.Center
+			row.Parent = stats
+			labels[li] = row
+		end
+		h3s[i] = stats
+		h3Labels[i] = labels
 		local idx = i
 		letter.Activated:Connect(function()
 			onLetter(idx)
 		end)
 	end
 
-	local function fitText(text: string, font: Enum.Font, maxW: number, maxH: number): number
-		local size = math.floor(maxH)
-		while size > 8 do
-			local bounds = TextService:GetTextSize(text, size, font, Vector2.new(maxW, 10000))
-			if bounds.X <= maxW and bounds.Y <= maxH then
-				break
-			end
-			size -= 1
-		end
-		return math.max(8, size)
-	end
-
 	local function refreshSizeRow()
 		local w = row3.AbsoluteSize.X
-		local h = row3.AbsoluteSize.Y
-		if w < 3 or h < 3 then
+		if w < 3 then
 			return
 		end
 		local pad = 6
 		local cellW = math.floor((w - pad * 2) / 3)
-		sizeGrid.CellSize = UDim2.fromOffset(math.max(1, cellW), math.max(1, h))
-		task.defer(function()
-			local letter = h1s[1]
-			local word = h2s[1]
-			if not letter or not word then
-				return
+		local circle = math.clamp(math.floor(cellW * 0.72), 36, 72)
+		local wordH = 16
+		local statText = 13
+		local statLine = math.floor(statText * 1.15 + 0.5)
+		local statH = statLine * 4
+		local cellH = 2 + circle + 4 + wordH + 2 + statH + 4
+		sizeGrid.CellSize = UDim2.fromOffset(math.max(1, cellW), cellH)
+		for i = 1, 3 do
+			local letter = h1s[i]
+			local word = h2s[i]
+			local stats = h3s[i]
+			if letter then
+				letter.Size = UDim2.fromOffset(circle, circle)
 			end
-			local letterSize = fitText("M", letter.Font, math.max(1, letter.AbsoluteSize.X), math.max(1, letter.AbsoluteSize.Y))
-			for _, btn in h1s do
-				btn.TextSize = letterSize
+			local wordY = 2 + circle + 4
+			if word then
+				word.Position = UDim2.new(0.5, 0, 0, wordY)
+				word.Size = UDim2.new(1, -4, 0, wordH)
+				word.TextSize = math.max(10, math.floor(wordH * 0.9))
 			end
-			local wordSize = fitText("Medium", word.Font, math.max(1, word.AbsoluteSize.X), math.max(1, word.AbsoluteSize.Y))
-			for _, lbl in h2s do
-				lbl.TextSize = wordSize
+			if stats then
+				stats.Position = UDim2.new(0.5, 0, 0, wordY + wordH + 2)
+				stats.Size = UDim2.new(1, -2, 0, statH)
+				for _, row in ipairs(stats:GetChildren()) do
+					if row:IsA("TextLabel") then
+						row.TextSize = statText
+						row.Size = UDim2.new(1, 0, 0, statLine)
+					end
+				end
 			end
-		end)
+		end
 	end
 	row3:GetPropertyChangedSignal("AbsoluteSize"):Connect(refreshSizeRow)
 	task.defer(refreshSizeRow)

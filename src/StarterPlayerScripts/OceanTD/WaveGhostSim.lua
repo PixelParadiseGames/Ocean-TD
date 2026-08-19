@@ -15,6 +15,7 @@ local Workspace = game:GetService("Workspace")
 
 local oceanRoot = ReplicatedStorage:WaitForChild("OceanTD")
 local UiTheme = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiTheme"))
+local CoralSize = require(oceanRoot:WaitForChild("Shared"):WaitForChild("CoralSize"))
 local SkillStages = require(oceanRoot:WaitForChild("Shared"):WaitForChild("SkillStages"))
 
 local ClientPlot = require(script.Parent:WaitForChild("ClientPlot"))
@@ -70,6 +71,7 @@ type GhostFish = {
 	crabAnim: any?,
 	shellHitbox: BasePart?,
 	pauseUntil: number?,
+	pauseDur: number?,
 	stunSkullPart: BasePart?,
 	crabSprint: any?,
 }
@@ -1060,8 +1062,9 @@ local function tick(dt: number)
 						pos,
 						tang,
 						simDt,
-						WaveCrab.pauseElapsed(agent.pauseUntil),
-						agent.id
+						WaveCrab.pauseElapsed(agent.pauseUntil, agent.pauseDur),
+						agent.id,
+						agent.pauseDur
 					)
 				else
 					setFishCFrame(agent, pos, tang, simDt)
@@ -1082,16 +1085,23 @@ local function tick(dt: number)
 								stunnedCorals[part] = true
 								WaveCrab.stunCoralPart(part)
 								coralDirty = true
-								agent.pauseUntil = os.clock() + C.CRAB_CORAL_PAUSE_SEC
+								local _d, class = CoralSize.readFromPart(part)
+								local def = CoralSize.statsFor(class).defense
+								agent.pauseDur = def
+								agent.pauseUntil = os.clock() + def
 								agent.stunSkullPart = part
 								local follow = agent
-								local fallback = pos + Vector3.new(0, 2.2, 0)
+								local fallback = pos
 								WaveCrab.playZapBurst(ensureFolder(), function()
 									if follow.finished or not follow.root.Parent then
 										return fallback
 									end
-									return follow.root.Position + Vector3.new(0, 2.2, 0)
-								end)
+									local shellNow = follow.shellHitbox
+									if shellNow and shellNow.Parent then
+										return shellNow.Position
+									end
+									return follow.root.Position
+								end, def)
 								break
 							end
 						end
