@@ -1,7 +1,7 @@
 --!strict
 --[[
 	Skill stage catalog (UI + persist). Gameplay effects come later.
-	Stages 1..8; all skills start at 1 unlocked.
+	Most skills: stages 1..8. Wave Speed: stages 1..4. All skills start at 1.
 ]]
 
 local SkillStages = {}
@@ -21,6 +21,9 @@ local DEFS: { SkillDef } = {
 	{ id = "PlotSize", displayName = "Plot Size", buttonName = "PlotSizeBTN" },
 	{ id = "EarnMore", displayName = "Earn More", buttonName = "EarnMoreBTN" },
 	{ id = "PlaceMore", displayName = "Place More", buttonName = "PlaceMoreBTN" },
+	{ id = "RHealth", displayName = "Reef Health", buttonName = "RHealthBTN" },
+	{ id = "Skip", displayName = "Skip Wave", buttonName = "SkipBTN" },
+	{ id = "WaveSpeed", displayName = "Wave Speed", buttonName = "WaveSpeedBTN" },
 }
 
 local BY_ID: { [string]: SkillDef } = {}
@@ -106,6 +109,19 @@ function SkillStages.clampStage(n: any): number
 	return math.clamp(v, SkillStages.MIN_STAGE, SkillStages.MAX_STAGE)
 end
 
+-- Per-skill stage cap (Wave Speed is 1–3; others use MAX_STAGE).
+function SkillStages.maxStageFor(skillId: string): number
+	if skillId == "WaveSpeed" then
+		return 4
+	end
+	return SkillStages.MAX_STAGE
+end
+
+function SkillStages.clampStageFor(skillId: string, n: any): number
+	local v = math.floor(tonumber(n) or SkillStages.MIN_STAGE)
+	return math.clamp(v, SkillStages.MIN_STAGE, SkillStages.maxStageFor(skillId))
+end
+
 function SkillStages.defaultMap(): { [string]: number }
 	local m: { [string]: number } = {}
 	for _, def in ipairs(DEFS) do
@@ -120,7 +136,7 @@ function SkillStages.sanitizeMap(raw: any): { [string]: number }
 		return m
 	end
 	for _, def in ipairs(DEFS) do
-		m[def.id] = SkillStages.clampStage(raw[def.id])
+		m[def.id] = SkillStages.clampStageFor(def.id, raw[def.id])
 	end
 	return m
 end
@@ -136,6 +152,28 @@ function SkillStages.nextStage(current: number): number?
 		return nil
 	end
 	return c + 1
+end
+
+function SkillStages.nextStageFor(skillId: string, current: number): number?
+	local maxS = SkillStages.maxStageFor(skillId)
+	local c = SkillStages.clampStageFor(skillId, current)
+	if c >= maxS then
+		return nil
+	end
+	return c + 1
+end
+
+-- Wave Speed button: stage 1 = 1x only (locked UI); 2 = up to 1.5x; 3 = up to 2x; 4 = + pause.
+function SkillStages.waveSpeedMaxStep(stage: number): number
+	return SkillStages.clampStageFor("WaveSpeed", stage)
+end
+
+function SkillStages.waveSpeedLocked(stage: number): boolean
+	return SkillStages.clampStageFor("WaveSpeed", stage) <= 1
+end
+
+function SkillStages.waveSpeedPauseUnlocked(stage: number): boolean
+	return SkillStages.clampStageFor("WaveSpeed", stage) >= 4
 end
 
 -- Place More max placed coral by stage. Stages 1–4 ramp gently; 5–8 ramp hard to 1000 cap.
@@ -236,6 +274,40 @@ function SkillStages.unlockDesc(skillId: string, stage: number): string
 		end
 		return "Get " .. tostring(s) .. "x per fish fed"
 	end
+	if skillId == "RHealth" then
+		if SkillStages.nextStage(s) == nil then
+			return "Max: " .. tostring(SkillStages.reefHealthAtStage(s))
+		end
+		local inc = SkillStages.reefHealthIncrementAtStage(s)
+		local newMax = SkillStages.reefHealthAtStage(s)
+		return "+" .. tostring(inc) .. "  New Max: " .. tostring(newMax)
+	end
+	if skillId == "Skip" then
+		if SkillStages.isSkipUnlimited(s) or SkillStages.nextStage(s) == nil then
+			return "Unlimited Skips"
+		end
+		local uses = SkillStages.skipUsesAtStage(s)
+		if uses <= 0 then
+			return "Unlock stage 2 for 1 skip per wave session"
+		end
+		local inc = SkillStages.skipUsesIncrementAtStage(s)
+		return "+" .. tostring(inc) .. "  New Max: " .. tostring(uses) .. " per session"
+	end
+	if skillId == "WaveSpeed" then
+		if s <= 1 then
+			return "Normal wave speed"
+		end
+		if s == 2 then
+			return "Unlock 1.5x wave speed"
+		end
+		if s == 3 then
+			return "Unlock 2x wave speed"
+		end
+		if s == 4 then
+			return "Unlock wave pause"
+		end
+		return "All wave speeds unlocked"
+	end
 	return ""
 end
 
@@ -251,6 +323,67 @@ function SkillStages.isLockedUntilPlotSize(skillId: string, plotSizeStage: numbe
 		return false
 	end
 	return SkillStages.clampStage(plotSizeStage) < SkillStages.PLOT_SIZE_GATE_STAGE
+end
+
+-- Reef Health stays gated until Place More reaches this stage (stage 2 purchased).
+SkillStages.PLACE_MORE_GATE_STAGE = 2
+SkillStages.REEF_HEALTH_BASE = 10
+SkillStages.REEF_HEALTH_PER_STAGE = 10
+
+function SkillStages.reefHealthAtStage(stage: number): number
+	local s = SkillStages.clampStage(stage)
+	return SkillStages.REEF_HEALTH_BASE + SkillStages.REEF_HEALTH_PER_STAGE * (s - 1)
+end
+
+function SkillStages.reefHealthIncrementAtStage(stage: number): number
+	local s = SkillStages.clampStage(stage)
+	if s <= 1 then
+		return 0
+	end
+	return SkillStages.REEF_HEALTH_PER_STAGE
+end
+
+function SkillStages.isGatedByPlaceMore(skillId: string): boolean
+	return skillId == "RHealth"
+end
+
+function SkillStages.isLockedUntilPlaceMore(skillId: string, placeMoreStage: number): boolean
+	if not SkillStages.isGatedByPlaceMore(skillId) then
+		return false
+	end
+	return SkillStages.clampStage(placeMoreStage) < SkillStages.PLACE_MORE_GATE_STAGE
+end
+
+function SkillStages.isSkillLocked(skillId: string, stages: { [string]: number }): boolean
+	local plot = if typeof(stages) == "table" then stages.PlotSize else 1
+	local place = if typeof(stages) == "table" then stages.PlaceMore else 1
+	return SkillStages.isLockedUntilPlotSize(skillId, plot)
+		or SkillStages.isLockedUntilPlaceMore(skillId, place)
+end
+
+-- Skip Wave: stage 1 = 0 uses; stage 2 = 1 use/session; each further stage +1.
+-- Max stage = unlimited skips. Session = WaveSim.start() until stop.
+function SkillStages.isSkipUnlimited(stage: number): boolean
+	return SkillStages.clampStage(stage) >= SkillStages.MAX_STAGE
+end
+
+function SkillStages.skipUsesAtStage(stage: number): number
+	local s = SkillStages.clampStage(stage)
+	if SkillStages.isSkipUnlimited(s) then
+		return math.huge
+	end
+	return math.max(0, s - 1)
+end
+
+function SkillStages.skipUsesIncrementAtStage(stage: number): number
+	local s = SkillStages.clampStage(stage)
+	if s <= 1 then
+		return 0
+	end
+	if SkillStages.isSkipUnlimited(s) then
+		return 0
+	end
+	return 1
 end
 
 return SkillStages

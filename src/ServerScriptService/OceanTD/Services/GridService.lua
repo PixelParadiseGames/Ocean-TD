@@ -21,6 +21,10 @@ export type CellData = {
 	diameter: number?,
 	sizeTier: number?,
 	sizeClass: number?,
+	colorIndex: number?,
+	colorR: number?,
+	colorG: number?,
+	colorB: number?,
 }
 
 local GridService = {}
@@ -99,12 +103,19 @@ function GridService.tryOccupy(
 	gz: number?,
 	diameter: number?,
 	sizeTier: number?,
-	sizeClass: number?
+	sizeClass: number?,
+	colorIndex: number?,
+	colorR: number?,
+	colorG: number?,
+	colorB: number?
 ): (boolean, string?)
 	local rx, ry, rz, key = resolveGridKey(plotId, lx, ly, lz, gx, gy, gz)
 	if cells[key] then
 		return false, "SpotTaken"
 	end
+	local cr = if typeof(colorR) == "number" and colorR == colorR then math.clamp(colorR, 0, 1) else nil
+	local cg = if typeof(colorG) == "number" and colorG == colorG then math.clamp(colorG, 0, 1) else nil
+	local cb = if typeof(colorB) == "number" and colorB == colorB then math.clamp(colorB, 0, 1) else nil
 	cells[key] = {
 		id = itemId,
 		lx = lx,
@@ -118,6 +129,10 @@ function GridService.tryOccupy(
 		diameter = if typeof(diameter) == "number" and diameter > 0 then diameter else nil,
 		sizeTier = if typeof(sizeTier) == "number" then math.clamp(math.floor(sizeTier), 1, 3) else nil,
 		sizeClass = if typeof(sizeClass) == "number" then math.clamp(math.floor(sizeClass), 1, 3) else nil,
+		colorIndex = if typeof(colorIndex) == "number" then math.clamp(math.floor(colorIndex), 1, 14) else nil,
+		colorR = cr,
+		colorG = cg,
+		colorB = cb,
 	}
 	plotObjectCounts[plotId] = (plotObjectCounts[plotId] or 0) + 1
 	return true, nil
@@ -139,6 +154,33 @@ function GridService.setSizeAtGrid(
 	cell.diameter = diameter
 	cell.sizeTier = sizeTier
 	cell.sizeClass = sizeClass
+	return true
+end
+
+function GridService.setColorAtGrid(
+	plotId: PlotId,
+	gx: number,
+	gy: number,
+	gz: number,
+	colorIndex: number,
+	colorR: number?,
+	colorG: number?,
+	colorB: number?
+): boolean
+	local cell = GridService.getCellAtGrid(plotId, gx, gy, gz)
+	if not cell then
+		return false
+	end
+	cell.colorIndex = math.clamp(math.floor(colorIndex), 1, 14)
+	if typeof(colorR) == "number" and typeof(colorG) == "number" and typeof(colorB) == "number" then
+		cell.colorR = math.clamp(colorR, 0, 1)
+		cell.colorG = math.clamp(colorG, 0, 1)
+		cell.colorB = math.clamp(colorB, 0, 1)
+	else
+		cell.colorR = nil
+		cell.colorG = nil
+		cell.colorB = nil
+	end
 	return true
 end
 
@@ -176,7 +218,28 @@ function GridService.hydrate(plotId: PlotId, ownerUserId: number, layout: { Layo
 			local diameter = tonumber(obj.diameter)
 			local sizeTier = tonumber(obj.sizeTier)
 			local sizeClass = tonumber(obj.sizeClass)
-			local ok = GridService.tryOccupy(plotId, ownerUserId, obj.id, lx, ly, lz, gx, gy, gz, diameter, sizeTier, sizeClass)
+			local colorIndex = tonumber(obj.colorIndex)
+			local colorR = tonumber(obj.colorR)
+			local colorG = tonumber(obj.colorG)
+			local colorB = tonumber(obj.colorB)
+			local ok = GridService.tryOccupy(
+				plotId,
+				ownerUserId,
+				obj.id,
+				lx,
+				ly,
+				lz,
+				gx,
+				gy,
+				gz,
+				diameter,
+				sizeTier,
+				sizeClass,
+				colorIndex,
+				colorR,
+				colorG,
+				colorB
+			)
 			if ok then
 				count += 1
 			end
@@ -209,6 +272,10 @@ function GridService.snapshot(plotId: PlotId): { LayoutObject }
 				diameter = cell.diameter,
 				sizeTier = cell.sizeTier,
 				sizeClass = cell.sizeClass,
+				colorIndex = cell.colorIndex,
+				colorR = cell.colorR,
+				colorG = cell.colorG,
+				colorB = cell.colorB,
 			})
 		end
 	end
@@ -235,7 +302,24 @@ function GridService.reframe(plotId: PlotId, oldCf: CFrame, newCf: CFrame): numb
 		local localPos = newCf:PointToObjectSpace(world)
 		local lx, ly, lz = localPos.X, localPos.Y, localPos.Z
 		local gx, gy, gz = GridMath.worldToGrid(localPos, Vector3.zero)
-		GridService.tryOccupy(plotId, cell.ownerUserId, cell.id, lx, ly, lz, gx, gy, gz, cell.diameter, cell.sizeTier, cell.sizeClass)
+		GridService.tryOccupy(
+			plotId,
+			cell.ownerUserId,
+			cell.id,
+			lx,
+			ly,
+			lz,
+			gx,
+			gy,
+			gz,
+			cell.diameter,
+			cell.sizeTier,
+			cell.sizeClass,
+			cell.colorIndex,
+			cell.colorR,
+			cell.colorG,
+			cell.colorB
+		)
 		moved += 1
 	end
 	log("Reframe", plotId, "objects=", moved)

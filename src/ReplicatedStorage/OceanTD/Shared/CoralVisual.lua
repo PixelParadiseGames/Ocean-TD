@@ -134,4 +134,14 @@ function CoralVisual.applyRestLook(part: BasePart)
 	part.Color = color
 end
 
+function CoralVisual.setRestColor(part: BasePart, color: Color3)
+	part:SetAttribute("OceanTD_RestR", color.R)
+	part:SetAttribute("OceanTD_RestG", color.G)
+	part:SetAttribute("OceanTD_RestB", color.B)
+	if part:GetAttribute("OceanTD_CrabStunned") == true then
+		return
+	end
+	part.Color = color
+end
+
 return CoralVisual

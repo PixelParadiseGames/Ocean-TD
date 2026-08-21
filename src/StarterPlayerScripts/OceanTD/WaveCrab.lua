@@ -551,7 +551,7 @@ function WaveCrab.clearCoralStun(part: BasePart, fade: boolean)
 	end
 end
 
-function WaveCrab.playZapBurst(parent: Instance, follow: () -> Vector3, pauseDur: number?)
+function WaveCrab.playZapBurst(parent: Instance, follow: () -> Vector3, pauseDur: number?, stillFighting: (() -> boolean)?)
 	local rng = Random.new()
 	local dur = if typeof(pauseDur) == "number" and pauseDur > 0 then pauseDur else C.CRAB_CORAL_PAUSE_SEC
 	type Zap = {
@@ -665,14 +665,20 @@ function WaveCrab.playZapBurst(parent: Instance, follow: () -> Vector3, pauseDur
 
 	local t0 = os.clock()
 	local nextBubbleAt = t0 + rng:NextNumber(0.08, 0.18)
+	local bubblesDone = false
 	local conn: RBXScriptConnection
 	conn = RunService.Heartbeat:Connect(function(dt)
 		local now = os.clock()
 		local u = math.clamp((now - t0) / dur, 0, 1)
 		local origin = follow()
-		if u < 0.78 and now >= nextBubbleAt then
-			spawnBubble(origin)
-			nextBubbleAt = now + rng:NextNumber(0.07, 0.2)
+		local fighting = if stillFighting then stillFighting() else true
+		if not bubblesDone then
+			if not fighting then
+				bubblesDone = true
+			elseif u < 0.78 and now >= nextBubbleAt then
+				spawnBubble(origin)
+				nextBubbleAt = now + rng:NextNumber(0.07, 0.2)
+			end
 		end
 		for _, z in ipairs(zaps) do
 			if not z.anchor.Parent then

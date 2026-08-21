@@ -114,6 +114,18 @@ local function sanitizeLayout(raw: any): { LayoutObject }
 			if sizeClass then
 				entry.sizeClass = math.clamp(math.floor(sizeClass), 1, 3)
 			end
+			local colorIndex = tonumber(obj.colorIndex)
+			if colorIndex then
+				entry.colorIndex = math.clamp(math.floor(colorIndex), 1, 14)
+			end
+			local colorR = tonumber(obj.colorR)
+			local colorG = tonumber(obj.colorG)
+			local colorB = tonumber(obj.colorB)
+			if colorR and colorG and colorB then
+				entry.colorR = math.clamp(colorR, 0, 1)
+				entry.colorG = math.clamp(colorG, 0, 1)
+				entry.colorB = math.clamp(colorB, 0, 1)
+			end
 			table.insert(layout, entry)
 		end
 	end
@@ -134,6 +146,10 @@ local function cloneLayout(layout: { LayoutObject }): { LayoutObject }
 			diameter = obj.diameter,
 			sizeTier = obj.sizeTier,
 			sizeClass = obj.sizeClass,
+			colorIndex = obj.colorIndex,
+			colorR = obj.colorR,
+			colorG = obj.colorG,
+			colorB = obj.colorB,
 		})
 	end
 	return out
@@ -483,7 +499,7 @@ end
 
 function PersistenceService.getSkillStage(player: Player, skillId: string): number
 	local stages = PersistenceService.getSkillStages(player)
-	return SkillStages.clampStage(stages[skillId])
+	return SkillStages.clampStageFor(skillId, stages[skillId])
 end
 
 -- Unlock next stage for skillId. Returns { ok, stage, prevStage?, errorCode?, sandDollars? }.
@@ -503,8 +519,8 @@ function PersistenceService.tryUnlockSkillStage(player: Player, skillId: string)
 		return { ok = false, stage = 1, errorCode = "BadSkill", sandDollars = profile.currencies.sandDollars }
 	end
 	profile.skillStages = SkillStages.sanitizeMap(profile.skillStages)
-	local current = SkillStages.clampStage(profile.skillStages[skillId])
-	local nextStage = SkillStages.nextStage(current)
+	local current = SkillStages.clampStageFor(skillId, profile.skillStages[skillId])
+	local nextStage = SkillStages.nextStageFor(skillId, current)
 	if not nextStage then
 		return { ok = false, stage = current, prevStage = current, errorCode = "Maxed", sandDollars = profile.currencies.sandDollars }
 	end
@@ -514,12 +530,19 @@ function PersistenceService.tryUnlockSkillStage(player: Player, skillId: string)
 		return { ok = false, stage = current, prevStage = current, errorCode = "CantAfford", sandDollars = cash }
 	end
 	-- Earn More / Place More require Plot Size stage 2+.
-	if SkillStages.isLockedUntilPlotSize(skillId, SkillStages.clampStage(profile.skillStages.PlotSize)) then
+	-- Reef Health requires Place More stage 2+.
+	if SkillStages.isSkillLocked(skillId, profile.skillStages) then
+		local errorCode = if SkillStages.isLockedUntilPlaceMore(
+				skillId,
+				SkillStages.clampStage(profile.skillStages.PlaceMore)
+			)
+			then "PlaceMoreGate"
+			else "PlotSizeGate"
 		return {
 			ok = false,
 			stage = current,
 			prevStage = current,
-			errorCode = "PlotSizeGate",
+			errorCode = errorCode,
 			sandDollars = cash,
 		}
 	end

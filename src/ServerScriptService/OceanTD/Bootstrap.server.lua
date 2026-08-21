@@ -131,6 +131,7 @@ end
 
 local function onPlayerRemoving(player: Player)
 	print("[PLOT] PlayerRemoving", player.Name)
+	PlacementService.clearPendingColorSave(player)
 	savePlayer(player, "leave")
 
 	local plotId = PlotService.getOwnerPlotId(player)
@@ -380,4 +381,16 @@ requestCoralSize.OnServerInvoke = function(player: Player, placeId: any, targetC
 		return { ok = false, errorCode = "BadRequest" }
 	end
 	return PlacementService.setCoralSize(player, placeId, want, unlockNext == true)
+end
+
+local requestCoralColor = Remotes.getFunction("RequestCoralColor")
+requestCoralColor.OnServerInvoke = function(player: Player, placeId: any, colorIndex: any, colorR: any, colorG: any, colorB: any)
+	if typeof(placeId) ~= "string" then
+		return { ok = false, errorCode = "BadRequest" }
+	end
+	local idx = tonumber(colorIndex)
+	if typeof(idx) ~= "number" then
+		return { ok = false, errorCode = "BadRequest" }
+	end
+	return PlacementService.setCoralColor(player, placeId, idx, tonumber(colorR), tonumber(colorG), tonumber(colorB))
 end

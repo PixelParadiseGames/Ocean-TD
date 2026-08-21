@@ -37,7 +37,9 @@ local SkillPowerUpUI = require(script.Parent:WaitForChild("SkillPowerUpUI"))
 local PlaceConfirmHitTest = require(script.Parent:WaitForChild("PlaceConfirmHitTest"))
 local PlaceConfirmChrome = require(script.Parent:WaitForChild("PlaceConfirmChrome"))
 local PlaceAimScreen = require(script.Parent:WaitForChild("PlaceAimScreen"))
+local CoralRangeRings = require(script.Parent:WaitForChild("CoralRangeRings"))
 local SkillStages = require(oceanRoot:WaitForChild("Shared"):WaitForChild("SkillStages"))
+local CoralSize = require(oceanRoot:WaitForChild("Shared"):WaitForChild("CoralSize"))
 
 local PlacementController = {}
 
@@ -424,6 +426,7 @@ local function clearGhost()
 	ghostBaseMaterial = nil
 	ghostPlaceDiameter = nil
 	SelectRing.destroy(placeSelectRing)
+	CoralRangeRings.hide()
 	-- Keep move icon alive (billboard may be Adorned to this ghost).
 	detachMoveHintToScreen()
 	if ghost then
@@ -953,6 +956,12 @@ local function updateGhostAt(anchorPos: Vector3)
 				pendingGhostScaleIn = false
 				startGhostScaleIn(ghost)
 			end
+			-- Range preview until place confirms or cancels (ghost cleared).
+			CoralRangeRings.show(ghost, function()
+				return ghost
+			end, function()
+				return CoralSize.statsFor(1).range
+			end)
 		end
 	else
 		ghost.CFrame = CFrame.new(anchorPos)

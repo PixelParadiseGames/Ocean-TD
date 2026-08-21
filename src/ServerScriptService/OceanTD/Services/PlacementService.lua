@@ -16,12 +16,15 @@ local CoralVisual = require(oceanShared:WaitForChild("CoralVisual"))
 local CoralSize = require(oceanShared:WaitForChild("CoralSize"))
 local ItemCatalog = require(oceanShared:WaitForChild("ItemCatalog"))
 local SkillStages = require(oceanShared:WaitForChild("SkillStages"))
+local PlotOutlineColors = require(oceanShared:WaitForChild("PlotOutlineColors"))
 
 local PlotService = require(script.Parent:WaitForChild("PlotService"))
 local GridService = require(script.Parent:WaitForChild("GridService"))
 local PlayerSession = require(script.Parent:WaitForChild("PlayerSession"))
 local PersistenceService = require(script.Parent:WaitForChild("PersistenceService"))
 local UndoService = require(script.Parent:WaitForChild("UndoService"))
+
+local COLOR_SAVE_DEBOUNCE_SEC = 5
 
 type LayoutObject = {
 	id: string,
@@ -34,6 +37,7 @@ type LayoutObject = {
 	diameter: number?,
 	sizeTier: number?,
 	sizeClass: number?,
+	colorIndex: number?,
 }
 
 export type PlaceResult = {
@@ -50,9 +54,33 @@ local PlacementService = {}
 local ROOT_NAME = "OceanTD_Placed"
 -- While true, successful ops don't push undo (used during undo itself).
 local suppressUndoRecord = false
+-- Debounce DataStore writes while players spam dice rolls (grid/visual still update live).
+local colorSaveTokenByUser: { [number]: number } = {}
 
 local function log(...: any)
 	print("[PLACE]", ...)
+end
+
+local function scheduleCoralColorSave(player: Player, plotId: string)
+	local userId = player.UserId
+	local token = (colorSaveTokenByUser[userId] or 0) + 1
+	colorSaveTokenByUser[userId] = token
+	task.delay(COLOR_SAVE_DEBOUNCE_SEC, function()
+		if colorSaveTokenByUser[userId] ~= token then
+			return
+		end
+		colorSaveTokenByUser[userId] = nil
+		if not player.Parent or not PlayerSession.canSave(player) then
+			return
+		end
+		-- Fresh snapshot so later place/move/size ops aren't overwritten by a stale layout.
+		PersistenceService.save(player, GridService.snapshot(plotId))
+		log("Color save (debounced)", player.Name)
+	end)
+end
+
+function PlacementService.clearPendingColorSave(player: Player)
+	colorSaveTokenByUser[player.UserId] = nil
 end
 
 local function warnPlace(...: any)
@@ -187,6 +215,11 @@ function PlacementService.hydrateVisuals(plotId: string, boundsCFrame: CFrame)
 			local class = CoralSize.clampTier(cell.sizeClass or CoralSize.classFromDiameter(cell.diameter or 4))
 			local tier = CoralSize.clampTier(cell.sizeTier or class)
 			CoralSize.applyToPart(visual, cell.diameter or visual.Size.X, class, tier)
+			if typeof(cell.colorIndex) == "number" then
+				local idx = PlotOutlineColors.clampCoralIndex(cell.colorIndex)
+				visual:SetAttribute("OceanTD_ColorIndex", idx)
+				CoralVisual.setRestColor(visual, PlotOutlineColors.resolveCoralPaint(idx, cell.colorR, cell.colorG, cell.colorB))
+			end
 		end
 	end)
 	log("Hydrated visuals", plotId)
@@ -205,7 +238,11 @@ function PlacementService.placeFromSave(
 	consumeSeed: boolean?,
 	diameter: number?,
 	sizeTier: number?,
-	sizeClass: number?
+	sizeClass: number?,
+	colorIndex: number?,
+	colorR: number?,
+	colorG: number?,
+	colorB: number?
 ): PlaceResult
 	local shouldConsume = consumeSeed == true
 	local item = ItemCatalog.get(itemId)
@@ -237,6 +274,10 @@ function PlacementService.placeFromSave(
 
 	-- exactPos = plot.CFrame:PointToWorldSpace(VisualPos) — never re-snap to terrain/grid center.
 	local worldPos = GridMath.plotLocalToWorld(visualLocal, slot.cframe)
+	local paintIdx = if typeof(colorIndex) == "number" then PlotOutlineColors.clampCoralIndex(colorIndex) else nil
+	local paintColor = if paintIdx
+		then PlotOutlineColors.resolveCoralPaint(paintIdx, colorR, colorG, colorB)
+		else nil
 	local occupied, occupyErr = GridService.tryOccupy(
 		plotId,
 		player.UserId,
@@ -249,7 +290,11 @@ function PlacementService.placeFromSave(
 		gz,
 		diameter,
 		sizeTier,
-		sizeClass
+		sizeClass,
+		paintIdx,
+		if paintColor then paintColor.R else nil,
+		if paintColor then paintColor.G else nil,
+		if paintColor then paintColor.B else nil
 	)
 	if not occupied then
 		if shouldConsume then
@@ -258,7 +303,7 @@ function PlacementService.placeFromSave(
 		return { ok = false, errorCode = occupyErr or "SpotTaken" }
 	end
 
-	local visual = PlacementService.spawnVisual(plotId, species.speciesId, worldPos, nil, diameter)
+	local visual = PlacementService.spawnVisual(plotId, species.speciesId, worldPos, paintColor, diameter)
 	if not visual then
 		GridService.vacate(plotId, visualLocal.X, visualLocal.Y, visualLocal.Z, gx, gy, gz)
 		if shouldConsume then
@@ -272,6 +317,9 @@ function PlacementService.placeFromSave(
 	visual:SetAttribute("OceanTD_PlaceId", placeId)
 	visual:SetAttribute("OceanTD_ItemId", itemId)
 	visual:SetAttribute("OceanTD_SpeciesId", species.speciesId)
+	if paintIdx then
+		visual:SetAttribute("OceanTD_ColorIndex", paintIdx)
+	end
 	local class = CoralSize.clampTier(sizeClass or CoralSize.classFromDiameter(diameter or visual.Size.X))
 	local tier = CoralSize.clampTier(sizeTier or class)
 	CoralSize.applyToPart(visual, diameter or visual.Size.X, class, tier)
@@ -486,7 +534,11 @@ function PlacementService.move(
 		tgz,
 		cell.diameter,
 		cell.sizeTier,
-		cell.sizeClass
+		cell.sizeClass,
+		cell.colorIndex,
+		cell.colorR,
+		cell.colorG,
+		cell.colorB
 	)
 	if not occupied then
 		-- Roll back vacate so the coral isn't lost from the grid.
@@ -502,7 +554,11 @@ function PlacementService.move(
 			fgz,
 			cell.diameter,
 			cell.sizeTier,
-			cell.sizeClass
+			cell.sizeClass,
+			cell.colorIndex,
+			cell.colorR,
+			cell.colorG,
+			cell.colorB
 		)
 		return { ok = false, errorCode = occupyErr or "SpotTaken" }
 	end
@@ -773,7 +829,11 @@ function PlacementService.applyLayout(player: Player, layout: { LayoutObject }):
 			true,
 			obj.diameter,
 			obj.sizeTier,
-			obj.sizeClass
+			obj.sizeClass,
+			obj.colorIndex,
+			obj.colorR,
+			obj.colorG,
+			obj.colorB
 		)
 		if result.ok then
 			placed += 1
@@ -964,6 +1024,47 @@ function PlacementService.setCoralSize(
 	PersistenceService.save(player, GridService.snapshot(plotId))
 	log("Size", placeId, "class", want, "tier", newTier, "d", newDiam)
 	return { ok = true, diameter = newDiam, sizeClass = want, sizeTier = newTier }
+end
+
+function PlacementService.setCoralColor(
+	player: Player,
+	placeId: string,
+	colorIndex: number,
+	colorR: number?,
+	colorG: number?,
+	colorB: number?
+): { ok: boolean, errorCode: string?, colorIndex: number?, colorR: number?, colorG: number?, colorB: number? }
+	if typeof(placeId) ~= "string" or placeId == "" then
+		return { ok = false, errorCode = "BadRequest" }
+	end
+	if not PlayerSession.canSave(player) then
+		return { ok = false, errorCode = "NotReady" }
+	end
+	local plotId = PlotService.getOwnerPlotId(player)
+	if not plotId then
+		return { ok = false, errorCode = "NoPlot" }
+	end
+	local visual = findVisualByPlaceId(plotId, placeId)
+	if not visual then
+		return { ok = false, errorCode = "Missing" }
+	end
+	local idx = PlotOutlineColors.clampCoralIndex(colorIndex)
+	local paint = PlotOutlineColors.resolveCoralPaint(idx, colorR, colorG, colorB)
+	local slot = PlotService.getSlot(plotId)
+	if not slot then
+		return { ok = false, errorCode = "BadPlot" }
+	end
+	local localPos = GridMath.worldToPlotLocal(visual.Position, slot.cframe)
+	local gx, gy, gz = GridMath.worldToGrid(localPos, Vector3.zero)
+	if not GridService.setColorAtGrid(plotId, gx, gy, gz, idx, paint.R, paint.G, paint.B) then
+		return { ok = false, errorCode = "Missing" }
+	end
+	visual:SetAttribute("OceanTD_ColorIndex", idx)
+	CoralVisual.setRestColor(visual, paint)
+	-- Live grid/visual now; DataStore after 5s idle so rapid dice rolls don't thrash saves.
+	scheduleCoralColorSave(player, plotId)
+	log("Color", placeId, "index", idx)
+	return { ok = true, colorIndex = idx, colorR = paint.R, colorG = paint.G, colorB = paint.B }
 end
 
 function PlacementService.init()

@@ -349,7 +349,7 @@ local function applyStages(raw: any)
 end
 
 local function currentStage(skillId: string): number
-	return SkillStages.clampStage(stagesMap[skillId])
+	return SkillStages.clampStageFor(skillId, stagesMap[skillId])
 end
 
 local function findTextLabel(host: Instance, name: string): TextLabel?
@@ -522,7 +522,7 @@ local function refreshTemplate()
 	if unlockNameLbl then
 		unlockNameLbl.Text = def.displayName
 	end
-	local nextS = SkillStages.nextStage(stage)
+	local nextS = SkillStages.nextStageFor(activeSkillId, stage)
 	if nextStageLbl then
 		if nextS then
 			nextStageLbl.Text = "Stage " .. tostring(nextS)
@@ -572,6 +572,69 @@ local function refreshTemplate()
 					)
 				end)
 			end
+		elseif activeSkillId == "RHealth" then
+			local newMax = SkillStages.reefHealthAtStage(descStage)
+			if nextS == nil then
+				startUnlockDescPulse("RHealth", function(c: Color3)
+					return string.format(
+						'Max: <font color="%s">%d</font>',
+						rgbFontTag(c),
+						newMax
+					)
+				end)
+			else
+				local inc = SkillStages.reefHealthIncrementAtStage(descStage)
+				startUnlockDescPulse("RHealth", function(c: Color3)
+					return string.format(
+						'<font color="%s">+%d</font>  New Max: %d',
+						rgbFontTag(c),
+						inc,
+						newMax
+					)
+				end)
+			end
+		elseif activeSkillId == "Skip" then
+			if SkillStages.isSkipUnlimited(descStage) or nextS == nil then
+				startUnlockDescPulse("Skip", function(c: Color3)
+					return string.format('<font color="%s">Unlimited Skips</font>', rgbFontTag(c))
+				end)
+			else
+				local uses = SkillStages.skipUsesAtStage(descStage)
+				if uses <= 0 then
+					stopUnlockDescPulse()
+					unlockDescLbl.RichText = false
+					unlockDescLbl.Text = SkillStages.unlockDesc(activeSkillId, descStage)
+					unlockDescLbl.Visible = true
+				else
+					local inc = SkillStages.skipUsesIncrementAtStage(descStage)
+					startUnlockDescPulse("Skip", function(c: Color3)
+						return string.format(
+							'<font color="%s">+%d</font>  New Max: %d per session',
+							rgbFontTag(c),
+							inc,
+							uses
+						)
+					end)
+				end
+			end
+		elseif activeSkillId == "WaveSpeed" then
+			if nextS == nil then
+				startUnlockDescPulse("WaveSpeed", function(c: Color3)
+					return string.format('<font color="%s">All speeds + pause</font>', rgbFontTag(c))
+				end)
+			elseif descStage == 2 then
+				startUnlockDescPulse("WaveSpeed", function(c: Color3)
+					return string.format('Unlock <font color="%s">1.5x</font> wave speed', rgbFontTag(c))
+				end)
+			elseif descStage == 3 then
+				startUnlockDescPulse("WaveSpeed", function(c: Color3)
+					return string.format('Unlock <font color="%s">2x</font> wave speed', rgbFontTag(c))
+				end)
+			else
+				startUnlockDescPulse("WaveSpeed", function(c: Color3)
+					return string.format('Unlock wave <font color="%s">pause</font>', rgbFontTag(c))
+				end)
+			end
 		else
 			stopUnlockDescPulse()
 			unlockDescLbl.RichText = false
@@ -605,9 +668,14 @@ local function refreshTemplate()
 	end
 
 	clearLockOverlays()
+	local maxS = SkillStages.maxStageFor(activeSkillId)
 	for i = 1, SkillStages.MAX_STAGE do
 		local sb = stageButtons[i]
 		if not sb then
+			continue
+		end
+		if i > maxS then
+			sb.Visible = false
 			continue
 		end
 		sb.Visible = true
@@ -737,9 +805,17 @@ local function doUnlockRemote()
 				WaveEndVfx.setRouteEndWorldPos(park)
 			end
 		end
-		stagesMap[skillId] = SkillStages.clampStage(result.stage)
+		stagesMap[skillId] = SkillStages.clampStageFor(skillId, result.stage)
 		hideConfirm()
 		refreshTemplate()
+		if skillId == "RHealth" then
+			local WaveSim = require(script.Parent:WaitForChild("WaveSim"))
+			WaveSim.applyReefHealthStage(result.stage)
+		end
+		if skillId == "WaveSpeed" then
+			local WaveSim = require(script.Parent:WaitForChild("WaveSim"))
+			WaveSim.clampSpeedToMaxStep(SkillStages.waveSpeedMaxStep(result.stage))
+		end
 		if skillId == "PlotSize" then
 			-- ForceClose always tears down skills + powerup; avoid close() while open
 			-- so onClosed cannot race HUD restore mid-cinematic.
@@ -756,6 +832,8 @@ local function doUnlockRemote()
 		showToast("Max Stage")
 	elseif code == "PlotSizeGate" then
 		showToast("Unlock Plot Size Stage 2 first")
+	elseif code == "PlaceMoreGate" then
+		showToast("Unlock Place More Stage 2 first")
 	else
 		showToast("Can't unlock")
 	end
@@ -767,7 +845,7 @@ local function showConfirmUnlock()
 		return
 	end
 	local stage = currentStage(activeSkillId)
-	local nextS = SkillStages.nextStage(stage)
+	local nextS = SkillStages.nextStageFor(activeSkillId, stage)
 	if not nextS then
 		showToast("Max Stage")
 		return
@@ -854,6 +932,21 @@ local function showConfirmUnlock()
 
 	if isGamepadMode() then
 		beginConfirmGamepadNav(unlock, cancel)
+	else
+		-- Keyboard tips: Enter = unlock, Backspace = cancel.
+		local tipT0 = os.clock()
+		local tipConn: RBXScriptConnection? = nil
+		tipConn = RunService.Heartbeat:Connect(function()
+			if not confirmGui or confirmGui ~= sg then
+				if tipConn then
+					tipConn:Disconnect()
+				end
+				return
+			end
+			local showTip = (math.floor((os.clock() - tipT0) / 1) % 2) == 1
+			unlock.Text = if showTip then "Enter" else "UNLOCK"
+			cancel.Text = if showTip then "Backspace" else "CANCEL"
+		end)
 	end
 end
 
@@ -866,7 +959,7 @@ function SkillPowerUpUI.requestUnlockNext()
 		return
 	end
 	local stage = currentStage(activeSkillId)
-	local nextS = SkillStages.nextStage(stage)
+	local nextS = SkillStages.nextStageFor(activeSkillId, stage)
 	if not nextS then
 		showToast("Max Stage")
 		return
@@ -931,7 +1024,7 @@ function SkillPowerUpUI.open(skillId: string)
 		warn("[SkillPowerUp] Unknown skill", skillId)
 		return
 	end
-	if SkillStages.isLockedUntilPlotSize(skillId, currentStage("PlotSize")) then
+	if SkillStages.isSkillLocked(skillId, stagesMap) then
 		SkillsBubbleSim.playLockedRejectFx(skillId)
 		return
 	end
@@ -1121,7 +1214,7 @@ UserInputService.LastInputTypeChanged:Connect(function()
 	end
 end)
 
--- Keyboard: Enter = Unlock. X / B are owned by MobileSkillsA (power-up first, then bubbles).
+-- Keyboard: Enter = Unlock, Backspace = Cancel (confirm). X / B owned by MobileSkillsA.
 -- Pointer fallback: ZIndex fights can swallow Activated — resolve by hit list.
 UserInputService.InputBegan:Connect(function(input, gameProcessed)
 	if not popupOpen then
@@ -1174,6 +1267,13 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
 		else
 			SkillPowerUpUI.requestUnlockNext()
 		end
+		return
+	end
+	if key == Enum.KeyCode.Backspace then
+		if confirmGui then
+			hideConfirm()
+		end
+		return
 	end
 end)
 
@@ -1193,6 +1293,7 @@ syncRemote.OnClientEvent:Connect(function(payload)
 	end
 	WaveEndVfx.syncToPlotSizeStage(currentStage("PlotSize"))
 	local WaveSim = require(script.Parent:WaitForChild("WaveSim"))
+	WaveSim.applyReefHealthStage(currentStage("RHealth"))
 	if WaveSim.isRunning() then
 		WaveSim.rebuildRouteForPlotSize(currentStage("PlotSize"))
 	end

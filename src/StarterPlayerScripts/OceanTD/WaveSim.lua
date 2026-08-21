@@ -199,13 +199,20 @@ local crabSpawnDelay = 0
 local waveIndex = 0
 local reefMaxHealth = C.REEF_START_HEALTH
 local reefHealth = C.REEF_START_HEALTH
+
+local function reefMaxFromSkills(): number
+	return SkillStages.reefHealthAtStage(SkillPowerUpUI.getStage("RHealth"))
+end
+
 local fishFed = 0
 local waveFishExpected = 0
 local waveFishSpawned = 0 -- successfully spawned this wave (denominator once spawning ends)
 local waveFishFullyFed = 0 -- fish that reached full hunger this wave (alive or finished happy)
 local startedAt = 0
-local simClock = 0 -- advances with dt * speedMult (ammo/combat); HUD clock stays real-time
-local speedMult = 1 -- 1 | 1.5 | 2; session-only, player-controlled
+local simClock = 0 -- advances with dt * speedMult (ammo/combat); HUD clock freezes while paused
+local speedMult = 1 -- 1 | 1.5 | 2 | 0 (pause); session-only, player-controlled
+local pauseWallT0: number? = nil -- wall clock when speed-pause began
+local pausedWallAccum = 0 -- total wall time spent paused this run
 local waveSpawning = false
 local moveConn: RBXScriptConnection? = nil
 local combatAcc = 0
@@ -219,7 +226,54 @@ local stopListeners: { (Summary) -> () } = {}
 local fishRng = Random.new()
 local feedPitchCursor = C.FEED_PITCH_MIN
 
-local SPEED_STEPS = { 1, 1.5, 2 }
+-- Indices 1–3 are play speeds; index 4 (0) is pause (stage 4 Wave Speed only).
+local SPEED_STEPS = { 1, 1.5, 2, 0 }
+
+local function wallElapsedSec(): number
+	if not running then
+		return 0
+	end
+	if pauseWallT0 then
+		return math.max(0, pauseWallT0 - startedAt - pausedWallAccum)
+	end
+	return math.max(0, os.clock() - startedAt - pausedWallAccum)
+end
+
+local function applySpeedPauseState(nowPaused: boolean)
+	if nowPaused then
+		if not pauseWallT0 then
+			pauseWallT0 = os.clock()
+		end
+		return
+	end
+	if pauseWallT0 then
+		local dt = os.clock() - pauseWallT0
+		pausedWallAccum += dt
+		-- Fight timers use wall clock; shift so they don't expire during pause.
+		for _, agent in ipairs(fishList) do
+			local untilT = agent.pauseUntil
+			if untilT then
+				agent.pauseUntil = untilT + dt
+			end
+		end
+		pauseWallT0 = nil
+	end
+end
+
+local function resetSpeedState()
+	speedMult = 1
+	pauseWallT0 = nil
+	pausedWallAccum = 0
+end
+
+-- Skip / next-wave while paused → resume at 1x.
+local function resumeNormalSpeedIfPaused()
+	if speedMult > 1e-6 then
+		return
+	end
+	applySpeedPauseState(false)
+	speedMult = 1
+end
 
 local function fishWorldOffset(agent: FishAgent, pos: Vector3, tang: Vector3, atDist: number?): Vector3
 	local side = Vector3.new(-tang.Z, 0, tang.X)
@@ -326,7 +380,7 @@ local function getFeedProgress(): (number, boolean)
 end
 
 local function flushHud()
-	local elapsed = if running then os.clock() - startedAt else 0
+	local elapsed = wallElapsedSec()
 	local sec = math.floor(elapsed)
 	local feedProg, feedDone = getFeedProgress()
 	local danger = anyHungerDanger()
@@ -373,6 +427,22 @@ local function flushHud()
 	}
 	for _, cb in ipairs(hudListeners) do
 		cb(snap)
+	end
+end
+
+-- Grow max (and current) when Reef Health skill stages up. Safe while idle too.
+function WaveSim.applyReefHealthStage(stage: number)
+	local newMax = SkillStages.reefHealthAtStage(stage)
+	local delta = newMax - reefMaxHealth
+	reefMaxHealth = newMax
+	if delta > 0 then
+		reefHealth = math.min(reefMaxHealth, reefHealth + delta)
+	else
+		reefHealth = math.min(reefHealth, reefMaxHealth)
+	end
+	if running then
+		notifyHud()
+		flushHud()
 	end
 end
 
@@ -690,7 +760,7 @@ local function destroyArrowPreview()
 end
 
 local function playArrowStartSound()
-	WaveEntityPool.playSound("arrow", arrowSound, 1, 0.9)
+	WaveEntityPool.playSound("arrow", arrowSound, 1, 0.9, true)
 end
 
 local function createWavePathLabel(text: string, pos: Vector3, parent: Instance): BasePart
@@ -1529,6 +1599,18 @@ local function spawnOneCrab(startDist: number?)
 	clone.Parent = ensureFolder()
 	local dist0 = math.clamp(startDist or 0, 0, math.max(0, path.totalLen - 1))
 	local pos, tang = WaveCrab.sample(path, dist0)
+	local lateral = fishRng:NextNumber(-C.CRAB_LATERAL_SPREAD, C.CRAB_LATERAL_SPREAD)
+	local wanderAmp = fishRng:NextNumber(C.CRAB_WANDER_AMP_MIN, C.CRAB_WANDER_AMP_MAX)
+	local wanderFreq = fishRng:NextNumber(0.08, 0.18)
+	local wanderPhase = fishRng:NextNumber(0, math.pi * 2)
+	-- Apply lateral before ground snap so spawn matches move loop.
+	do
+		local side = Vector3.new(-tang.Z, 0, tang.X)
+		if side.Magnitude > 1e-4 then
+			side = side.Unit
+			pos = pos + side * lateral
+		end
+	end
 	pos = WaveCrab.worldOnGround(pos, nil, 1)
 	local anim = WaveCrab.bindAnim(clone, root)
 	local agent: FishAgent = {
@@ -1536,14 +1618,14 @@ local function spawnOneCrab(startDist: number?)
 		root = root,
 		model = clone,
 		dist = dist0,
-		lateral = 0,
+		lateral = lateral,
 		vert = 0,
 		bobAmp = 0,
 		bobFreq = 1,
 		bobPhase = 0,
-		wanderAmp = 0,
-		wanderFreq = 1,
-		wanderPhase = 0,
+		wanderAmp = wanderAmp,
+		wanderFreq = wanderFreq,
+		wanderPhase = wanderPhase,
 		speedPhase = 0,
 		speedFreq = 1,
 		hunger = 0,
@@ -1784,8 +1866,9 @@ local function predictFishMeetPos(agent: FishAgent, aheadSec: number): Vector3?
 		if futureDist >= ground.totalLen - 0.35 then
 			return nil
 		end
-		local pos, tang = WaveCrab.sample(ground, futureDist)
-		pos = WaveCrab.worldOnGround(pos, nil, 1)
+		local pathPos, tang = WaveCrab.sample(ground, futureDist)
+		local offset = fishWorldOffset(agent, pathPos, tang, futureDist)
+		local pos = WaveCrab.worldOnGround(offset, nil, 1)
 		local fwd = if tang.Magnitude > 1e-5 then tang.Unit else agent.smoothTang
 		if fwd.Magnitude < 1e-5 then
 			fwd = Vector3.new(0, 0, -1)
@@ -1852,6 +1935,13 @@ local function foodFlightPos(shot: FoodShot, u: number, meetPos: Vector3): Vecto
 		end
 		local sway = math.sin(t * math.pi * 2 + shot.swayPhase) * C.FOOD_SWAY_AMP * envelope
 		base = base + side * sway
+	end
+	-- Crabs: lob up then down onto the shell (fish keep the flatter path).
+	local target = shot.target
+	if target and target.isCrab then
+		local flat = Vector3.new(along.X, 0, along.Z).Magnitude
+		local arcH = math.clamp(flat * C.FOOD_CRAB_ARC_FRAC, C.FOOD_CRAB_ARC_MIN, C.FOOD_CRAB_ARC_MAX)
+		base = base + Vector3.yAxis * (math.sin(t * math.pi) * arcH)
 	end
 	return base
 end
@@ -2118,8 +2208,9 @@ local function tickFish(dt: number)
 				finishFish(agent)
 				continue
 			end
-			local pos, tang = WaveCrab.sample(ground, agent.dist)
-			pos = WaveCrab.worldOnGround(pos, agent.lastWorld.Y, dt)
+			local pathPos, tang = WaveCrab.sample(ground, agent.dist)
+			local offset = fishWorldOffset(agent, pathPos, tang, agent.dist)
+			local pos = WaveCrab.worldOnGround(offset, agent.lastWorld.Y, dt)
 			if paused then
 				WaveCrab.applyFightPose(
 					agent.root,
@@ -2152,16 +2243,24 @@ local function tickFish(dt: number)
 							agent.pauseUntil = os.clock() + coral.defenseSec
 							agent.stunSkullPart = coral.part
 							local follow = agent
-							WaveCrab.playZapBurst(ensureFolder(), function()
-								if follow.finished or not follow.root.Parent then
-									return pos
+							WaveCrab.playZapBurst(
+								ensureFolder(),
+								function()
+									if follow.finished or not follow.root.Parent then
+										return pos
+									end
+									local shellNow = follow.shellHitbox
+									if shellNow and shellNow.Parent then
+										return shellNow.Position
+									end
+									return follow.root.Position
+								end,
+								coral.defenseSec,
+								function()
+									local untilT = follow.pauseUntil
+									return untilT ~= nil and os.clock() < untilT
 								end
-								local shellNow = follow.shellHitbox
-								if shellNow and shellNow.Parent then
-									return shellNow.Position
-								end
-								return follow.root.Position
-							end, coral.defenseSec)
+							)
 							break
 						end
 					end
@@ -2200,7 +2299,7 @@ local function makeSummary(): Summary
 	return {
 		waveReached = math.max(1, waveIndex),
 		fishFed = fishFed,
-		elapsedSec = math.max(0, os.clock() - startedAt),
+		elapsedSec = wallElapsedSec(),
 	}
 end
 
@@ -2295,7 +2394,7 @@ function WaveSim.getHudSnapshot(): HudSnapshot
 		wave = waveIndex,
 		reefHealth = reefHealth,
 		reefMax = reefMaxHealth,
-		elapsedSec = if running then math.max(0, os.clock() - startedAt) else 0,
+		elapsedSec = wallElapsedSec(),
 		running = running,
 		feedProgress = feedProg,
 		feedComplete = feedDone,
@@ -2400,6 +2499,7 @@ function WaveSim.finishWaveEarly(): boolean
 	end
 	clearActiveWaveEntities()
 	UiHaptics.pulseTriple()
+	resumeNormalSpeedIfPaused()
 	beginWave(waveIndex + 1)
 	notifyHud()
 	flushHud()
@@ -2412,6 +2512,7 @@ function WaveSim.skipToNextWave(): boolean
 	end
 	clearActiveWaveEntities()
 	UiHaptics.pulseTriple()
+	resumeNormalSpeedIfPaused()
 	beginWave(waveIndex + 1)
 	notifyHud()
 	flushHud()
@@ -2446,6 +2547,7 @@ function WaveSim.stop(): Summary
 	running = false
 	disconnectMove()
 	local summary = makeSummary()
+	resetSpeedState()
 	hardCleanup()
 	lastHudWave = -1
 	lastHudReef = -1
@@ -2463,6 +2565,11 @@ local function attachSimLoop(myToken: number)
 	disconnectMove()
 	moveConn = RunService.Heartbeat:Connect(function(dt)
 		if myToken ~= token or not running then
+			return
+		end
+		-- Speed pause: freeze fish, crabs, food, ammo, combat, spawns; HUD clock holds.
+		if speedMult <= 1e-6 then
+			flushHud()
 			return
 		end
 		local simDt = dt * speedMult
@@ -2528,6 +2635,7 @@ local function attachSimLoop(myToken: number)
 		-- Wave complete → next wave immediately (no intermission pause).
 		if not waveSpawning and spawnQueue <= 0 and crabSpawnQueue <= 0 and countAliveFish() == 0 then
 			UiHaptics.pulseTriple()
+			resumeNormalSpeedIfPaused()
 			beginWave(waveIndex + 1)
 		end
 	end)
@@ -2544,14 +2652,15 @@ function WaveSim.continueWithHearts(hearts: number): boolean
 		return false
 	end
 	if not WaveEntityPool.hasFishKind(WaveEntityPool.FISH_TANG) then
-		warn("[WAVE] ReplicatedStorage.Fish.Tang missing")
+		warn("[WAVE] ReplicatedStorage.HungryFish missing")
 		return false
 	end
 	token += 1
 	local myToken = token
 	running = true
-	reefMaxHealth = C.REEF_START_HEALTH
+	reefMaxHealth = reefMaxFromSkills()
 	reefHealth = math.clamp(math.floor(hearts + 0.5), 1, reefMaxHealth)
+	resetSpeedState()
 	ensureFolder()
 	WaveEndVfx.refreshLocalEndHeart()
 	beginWave(math.max(1, waveIndex) + 1)
@@ -2571,20 +2680,21 @@ function WaveSim.start(): boolean
 		return false
 	end
 	if not WaveEntityPool.hasFishKind(WaveEntityPool.FISH_TANG) then
-		warn("[WAVE] ReplicatedStorage.Fish.Tang missing")
+		warn("[WAVE] ReplicatedStorage.HungryFish missing")
 		return false
 	end
 	token += 1
 	local myToken = token
 	running = true
 	waveIndex = 0
-	reefMaxHealth = C.REEF_START_HEALTH
-	reefHealth = C.REEF_START_HEALTH
+	reefMaxHealth = reefMaxFromSkills()
+	reefHealth = reefMaxHealth
 	fishFed = 0
 	WaveEndVfx.resetStreak()
 	feedPitchCursor = C.FEED_PITCH_MIN
 	startedAt = os.clock()
 	simClock = 0
+	resetSpeedState()
 	combatAcc = 0
 	nextFishId = 1
 	ensureFolder()
@@ -2625,19 +2735,58 @@ function WaveSim.getSpeedMult(): number
 	return speedMult
 end
 
--- Returns new mult after cycle: 1 → 1.5 → 2 → 1
-function WaveSim.cycleSpeed(): number
+function WaveSim.isSpeedPaused(): boolean
+	return speedMult <= 1e-6
+end
+
+-- Cycle within unlocked steps: 1 → 1.5 → 2 → (pause if stage 4) → 1.
+function WaveSim.cycleSpeed(maxStep: number?): number
+	local cap = math.clamp(math.floor(tonumber(maxStep) or 3), 1, #SPEED_STEPS)
+	local n = if cap >= 4 then 4 else math.min(cap, 3)
 	local idx = 1
-	for i, s in ipairs(SPEED_STEPS) do
-		if math.abs(speedMult - s) < 1e-4 then
+	local found = false
+	for i = 1, n do
+		if math.abs(speedMult - SPEED_STEPS[i]) < 1e-4 then
 			idx = i
+			found = true
 			break
 		end
 	end
-	idx = idx % #SPEED_STEPS + 1
+	if not found then
+		-- Paused without unlock, or unknown mult → start from normal.
+		if speedMult <= 1e-6 and n < 4 then
+			idx = n -- will wrap to 1
+		else
+			idx = 1
+		end
+	end
+	idx = idx % n + 1
+	local wasPaused = speedMult <= 1e-6
 	speedMult = SPEED_STEPS[idx]
+	local nowPaused = speedMult <= 1e-6
+	if wasPaused ~= nowPaused then
+		applySpeedPauseState(nowPaused)
+	end
 	notifyHud()
 	return speedMult
+end
+
+function WaveSim.clampSpeedToMaxStep(maxStep: number)
+	local cap = math.clamp(math.floor(tonumber(maxStep) or 3), 1, #SPEED_STEPS)
+	if speedMult <= 1e-6 then
+		if cap < 4 then
+			applySpeedPauseState(false)
+			speedMult = 1
+			notifyHud()
+		end
+		return
+	end
+	local maxPlay = math.min(cap, 3)
+	local allowed = SPEED_STEPS[maxPlay]
+	if speedMult > allowed + 1e-4 then
+		speedMult = allowed
+		notifyHud()
+	end
 end
 
 function WaveSim.formatClock(sec: number): string

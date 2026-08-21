@@ -3,7 +3,7 @@
 	Soft lava-lamp bubble physics for MobileSkillsA skill ImageButtons.
 	Heartbeat only while open. Does not touch placement / other HUD systems.
 	Bubble size + label placement use per-stage Studio templates (SkillStages);
-	only PlotSize / EarnMore / PlaceMore BTNs are playable bubbles.
+	only PlotSize / EarnMore / PlaceMore / RHealth / Skip BTNs are playable bubbles.
 
 	Coords: physics + hits use GuiObject.AbsolutePosition space.
 	Pointer→abs is calibrated per grab (raw vs inset-subtracted) so we never guess
@@ -147,11 +147,18 @@ local function syncOrbitLocks()
 	if not running then
 		return
 	end
-	local plotStage = readSkillStage("PlotSize")
+	local stages = {
+		PlotSize = readSkillStage("PlotSize"),
+		PlaceMore = readSkillStage("PlaceMore"),
+		EarnMore = readSkillStage("EarnMore"),
+		RHealth = readSkillStage("RHealth"),
+		Skip = readSkillStage("Skip"),
+		WaveSpeed = readSkillStage("WaveSpeed"),
+	}
 	local rng = Random.new()
 	for _, b in ipairs(bubbles) do
 		local id = skillIdForBubble(b)
-		if id and SkillStages.isLockedUntilPlotSize(id, plotStage) and b.btn.Parent then
+		if id and SkillStages.isSkillLocked(id, stages) and b.btn.Parent then
 			local old = b.btn:FindFirstChild("OceanTD_SkillGateLock")
 			if old then
 				old:Destroy()
@@ -399,7 +406,7 @@ readSkillStage = function(skillId: string): number
 		return require(script.Parent:WaitForChild("SkillPowerUpUI"))
 	end)
 	if ok and typeof(ui) == "table" and typeof((ui :: any).getStage) == "function" then
-		return SkillStages.clampStage((ui :: any).getStage(skillId))
+		return SkillStages.clampStageFor(skillId, (ui :: any).getStage(skillId))
 	end
 	return SkillStages.MIN_STAGE
 end
@@ -1445,7 +1452,14 @@ function SkillsBubbleSim.playLockedRejectFx(skillId: string)
 	end
 	rejectFxToken += 1
 	local token = rejectFxToken
-	local plotStage = readSkillStage("PlotSize")
+	local stages = {
+		PlotSize = readSkillStage("PlotSize"),
+		PlaceMore = readSkillStage("PlaceMore"),
+		EarnMore = readSkillStage("EarnMore"),
+		RHealth = readSkillStage("RHealth"),
+		Skip = readSkillStage("Skip"),
+		WaveSpeed = readSkillStage("WaveSpeed"),
+	}
 
 	local locked: Bubble? = nil
 	local growTargets: { Bubble } = {}
@@ -1459,9 +1473,9 @@ function SkillsBubbleSim.playLockedRejectFx(skillId: string)
 		end
 		if id == skillId then
 			locked = b
-		elseif not SkillStages.isLockedUntilPlotSize(id, plotStage) then
+		elseif not SkillStages.isSkillLocked(id, stages) then
 			-- Already at max stage layout — don't enlarge the circle further.
-			if readSkillStage(id) < SkillStages.MAX_STAGE then
+			if readSkillStage(id) < SkillStages.maxStageFor(id) then
 				table.insert(growTargets, b)
 			end
 		end

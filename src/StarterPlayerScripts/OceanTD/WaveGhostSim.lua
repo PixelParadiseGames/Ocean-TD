@@ -635,7 +635,7 @@ local function playArrowStartSound()
 	if lodFar then
 		return
 	end
-	WaveEntityPool.playSound("arrow", arrowSound, 1, 0.9)
+	WaveEntityPool.playSound("arrow", arrowSound, 1, 0.9, true)
 end
 
 local function startWaveArrowPreview(wave: number)

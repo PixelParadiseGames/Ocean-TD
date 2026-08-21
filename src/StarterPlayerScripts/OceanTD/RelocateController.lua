@@ -32,6 +32,7 @@ local PlaceVfx = require(script.Parent:WaitForChild("PlaceVfx"))
 local PlacementController = require(script.Parent:WaitForChild("PlacementController"))
 local SelectRing = require(script.Parent:WaitForChild("SelectRing"))
 local PlaceConfirmChrome = require(script.Parent:WaitForChild("PlaceConfirmChrome"))
+local PlaceConfirmHitTest = require(script.Parent:WaitForChild("PlaceConfirmHitTest"))
 
 local RelocateController = {}
 
@@ -67,6 +68,7 @@ local cinematicHold = false
 local inspectModal = false
 local activeChanged = Instance.new("BindableEvent")
 local r1WhileActive: (() -> boolean)? = nil
+local aWhileIdle: (() -> boolean)? = nil
 local busy = false
 local introAnimating = false
 local gamepadRelocate = false
@@ -79,6 +81,7 @@ local placeId = ""
 local itemId: string? = nil
 local baseColor: Color3? = nil
 local baseMaterial: Enum.Material? = nil
+local showPaintSolid = false -- after color pick: hide white neon, show real paint
 local hasMoved = false
 local validSpot = true
 local rejectReason: string? = nil
@@ -107,6 +110,7 @@ local moveIcon: ImageLabel? = nil
 local waistBb: BillboardGui? = nil
 local waistAdornee: BasePart? = nil
 local chromeBtnDown = false
+local chromePressTarget: string? = nil -- "check" | "cancel" | "recycle"
 local fingerDown = false
 local pressOrigin: Vector2? = nil
 local dragging = false
@@ -139,6 +143,9 @@ local selectRing = SelectRing.new()
 -- Click pick: press may be marked processed by GUI; confirm on release too.
 local pendingPick: BasePart? = nil
 local pendingPickScreen: Vector2? = nil
+-- While relocating: tap another coral to switch (deferred to release so drag still works).
+local pendingCoralSwitch: BasePart? = nil
+local pendingCoralSwitchScreen: Vector2? = nil
 local PICK_TAP_PX = 48
 -- Max screen-space distance from a coral's projected center to count as a tap/hover.
 local PICK_SCREEN_PX = 42
@@ -175,29 +182,35 @@ local function clampGamepadCursor(pos: Vector2): Vector2
 	if not cam then
 		return pos
 	end
-	local inset = GuiService:GetGuiInset()
 	local vp = cam.ViewportSize
-	return Vector2.new(
-		math.clamp(pos.X, inset.X + 8, inset.X + vp.X - 8),
-		math.clamp(pos.Y, inset.Y + 8, inset.Y + vp.Y - 8)
-	)
+	return Vector2.new(math.clamp(pos.X, 8, vp.X - 8), math.clamp(pos.Y, 8, vp.Y - 8))
 end
 
 local function hoverPickScreenPos(): Vector2
-	-- Gamepad: highlight coral near screen center (look / walk aim).
+	-- Gamepad: highlight coral near viewport center (look / walk aim).
 	if isUsingGamepad() then
 		local cam = Workspace.CurrentCamera
 		if cam then
 			local vp = cam.ViewportSize
+			-- Same space as GetMouseLocation / ViewportPointToRay (no top-bar inset).
 			return Vector2.new(vp.X * 0.5, vp.Y * 0.5)
 		end
 	end
 	return UserInputService:GetMouseLocation()
 end
 
-local function viewportToScreen(v: Vector2): Vector2
-	local inset = GuiService:GetGuiInset()
-	return Vector2.new(v.X + inset.X, v.Y + inset.Y)
+-- GetMouseLocation is viewport space. Pair with ViewportPointToRay / WorldToViewportPoint.
+-- ScreenPoint* APIs add GuiInset and park the hit ~36px above the cursor.
+local function viewportRay(cam: Camera, vp: Vector2): Ray
+	return cam:ViewportPointToRay(vp.X, vp.Y)
+end
+
+local function worldToViewport(cam: Camera, world: Vector3): (Vector2?, boolean)
+	local sp, onScreen = cam:WorldToViewportPoint(world)
+	if not onScreen or sp.Z <= 0 then
+		return nil, false
+	end
+	return Vector2.new(sp.X, sp.Y), true
 end
 
 local function getPlayerControls(): any
@@ -404,6 +417,7 @@ local function aimScreenPos(): Vector2
 		return Vector2.new(gamepadCursor.X, gamepadCursor.Y - AIM_VISUAL_CENTER_OFFSET_Y)
 	end
 	if UserInputService:GetLastInputType() == Enum.UserInputType.Touch then
+		-- Raise aim so the coral / move icon sit above the thumb (thumb below).
 		return Vector2.new(finger.X, finger.Y - GHOST_SCREEN_OFFSET_Y)
 	end
 	-- Mouse: aim above the cursor so the ball center lands on it.
@@ -415,8 +429,9 @@ local function worldToScreen(world: Vector3): Vector2?
 	if not cam then
 		return nil
 	end
-	local sp, _ = cam:WorldToViewportPoint(world)
-	if sp.Z <= 0 then
+	-- IgnoreGuiInset ScreenGui layout space (includes top bar).
+	local sp, onScreen = cam:WorldToScreenPoint(world)
+	if not onScreen or sp.Z <= 0 then
 		return nil
 	end
 	return Vector2.new(sp.X, sp.Y)
@@ -596,26 +611,39 @@ local function makeUi()
 	plus.Parent = recycleBtn
 	recyclePlus = plus
 
-	local function markDown()
+	local function markDown(target: string?)
 		chromeBtnDown = true
+		chromePressTarget = target
 		fingerDown = false
 		pressOrigin = nil
 		dragging = false
 		grabFromMoveIcon = false
 	end
-	checkBtn.MouseButton1Down:Connect(markDown)
-	cancelBtn.MouseButton1Down:Connect(markDown)
-	recycleBtn.MouseButton1Down:Connect(markDown)
-	checkBtn.MouseButton1Click:Connect(function()
-		RelocateController.commit()
+	checkBtn.MouseButton1Down:Connect(function()
+		markDown("check")
 	end)
-	cancelBtn.MouseButton1Click:Connect(function()
-		-- X always closes move/recycle UI (cancels recycle confirm if open).
-		RelocateController.cancel()
+	cancelBtn.MouseButton1Down:Connect(function()
+		markDown("cancel")
 	end)
-	recycleBtn.MouseButton1Click:Connect(function()
-		RelocateController.beginRecycleConfirm()
+	recycleBtn.MouseButton1Down:Connect(function()
+		markDown("recycle")
 	end)
+	checkBtn.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			markDown("check")
+		end
+	end)
+	cancelBtn.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			markDown("cancel")
+		end
+	end)
+	recycleBtn.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			markDown("recycle")
+		end
+	end)
+	-- BillboardGui Click is flaky on phone — commit on InputEnded via chromePressTarget.
 end
 
 local function attachMoveIcon(adornee: BasePart)
@@ -758,7 +786,7 @@ local function raycastTerrain(screenPos: Vector2): Vector3?
 	if not cam then
 		return nil
 	end
-	local ray = cam:ScreenPointToRay(screenPos.X, screenPos.Y)
+	local ray = viewportRay(cam, screenPos)
 	local params = RaycastParams.new()
 	params.FilterType = Enum.RaycastFilterType.Exclude
 	local exclude: { Instance } = {}
@@ -857,21 +885,13 @@ local function pickPlacedCoral(screenPos: Vector2): BasePart?
 		return nil
 	end
 
-	local function directWorldHit(useViewport: boolean): BasePart?
-		local ray = if useViewport
-			then cam:ViewportPointToRay(screenPos.X, screenPos.Y)
-			else cam:ScreenPointToRay(screenPos.X, screenPos.Y)
-		local result = Workspace:Raycast(ray.Origin, ray.Direction * 800, worldParams)
-		if not result then
-			return nil
+	local ray = viewportRay(cam, screenPos)
+	local result = Workspace:Raycast(ray.Origin, ray.Direction * 800, worldParams)
+	if result then
+		local hit = coralFromHit(result.Instance)
+		if hit then
+			return hit
 		end
-		-- First solid hit must be the coral itself (visible).
-		return coralFromHit(result.Instance)
-	end
-
-	local hit = directWorldHit(false) or directWorldHit(true)
-	if hit then
-		return hit
 	end
 
 	-- Near-miss fallback: closest on-screen coral that still has clear LOS from camera.
@@ -891,12 +911,12 @@ local function pickPlacedCoral(screenPos: Vector2): BasePart?
 			table.insert(list, player.Character)
 		end
 		losParams.FilterDescendantsInstances = list
-		-- Ray only as far as the coral center so we can't "hit" geometry behind it.
-		local result = Workspace:Raycast(origin, delta.Unit * dist, losParams)
-		if not result then
+		-- Ray only as far as the coral so we can't "hit" geometry behind it.
+		local losHit = Workspace:Raycast(origin, delta.Unit * dist, losParams)
+		if not losHit then
 			return true
 		end
-		return result.Distance >= dist - 0.35
+		return losHit.Distance >= dist - 0.35
 	end
 
 	local radius = if isUsingGamepad() then math.max(PICK_SCREEN_PX, 72) else PICK_SCREEN_PX
@@ -908,9 +928,9 @@ local function pickPlacedCoral(screenPos: Vector2): BasePart?
 	for _, inst in ipairs(folder:GetChildren()) do
 		local coral = isPlacedCoralPart(inst)
 		if coral and coral ~= part then
-			local sp, onScreen = cam:WorldToViewportPoint(coral.Position)
-			if onScreen and sp.Z > 0 then
-				local d = (Vector2.new(sp.X, sp.Y) - screenPos).Magnitude
+			local sp = worldToViewport(cam, coral.Position)
+			if sp then
+				local d = (sp - screenPos).Magnitude
 				if d <= radius then
 					if d < d1 then
 						c3, d3 = c2, d2
@@ -937,6 +957,45 @@ local function pickPlacedCoral(screenPos: Vector2): BasePart?
 		return c3
 	end
 	return nil
+end
+
+-- True when the pointer is on the already-selected coral.
+-- pickPlacedCoral excludes `part`, so a press on the selected ball can otherwise
+-- fall through and falsely hit a neighbor — which stole the drag gesture.
+local function pointerHitsSelectedCoral(screenPos: Vector2): boolean
+	if not part or not part.Parent then
+		return false
+	end
+	local cam = Workspace.CurrentCamera
+	if not cam then
+		return false
+	end
+	local ray = viewportRay(cam, screenPos)
+	local params = RaycastParams.new()
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	local exclude: { Instance } = {}
+	if player.Character then
+		table.insert(exclude, player.Character)
+	end
+	params.FilterDescendantsInstances = exclude
+	local result = Workspace:Raycast(ray.Origin, ray.Direction * 800, params)
+	if result then
+		local cur: Instance? = result.Instance
+		while cur do
+			if cur == part then
+				return true
+			end
+			cur = cur.Parent
+		end
+	end
+	local sp = worldToViewport(cam, part.Position)
+	if sp then
+		local radius = if isUsingGamepad() then math.max(PICK_SCREEN_PX, 72) else PICK_SCREEN_PX
+		if (sp - screenPos).Magnitude <= radius then
+			return true
+		end
+	end
+	return false
 end
 
 local function destroyHoverHint()
@@ -1287,15 +1346,23 @@ local function updateRelocateFlash()
 	if not part or not part.Parent or not baseColor then
 		return
 	end
-	part.Material = Enum.Material.Neon
-	if validSpot then
-		-- Flash neon in this coral's color while the move tool is open.
-		local pulse = 0.5 + 0.5 * math.sin(os.clock() * 9)
-		part.Color = baseColor:Lerp(Color3.new(1, 1, 1), 0.12 + 0.28 * pulse)
+	if showPaintSolid and validSpot then
+		-- After a color pick, show the real paint (no white neon wash).
+		if baseMaterial then
+			part.Material = baseMaterial
+		end
+		part.Color = baseColor
 	else
-		-- Moving coral: red/white neon when the cell is invalid.
-		local pulse = (math.sin(os.clock() * 12) + 1) * 0.5
-		part.Color = Color3.new(1, 1, 1):Lerp(Color3.fromRGB(255, 45, 45), pulse)
+		part.Material = Enum.Material.Neon
+		if validSpot then
+			-- Flash neon in this coral's color while the move tool is open.
+			local pulse = 0.5 + 0.5 * math.sin(os.clock() * 9)
+			part.Color = baseColor:Lerp(Color3.new(1, 1, 1), 0.12 + 0.28 * pulse)
+		else
+			-- Moving coral: red/white neon when the cell is invalid.
+			local pulse = (math.sin(os.clock() * 12) + 1) * 0.5
+			part.Color = Color3.new(1, 1, 1):Lerp(Color3.fromRGB(255, 45, 45), pulse)
+		end
 	end
 	-- Keep blocker solid red neon (do not pulse it).
 	if blockPart and blockPart.Parent then
@@ -1325,11 +1392,9 @@ local function startLoop()
 			local stick = readThumbstick1()
 			local mag = stick.Magnitude
 			if mag > GAMEPAD_STICK_DEADZONE then
-				local screen = if part then worldToScreen(part.Position) else nil
+				local screen = if part then worldToViewport(Workspace.CurrentCamera :: Camera, part.Position) else nil
 				if not gamepadCursor then
-					gamepadCursor = if screen
-						then viewportToScreen(screen)
-						else UserInputService:GetMouseLocation()
+					gamepadCursor = screen or UserInputService:GetMouseLocation()
 				end
 				local dir = stick.Unit
 				local speed = GAMEPAD_AIM_SPEED * math.clamp((mag - GAMEPAD_STICK_DEADZONE) / (1 - GAMEPAD_STICK_DEADZONE), 0, 1)
@@ -1438,6 +1503,7 @@ local function clearState()
 	itemId = nil
 	baseColor = nil
 	baseMaterial = nil
+	showPaintSolid = false
 	hasMoved = false
 	validSpot = true
 	rejectReason = nil
@@ -1446,6 +1512,7 @@ local function clearState()
 	recycleSlideU = 0
 	recycleSlideActive = false
 	chromeBtnDown = false
+	chromePressTarget = nil
 	fingerDown = false
 	pressOrigin = nil
 	dragging = false
@@ -1486,6 +1553,27 @@ end
 
 function RelocateController.setR1WhileActiveHandler(cb: (() -> boolean)?)
 	r1WhileActive = cb
+end
+
+function RelocateController.setAWhileIdleHandler(cb: (() -> boolean)?)
+	aWhileIdle = cb
+end
+
+-- After inspect paints a new rest color, drop white neon and show the real paint.
+function RelocateController.syncSelectedRestColor()
+	if not part or not part.Parent then
+		return
+	end
+	local restMat, restColor = CoralVisual.readRestLook(part)
+	baseColor = restColor
+	baseMaterial = restMat
+	showPaintSolid = true
+	part.Material = restMat
+	part.Color = restColor
+end
+
+function RelocateController.isMoveConfirmUp(): boolean
+	return active == true and (hasMoved == true or recyclePending == true)
 end
 
 function RelocateController.getSavedCameraCFrame(): CFrame?
@@ -1718,6 +1806,7 @@ local function commitRecycle()
 			validSpot = true
 			rejectReason = nil
 			chromeBtnDown = false
+			chromePressTarget = nil
 			fingerDown = false
 			pressOrigin = nil
 			dragging = false
@@ -1830,11 +1919,14 @@ function RelocateController.begin(target: BasePart)
 	relocateShownAt = os.clock()
 	pendingPick = nil
 	pendingPickScreen = nil
+	pendingCoralSwitch = nil
+	pendingCoralSwitchScreen = nil
 	part = target
 	originPos = target.Position
 	itemId = iid
 	baseColor = restColor
 	baseMaterial = restMat
+	showPaintSolid = false
 	hasMoved = false
 	validSpot = true
 	rejectReason = nil
@@ -1844,6 +1936,7 @@ function RelocateController.begin(target: BasePart)
 	recycleSlideU = 0
 	recycleSlideActive = false
 	chromeBtnDown = false
+	chromePressTarget = nil
 	fingerDown = false
 	pressOrigin = nil
 	dragging = false
@@ -1851,11 +1944,13 @@ function RelocateController.begin(target: BasePart)
 	local existingId = target:GetAttribute("OceanTD_PlaceId")
 	placeId = if typeof(existingId) == "string" then existingId else ""
 
-	local vpScreen = worldToScreen(target.Position)
+	local vpScreen = if Workspace.CurrentCamera
+		then worldToViewport(Workspace.CurrentCamera :: Camera, target.Position)
+		else nil
 	local screen = vpScreen or pointerScreenPos()
 	if gamepadRelocate then
-		-- Aim cursor is GetMouseLocation / ScreenPoint space.
-		gamepadCursor = if vpScreen then viewportToScreen(vpScreen) else screen
+		-- Aim cursor is GetMouseLocation / viewport space.
+		gamepadCursor = screen
 	else
 		gamepadCursor = nil
 	end
@@ -1961,9 +2056,21 @@ local function isOverChrome(screenPos: Vector2): boolean
 	if chromeBtnDown then
 		return true
 	end
-	return guiObjectHit(checkBtn, screenPos, 12)
-		or guiObjectHit(cancelBtn, screenPos, 12)
-		or guiObjectHit(recycleBtn, screenPos, 12)
+	if PlaceConfirmHitTest.resolveTarget(screenPos, checkBtn, cancelBtn, playerGui) ~= nil then
+		return true
+	end
+	return guiObjectHit(recycleBtn, screenPos, 12)
+end
+
+local function resolveRelocateChrome(screenPos: Vector2): string?
+	local t = PlaceConfirmHitTest.resolveTarget(screenPos, checkBtn, cancelBtn, playerGui)
+	if t then
+		return t
+	end
+	if guiObjectHit(recycleBtn, screenPos, 12) then
+		return "recycle"
+	end
+	return nil
 end
 
 table.insert(inputConns, UserInputService.InputBegan:Connect(function(input, _processed)
@@ -1987,6 +2094,12 @@ table.insert(inputConns, UserInputService.InputBegan:Connect(function(input, _pr
 			return
 		end
 		if input.KeyCode == Enum.KeyCode.ButtonA then
+			-- Idle (no ✓ / recycle confirm): allow inspect A (e.g. color pick).
+			if not hasMoved and not recyclePending then
+				if aWhileIdle and aWhileIdle() then
+					return
+				end
+			end
 			RelocateController.commit()
 			return
 		end
@@ -2002,12 +2115,21 @@ table.insert(inputConns, UserInputService.InputBegan:Connect(function(input, _pr
 		if not isMouse and not isTouch then
 			return
 		end
-		local screenPos = pointerScreenPos()
+		local screenPos = PlaceConfirmHitTest.pointerScreenPos(input)
+		-- World picks use viewport space (GetMouseLocation / Touch Position).
+		-- PlaceConfirmHitTest adds GuiInset for touch — that breaks ViewportPointToRay.
+		local pickPos = if isTouch
+			then Vector2.new(input.Position.X, input.Position.Y)
+			else UserInputService:GetMouseLocation()
 		-- Move handle wins over ✓/X/recycle so grabbing the icon starts a drag.
 		local grabHandle = isOverMoveIcon(screenPos)
-		if not grabHandle and isOverChrome(screenPos) then
-			chromeBtnDown = true
-			return
+		if not grabHandle then
+			local chromeTarget = resolveRelocateChrome(screenPos)
+			if chromeTarget then
+				chromeBtnDown = true
+				chromePressTarget = chromeTarget
+				return
+			end
 		end
 		if InventoryState.isPointerOverBackpack(screenPos) then
 			return
@@ -2015,13 +2137,19 @@ table.insert(inputConns, UserInputService.InputBegan:Connect(function(input, _pr
 		if recyclePending then
 			return
 		end
-		local other = pickPlacedCoral(screenPos)
-		if other and other ~= part then
-			RelocateController.begin(other)
+		-- Switching coral must not steal the press used to drag the current one.
+		-- pickPlacedCoral excludes the selected part, so presses on it often "hit"
+		-- a neighbor — defer switch to a clean tap on release instead.
+		pendingCoralSwitch = nil
+		pendingCoralSwitchScreen = nil
+		local other = pickPlacedCoral(pickPos)
+		if other and other ~= part and not grabHandle and not pointerHitsSelectedCoral(pickPos) then
+			pendingCoralSwitch = other
+			pendingCoralSwitchScreen = pickPos
 			return
 		end
 		fingerDown = true
-		pressOrigin = screenPos
+		pressOrigin = pickPos
 		dragging = grabHandle
 		grabFromMoveIcon = grabHandle
 		return
@@ -2080,16 +2208,24 @@ table.insert(inputConns, UserInputService.InputChanged:Connect(function(input, _
 			return
 		end
 		dragging = true
+		-- Sliding = move, not a switch-tap.
+		pendingCoralSwitch = nil
+		pendingCoralSwitchScreen = nil
 	end
 	if not dragging and not fingerDown then
 		return
 	end
-	-- Grabbing the on-coral handle: ray at the cursor so the icon stays under the pointer.
-	-- Skip until the pointer actually moves so a click on the icon doesn't snap the coral.
+	-- Grabbing the on-coral handle: keep icon under the pointer on mouse;
+	-- on touch always raise so the coral sits above the thumb.
 	if grabFromMoveIcon and pressOrigin and (now - pressOrigin).Magnitude < 2 then
 		return
 	end
-	local aim = if grabFromMoveIcon then now else aimScreenPos()
+	local aim: Vector2
+	if grabFromMoveIcon and UserInputService:GetLastInputType() ~= Enum.UserInputType.Touch then
+		aim = now
+	else
+		aim = aimScreenPos()
+	end
 	local pos = raycastTerrain(aim)
 	if pos then
 		updateAt(pos)
@@ -2100,20 +2236,63 @@ table.insert(inputConns, UserInputService.InputEnded:Connect(function(input, _pr
 	if input.UserInputType ~= Enum.UserInputType.MouseButton1 and input.UserInputType ~= Enum.UserInputType.Touch then
 		return
 	end
-	local screenPos = pointerScreenPos()
+	local screenPos = PlaceConfirmHitTest.pointerScreenPos(input)
+	local pickPos = if input.UserInputType == Enum.UserInputType.Touch
+		then Vector2.new(input.Position.X, input.Position.Y)
+		else UserInputService:GetMouseLocation()
+	local switchTarget = pendingCoralSwitch
+	local switchOrigin = pendingCoralSwitchScreen
+	local chromeTarget = chromePressTarget
+	local wasChrome = chromeBtnDown
 	chromeBtnDown = false
+	chromePressTarget = nil
 	fingerDown = false
 	pressOrigin = nil
 	dragging = false
 	grabFromMoveIcon = false
+	pendingCoralSwitch = nil
+	pendingCoralSwitchScreen = nil
+
+	-- BillboardGui Click is flaky — fire chrome actions on release if still over the button.
+	if active and wasChrome and chromeTarget then
+		local still = resolveRelocateChrome(screenPos)
+		if still == chromeTarget or (chromeTarget == "check" and still == "check") then
+			if chromeTarget == "check" then
+				RelocateController.commit()
+				return
+			elseif chromeTarget == "cancel" then
+				RelocateController.cancel()
+				return
+			elseif chromeTarget == "recycle" then
+				RelocateController.beginRecycleConfirm()
+				return
+			end
+		elseif chromeTarget == "cancel" and still == nil then
+			-- Release slightly off cancel still cancels (same as before Click).
+			RelocateController.cancel()
+			return
+		elseif chromeTarget == "check" then
+			-- Soft accept: if we pressed check, commit even if release drifts a bit.
+			RelocateController.commit()
+			return
+		end
+	end
+
+	-- Tap another coral while one is selected → switch (no drag happened).
+	if active and switchTarget and switchTarget.Parent and switchOrigin then
+		if (pickPos - switchOrigin).Magnitude <= PICK_TAP_PX then
+			RelocateController.begin(switchTarget)
+			return
+		end
+	end
 
 	-- Tap fallback: if press didn't open the tool (processed/ray miss), try again on release.
 	if not active and not PlacementController.isActive() and pendingPick and pendingPickScreen then
-		if (screenPos - pendingPickScreen).Magnitude <= PICK_TAP_PX then
+		if (pickPos - pendingPickScreen).Magnitude <= PICK_TAP_PX then
 			if pendingPick.Parent then
 				RelocateController.begin(pendingPick)
 			else
-				tryBeginFromPick(screenPos)
+				tryBeginFromPick(pickPos)
 			end
 		end
 	end

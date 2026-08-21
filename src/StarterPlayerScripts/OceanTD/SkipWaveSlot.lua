@@ -20,9 +20,12 @@ local UiTheme = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiTheme")
 local UiIdleCycle = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiIdleCycle"))
 local UiHaptics = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiHaptics"))
 local UiPopupScale = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiPopupScale"))
+local Remotes = require(oceanRoot:WaitForChild("Remotes"))
+local SkillStages = require(oceanRoot:WaitForChild("Shared"):WaitForChild("SkillStages"))
 
 local InventoryState = require(script.Parent:WaitForChild("InventoryState"))
 local WaveSim = require(script.Parent:WaitForChild("WaveSim"))
+local SkillPowerUpUI = require(script.Parent:WaitForChild("SkillPowerUpUI"))
 
 local SkipWaveSlot = {}
 
@@ -37,6 +40,11 @@ local SCALE_IN = TweenInfo.new(0.28, Enum.EasingStyle.Quad, Enum.EasingDirection
 local SCALE_OUT = TweenInfo.new(0.22, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
 local CONFIRM_SOUND_ID = "rbxassetid://132862955422973"
 local FLASH_FADE_SEC = 2
+local SKIP_LOCK_IMAGE = "rbxassetid://105420423737825"
+local SKIP_LOCK_SIZE_PX = 17 -- 50% of prior 34
+local SKIP_LOCK_ORBIT_SPEED = 1.35 -- rad/sec
+local SKIP_LOCK_ORBIT_FRAC = 0.42
+local SKIP_LOCK_RED = Color3.fromRGB(220, 40, 45)
 
 export type Deps = {
 	mainHUD: ScreenGui,
@@ -88,6 +96,141 @@ local confirmOpenedAt = 0
 local titleFlashConn: RBXScriptConnection? = nil
 local scaleToken = 0
 local hudUnsub: (() -> ())? = nil
+local stopUnsub: (() -> ())? = nil
+-- Skips spent this wave-run (reset on WaveSim.start / continue does not reset).
+local skipsUsedThisSession = 0
+local confirmBody: TextLabel? = nil
+local skipLockIcon: ImageLabel? = nil
+local skipLockOverlay: Frame? = nil
+local skipLockOrbitAngle = 0
+local skipLockOrbitConn: RBXScriptConnection? = nil
+
+local function skipStage(): number
+	return SkillPowerUpUI.getStage("Skip")
+end
+
+local function isSkipUnlimited(): boolean
+	return SkillStages.isSkipUnlimited(skipStage())
+end
+
+local function skipBudgetMax(): number
+	return SkillStages.skipUsesAtStage(skipStage())
+end
+
+local function skipUsesRemaining(): number
+	if isSkipUnlimited() then
+		return math.huge
+	end
+	return math.max(0, skipBudgetMax() - skipsUsedThisSession)
+end
+
+local function hasSkipAccess(): boolean
+	return skipUsesRemaining() > 0
+end
+
+-- No uses left (stage 1 or spent) — show lock and route taps to Skills.
+local function needsSkipUnlock(): boolean
+	return not hasSkipAccess()
+end
+
+local function resetSkipSession()
+	skipsUsedThisSession = 0
+end
+
+local function stopSkipLockOrbit()
+	if skipLockOrbitConn then
+		skipLockOrbitConn:Disconnect()
+		skipLockOrbitConn = nil
+	end
+end
+
+local function startSkipLockOrbit(host: GuiObject)
+	if skipLockOrbitConn then
+		return
+	end
+	skipLockOrbitConn = RunService.Heartbeat:Connect(function(dt)
+		local icon = skipLockIcon
+		if not icon or not icon.Parent or not icon.Visible then
+			return
+		end
+		skipLockOrbitAngle += SKIP_LOCK_ORBIT_SPEED * dt
+		local abs = host.AbsoluteSize
+		local radius = math.max(10, math.min(abs.X, abs.Y) * 0.5 * SKIP_LOCK_ORBIT_FRAC)
+		local ox = math.cos(skipLockOrbitAngle) * radius
+		local oy = math.sin(skipLockOrbitAngle) * radius
+		icon.Position = UDim2.new(0.5, ox, 0.5, oy)
+	end)
+end
+
+local function openSkipSkillUi()
+	local pg = game:GetService("Players").LocalPlayer:FindFirstChild("PlayerGui")
+	if not pg then
+		return
+	end
+	UiHaptics.pulseShort()
+	pg:SetAttribute("OceanTD_ForceOpenSkillId", "Skip")
+	pg:SetAttribute("OceanTD_ForceOpenSkills", os.clock())
+	deps.log("Skip locked — opened Skills / Skip Wave")
+end
+
+local function syncSkipLock()
+	local host: GuiObject? = if slot6Circle and slot6Circle:IsA("GuiObject") then slot6Circle else slot6
+	if not host then
+		return
+	end
+	local show = revealed == true and needsSkipUnlock()
+	if show then
+		local overlay = skipLockOverlay
+		if not overlay or not overlay.Parent then
+			overlay = Instance.new("Frame")
+			overlay.Name = "OceanTD_SkipLockOverlay"
+			overlay.BackgroundColor3 = SKIP_LOCK_RED
+			overlay.BackgroundTransparency = 0.5
+			overlay.BorderSizePixel = 0
+			overlay.Size = UDim2.fromScale(1, 1)
+			overlay.Position = UDim2.fromScale(0, 0)
+			overlay.Active = false
+			overlay.ZIndex = host.ZIndex + 18
+			overlay.Parent = host
+			local corner = Instance.new("UICorner")
+			corner.CornerRadius = UDim.new(1, 0)
+			corner.Parent = overlay
+			skipLockOverlay = overlay
+		else
+			overlay.Visible = true
+			overlay.ZIndex = host.ZIndex + 18
+		end
+
+		local icon = skipLockIcon
+		if not icon or not icon.Parent then
+			icon = Instance.new("ImageLabel")
+			icon.Name = "OceanTD_SkipLock"
+			icon.BackgroundTransparency = 1
+			icon.Image = SKIP_LOCK_IMAGE
+			icon.Size = UDim2.fromOffset(SKIP_LOCK_SIZE_PX, SKIP_LOCK_SIZE_PX)
+			icon.AnchorPoint = Vector2.new(0.5, 0.5)
+			icon.Position = UDim2.fromScale(0.5, 0.5)
+			icon.Active = false
+			icon.ZIndex = host.ZIndex + 22
+			icon.Parent = host
+			skipLockIcon = icon
+			skipLockOrbitAngle = Random.new():NextNumber(0, math.pi * 2)
+		else
+			icon.Visible = true
+			icon.Size = UDim2.fromOffset(SKIP_LOCK_SIZE_PX, SKIP_LOCK_SIZE_PX)
+			icon.ZIndex = host.ZIndex + 22
+		end
+		startSkipLockOrbit(host)
+	else
+		stopSkipLockOrbit()
+		if skipLockOverlay then
+			skipLockOverlay.Visible = false
+		end
+		if skipLockIcon then
+			skipLockIcon.Visible = false
+		end
+	end
+end
 
 local confirmSound = Instance.new("Sound")
 confirmSound.Name = "OceanTD_SkipWaveConfirmSound"
@@ -299,6 +442,9 @@ local function canArm(): boolean
 	if not WaveSim.isRunning() then
 		return false
 	end
+	if not hasSkipAccess() then
+		return false
+	end
 	if InventoryState.isOpen() then
 		return false
 	end
@@ -459,6 +605,7 @@ local function ensureConfirmUi()
 	body.TextYAlignment = Enum.TextYAlignment.Top
 	body.ZIndex = 3
 	body.Parent = panel
+	confirmBody = body
 
 	local function makeWideBtn(text: string, color: Color3, strokeColor: Color3): TextButton
 		local b = Instance.new("TextButton")
@@ -552,18 +699,24 @@ function SkipWaveSlot.commit()
 	if not confirmActive then
 		return
 	end
+	if not hasSkipAccess() then
+		SkipWaveSlot.hideConfirm()
+		deps.log("Skip wave blocked — no uses left")
+		return
+	end
 	SkipWaveSlot.hideConfirm()
 	UiHaptics.pulseShort()
 	playWhiteFlash()
-	local snd = confirmSound:Clone()
-	snd.Parent = SoundService
-	snd:Play()
-	snd.Ended:Once(function()
-		snd:Destroy()
-	end)
+	confirmSound:Stop()
+	confirmSound.TimePosition = 0
+	confirmSound:Play()
 	local ok = WaveSim.skipToNextWave()
 	if ok then
-		deps.log("Skip wave confirmed")
+		if not isSkipUnlimited() then
+			skipsUsedThisSession += 1
+		end
+		deps.log("Skip wave confirmed", "left=", skipUsesRemaining())
+		syncSkipLock()
 	else
 		deps.log("Skip wave failed — waves not running")
 		SkipWaveSlot.syncToWaveRunning(false)
@@ -574,10 +727,39 @@ function SkipWaveSlot.beginConfirm()
 	if confirmActive then
 		return
 	end
+	if not revealed or not slot6 or not slot6.Visible then
+		return
+	end
+	if not WaveSim.isRunning() then
+		return
+	end
+	if InventoryState.isOpen() then
+		return
+	end
+	if deps.isWaveSummaryOpen() or deps.isSavePlotsOpen() or deps.isClearConfirmActive() then
+		return
+	end
+	if needsSkipUnlock() then
+		openSkipSkillUi()
+		return
+	end
 	if not canArm() then
 		return
 	end
 	ensureConfirmUi()
+	if confirmBody then
+		if isSkipUnlimited() then
+			confirmBody.Text = "Jump to the next wave. No hearts lost.\nUnlimited Skips"
+		else
+			local left = skipUsesRemaining()
+			local maxUses = skipBudgetMax()
+			confirmBody.Text = string.format(
+				"Jump to the next wave. No hearts lost.\nUses left this session: %d / %d",
+				left,
+				maxUses
+			)
+		end
+	end
 	playArmFlash()
 	confirmOpenedAt = os.clock()
 	confirmActive = true
@@ -639,6 +821,7 @@ function SkipWaveSlot.playReveal()
 		return
 	end
 	if revealed and slot6.Visible then
+		syncSkipLock()
 		return
 	end
 	slideToken += 1
@@ -651,6 +834,7 @@ function SkipWaveSlot.playReveal()
 	slot6.Position = hidden
 	slot6.ZIndex = if slot5 then math.max(0, slot5.ZIndex - 1) else slot6HomeZ
 	revealed = true
+	syncSkipLock()
 	if slot6Stroke then
 		slot6Stroke.Enabled = true
 		slot6Stroke.Color = Color3.new(1, 1, 1)
@@ -682,6 +866,7 @@ function SkipWaveSlot.playReveal()
 	end
 	SkipWaveSlot.refreshHelpBadge()
 	setSlot6Interactable(not InventoryState.isOpen())
+	syncSkipLock()
 end
 
 function SkipWaveSlot.playHide()
@@ -696,6 +881,13 @@ function SkipWaveSlot.playHide()
 	stopIdleCycle()
 	pressToken += 1
 	revealed = false
+	stopSkipLockOrbit()
+	if skipLockOverlay then
+		skipLockOverlay.Visible = false
+	end
+	if skipLockIcon then
+		skipLockIcon.Visible = false
+	end
 	if not slot6.Visible then
 		if helpSlot then
 			helpSlot.Visible = false
@@ -747,6 +939,7 @@ function SkipWaveSlot.syncToWaveRunning(running: boolean)
 			task.spawn(SkipWaveSlot.playReveal)
 		else
 			SkipWaveSlot.refreshHelpBadge()
+			syncSkipLock()
 		end
 	else
 		task.spawn(SkipWaveSlot.playHide)
@@ -909,9 +1102,18 @@ function SkipWaveSlot.mount(d: Deps)
 		hudUnsub = nil
 	end
 	local lastRunning = WaveSim.isRunning()
+	if lastRunning then
+		-- Already mid-session (hot reload); don't refund used skips.
+	else
+		resetSkipSession()
+	end
 	hudUnsub = WaveSim.onHud(function(snap)
 		if snap.running == lastRunning then
 			return
+		end
+		-- New wave session (start from idle) → refill skip budget.
+		if snap.running and not lastRunning then
+			resetSkipSession()
 		end
 		lastRunning = snap.running
 		SkipWaveSlot.syncToWaveRunning(snap.running)
@@ -919,6 +1121,10 @@ function SkipWaveSlot.mount(d: Deps)
 	if lastRunning then
 		SkipWaveSlot.syncToWaveRunning(true)
 	end
+
+	Remotes.get("SkillStagesSync").OnClientEvent:Connect(function()
+		syncSkipLock()
+	end)
 end
 
 return SkipWaveSlot

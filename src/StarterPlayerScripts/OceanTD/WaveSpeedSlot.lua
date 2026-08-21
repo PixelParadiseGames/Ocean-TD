@@ -1,9 +1,9 @@
 --!strict
 --[[
 	Slot7 Wave Speed — slides out from under Slot5 while waves run.
-	Cycles 1x → 1.5x → 2x → 1x. Shortcuts: T / L2 (backpack closed).
-	Help badge; hidden on touch. Idle text opposite Skip Wave (shared clock).
-	Green orbiting dot on the rim; angular speed scales with speed step.
+	Cycles 1x → 1.5x → 2x → pause (stage 4) → 1x. Shortcuts: T / L2.
+	Stage 1: locked (red overlay) → opens Wave Speed powerup. Stage 2: up to 1.5x.
+	Stage 3: up to 2x. Stage 4: pause after 2x. Help badge; idle text opposite Skip.
 ]]
 
 local RunService = game:GetService("RunService")
@@ -17,9 +17,12 @@ local UiCircles = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiCircl
 local UiTheme = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiTheme"))
 local UiIdleCycle = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiIdleCycle"))
 local UiHaptics = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiHaptics"))
+local Remotes = require(oceanRoot:WaitForChild("Remotes"))
+local SkillStages = require(oceanRoot:WaitForChild("Shared"):WaitForChild("SkillStages"))
 
 local InventoryState = require(script.Parent:WaitForChild("InventoryState"))
 local WaveSim = require(script.Parent:WaitForChild("WaveSim"))
+local SkillPowerUpUI = require(script.Parent:WaitForChild("SkillPowerUpUI"))
 
 local WaveSpeedSlot = {}
 
@@ -29,14 +32,22 @@ local IDLE_HALF_SEC = 2
 local HELP_CYAN = Color3.fromRGB(60, 170, 230)
 local ORBIT_GREEN = Color3.fromRGB(45, 210, 95)
 local FLASH_GREEN = Color3.fromRGB(40, 220, 110)
--- Seconds per full revolution at speed steps 1 / 2 / 3 (1x / 1.5x / 2x).
-local ORBIT_PERIOD = { 2.4, 1.35, 0.75 }
+local PAUSE_FLASH_YELLOW = Color3.fromRGB(255, 220, 40)
+local PAUSE_FLASH_WHITE = Color3.new(1, 1, 1)
+local PAUSE_FLASH_HALF_SEC = 0.4
+-- Seconds per full revolution at speed steps 1 / 2 / 3 / pause (orbit frozen).
+local ORBIT_PERIOD = { 2.4, 1.35, 0.75, 999 }
 local ORBIT_DOT_SCALE = 0.13 -- fraction of button size
 -- Radius so the dot center sits on the button rim.
 local ORBIT_RADIUS = 0.5
 local SPEED_SOUND_ID = "rbxassetid://135244211779631"
--- PlaybackSpeed for steps 1 / 2 / 3 (low / med / high).
-local SPEED_SOUND_PITCH = { 0.85, 1.05, 1.3 }
+-- PlaybackSpeed for steps 1 / 2 / 3 / pause (low / med / high / low).
+local SPEED_SOUND_PITCH = { 0.85, 1.05, 1.3, 0.7 }
+local SPEED_LOCK_IMAGE = "rbxassetid://105420423737825"
+local SPEED_LOCK_SIZE_PX = 17
+local SPEED_LOCK_ORBIT_SPEED = 1.35
+local SPEED_LOCK_ORBIT_FRAC = 0.42
+local SPEED_LOCK_RED = Color3.fromRGB(220, 40, 45)
 
 local ICON_1X = "rbxassetid://130235737024254"
 local ICON_15X = "rbxassetid://93866614390396"
@@ -98,8 +109,120 @@ local revealed = false
 local hudUnsub: (() -> ())? = nil
 local showingText = false
 local iconFading = false
+local pauseFlashToken = 0
+local pauseFlashConn: RBXScriptConnection? = nil
+local speedLockIcon: ImageLabel? = nil
+local speedLockOverlay: Frame? = nil
+local speedLockOrbitAngle = 0
+local speedLockOrbitConn: RBXScriptConnection? = nil
+
+local function waveSpeedStage(): number
+	return SkillPowerUpUI.getStage("WaveSpeed")
+end
+
+local function needsSpeedUnlock(): boolean
+	return SkillStages.waveSpeedLocked(waveSpeedStage())
+end
+
+local function stopSpeedLockOrbit()
+	if speedLockOrbitConn then
+		speedLockOrbitConn:Disconnect()
+		speedLockOrbitConn = nil
+	end
+end
+
+local function startSpeedLockOrbit(host: GuiObject)
+	if speedLockOrbitConn then
+		return
+	end
+	speedLockOrbitConn = RunService.Heartbeat:Connect(function(dt)
+		local icon = speedLockIcon
+		if not icon or not icon.Parent or not icon.Visible then
+			return
+		end
+		speedLockOrbitAngle += SPEED_LOCK_ORBIT_SPEED * dt
+		local abs = host.AbsoluteSize
+		local radius = math.max(10, math.min(abs.X, abs.Y) * 0.5 * SPEED_LOCK_ORBIT_FRAC)
+		local ox = math.cos(speedLockOrbitAngle) * radius
+		local oy = math.sin(speedLockOrbitAngle) * radius
+		icon.Position = UDim2.new(0.5, ox, 0.5, oy)
+	end)
+end
+
+local function openWaveSpeedSkillUi()
+	local pg = game:GetService("Players").LocalPlayer:FindFirstChild("PlayerGui")
+	if not pg then
+		return
+	end
+	UiHaptics.pulseShort()
+	pg:SetAttribute("OceanTD_ForceOpenSkillId", "WaveSpeed")
+	pg:SetAttribute("OceanTD_ForceOpenSkills", os.clock())
+	deps.log("Wave speed locked — opened Skills / Wave Speed")
+end
+
+local function syncSpeedLock()
+	local host: GuiObject? = if slot7Circle and slot7Circle:IsA("GuiObject") then slot7Circle else slot7
+	if not host then
+		return
+	end
+	local show = revealed == true and needsSpeedUnlock()
+	if show then
+		local overlay = speedLockOverlay
+		if not overlay or not overlay.Parent then
+			overlay = Instance.new("Frame")
+			overlay.Name = "OceanTD_SpeedLockOverlay"
+			overlay.BackgroundColor3 = SPEED_LOCK_RED
+			overlay.BackgroundTransparency = 0.5
+			overlay.BorderSizePixel = 0
+			overlay.Size = UDim2.fromScale(1, 1)
+			overlay.Position = UDim2.fromScale(0, 0)
+			overlay.Active = false
+			overlay.ZIndex = host.ZIndex + 18
+			overlay.Parent = host
+			local corner = Instance.new("UICorner")
+			corner.CornerRadius = UDim.new(1, 0)
+			corner.Parent = overlay
+			speedLockOverlay = overlay
+		else
+			overlay.Visible = true
+			overlay.ZIndex = host.ZIndex + 18
+		end
+
+		local icon = speedLockIcon
+		if not icon or not icon.Parent then
+			icon = Instance.new("ImageLabel")
+			icon.Name = "OceanTD_SpeedLock"
+			icon.BackgroundTransparency = 1
+			icon.Image = SPEED_LOCK_IMAGE
+			icon.Size = UDim2.fromOffset(SPEED_LOCK_SIZE_PX, SPEED_LOCK_SIZE_PX)
+			icon.AnchorPoint = Vector2.new(0.5, 0.5)
+			icon.Position = UDim2.fromScale(0.5, 0.5)
+			icon.Active = false
+			icon.ZIndex = host.ZIndex + 22
+			icon.Parent = host
+			speedLockIcon = icon
+			speedLockOrbitAngle = Random.new():NextNumber(0, math.pi * 2)
+		else
+			icon.Visible = true
+			icon.Size = UDim2.fromOffset(SPEED_LOCK_SIZE_PX, SPEED_LOCK_SIZE_PX)
+			icon.ZIndex = host.ZIndex + 22
+		end
+		startSpeedLockOrbit(host)
+	else
+		stopSpeedLockOrbit()
+		if speedLockOverlay then
+			speedLockOverlay.Visible = false
+		end
+		if speedLockIcon then
+			speedLockIcon.Visible = false
+		end
+	end
+end
 
 local function speedStep(): number
+	if WaveSim.isSpeedPaused() then
+		return 4
+	end
 	local mult = WaveSim.getSpeedMult()
 	if math.abs(mult - 1.5) < 1e-4 then
 		return 2
@@ -152,6 +275,13 @@ local function startOrbitAnim()
 	orbitConn = RunService.Heartbeat:Connect(function(dt)
 		if not revealed or not orbitDot then
 			return
+		end
+		if WaveSim.isSpeedPaused() then
+			orbitDot.Visible = false
+			return
+		end
+		if not orbitDot.Visible then
+			orbitDot.Visible = true
 		end
 		local period = ORBIT_PERIOD[speedStep()] or ORBIT_PERIOD[1]
 		orbitAngle += dt * (math.pi * 2) / period
@@ -284,7 +414,6 @@ local function applyIconVisual()
 	if not slot7Circle then
 		return
 	end
-	local img = iconForMult(WaveSim.getSpeedMult())
 	if slot7Circle:IsA("ImageLabel") or slot7Circle:IsA("ImageButton") then
 		(slot7Circle :: any).Image = ""
 	end
@@ -294,6 +423,22 @@ local function applyIconVisual()
 		speedIconFade.Visible = false
 		speedIconFade.ImageTransparency = 1
 	end
+	if WaveSim.isSpeedPaused() then
+		if speedIcon then
+			speedIcon.Visible = false
+		end
+		if speedLabel then
+			speedLabel.Text = "WAVE\nSPEED"
+			speedLabel.TextColor3 = PAUSE_FLASH_WHITE
+			speedLabel.Visible = true
+		end
+		if orbitDot then
+			orbitDot.Visible = false
+		end
+		showingText = true
+		return
+	end
+	local img = iconForMult(WaveSim.getSpeedMult())
 	if speedIcon then
 		speedIcon.Image = img
 		speedIcon.ImageTransparency = 0
@@ -307,6 +452,10 @@ end
 
 local function applyTextVisual()
 	if not slot7Circle or iconFading then
+		return
+	end
+	if WaveSim.isSpeedPaused() then
+		applyIconVisual()
 		return
 	end
 	if slot7Circle:IsA("ImageLabel") or slot7Circle:IsA("ImageButton") then
@@ -333,36 +482,25 @@ local function stopIdleCycle()
 		idleStop()
 		idleStop = nil
 	end
-	if speedLabel then
+	if speedLabel and not WaveSim.isSpeedPaused() then
 		speedLabel.Visible = false
 	end
-	showingText = false
+	if not WaveSim.isSpeedPaused() then
+		showingText = false
+	end
 end
 
 -- Shared idle: Skip uses invert=true (text when others show icon).
 -- We use invert=false so WAVE SPEED text appears when Skip shows its icon.
 local function applyIdleFrame(showText: boolean)
+	if WaveSim.isSpeedPaused() then
+		return
+	end
 	if showText then
 		applyTextVisual()
 	else
 		applyIconVisual()
 	end
-end
-
-local function startIdleCycle()
-	if not slot7 or not slot7Circle or not revealed then
-		return
-	end
-	stopIdleCycle()
-	if slot7Stroke then
-		slot7Stroke.Enabled = true
-		slot7Stroke.Color = Color3.new(1, 1, 1)
-		slot7Stroke.Thickness = 2
-	end
-	UiCircles.ensure(slot7Circle)
-	idleStop = UiIdleCycle.subscribeSharedToggle(IDLE_HALF_SEC, applyIdleFrame, function()
-		return revealed and slot7 ~= nil and slot7.Visible and not iconFading
-	end, false)
 end
 
 local function cancelIconFade()
@@ -379,6 +517,89 @@ local function cancelIconFade()
 	if speedIcon then
 		speedIcon.ImageTransparency = 0
 	end
+end
+
+local function stopPauseFlash()
+	pauseFlashToken += 1
+	if pauseFlashConn then
+		pauseFlashConn:Disconnect()
+		pauseFlashConn = nil
+	end
+	if slot7Stroke and revealed then
+		slot7Stroke.Color = Color3.new(1, 1, 1)
+		slot7Stroke.Thickness = 2
+	end
+end
+
+local function startPauseFlash()
+	if not slot7Circle or not revealed then
+		return
+	end
+	stopPauseFlash()
+	if idleStop then
+		idleStop()
+		idleStop = nil
+	end
+	cancelIconFade()
+	applyIconVisual()
+	if slot7Stroke then
+		slot7Stroke.Enabled = true
+		slot7Stroke.Thickness = 2
+	end
+	local my = pauseFlashToken
+	local t0 = os.clock()
+	pauseFlashConn = RunService.Heartbeat:Connect(function()
+		if my ~= pauseFlashToken or not revealed or not WaveSim.isSpeedPaused() then
+			if pauseFlashConn then
+				pauseFlashConn:Disconnect()
+				pauseFlashConn = nil
+			end
+			if slot7Stroke and revealed then
+				slot7Stroke.Color = Color3.new(1, 1, 1)
+				slot7Stroke.Thickness = 2
+			end
+			return
+		end
+		local phase = math.floor((os.clock() - t0) / PAUSE_FLASH_HALF_SEC) % 2
+		local strokeColor = if phase == 0 then PAUSE_FLASH_WHITE else PAUSE_FLASH_YELLOW
+		if speedLabel then
+			if phase == 0 then
+				speedLabel.Text = "WAVE\nSPEED"
+				speedLabel.TextColor3 = PAUSE_FLASH_WHITE
+			else
+				speedLabel.Text = "PAUSED"
+				speedLabel.TextColor3 = PAUSE_FLASH_YELLOW
+			end
+			speedLabel.Visible = true
+			showingText = true
+		end
+		if slot7Stroke then
+			slot7Stroke.Enabled = true
+			slot7Stroke.Color = strokeColor
+			slot7Stroke.Thickness = 2
+		end
+	end)
+end
+
+local function startIdleCycle()
+	if not slot7 or not slot7Circle or not revealed then
+		return
+	end
+	if WaveSim.isSpeedPaused() then
+		startPauseFlash()
+		return
+	end
+	stopPauseFlash()
+	stopIdleCycle()
+	if slot7Stroke then
+		slot7Stroke.Enabled = true
+		slot7Stroke.Color = Color3.new(1, 1, 1)
+		slot7Stroke.Thickness = 2
+	end
+	UiCircles.ensure(slot7Circle)
+	idleStop = UiIdleCycle.subscribeSharedToggle(IDLE_HALF_SEC, applyIdleFrame, function()
+		return revealed and slot7 ~= nil and slot7.Visible and not iconFading and not WaveSim.isSpeedPaused()
+	end, false)
 end
 
 -- Force icon mode and crossfade old → new; keep icon up for ICON_HOLD_SEC total, then rejoin idle.
@@ -524,6 +745,10 @@ function WaveSpeedSlot.refreshHelpBadge()
 end
 
 function WaveSpeedSlot.refreshIcon()
+	if WaveSim.isSpeedPaused() then
+		startPauseFlash()
+		return
+	end
 	if showingText then
 		return
 	end
@@ -604,14 +829,33 @@ function WaveSpeedSlot.cycle()
 	if not WaveSim.isRunning() then
 		return false
 	end
-	local oldImg = iconForMult(WaveSim.getSpeedMult())
-	WaveSim.cycleSpeed()
-	local newImg = iconForMult(WaveSim.getSpeedMult())
+	if needsSpeedUnlock() then
+		openWaveSpeedSkillUi()
+		return false
+	end
+	local maxStep = SkillStages.waveSpeedMaxStep(waveSpeedStage())
+	local wasPaused = WaveSim.isSpeedPaused()
+	local oldMult = WaveSim.getSpeedMult()
+	local oldImg = iconForMult(oldMult)
+	WaveSim.cycleSpeed(maxStep)
+	local nowPaused = WaveSim.isSpeedPaused()
+	local newMult = WaveSim.getSpeedMult()
 	UiHaptics.pulseShort()
 	playSpeedSound()
-	crossfadeSpeedIcons(oldImg, newImg)
+	if nowPaused or wasPaused then
+		cancelIconFade()
+		if nowPaused then
+			startPauseFlash()
+		else
+			stopPauseFlash()
+			applyIconVisual()
+			startIdleCycle()
+		end
+	else
+		crossfadeSpeedIcons(oldImg, iconForMult(newMult))
+	end
 	flashClickFeedback()
-	deps.log("Wave speed →", WaveSim.getSpeedMult(), "x")
+	deps.log("Wave speed →", if nowPaused then "PAUSE" else tostring(newMult) .. "x", "maxStep=", maxStep)
 	return true
 end
 
@@ -667,6 +911,7 @@ function WaveSpeedSlot.playReveal()
 	end
 	WaveSpeedSlot.refreshHelpBadge()
 	setSlot7Interactable(not InventoryState.isOpen())
+	syncSpeedLock()
 end
 
 function WaveSpeedSlot.playHide()
@@ -676,7 +921,15 @@ function WaveSpeedSlot.playHide()
 	slideToken += 1
 	local token = slideToken
 	local home = homePos
+	stopSpeedLockOrbit()
+	if speedLockOverlay then
+		speedLockOverlay.Visible = false
+	end
+	if speedLockIcon then
+		speedLockIcon.Visible = false
+	end
 
+	stopPauseFlash()
 	stopIdleCycle()
 	stopOrbitAnim()
 	cancelIconFade()
@@ -736,11 +989,13 @@ end
 
 function WaveSpeedSlot.syncToWaveRunning(running: boolean)
 	if running then
+		WaveSim.clampSpeedToMaxStep(SkillStages.waveSpeedMaxStep(waveSpeedStage()))
 		if not revealed then
 			task.spawn(WaveSpeedSlot.playReveal)
 		else
 			WaveSpeedSlot.refreshHelpBadge()
 			WaveSpeedSlot.refreshIcon()
+			syncSpeedLock()
 		end
 	else
 		task.spawn(WaveSpeedSlot.playHide)
@@ -903,16 +1158,35 @@ function WaveSpeedSlot.mount(d: Deps)
 		hudUnsub = nil
 	end
 	local lastRunning = WaveSim.isRunning()
+	local lastSpeed = WaveSim.getSpeedMult()
 	hudUnsub = WaveSim.onHud(function(snap)
-		if snap.running == lastRunning then
-			return
+		if snap.running ~= lastRunning then
+			lastRunning = snap.running
+			WaveSpeedSlot.syncToWaveRunning(snap.running)
 		end
-		lastRunning = snap.running
-		WaveSpeedSlot.syncToWaveRunning(snap.running)
+		if math.abs(snap.speedMult - lastSpeed) >= 1e-4 then
+			lastSpeed = snap.speedMult
+			if snap.running and revealed then
+				cancelIconFade()
+				if WaveSim.isSpeedPaused() then
+					startPauseFlash()
+				else
+					stopPauseFlash()
+					applyIconVisual()
+					startIdleCycle()
+				end
+			end
+		end
 	end)
 	if lastRunning then
 		WaveSpeedSlot.syncToWaveRunning(true)
 	end
+
+	Remotes.get("SkillStagesSync").OnClientEvent:Connect(function()
+		WaveSim.clampSpeedToMaxStep(SkillStages.waveSpeedMaxStep(waveSpeedStage()))
+		WaveSpeedSlot.refreshIcon()
+		syncSpeedLock()
+	end)
 end
 
 return WaveSpeedSlot

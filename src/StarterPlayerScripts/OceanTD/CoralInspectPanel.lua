@@ -1,5 +1,5 @@
 --!strict
--- Build-mode inspect for a selected placed coral: name, UPGRADE, S/M/L.
+-- Build-mode inspect for a selected placed coral: name, colors, UPGRADE, S/M/L.
 
 local Players = game:GetService("Players")
 local GuiService = game:GetService("GuiService")
@@ -16,11 +16,14 @@ local oceanRoot = ReplicatedStorage:WaitForChild("OceanTD")
 local Remotes = require(oceanRoot:WaitForChild("Remotes"))
 local ItemCatalog = require(oceanRoot:WaitForChild("Shared"):WaitForChild("ItemCatalog"))
 local CoralSize = require(oceanRoot:WaitForChild("Shared"):WaitForChild("CoralSize"))
+local PlotOutlineColors = require(oceanRoot:WaitForChild("Shared"):WaitForChild("PlotOutlineColors"))
 local UiCircles = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiCircles"))
 local UiTheme = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiTheme"))
 local UiHaptics = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiHaptics"))
 
 local RelocateController = require(script.Parent:WaitForChild("RelocateController"))
+local CoralRangeRings = require(script.Parent:WaitForChild("CoralRangeRings"))
+local CoralVisual = require(oceanRoot:WaitForChild("Shared"):WaitForChild("CoralVisual"))
 
 local CoralInspectPanel = {}
 
@@ -46,6 +49,16 @@ local catalog: GuiObject? = nil
 local iconLbl: ImageLabel? = nil
 local nameLbl: TextLabel? = nil
 local upgradeBtn: TextButton? = nil
+local colorScroll: ScrollingFrame? = nil
+local colorSwatchBtns: { [number]: GuiButton } = {}
+local colorSwatchStrokes: { [number]: UIStroke } = {}
+local colorDice: ImageLabel? = nil
+local diceSpinToken = 0
+local activeColorIndex: number? = nil
+local focusColorIndex: number = PlotOutlineColors.DEFAULT_INDEX
+local colorSendToken = 0
+local DICE_ICON = "rbxassetid://77867192113507"
+local COLOR_FOCUS = Color3.fromRGB(255, 220, 40)
 local h1s: { TextButton } = {}
 local h2s: { TextLabel } = {}
 local h3s: { Frame } = {}
@@ -55,13 +68,11 @@ local pulseConn: RBXScriptConnection? = nil
 local hintConn: RBXScriptConnection? = nil
 local confirmStrokeConn: RBXScriptConnection? = nil
 local sizeFlashConn: RBXScriptConnection? = nil
-local rangeFolder: Folder? = nil
-local rangeBb: BillboardGui? = nil
-local rangeFollow: RBXScriptConnection? = nil
 local cineToken = 0
 local bound = false
 
 local sizeRf = Remotes.getFunction("RequestCoralSize")
+local colorRf = Remotes.getFunction("RequestCoralColor")
 
 local function isGamepad(): boolean
 	local t = UserInputService:GetLastInputType()
@@ -100,112 +111,12 @@ local function selectedPart(): BasePart?
 	return RelocateController.getSelectedPart()
 end
 
-local RANGE_SPIN = { 0.55, -0.7, 0.4, -0.5, 0.62, -0.38 }
-local RANGE_PHASE = { 0, 1.05, 2.1, 3.15, 4.2, 5.25 }
-local RANGE_RING_N = 6
-local RANGE_DASH_N = 14
--- Six evenly spaced great-circle axes (cuboctahedron). Shared tumble keeps gaps.
-local RANGE_NORMALS = {
-	Vector3.new(1, 1, 0),
-	Vector3.new(1, -1, 0),
-	Vector3.new(1, 0, 1),
-	Vector3.new(1, 0, -1),
-	Vector3.new(0, 1, 1),
-	Vector3.new(0, 1, -1),
-}
-
 local function hideRangeRing()
-	if rangeFollow then
-		rangeFollow:Disconnect()
-		rangeFollow = nil
-	end
-	if rangeFolder then
-		rangeFolder:Destroy()
-		rangeFolder = nil
-	end
-	if rangeBb then
-		rangeBb:Destroy()
-		rangeBb = nil
-	end
-end
-
-local function ringBasis(ri: number, spin: number): CFrame
-	local n = RANGE_NORMALS[ri] or Vector3.yAxis
-	n = n.Unit
-	local spinA = spin * (RANGE_SPIN[ri] or 0.5) + (RANGE_PHASE[ri] or 0)
-	local tumble = CFrame.Angles(spin * 0.11, spin * 0.17, spin * 0.07)
-	local up = if math.abs(n.Y) > 0.92 then Vector3.xAxis else Vector3.yAxis
-	return tumble * CFrame.lookAt(Vector3.zero, n, up) * CFrame.Angles(0, 0, spinA)
-end
-
-local function poseRangeRings(part: BasePart, folder: Folder, range: number, spin: number, grow: number)
-	local pos = part.Position
-	local s = math.clamp(grow, 0, 1)
-	s = 1 - (1 - s) * (1 - s)
-	local r = range * s
-	local thick = 0.55 * math.max(s, 0.15)
-	local arcLen = math.max(2.2, (2 * math.pi * range / RANGE_DASH_N) * 0.5) * s
-	for _, dash in ipairs(folder:GetChildren()) do
-		if not dash:IsA("BasePart") then
-			continue
-		end
-		local ri = dash:GetAttribute("Ring")
-		local di = dash:GetAttribute("Dash")
-		if typeof(ri) ~= "number" or typeof(di) ~= "number" then
-			continue
-		end
-		local ang = ((di - 1) / RANGE_DASH_N) * math.pi * 2 + spin * (RANGE_SPIN[ri] or 1)
-		dash.Size = Vector3.new(math.max(0.05, arcLen), thick, thick)
-		dash.CFrame = CFrame.new(pos)
-			* ringBasis(ri, spin)
-			* CFrame.Angles(0, 0, ang)
-			* CFrame.new(r, 0, 0)
-			* CFrame.Angles(0, 0, math.pi * 0.5)
-	end
+	CoralRangeRings.hide()
 end
 
 local function showRangeRing(part: BasePart)
-	if rangeFolder and rangeFolder.Parent then
-		return
-	end
-	hideRangeRing()
-	local folder = Instance.new("Folder")
-	folder.Name = "OceanTD_RangeRing"
-	folder.Parent = workspace
-	for ri = 1, RANGE_RING_N do
-		for di = 1, RANGE_DASH_N do
-			local dash = Instance.new("Part")
-			dash.Name = "Dash"
-			dash.Anchored = true
-			dash.CanCollide = false
-			dash.CanQuery = false
-			dash.CanTouch = false
-			dash.CastShadow = false
-			dash.Material = Enum.Material.Neon
-			dash.Color = ACTIVE_GREEN
-			dash.Transparency = 0.05
-			dash:SetAttribute("Ring", ri)
-			dash:SetAttribute("Dash", di)
-			dash.Parent = folder
-		end
-	end
-	rangeFolder = folder
-	local spin = 0
-	local growT = 0
-	local _d0, class0 = CoralSize.readFromPart(part)
-	poseRangeRings(part, folder, CoralSize.statsFor(class0).range, spin, 0)
-	rangeFollow = RunService.Heartbeat:Connect(function(dt)
-		local p = selectedPart()
-		local f = rangeFolder
-		if not p or not p.Parent or not f or not f.Parent then
-			hideRangeRing()
-			return
-		end
-		spin += dt
-		growT += dt
-		local _dd, cls = CoralSize.readFromPart(p)
-		poseRangeRings(p, f, CoralSize.statsFor(cls).range, spin, growT / 2)
-	end)
+	CoralRangeRings.show(part, selectedPart)
 end
 
 local function hideConfirm()
@@ -679,6 +590,172 @@ local function startUpgradeFx()
 	end)
 end
 
+local function refreshColorSwatches()
+	local showFocus = isGamepad()
+	local dice = colorDice
+	local activeBtn: GuiButton? = nil
+	for idx, stroke in pairs(colorSwatchStrokes) do
+		local isActive = activeColorIndex ~= nil and idx == activeColorIndex
+		local isFocus = showFocus and idx == focusColorIndex
+		if isActive then
+			stroke.Enabled = true
+			stroke.Thickness = 2.5
+			stroke.Color = WHITE
+			activeBtn = colorSwatchBtns[idx]
+		elseif isFocus then
+			stroke.Enabled = true
+			stroke.Thickness = 2
+			stroke.Color = COLOR_FOCUS
+		else
+			stroke.Enabled = false
+			stroke.Thickness = 0
+		end
+	end
+	if dice then
+		if activeBtn then
+			dice.Visible = true
+			dice.Parent = activeBtn
+		else
+			dice.Visible = false
+		end
+	end
+end
+
+local function scrollFocusIntoView()
+	local scroll = colorScroll
+	local btn = colorSwatchBtns[focusColorIndex]
+	if not scroll or not btn then
+		return
+	end
+	local pad = 6
+	local btnPos = btn.AbsolutePosition
+	local btnSize = btn.AbsoluteSize
+	local scrollPos = scroll.AbsolutePosition
+	local scrollSize = scroll.AbsoluteSize
+	local canvas = scroll.CanvasPosition
+	local left = btnPos.X
+	local right = btnPos.X + btnSize.X
+	local viewL = scrollPos.X
+	local viewR = scrollPos.X + scrollSize.X
+	if left < viewL + pad then
+		scroll.CanvasPosition = Vector2.new(math.max(0, canvas.X - (viewL - left) - pad), 0)
+	elseif right > viewR - pad then
+		scroll.CanvasPosition = Vector2.new(canvas.X + (right - viewR) + pad, 0)
+	end
+end
+
+local function nudgeColorFocus(delta: number)
+	if not root or not root.Visible then
+		return
+	end
+	local maxI = PlotOutlineColors.CORAL_MAX_INDEX
+	local next = focusColorIndex + delta
+	if next < 1 then
+		next = maxI
+	elseif next > maxI then
+		next = 1
+	end
+	focusColorIndex = next
+	refreshColorSwatches()
+	scrollFocusIntoView()
+	UiHaptics.pulseShort()
+end
+
+local function syncColorFromPart(part: BasePart)
+	local attr = part:GetAttribute("OceanTD_ColorIndex")
+	if typeof(attr) == "number" then
+		activeColorIndex = PlotOutlineColors.clampCoralIndex(attr)
+		focusColorIndex = activeColorIndex
+	else
+		activeColorIndex = nil
+		focusColorIndex = PlotOutlineColors.DEFAULT_INDEX
+	end
+	refreshColorSwatches()
+	task.defer(scrollFocusIntoView)
+end
+
+local function spinColorDice()
+	local dice = colorDice
+	if not dice then
+		return
+	end
+	if not dice.Visible or not dice.Parent then
+		return
+	end
+	diceSpinToken += 1
+	local token = diceSpinToken
+	dice.Rotation = 0
+	local tw = TweenService:Create(
+		dice,
+		TweenInfo.new(0.42, Enum.EasingStyle.Back, Enum.EasingDirection.Out),
+		{ Rotation = 360 }
+	)
+	tw:Play()
+	tw.Completed:Connect(function()
+		if token ~= diceSpinToken then
+			return
+		end
+		dice.Rotation = 0
+	end)
+end
+
+local function applyCoralPaint(part: BasePart, idx: number, paint: Color3, placeId: string)
+	activeColorIndex = idx
+	focusColorIndex = idx
+	part:SetAttribute("OceanTD_ColorIndex", idx)
+	CoralVisual.setRestColor(part, paint)
+	RelocateController.syncSelectedRestColor()
+	refreshColorSwatches()
+	UiHaptics.pulseShort()
+	colorSendToken += 1
+	local myToken = colorSendToken
+	task.spawn(function()
+		local ok, result = pcall(function()
+			return colorRf:InvokeServer(placeId, idx, paint.R, paint.G, paint.B)
+		end)
+		if myToken ~= colorSendToken then
+			return
+		end
+		local still = selectedPart()
+		if still ~= part then
+			return
+		end
+		if not ok or typeof(result) ~= "table" or result.ok ~= true then
+			syncColorFromPart(part)
+			return
+		end
+		local confirmed = PlotOutlineColors.clampCoralIndex(result.colorIndex or idx)
+		activeColorIndex = confirmed
+		part:SetAttribute("OceanTD_ColorIndex", confirmed)
+		local confirmedPaint = PlotOutlineColors.resolveCoralPaint(confirmed, result.colorR, result.colorG, result.colorB)
+		CoralVisual.setRestColor(part, confirmedPaint)
+		RelocateController.syncSelectedRestColor()
+		refreshColorSwatches()
+	end)
+end
+
+local function selectCoralColor(index: number)
+	local part = selectedPart()
+	if not part then
+		return false
+	end
+	local placeId = part:GetAttribute("OceanTD_PlaceId")
+	if typeof(placeId) ~= "string" or placeId == "" then
+		return false
+	end
+	local idx = PlotOutlineColors.clampCoralIndex(index)
+	focusColorIndex = idx
+	if activeColorIndex == idx then
+		-- Re-tap active swatch: spin dice and roll a new shade in that hue.
+		spinColorDice()
+		applyCoralPaint(part, idx, PlotOutlineColors.randomHueVariant(idx), placeId)
+		return true
+	end
+	-- New swatch: paint the palette base color.
+	applyCoralPaint(part, idx, PlotOutlineColors.coralColor(idx), placeId)
+	return true
+end
+
 local function fillHeader(part: BasePart)
 	local itemId = part:GetAttribute("OceanTD_ItemId")
 	local def = if typeof(itemId) == "string" then ItemCatalog.get(itemId) else nil
@@ -688,6 +765,7 @@ local function fillHeader(part: BasePart)
 	if nameLbl then
 		nameLbl.Text = if def then def.displayName else "Coral"
 	end
+	syncColorFromPart(part)
 end
 
 local function setVisible(on: boolean)
@@ -737,7 +815,7 @@ function CoralInspectPanel.bind(panel: GuiObject, catalogFrame: GuiObject)
 
 	local row1 = Instance.new("Frame")
 	row1.BackgroundTransparency = 1
-	row1.Size = UDim2.new(1, 0, 0.22, 0)
+	row1.Size = UDim2.new(1, 0, 0.18, 0)
 	row1.LayoutOrder = 1
 	row1.Parent = frame
 
@@ -770,10 +848,86 @@ function CoralInspectPanel.bind(panel: GuiObject, catalogFrame: GuiObject)
 	nm.Parent = row1
 	nameLbl = nm
 
+	-- Color swatch row (above UPGRADE).
+	local colorRow = Instance.new("Frame")
+	colorRow.Name = "ColorRow"
+	colorRow.BackgroundTransparency = 1
+	colorRow.Size = UDim2.new(1, 0, 0.14, 0)
+	colorRow.LayoutOrder = 2
+	colorRow.Parent = frame
+
+	local scroll = Instance.new("ScrollingFrame")
+	scroll.Name = "ColorScroll"
+	scroll.BackgroundTransparency = 1
+	scroll.BorderSizePixel = 0
+	scroll.AnchorPoint = Vector2.new(0.5, 0.5)
+	scroll.Position = UDim2.fromScale(0.5, 0.5)
+	scroll.Size = UDim2.new(0.96, 0, 0.92, 0)
+	scroll.ScrollBarThickness = 3
+	scroll.ScrollBarImageColor3 = Color3.fromRGB(180, 200, 210)
+	scroll.ScrollingDirection = Enum.ScrollingDirection.X
+	scroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+	scroll.AutomaticCanvasSize = Enum.AutomaticSize.X
+	scroll.Parent = colorRow
+	colorScroll = scroll
+
+	local scrollLay = Instance.new("UIListLayout")
+	scrollLay.FillDirection = Enum.FillDirection.Horizontal
+	scrollLay.VerticalAlignment = Enum.VerticalAlignment.Center
+	scrollLay.SortOrder = Enum.SortOrder.LayoutOrder
+	scrollLay.Padding = UDim.new(0, 6)
+	scrollLay.Parent = scroll
+	local scrollPad = Instance.new("UIPadding")
+	scrollPad.PaddingLeft = UDim.new(0, 4)
+	scrollPad.PaddingRight = UDim.new(0, 4)
+	scrollPad.Parent = scroll
+
+	table.clear(colorSwatchBtns)
+	table.clear(colorSwatchStrokes)
+	for _, sw in ipairs(PlotOutlineColors.coralSwatches()) do
+		local btn = Instance.new("TextButton")
+		btn.Name = "Color_" .. tostring(sw.index)
+		btn.Text = ""
+		btn.AutoButtonColor = true
+		btn.BackgroundColor3 = sw.color or Color3.new(1, 1, 1)
+		btn.BorderSizePixel = 0
+		btn.Size = UDim2.fromOffset(36, 36)
+		btn.LayoutOrder = sw.index
+		btn.Parent = scroll
+		UiCircles.ensure(btn)
+		local stroke = Instance.new("UIStroke")
+		stroke.Name = "_OceanTD_ActiveColor"
+		stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+		stroke.Thickness = 2.5
+		stroke.Color = WHITE
+		stroke.Enabled = false
+		stroke.Parent = btn
+		colorSwatchBtns[sw.index] = btn
+		colorSwatchStrokes[sw.index] = stroke
+		local idx = sw.index
+		btn.Activated:Connect(function()
+			selectCoralColor(idx)
+		end)
+	end
+
+	local dice = Instance.new("ImageLabel")
+	dice.Name = "ColorDice"
+	dice.BackgroundTransparency = 1
+	dice.Image = DICE_ICON
+	dice.AnchorPoint = Vector2.new(0.5, 0.5)
+	dice.Position = UDim2.fromScale(0.5, 0.5)
+	dice.Size = UDim2.fromScale(0.58, 0.58)
+	dice.ScaleType = Enum.ScaleType.Fit
+	dice.ZIndex = 5
+	dice.Visible = false
+	dice.Active = false
+	dice.Parent = scroll
+	colorDice = dice
+
 	local upRow = Instance.new("Frame")
 	upRow.BackgroundTransparency = 1
-	upRow.Size = UDim2.new(1, 0, 0.18, 0)
-	upRow.LayoutOrder = 2
+	upRow.Size = UDim2.new(1, 0, 0.16, 0)
+	upRow.LayoutOrder = 3
 	upRow.Parent = frame
 
 	local up = Instance.new("TextButton")
@@ -806,8 +960,8 @@ function CoralInspectPanel.bind(panel: GuiObject, catalogFrame: GuiObject)
 
 	local row3 = Instance.new("Frame")
 	row3.BackgroundTransparency = 1
-	row3.Size = UDim2.new(1, 0, 0.55, 0)
-	row3.LayoutOrder = 3
+	row3.Size = UDim2.new(1, 0, 0.48, 0)
+	row3.LayoutOrder = 4
 	row3.Parent = frame
 	local sizeGrid = Instance.new("UIGridLayout")
 	sizeGrid.Name = "SizeGrid"
@@ -936,13 +1090,30 @@ function CoralInspectPanel.bind(panel: GuiObject, catalogFrame: GuiObject)
 		showConfirmUnlock()
 		return true
 	end)
+	RelocateController.setAWhileIdleHandler(function(): boolean
+		if not root or not root.Visible then
+			return false
+		end
+		if confirmGui then
+			return false
+		end
+		return selectCoralColor(focusColorIndex)
+	end)
 
 	UserInputService.InputBegan:Connect(function(input)
-		if not confirmGui then
+		if confirmGui then
+			if input.KeyCode == Enum.KeyCode.ButtonB or input.KeyCode == Enum.KeyCode.Escape then
+				hideConfirm()
+			end
 			return
 		end
-		if input.KeyCode == Enum.KeyCode.ButtonB or input.KeyCode == Enum.KeyCode.Escape then
-			hideConfirm()
+		if not root or not root.Visible or not RelocateController.isActive() then
+			return
+		end
+		if input.KeyCode == Enum.KeyCode.DPadLeft then
+			nudgeColorFocus(-1)
+		elseif input.KeyCode == Enum.KeyCode.DPadRight then
+			nudgeColorFocus(1)
 		end
 	end)
 end

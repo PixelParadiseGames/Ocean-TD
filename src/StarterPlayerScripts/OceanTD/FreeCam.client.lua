@@ -294,12 +294,70 @@ end
 
 local function applyIconChrome(icon: ModeIcon, relativeTo: CamMode, collapsed: boolean)
 	local isActive = icon.mode == relativeTo
+	-- Collapsed stack: only the front (active) icon should eat clicks / hand cursor.
+	local interactive = isActive or not collapsed
 	icon.root.Visible = true
 	icon.stroke.Enabled = true
 	icon.stroke.Thickness = if isActive then STROKE_THICK + 1 else STROKE_THICK
 	icon.stroke.Color = if isActive then GREEN else RED
 	icon.stroke.Transparency = 0
 	icon.root.Rotation = 0
+	icon.hit.Active = interactive
+	icon.hit.Selectable = interactive
+	pcall(function()
+		(icon.hit :: any).Interactable = interactive
+	end)
+	if icon.root:IsA("GuiButton") and icon.root ~= icon.hit then
+		local rootBtn = icon.root :: GuiButton
+		rootBtn.Active = interactive
+		rootBtn.Selectable = interactive
+		pcall(function()
+			(rootBtn :: any).Interactable = interactive
+		end)
+	end
+end
+
+local function makeDecorNonInteractive(gui: GuiObject)
+	-- Pure visual chrome — must never steal 3D coral picks or show the hand cursor.
+	gui.Active = false
+	if gui:IsA("GuiButton") then
+		gui.Active = false
+		gui.Selectable = false
+		gui.AutoButtonColor = false
+		pcall(function()
+			(gui :: any).Interactable = false
+		end)
+	end
+	for _, d in ipairs(gui:GetDescendants()) do
+		if d:IsA("GuiObject") then
+			d.Active = false
+			if d:IsA("GuiButton") then
+				d.Selectable = false
+				d.AutoButtonColor = false
+				pcall(function()
+					(d :: any).Interactable = false
+				end)
+			end
+		end
+	end
+end
+
+local function raiseDPadIconLayer()
+	local icon = dPadIcon
+	if not icon then
+		return
+	end
+	-- Above FreeCam / FishCam / OffCam roots (Z 10–30) and other dPad siblings.
+	local z = 80
+	icon.ZIndex = z
+	for _, d in ipairs(icon:GetDescendants()) do
+		if d:IsA("GuiObject") then
+			d.ZIndex = math.max(d.ZIndex, z + 1)
+		end
+	end
+	makeDecorNonInteractive(icon)
+	-- Last sibling draws on top when ZIndex ties (Sibling behavior).
+	icon.Parent = icon.Parent
 end
 
 local function tweenIconsToLayout(relativeTo: CamMode, collapsed: boolean, info: TweenInfo, token: number, onDone: (() -> ())?)
@@ -323,6 +381,7 @@ local function tweenIconsToLayout(relativeTo: CamMode, collapsed: boolean, info:
 			oneDone()
 		end)
 	end
+	raiseDPadIconLayer()
 end
 
 local function snapIconsToLayout(relativeTo: CamMode, collapsed: boolean)
@@ -335,6 +394,7 @@ local function snapIconsToLayout(relativeTo: CamMode, collapsed: boolean)
 		icon.scale.Scale = scaleGoal
 		icon.root.Rotation = 0
 	end
+	raiseDPadIconLayer()
 end
 
 local function scheduleCollapse(token: number, relativeTo: CamMode)
@@ -1418,6 +1478,9 @@ local function syncDPadIcon()
 	local skillsOpen = playerGui:GetAttribute("OceanTD_SkillsBubblesOpen") == true
 	local want = not InventoryState.isOpen() and not skillsOpen
 	if want == dPadIconShown then
+		if want then
+			raiseDPadIconLayer()
+		end
 		return
 	end
 	dPadIconShown = want
@@ -1426,6 +1489,7 @@ local function syncDPadIcon()
 		dPadIconTween = nil
 	end
 	dPadIcon.Visible = true
+	raiseDPadIconLayer()
 	local goal = if want then 1 else 0
 	local info = if want then ICON_SCALE_IN else ICON_SCALE_OUT
 	local tw = TweenService:Create(dPadIconScale, info, { Scale = goal })
@@ -1442,6 +1506,7 @@ end
 
 local function wireDPadIcon(icon: GuiObject)
 	dPadIcon = icon
+	makeDecorNonInteractive(icon)
 	-- UIScale pivots from AnchorPoint — center so it grows/shrinks in place.
 	if icon:GetAttribute("_OceanTD_DPadIconCentered") ~= true then
 		local ap = icon.AnchorPoint
@@ -1463,6 +1528,7 @@ local function wireDPadIcon(icon: GuiObject)
 		s.Parent = icon
 		dPadIconScale = s
 	end
+	raiseDPadIconLayer()
 	dPadIconShown = false
 	syncDPadIcon()
 end

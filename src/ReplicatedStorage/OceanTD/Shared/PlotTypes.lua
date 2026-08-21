@@ -29,6 +29,12 @@ export type LayoutObject = {
 	sizeTier: number?,
 	-- Current size band (may be smaller than sizeTier if player switched down).
 	sizeClass: number?,
+	-- PlotOutlineColors index 1–14 (coral paint). Missing → species random on place.
+	colorIndex: number?,
+	-- Optional exact paint (0–1). Missing → palette base for colorIndex.
+	colorR: number?,
+	colorG: number?,
+	colorB: number?,
 }
 
 export type PlotSaveSlot = {

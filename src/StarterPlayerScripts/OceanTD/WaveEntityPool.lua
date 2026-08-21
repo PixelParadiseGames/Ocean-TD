@@ -2,8 +2,9 @@
 --[[
 	Typed acquire/release pools for wave visuals (client-local).
 
-	Fish are keyed by species kind (first: "Tang", crabs: "CrabTemplate"). Future critters = new kind +
-	ReplicatedStorage.Fish.<Kind> template — same acquireFish/releaseFish API.
+	Hungry fish ("Tang" kind): one random MeshPart from ReplicatedStorage.HungryFish,
+	pooled for reuse; size jitter ±2 studs on longest axis at each acquire.
+	Crabs: ReplicatedStorage.Fish.CrabTemplate. Same acquireFish/releaseFish API.
 
 	Also pools food orbs, green-arrow sets, ammo balls, and short SFX clones.
 ]]
@@ -21,8 +22,10 @@ local MAX_FOOD = 64
 local MAX_ARROW = 40
 local MAX_AMMO = 64
 local MAX_SOUND_PER_KEY = 12
+local HUNGRY_SIZE_JITTER = 2 -- ± studs on longest axis
 
 local ATTR_KIND = "OceanTD_PoolFishKind"
+local ATTR_BASE_SIZE = "OceanTD_FishBaseSize"
 
 local fishPools: { [string]: { Instance } } = {}
 -- Prevents double-release / double-acquire (shared WaveSim + WaveGhostSim pool).
@@ -31,8 +34,12 @@ local foodPool: { BasePart } = {}
 local arrowPool: { Instance } = {}
 local ammoPool: { BasePart } = {}
 local soundPools: { [string]: { Sound } } = {}
+local liveSounds: { [string]: Sound } = {}
+-- Invalid generation so a delayed recycle can't Stop/Destroy a reused or replacement Sound.
+local soundGen: { [Sound]: number } = {}
 
 local fishTemplateCache: { [string]: Instance? } = {}
+local hungryMeshTemplates: { BasePart }? = nil
 local arrowTemplateCache: Instance? = nil
 
 local function findPrimary(inst: Instance): BasePart?
@@ -119,7 +126,53 @@ local function stripHungerUi(root: BasePart)
 	end
 end
 
+local function getHungryMeshTemplates(): { BasePart }
+	if hungryMeshTemplates then
+		return hungryMeshTemplates
+	end
+	local list: { BasePart } = {}
+	local folder = ReplicatedStorage:FindFirstChild("HungryFish")
+	if not folder then
+		warn("[WAVEPOOL] ReplicatedStorage.HungryFish missing")
+		hungryMeshTemplates = list
+		return list
+	end
+	for _, ch in ipairs(folder:GetChildren()) do
+		if ch:IsA("BasePart") then
+			table.insert(list, ch)
+		end
+	end
+	if #list == 0 then
+		warn("[WAVEPOOL] ReplicatedStorage.HungryFish has no MeshParts")
+	end
+	hungryMeshTemplates = list
+	return list
+end
+
+local function applyHungrySizeJitter(root: BasePart)
+	local baseAttr = root:GetAttribute(ATTR_BASE_SIZE)
+	local base: Vector3
+	if typeof(baseAttr) == "Vector3" then
+		base = baseAttr
+	else
+		base = root.Size
+		root:SetAttribute(ATTR_BASE_SIZE, base)
+	end
+	local longest = math.max(base.X, base.Y, base.Z)
+	if longest < 1e-4 then
+		return
+	end
+	-- Old max (longest + jitter) is the new floor; same 4-stud span above it.
+	local minTarget = longest + HUNGRY_SIZE_JITTER
+	local target = minTarget + math.random() * (2 * HUNGRY_SIZE_JITTER)
+	root.Size = base * (target / longest)
+end
+
 local function getFishTemplate(kind: string): Instance?
+	if kind == WaveEntityPool.FISH_TANG then
+		local meshes = getHungryMeshTemplates()
+		return if #meshes > 0 then meshes[1] else nil
+	end
 	local cached = fishTemplateCache[kind]
 	if cached and cached.Parent then
 		return cached
@@ -151,6 +204,26 @@ local function getArrowTemplate(): Instance?
 end
 
 local function newFishFromTemplate(kind: string): (Instance?, BasePart?)
+	if kind == WaveEntityPool.FISH_TANG then
+		local meshes = getHungryMeshTemplates()
+		if #meshes == 0 then
+			return nil, nil
+		end
+		-- Clone only the chosen variant — never the whole HungryFish folder.
+		local tmpl = meshes[math.random(1, #meshes)]
+		local clone = tmpl:Clone()
+		prepareLocalFxInstance(clone)
+		if clone:IsA("BasePart") then
+			clone:SetAttribute(ATTR_BASE_SIZE, clone.Size)
+		end
+		clone:SetAttribute(ATTR_KIND, kind)
+		local root = findPrimary(clone)
+		if not root then
+			clone:Destroy()
+			return nil, nil
+		end
+		return clone, root
+	end
 	local tmpl = getFishTemplate(kind)
 	if not tmpl then
 		return nil, nil
@@ -192,18 +265,24 @@ function WaveEntityPool.acquireFish(kind: string, name: string): (Instance?, Bas
 		pool = {}
 		fishPools[kind] = pool
 	end
+	local function finish(inst: Instance, root: BasePart): (Instance, BasePart)
+		stripHungerUi(root)
+		inst.Name = name
+		if inst:IsA("Model") and not inst.PrimaryPart then
+			inst.PrimaryPart = root
+		end
+		if kind == WaveEntityPool.FISH_TANG then
+			applyHungrySizeJitter(root)
+		end
+		fishInUse[inst] = true
+		return inst, root
+	end
 	while #pool > 0 do
 		local inst = table.remove(pool) :: Instance
 		if inst and not fishInUse[inst] then
 			local root = findPrimary(inst)
 			if root then
-				stripHungerUi(root)
-				inst.Name = name
-				if inst:IsA("Model") and not inst.PrimaryPart then
-					inst.PrimaryPart = root
-				end
-				fishInUse[inst] = true
-				return inst, root
+				return finish(inst, root)
 			end
 			inst:Destroy()
 		end
@@ -212,9 +291,7 @@ function WaveEntityPool.acquireFish(kind: string, name: string): (Instance?, Bas
 	if not clone or not root then
 		return nil, nil
 	end
-	clone.Name = name
-	fishInUse[clone] = true
-	return clone, root
+	return finish(clone, root)
 end
 
 function WaveEntityPool.releaseFish(kind: string, model: Instance)
@@ -364,28 +441,99 @@ function WaveEntityPool.releaseArrows(model: Instance)
 end
 
 -- Play a short SFX from a template Sound; clones are pooled after playback.
-function WaveEntityPool.playSound(key: string, template: Sound, playbackSpeed: number?, volume: number?)
+-- cutPrevious: stop any live instance of this key before starting (wave start / skip spam).
+function WaveEntityPool.playSound(
+	key: string,
+	template: Sound,
+	playbackSpeed: number?,
+	volume: number?,
+	cutPrevious: boolean?
+)
 	local pool = soundPools[key]
 	if not pool then
 		pool = {}
 		soundPools[key] = pool
 	end
+
+	if cutPrevious == true then
+		local prev = liveSounds[key]
+		liveSounds[key] = nil
+		if prev then
+			-- Invalidate any pending recycle delay so it can't Stop/Destroy the next play.
+			soundGen[prev] = -1
+			pcall(function()
+				prev:Stop()
+				prev:Destroy()
+			end)
+		end
+		-- Always fresh clone — reparenting a just-stopped Sound can lock Parent.
+		local snd = template:Clone()
+		snd.PlaybackSpeed = playbackSpeed or 1
+		snd.Volume = volume or template.Volume
+		snd.Parent = SoundService
+		liveSounds[key] = snd
+		local gen = 1
+		soundGen[snd] = gen
+		snd:Play()
+		local pitch = math.max(0.2, snd.PlaybackSpeed)
+		local ttl = math.max(0.8, (snd.TimeLength > 0 and snd.TimeLength or 0.5) / pitch + 0.35)
+		task.delay(ttl, function()
+			if soundGen[snd] ~= gen then
+				return
+			end
+			soundGen[snd] = nil
+			if liveSounds[key] == snd then
+				liveSounds[key] = nil
+			end
+			pcall(function()
+				snd:Stop()
+				snd:Destroy()
+			end)
+		end)
+		return
+	end
+
 	local snd = table.remove(pool)
 	if not snd or not snd:IsA("Sound") then
 		snd = template:Clone()
 	end
+	local gen = (soundGen[snd] or 0) + 1
+	soundGen[snd] = gen
 	snd.PlaybackSpeed = playbackSpeed or 1
 	snd.Volume = volume or template.Volume
-	snd.Parent = SoundService
+	local parentOk = pcall(function()
+		snd.Parent = SoundService
+	end)
+	if not parentOk then
+		soundGen[snd] = nil
+		pcall(function()
+			snd:Destroy()
+		end)
+		snd = template:Clone()
+		gen = 1
+		soundGen[snd] = gen
+		snd.PlaybackSpeed = playbackSpeed or 1
+		snd.Volume = volume or template.Volume
+		snd.Parent = SoundService
+	end
 	snd:Play()
 	local pitch = math.max(0.2, snd.PlaybackSpeed)
 	local ttl = math.max(0.8, (snd.TimeLength > 0 and snd.TimeLength or 0.5) / pitch + 0.35)
 	task.delay(ttl, function()
-		if not snd then
+		if soundGen[snd] ~= gen then
 			return
 		end
+		soundGen[snd] = nil
 		snd:Stop()
-		snd.Parent = nil
+		local unparentOk = pcall(function()
+			snd.Parent = nil
+		end)
+		if not unparentOk then
+			pcall(function()
+				snd:Destroy()
+			end)
+			return
+		end
 		local bucket = soundPools[key]
 		if bucket and #bucket < MAX_SOUND_PER_KEY then
 			table.insert(bucket, snd)
