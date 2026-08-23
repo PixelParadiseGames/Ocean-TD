@@ -40,7 +40,8 @@ local Constants = {
 	SAND_DOLLARS_ATTR = "OceanTD_SandDollars",
 	-- Hard cap so wallet math stays a safe integer (below 2^53).
 	SAND_DOLLARS_MAX = 1000000000000000, -- 1e15
-	-- Studio left HUD: MobileLeftUI.dPad.$DCount
+	-- Studio left HUD: MobileLeftUI.dPad.$D + $DCount
+	SAND_DOLLARS_LABEL_NAME = "$D",
 	SAND_DOLLARS_COUNT_NAME = "$DCount",
 
 	-- Four named plot presets; autosave writes the active slot.

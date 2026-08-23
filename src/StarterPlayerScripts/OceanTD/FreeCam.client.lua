@@ -292,11 +292,26 @@ local function iconSlotGoals(iconMode: CamMode, relativeTo: CamMode, collapsed: 
 	return posGoal, scaleGoal, z
 end
 
+local function skillsBubblesOpen(): boolean
+	return playerGui:GetAttribute("OceanTD_SkillsBubblesOpen") == true
+end
+
+-- Skills / backpack own the left HUD — never force cam triangle icons back on.
+local function camModeIconsSuppressed(): boolean
+	return InventoryState.isOpen() or skillsBubblesOpen()
+end
+
 local function applyIconChrome(icon: ModeIcon, relativeTo: CamMode, collapsed: boolean)
 	local isActive = icon.mode == relativeTo
 	-- Collapsed stack: only the front (active) icon should eat clicks / hand cursor.
 	local interactive = isActive or not collapsed
-	icon.root.Visible = true
+	-- Pending carousel collapse used to re-show the active icon after skills hid the dPad.
+	if camModeIconsSuppressed() then
+		icon.root.Visible = false
+		interactive = false
+	else
+		icon.root.Visible = true
+	end
 	icon.stroke.Enabled = true
 	icon.stroke.Thickness = if isActive then STROKE_THICK + 1 else STROKE_THICK
 	icon.stroke.Color = if isActive then GREEN else RED
@@ -402,6 +417,10 @@ local function scheduleCollapse(token: number, relativeTo: CamMode)
 		if token ~= carouselToken or not carouselReady then
 			return
 		end
+		-- Skills/backpack may have opened during the wait — don't unhide cam icons.
+		if camModeIconsSuppressed() then
+			return
+		end
 		carouselCollapsed = true
 		tweenIconsToLayout(relativeTo, true, COLLAPSE_INFO, token, nil)
 	end)
@@ -409,6 +428,15 @@ end
 
 local function playCamCarousel(fromMode: CamMode, toMode: CamMode, animate: boolean)
 	if not carouselReady or #camIcons == 0 then
+		return
+	end
+	if camModeIconsSuppressed() then
+		-- Keep mode/layout state, but never force triangle icons over skills HUD.
+		carouselToken += 1
+		carouselCollapsed = true
+		for _, icon in ipairs(camIcons) do
+			applyIconChrome(icon, toMode, true)
+		end
 		return
 	end
 	carouselToken += 1
@@ -439,6 +467,18 @@ local function playCamCarousel(fromMode: CamMode, toMode: CamMode, animate: bool
 		tweenIconsToLayout(fromMode, false, EXPAND_INFO, my, revolveThenCollapse)
 	else
 		revolveThenCollapse()
+	end
+end
+
+-- Cancel delayed carousel collapse so it cannot unhide FreeCam/FishCam/OffCam over skills.
+-- Do not set Visible here while suppressed — MobileSkillsA rememberHide must record wasVisible=true.
+local function syncCamModeIconsForHud()
+	if camModeIconsSuppressed() then
+		carouselToken += 1
+		return
+	end
+	if carouselReady and #camIcons > 0 then
+		snapIconsToLayout(mode, carouselCollapsed)
 	end
 end
 
@@ -1172,10 +1212,6 @@ local function isDPadKey(code: Enum.KeyCode): boolean
 		or code == Enum.KeyCode.DPadDown
 end
 
-local function skillsBubblesOpen(): boolean
-	return playerGui:GetAttribute("OceanTD_SkillsBubblesOpen") == true
-end
-
 local function ensureDPadGlow(): (Frame?, UIScale?)
 	if not dPadIcon then
 		return nil, nil
@@ -1557,12 +1593,14 @@ task.spawn(function()
 
 	InventoryState.onOpenChanged(function()
 		syncDPadIcon()
+		syncCamModeIconsForHud()
 	end)
 	UserInputService.LastInputTypeChanged:Connect(function()
 		syncDPadIcon()
 	end)
 	playerGui:GetAttributeChangedSignal("OceanTD_SkillsBubblesOpen"):Connect(function()
 		syncDPadIcon()
+		syncCamModeIconsForHud()
 	end)
 
 	playerGui:GetAttributeChangedSignal("OceanTD_ForceCloseFreeCam"):Connect(function()

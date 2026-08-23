@@ -18,7 +18,9 @@ local UserInputService = game:GetService("UserInputService")
 local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
-local SkillStages = require(ReplicatedStorage:WaitForChild("OceanTD"):WaitForChild("Shared"):WaitForChild("SkillStages"))
+local oceanShared = ReplicatedStorage:WaitForChild("OceanTD"):WaitForChild("Shared")
+local SkillStages = require(oceanShared:WaitForChild("SkillStages"))
+local UiPopupScale = require(oceanShared:WaitForChild("UiPopupScale"))
 
 local SkillsBubbleSim = {}
 
@@ -36,6 +38,13 @@ local POP_IN_WINDOW = 0.35
 local POP_OUT_WINDOW = 0.35
 local POP_OUT_SEC = 0.2
 local POP_OVERSHOOT = 1.12
+-- After Plot Size leads, other bubbles pop in at random times in this window (seconds).
+local OTHER_POP_IN_DELAY_MIN = 0.22
+local OTHER_POP_IN_DELAY_MAX = 0.82
+local UNLOCK_SETTLE_SEC = 1
+local UNLOCK_SETTLE_INFO = TweenInfo.new(UNLOCK_SETTLE_SEC, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+-- Extra label size on 720p+ (on top of HUD scale baked into bubble Size).
+local HUD_BUBBLE_TEXT_BOOST = 1.5
 
 type Bubble = {
 	btn: GuiButton,
@@ -52,6 +61,8 @@ type Bubble = {
 	origSize: UDim2,
 	origAnchor: Vector2,
 	origZ: number,
+	settledScale: number, -- UIScale at the player's unlocked stage layout
+	maxPopScale: number, -- pop-in peaks here (max stage), then settles to settledScale
 }
 
 type LabelLayoutSnap = {
@@ -64,10 +75,21 @@ type LabelLayoutSnap = {
 	textY: Enum.TextYAlignment,
 }
 
+-- Studio Icon under larger stage templates (WaveSpeedBTN / RollSpeedBTN / PlotSizeBTN / LuckBTN).
+type IconLayoutSnap = {
+	position: UDim2,
+	size: UDim2,
+	anchor: Vector2,
+	zIndex: number,
+	imageTransparency: number,
+	scaleType: Enum.ScaleType,
+}
+
 type BubbleLayoutSnap = {
 	sizeOffset: Vector2,
 	sizeUdim: UDim2,
 	labels: { LabelLayoutSnap },
+	icon: IconLayoutSnap?,
 }
 
 type Drag = {
@@ -128,6 +150,35 @@ type OrbitLock = {
 
 local orbitLocks: { OrbitLock } = {}
 
+-- Purchase progress (gates / lock icons). Active stage can be dialed below this.
+-- Must be defined before syncOrbitLocks (local function scope).
+local function readUnlockedStage(skillId: string): number
+	local ok, ui = pcall(function()
+		return require(script.Parent:WaitForChild("SkillPowerUpUI"))
+	end)
+	if ok and typeof(ui) == "table" then
+		local getUnlocked = (ui :: any).getUnlockedStage
+		if typeof(getUnlocked) == "function" then
+			return SkillStages.clampStageFor(skillId, getUnlocked(skillId))
+		end
+		if typeof((ui :: any).getStage) == "function" then
+			return SkillStages.clampStageFor(skillId, (ui :: any).getStage(skillId))
+		end
+	end
+	return SkillStages.MIN_STAGE
+end
+
+local function unlockedStagesMap(): { [string]: number }
+	return {
+		PlotSize = readUnlockedStage("PlotSize"),
+		PlaceMore = readUnlockedStage("PlaceMore"),
+		EarnMore = readUnlockedStage("EarnMore"),
+		RHealth = readUnlockedStage("RHealth"),
+		Skip = readUnlockedStage("Skip"),
+		WaveSpeed = readUnlockedStage("WaveSpeed"),
+	}
+end
+
 local function clearOrbitLocks()
 	for _, o in ipairs(orbitLocks) do
 		if o.icon.Parent then
@@ -147,14 +198,7 @@ local function syncOrbitLocks()
 	if not running then
 		return
 	end
-	local stages = {
-		PlotSize = readSkillStage("PlotSize"),
-		PlaceMore = readSkillStage("PlaceMore"),
-		EarnMore = readSkillStage("EarnMore"),
-		RHealth = readSkillStage("RHealth"),
-		Skip = readSkillStage("Skip"),
-		WaveSpeed = readSkillStage("WaveSpeed"),
-	}
+	local stages = unlockedStagesMap()
 	local rng = Random.new()
 	for _, b in ipairs(bubbles) do
 		local id = skillIdForBubble(b)
@@ -355,13 +399,69 @@ local function collectBubbleLabels(root: GuiButton): { TextLabel }
 	return list
 end
 
+local function findBubbleIcon(root: GuiButton): ImageLabel?
+	local direct = root:FindFirstChild("Icon")
+	if direct and direct:IsA("ImageLabel") then
+		return direct
+	end
+	-- Case-insensitive fallback (Studio may use "icon").
+	for _, d in ipairs(root:GetChildren()) do
+		if d:IsA("ImageLabel") and string.lower(d.Name) == "icon" then
+			return d
+		end
+	end
+	return nil
+end
+
+local function ensureBubbleIcon(btn: GuiButton): ImageLabel
+	local existing = findBubbleIcon(btn)
+	if existing then
+		return existing
+	end
+	local icon = Instance.new("ImageLabel")
+	icon.Name = "Icon"
+	icon.BackgroundTransparency = 1
+	icon.BorderSizePixel = 0
+	icon.AnchorPoint = Vector2.new(0.5, 0.5)
+	icon.Position = UDim2.fromScale(0.5, 0.5)
+	icon.Size = UDim2.fromScale(0.45, 0.45)
+	icon.ScaleType = Enum.ScaleType.Fit
+	icon.Visible = false
+	icon.Active = false
+	icon.ZIndex = btn.ZIndex + 2
+	icon.Parent = btn
+	return icon
+end
+
+-- Product of ancestor UIScales (skips pop-in bubble scale). AbsoluteSize includes this.
+local function ancestorHudScale(inst: Instance): number
+	local product = 1
+	local cur: Instance? = inst
+	while cur and not cur:IsA("LayerCollector") do
+		for _, ch in ipairs(cur:GetChildren()) do
+			if ch:IsA("UIScale") and ch.Name ~= "_OceanTD_BubbleScale" then
+				product *= ch.Scale
+			end
+		end
+		cur = cur.Parent
+	end
+	if product < 0.001 then
+		return 1
+	end
+	return product
+end
+
 local function snapshotBubbleLayout(btn: GuiButton): BubbleLayoutSnap
-	local wasVisible = btn.Visible
-	btn.Visible = true
+	-- Do NOT force Visible=true — that flashes layout templates / skill BTNs at Studio
+	-- positions for a frame (or many frames while snapping all stages).
+	local hudScale = ancestorHudScale(btn)
 	local abs = btn.AbsoluteSize
-	local sizeOffset = if abs.X >= 1 and abs.Y >= 1
-		then Vector2.new(abs.X, abs.Y)
-		else Vector2.new(math.max(btn.Size.X.Offset, 64), math.max(btn.Size.Y.Offset, 64))
+	local sizeOffset: Vector2
+	if btn.Visible and abs.X >= 1 and abs.Y >= 1 then
+		sizeOffset = Vector2.new(abs.X / hudScale, abs.Y / hudScale)
+	else
+		sizeOffset = Vector2.new(math.max(btn.Size.X.Offset, 64), math.max(btn.Size.Y.Offset, 64))
+	end
 	local labels: { LabelLayoutSnap } = {}
 	for _, lbl in ipairs(collectBubbleLabels(btn)) do
 		table.insert(labels, {
@@ -374,30 +474,90 @@ local function snapshotBubbleLayout(btn: GuiButton): BubbleLayoutSnap
 			textY = lbl.TextYAlignment,
 		})
 	end
-	btn.Visible = wasVisible
+	local iconSnap: IconLayoutSnap? = nil
+	local iconLbl = findBubbleIcon(btn)
+	if iconLbl and iconLbl.Visible ~= false then
+		iconSnap = {
+			position = iconLbl.Position,
+			size = iconLbl.Size,
+			anchor = iconLbl.AnchorPoint,
+			zIndex = iconLbl.ZIndex,
+			imageTransparency = iconLbl.ImageTransparency,
+			scaleType = iconLbl.ScaleType,
+		}
+	end
 	return {
 		sizeOffset = sizeOffset,
 		sizeUdim = btn.Size,
 		labels = labels,
+		icon = iconSnap,
 	}
 end
 
-local function applyBubbleLayoutSnap(btn: GuiButton, snap: BubbleLayoutSnap)
-	btn.Size = UDim2.fromOffset(math.max(1, snap.sizeOffset.X), math.max(1, snap.sizeOffset.Y))
+local function scaleSnapUdim(u: UDim2, hud: number): UDim2
+	local xOff = if u.X.Scale == 0 then math.floor(u.X.Offset * hud + 0.5) else u.X.Offset
+	local yOff = if u.Y.Scale == 0 then math.floor(u.Y.Offset * hud + 0.5) else u.Y.Offset
+	return UDim2.new(u.X.Scale, xOff, u.Y.Scale, yOff)
+end
+
+local function applyBubbleLayoutSnap(btn: GuiButton, snap: BubbleLayoutSnap, skillId: string?)
+	local hud = UiPopupScale.getHud()
+	local w = snap.sizeOffset.X
+	local h = snap.sizeOffset.Y
+	if hud > 1.01 then
+		w = math.max(1, math.floor(w * hud + 0.5))
+		h = math.max(1, math.floor(h * hud + 0.5))
+	end
+	btn.Size = UDim2.fromOffset(w, h)
 	local dstLabels = collectBubbleLabels(btn)
 	for i, dst in ipairs(dstLabels) do
 		local src = snap.labels[i]
 		if not src then
 			break
 		end
-		-- Geometry from stage template; keep skill-authored text.
-		dst.Position = src.position
-		dst.Size = src.size
-		dst.AnchorPoint = src.anchor
-		dst.TextScaled = src.textScaled
-		dst.TextSize = src.textSize
-		dst.TextXAlignment = src.textX
-		dst.TextYAlignment = src.textY
+		if hud > 1.01 then
+			dst.Position = scaleSnapUdim(src.position, hud)
+			dst.Size = scaleSnapUdim(src.size, hud)
+			dst.AnchorPoint = src.anchor
+			dst.TextScaled = true
+			dst.TextSize = math.max(8, math.floor(src.textSize * hud * HUD_BUBBLE_TEXT_BOOST + 0.5))
+			dst.TextXAlignment = src.textX
+			dst.TextYAlignment = src.textY
+		else
+			dst.Position = src.position
+			dst.Size = src.size
+			dst.AnchorPoint = src.anchor
+			dst.TextScaled = src.textScaled
+			dst.TextSize = src.textSize
+			dst.TextXAlignment = src.textX
+			dst.TextYAlignment = src.textY
+		end
+	end
+
+	-- Larger stage templates (5–8) include Icon; smaller stages hide it.
+	local iconSnap = snap.icon
+	local iconImage = if skillId then SkillStages.iconImageFor(skillId) else nil
+	if iconSnap and iconImage then
+		local icon = ensureBubbleIcon(btn)
+		if hud > 1.01 then
+			icon.Position = scaleSnapUdim(iconSnap.position, hud)
+			icon.Size = scaleSnapUdim(iconSnap.size, hud)
+		else
+			icon.Position = iconSnap.position
+			icon.Size = iconSnap.size
+		end
+		icon.AnchorPoint = iconSnap.anchor
+		icon.ZIndex = math.max(btn.ZIndex + 2, iconSnap.zIndex)
+		icon.ImageTransparency = iconSnap.imageTransparency
+		icon.ScaleType = iconSnap.scaleType
+		icon.Image = iconImage
+		icon.Visible = true
+	else
+		local existing = findBubbleIcon(btn)
+		if existing then
+			existing.Visible = false
+			existing.Image = ""
+		end
 	end
 end
 
@@ -419,8 +579,11 @@ local function hideLayoutOnlyButtons(root: Instance)
 	end
 end
 
+local cachedLayoutHudScale: number? = nil
+
 local function ensureLayoutSnaps(panel: Instance): { [number]: BubbleLayoutSnap }
-	if cachedLayoutSnaps then
+	local hud = UiPopupScale.getHud()
+	if cachedLayoutSnaps and cachedLayoutHudScale == hud then
 		return cachedLayoutSnaps
 	end
 	local snaps: { [number]: BubbleLayoutSnap } = {}
@@ -434,6 +597,7 @@ local function ensureLayoutSnaps(panel: Instance): { [number]: BubbleLayoutSnap 
 		end
 	end
 	cachedLayoutSnaps = snaps
+	cachedLayoutHudScale = hud
 	return snaps
 end
 
@@ -444,21 +608,39 @@ local function applyStageLayoutsToSkillButtons(panel: Instance, buttons: { GuiBu
 		if not def then
 			continue
 		end
-		local stage = readSkillStage(def.id)
-		local snap = snapsByStage[stage]
+		local layoutStage = SkillStages.bubbleLayoutStageFor(def.id, readSkillStage(def.id))
+		local snap = snapsByStage[layoutStage]
 		if snap then
-			applyBubbleLayoutSnap(btn, snap)
+			applyBubbleLayoutSnap(btn, snap, def.id)
 		end
 	end
 	hideLayoutOnlyButtons(panel)
 end
 
-local function waitForGuiLayout(token: number): boolean
-	-- Hidden/just-shown buttons often report AbsolutePosition 0,0 for a frame.
-	RunService.Heartbeat:Wait()
-	if token ~= stopToken then
-		return false
+local function popScaleMaxOverUnlocked(unlockedSnap: BubbleLayoutSnap?, maxSnap: BubbleLayoutSnap?): number
+	if not unlockedSnap or not maxSnap then
+		return 1
 	end
+	local uw = math.max(unlockedSnap.sizeOffset.X, 1)
+	local uh = math.max(unlockedSnap.sizeOffset.Y, 1)
+	local mw = maxSnap.sizeOffset.X
+	local mh = maxSnap.sizeOffset.Y
+	return math.max(mw / uw, mh / uh, 1)
+end
+
+local function maxPopScaleForButton(panel: Instance, btn: GuiButton): number
+	local def = SkillStages.fromButtonName(btn.Name)
+	if not def then
+		return 1
+	end
+	local snaps = ensureLayoutSnaps(panel)
+	local unlocked = snaps[SkillStages.bubbleLayoutStageFor(def.id, readSkillStage(def.id))]
+	local maxSnap = snaps[SkillStages.bubbleLayoutStageFor(def.id, SkillStages.maxStageFor(def.id))]
+	return popScaleMaxOverUnlocked(unlocked, maxSnap)
+end
+
+local function waitForGuiLayout(token: number): boolean
+	-- One frame so the bubble layer has AbsoluteSize; keep skill BTNs hidden.
 	RunService.Heartbeat:Wait()
 	return token == stopToken
 end
@@ -482,9 +664,63 @@ local function readButtonAbs(btn: GuiButton): (Vector2, Vector2)
 	return absPos, absSize
 end
 
-local function scatterClusteredBubbles()
+local function clampBubble(b: Bubble, ox: number, oy: number, sw: number, sh: number)
+	local r = b.radius
+	local minX, maxX = ox + r, ox + sw - r
+	local minY, maxY = oy + r, oy + sh - r
+	if minX > maxX then
+		b.x = ox + sw * 0.5
+	else
+		if b.x < minX then
+			b.x = minX
+			b.vx = math.abs(b.vx) * 0.28
+		elseif b.x > maxX then
+			b.x = maxX
+			b.vx = -math.abs(b.vx) * 0.28
+		end
+	end
+	if minY > maxY then
+		b.y = oy + sh * 0.5
+	else
+		if b.y < minY then
+			b.y = minY
+			b.vy = math.abs(b.vy) * 0.28
+		elseif b.y > maxY then
+			b.y = maxY
+			b.vy = -math.abs(b.vy) * 0.28
+		end
+	end
+end
+
+local function refreshBubbleRadii(forLayout: boolean?)
+	for _, b in ipairs(bubbles) do
+		if not b.btn.Parent then
+			continue
+		end
+		local sz = b.btn.Size
+		local w = math.max(sz.X.Offset, 1)
+		local h = math.max(sz.Y.Offset, 1)
+		local pop = if forLayout then 1 elseif b.scale then math.max(b.scale.Scale, 0.01) else 1
+		local r = math.max(w, h) * 0.5 * pop
+		b.radius = math.max(8, r)
+		b.mass = b.radius
+	end
+end
+
+local function bubbleInsideView(b: Bubble, ox: number, oy: number, sw: number, sh: number, pad: number): boolean
+	local r = b.radius
+	return b.x - r >= ox + pad
+		and b.x + r <= ox + sw - pad
+		and b.y - r >= oy + pad
+		and b.y + r <= oy + sh - pad
+end
+
+local function needsScreenLayout(): boolean
+	if UiPopupScale.getHud() > 1.01 then
+		return true
+	end
 	if #bubbles < 2 then
-		return
+		return false
 	end
 	local minX, maxX = bubbles[1].x, bubbles[1].x
 	local minY, maxY = bubbles[1].y, bubbles[1].y
@@ -495,37 +731,108 @@ local function scatterClusteredBubbles()
 		minY = math.min(minY, b.y)
 		maxY = math.max(maxY, b.y)
 	end
-	if (maxX - minX) > 48 or (maxY - minY) > 48 then
+	if (maxX - minX) <= 48 and (maxY - minY) <= 48 then
+		return true
+	end
+	local ox, oy = playOrigin()
+	local sw, sh = screenSize().X, screenSize().Y
+	for _, b in ipairs(bubbles) do
+		if not bubbleInsideView(b, ox, oy, sw, sh, 4) then
+			return true
+		end
+	end
+	return false
+end
+
+-- Plot Size at screen center; other skill bubbles on a ring around it (all viewports).
+local function layoutBubblesOnScreen()
+	if #bubbles == 0 then
 		return
 	end
 	local ox, oy = playOrigin()
-	local sw = screenSize()
-	local cx = ox + sw.X * 0.5
-	local cy = oy + sw.Y * 0.45
-	local spread = math.min(sw.X, sw.Y) * 0.2
-	for i, b in ipairs(bubbles) do
-		local a = ((i - 1) / #bubbles) * math.pi * 2 - math.pi * 0.5
+	local sw, sh = screenSize().X, screenSize().Y
+	local cx = ox + sw * 0.5
+	local cy = oy + sh * 0.5
+
+	local centerBubble: Bubble? = nil
+	local ring: { Bubble } = {}
+	for _, b in ipairs(bubbles) do
+		if skillIdForBubble(b) == "PlotSize" then
+			centerBubble = b
+		else
+			table.insert(ring, b)
+		end
+	end
+	-- Fallback: if Plot Size is missing, keep previous even-ring layout.
+	if not centerBubble then
+		centerBubble = bubbles[1]
+		table.clear(ring)
+		for i = 2, #bubbles do
+			table.insert(ring, bubbles[i])
+		end
+	end
+
+	local centerR = centerBubble.radius
+	local maxOuterR = centerR
+	for _, b in ipairs(ring) do
+		maxOuterR = math.max(maxOuterR, b.radius)
+	end
+
+	centerBubble.x = cx
+	centerBubble.y = cy
+	centerBubble.vx = 0
+	centerBubble.vy = 0
+
+	local n = #ring
+	if n == 0 then
+		clampBubble(centerBubble, ox, oy, sw, sh)
+		return
+	end
+
+	-- Keep outer bubbles clear of the center bubble and each other, within the view.
+	local gap = 18
+	local minRing = centerR + maxOuterR + gap
+	local minChord = maxOuterR * 2 + 14
+	local chordRing = if n > 1 then (n * minChord) / (2 * math.pi) else minRing
+	local margin = maxOuterR + 20
+	local maxRing = math.max(minRing, math.min(sw, sh) * 0.5 - margin)
+	local spread = math.clamp(math.max(minRing, chordRing), minRing, maxRing)
+
+	for i, b in ipairs(ring) do
+		-- Start at top and go clockwise so the ring reads evenly around Plot Size.
+		local a = ((i - 1) / n) * math.pi * 2 - math.pi * 0.5
 		b.x = cx + math.cos(a) * spread
 		b.y = cy + math.sin(a) * spread
 		b.vx = 0
 		b.vy = 0
+		clampBubble(b, ox, oy, sw, sh)
 	end
+	clampBubble(centerBubble, ox, oy, sw, sh)
 end
 
 local function ensureLayer(sg: ScreenGui): Frame
 	local existing = sg:FindFirstChild("_OceanTD_BubbleLayer")
+	local f: Frame
 	if existing and existing:IsA("Frame") then
-		return existing
+		f = existing
+	else
+		if existing then
+			existing:Destroy()
+		end
+		f = Instance.new("Frame")
+		f.Name = "_OceanTD_BubbleLayer"
+		f.BackgroundTransparency = 1
+		f.BorderSizePixel = 0
+		f.Size = UDim2.fromScale(1, 1)
+		f.Position = UDim2.fromScale(0, 0)
+		f.ZIndex = 10 -- PowerUp host sits above (Global ZIndex)
+		f.Active = false
+		f.Parent = sg
 	end
-	local f = Instance.new("Frame")
-	f.Name = "_OceanTD_BubbleLayer"
-	f.BackgroundTransparency = 1
-	f.BorderSizePixel = 0
-	f.Size = UDim2.fromScale(1, 1)
-	f.Position = UDim2.fromScale(0, 0)
-	f.ZIndex = 10 -- PowerUp host sits above (Global ZIndex)
-	f.Active = false
-	f.Parent = sg
+	local layerHud = f:FindFirstChild("_OceanTD_PopupScale")
+	if layerHud then
+		layerHud:Destroy()
+	end
 	return f
 end
 
@@ -746,26 +1053,6 @@ local function softSeparate(a: Bubble, b: Bubble)
 	end
 end
 
-local function clampBubble(b: Bubble, ox: number, oy: number, sw: number, sh: number)
-	local r = b.radius
-	local minX, maxX = ox + r, ox + sw - r
-	local minY, maxY = oy + r, oy + sh - r
-	if b.x < minX then
-		b.x = minX
-		b.vx = math.abs(b.vx) * 0.28
-	elseif b.x > maxX then
-		b.x = maxX
-		b.vx = -math.abs(b.vx) * 0.28
-	end
-	if b.y < minY then
-		b.y = minY
-		b.vy = math.abs(b.vy) * 0.28
-	elseif b.y > maxY then
-		b.y = maxY
-		b.vy = -math.abs(b.vy) * 0.28
-	end
-end
-
 local function clampSpeed(b: Bubble)
 	local sp = math.sqrt(b.vx * b.vx + b.vy * b.vy)
 	if sp > MAX_SPEED then
@@ -942,30 +1229,95 @@ local function restoreBubbles()
 	table.clear(bubbles)
 end
 
+local function playUnlockSettle(token: number)
+	for _, b in ipairs(bubbles) do
+		if token ~= stopToken or not running or closing or not b.btn.Parent then
+			return
+		end
+		if b.maxPopScale <= 1.001 then
+			continue
+		end
+		local tw = TweenService:Create(b.scale, UNLOCK_SETTLE_INFO, { Scale = b.settledScale })
+		tw:Play()
+	end
+end
+
+local function playPopInOneBubble(b: Bubble, delay: number, token: number, onDone: () -> ())
+	b.scale.Scale = 0
+	local peak = math.max(b.maxPopScale, b.settledScale)
+	local overshoot = POP_OVERSHOOT * peak
+	task.delay(delay, function()
+		if token ~= stopToken or not running or closing or not b.btn.Parent then
+			onDone()
+			return
+		end
+		local tw = TweenService:Create(b.scale, POP_IN_INFO, { Scale = overshoot })
+		tw:Play()
+		tw.Completed:Once(function()
+			if token ~= stopToken or not running or closing or not b.btn.Parent then
+				onDone()
+				return
+			end
+			local settleTw = TweenService:Create(b.scale, POP_SETTLE_INFO, { Scale = peak })
+			settleTw:Play()
+			settleTw.Completed:Once(onDone)
+		end)
+	end)
+end
+
 local function playPopIn()
 	local token = stopToken
 	if bgFade then
 		tweenBgFade(bgFade, 0, 1, BG_FADE_IN_INFO, token)
 	end
 	local rng = Random.new()
-	-- First bubble always starts immediately; others stagger across the window.
-	for i, b in ipairs(bubbles) do
-		b.scale.Scale = 0
-		local delay = if i == 1 then 0 else rng:NextNumber(0, POP_IN_WINDOW)
-		task.delay(delay, function()
-			if token ~= stopToken or not running or closing or not b.btn.Parent then
-				return
-			end
-			local tw = TweenService:Create(b.scale, POP_IN_INFO, { Scale = POP_OVERSHOOT })
-			tw:Play()
-			tw.Completed:Once(function()
-				if token ~= stopToken or not running or closing or not b.btn.Parent then
-					return
-				end
-				TweenService:Create(b.scale, POP_SETTLE_INFO, { Scale = 1 }):Play()
-			end)
-		end)
+	local popInTotal = #bubbles
+	local popInDone = 0
+	local settleStarted = false
+	local function tryStartUnlockSettle()
+		if settleStarted or popInDone < popInTotal then
+			return
+		end
+		settleStarted = true
+		playUnlockSettle(token)
 	end
+	local function onPopInBubbleDone()
+		popInDone += 1
+		tryStartUnlockSettle()
+	end
+	if popInTotal == 0 then
+		return
+	end
+
+	local plotSizeBubble: Bubble? = nil
+	local others: { Bubble } = {}
+	for _, b in ipairs(bubbles) do
+		if skillIdForBubble(b) == "PlotSize" then
+			plotSizeBubble = b
+		else
+			table.insert(others, b)
+		end
+	end
+
+	-- Plot Size always leads; remaining bubbles enter on random delays.
+	if plotSizeBubble then
+		playPopInOneBubble(plotSizeBubble, 0, token, onPopInBubbleDone)
+	else
+		-- Fallback if Plot Size is missing from the layer.
+		playPopInOneBubble(bubbles[1], 0, token, onPopInBubbleDone)
+		for i = 2, #bubbles do
+			local delay = rng:NextNumber(OTHER_POP_IN_DELAY_MIN, OTHER_POP_IN_DELAY_MAX)
+			playPopInOneBubble(bubbles[i], delay, token, onPopInBubbleDone)
+		end
+		tryStartUnlockSettle()
+		return
+	end
+
+	for _, b in ipairs(others) do
+		local delay = rng:NextNumber(OTHER_POP_IN_DELAY_MIN, OTHER_POP_IN_DELAY_MAX)
+		playPopInOneBubble(b, delay, token, onPopInBubbleDone)
+	end
+	tryStartUnlockSettle()
 end
 
 local function playPopOut(done: () -> ())
@@ -1073,6 +1425,8 @@ function SkillsBubbleSim.start(panel: Instance)
 	disconnectInputs()
 	clearSimState()
 	restoreBubbles()
+	-- restoreBubbles forces Visible=true; hide again before any layout wait (prevents flash).
+	SkillsBubbleSim.preHide(panel)
 	-- Keep bgFade from preHide (already at alpha 0); re-resolve if missing.
 	if not bgFade then
 		bgFade = findBackgroundGradient(panel)
@@ -1099,7 +1453,6 @@ function SkillsBubbleSim.start(panel: Instance)
 	local bubbleLayer = ensureLayer(sg)
 	layer = bubbleLayer
 
-	-- Measure while temporarily visible — preHide sets Visible=false (AbsoluteSize can be 0).
 	local buttons = collectImageButtons(panel)
 	if #buttons == 0 then
 		warn("[SkillsBubbles] No ImageButtons under MobileSkillsA")
@@ -1107,38 +1460,49 @@ function SkillsBubbleSim.start(panel: Instance)
 	end
 
 	-- Stage → Studio template size/label placement (skill text stays on the skill BTN).
+	-- Stay Visible=false until reparented at scale 0 (avoids half-second flash at Studio positions).
 	applyStageLayoutsToSkillButtons(panel, buttons)
+	for _, btn in ipairs(buttons) do
+		btn.Visible = false
+		ensureScale(btn).Scale = 0
+	end
 
 	local myStart = stopToken
-	for _, btn in ipairs(buttons) do
-		btn.Visible = true
-	end
+	-- Layer AbsoluteSize only — keep skill buttons hidden during this wait.
 	if not waitForGuiLayout(myStart) then
 		return
 	end
 
+	local ox, oy = playOrigin()
+	local sw, sh = screenSize().X, screenSize().Y
+	local seedX = ox + sw * 0.5
+	local seedY = oy + sh * 0.5
+
 	for i, btn in ipairs(buttons) do
-		local absPos, absSize = readButtonAbs(btn)
-		if absSize.X < 1 or absSize.Y < 1 then
-			continue
-		end
 		local parent = btn.Parent
 		if not parent then
 			continue
 		end
-		local cx = absPos.X + absSize.X * 0.5
-		local cy = absPos.Y + absSize.Y * 0.5
-		local r = math.max(absSize.X, absSize.Y) * 0.5
+		-- Prefer Size offsets from stage layout (AbsoluteSize is 0 while Visible=false / Scale=0).
+		local sz = btn.Size
+		local w = math.max(sz.X.Offset, 1)
+		local h = math.max(sz.Y.Offset, 1)
+		if w < 2 and h < 2 then
+			local _, absSize = readButtonAbs(btn)
+			w = math.max(absSize.X, 64)
+			h = math.max(absSize.Y, 64)
+		end
+		local r = math.max(w, h) * 0.5
 		local scale = ensureScale(btn)
 		scale.Scale = 0
-		btn.Visible = true
+		local maxPopScale = maxPopScaleForButton(panel, btn)
 		local b: Bubble = {
 			btn = btn,
 			scale = scale,
 			radius = math.max(8, r),
 			mass = math.max(8, r),
-			x = cx,
-			y = cy,
+			x = seedX,
+			y = seedY,
 			vx = 0,
 			vy = 0,
 			phase = (i * 1.6180339887) % (math.pi * 2),
@@ -1147,9 +1511,18 @@ function SkillsBubbleSim.start(panel: Instance)
 			origSize = btn.Size,
 			origAnchor = btn.AnchorPoint,
 			origZ = btn.ZIndex,
+			settledScale = 1,
+			maxPopScale = maxPopScale,
 		}
+		-- Keep stage-layout Size (unscaled). Layer UIScale matches former parent HUD scale.
+		-- Do not bake AbsoluteSize into Size — that double-scales circles vs TextSize.
+		-- Drop per-button HUD UIScale so only the layer scale applies (avoids double scale).
+		local btnHudScale = btn:FindFirstChild("_OceanTD_PopupScale")
+		if btnHudScale then
+			btnHudScale:Destroy()
+		end
 		btn.Parent = bubbleLayer
-		btn.Size = UDim2.fromOffset(math.max(1, absSize.X), math.max(1, absSize.Y))
+		btn.Visible = false -- still hidden until centered + scale 0
 		btn.AutoButtonColor = false
 		btn.Active = true
 		btn.Selectable = false -- custom gamepad focus; GuiService highlight steals the stick
@@ -1185,9 +1558,14 @@ function SkillsBubbleSim.start(panel: Instance)
 		warn("[SkillsBubbles] No laid-out ImageButtons (zero AbsoluteSize)")
 		return
 	end
-	scatterClusteredBubbles()
+	refreshBubbleRadii(true)
+	-- Always center Plot Size with others around it (all viewport widths).
+	layoutBubblesOnScreen()
 	for _, b in ipairs(bubbles) do
+		b.scale.Scale = 0
 		writeBubble(b)
+		-- Reveal only after correct position + scale 0 (pop-in grows from here).
+		b.btn.Visible = true
 	end
 
 	table.insert(
@@ -1339,8 +1717,8 @@ function SkillsBubbleSim.refreshStageLayouts()
 	-- may be gone — templates stay under MobileSkillsA; skill bubbles are on the layer).
 	applyStageLayoutsToSkillButtons(panel, buttons)
 	for _, b in ipairs(bubbles) do
-		local abs = b.btn.AbsoluteSize
-		local r = math.max(8, math.max(abs.X, abs.Y) * 0.5)
+		local sz = b.btn.Size
+		local r = math.max(8, math.max(sz.X.Offset, sz.Y.Offset) * 0.5)
 		b.radius = r
 		b.mass = r
 		writeBubble(b)
@@ -1452,14 +1830,7 @@ function SkillsBubbleSim.playLockedRejectFx(skillId: string)
 	end
 	rejectFxToken += 1
 	local token = rejectFxToken
-	local stages = {
-		PlotSize = readSkillStage("PlotSize"),
-		PlaceMore = readSkillStage("PlaceMore"),
-		EarnMore = readSkillStage("EarnMore"),
-		RHealth = readSkillStage("RHealth"),
-		Skip = readSkillStage("Skip"),
-		WaveSpeed = readSkillStage("WaveSpeed"),
-	}
+	local stages = unlockedStagesMap()
 
 	local locked: Bubble? = nil
 	local growTargets: { Bubble } = {}
@@ -1475,7 +1846,7 @@ function SkillsBubbleSim.playLockedRejectFx(skillId: string)
 			locked = b
 		elseif not SkillStages.isSkillLocked(id, stages) then
 			-- Already at max stage layout — don't enlarge the circle further.
-			if readSkillStage(id) < SkillStages.maxStageFor(id) then
+			if readUnlockedStage(id) < SkillStages.maxStageFor(id) then
 				table.insert(growTargets, b)
 			end
 		end
@@ -1491,15 +1862,15 @@ function SkillsBubbleSim.playLockedRejectFx(skillId: string)
 
 	for _, b in ipairs(growTargets) do
 		if b.scale.Parent then
-			b.scale.Scale = 1
+			b.scale.Scale = b.settledScale
 			local scaleObj = b.scale
-			local up = TweenService:Create(scaleObj, REJECT_UP_INFO, { Scale = REJECT_GROW_SCALE })
+			local up = TweenService:Create(scaleObj, REJECT_UP_INFO, { Scale = REJECT_GROW_SCALE * b.settledScale })
 			up:Play()
 			up.Completed:Connect(function()
 				if token ~= rejectFxToken or not scaleObj.Parent then
 					return
 				end
-				TweenService:Create(scaleObj, REJECT_DOWN_INFO, { Scale = 1 }):Play()
+				TweenService:Create(scaleObj, REJECT_DOWN_INFO, { Scale = b.settledScale }):Play()
 			end)
 		end
 	end
@@ -1530,7 +1901,7 @@ function SkillsBubbleSim.playLockedRejectFx(skillId: string)
 		end
 		for _, b in ipairs(growTargets) do
 			if b.scale.Parent then
-				b.scale.Scale = 1
+				b.scale.Scale = b.settledScale
 			end
 		end
 	end)

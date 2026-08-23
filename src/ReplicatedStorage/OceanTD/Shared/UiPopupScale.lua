@@ -14,7 +14,10 @@ local UiPopupScale = {}
 
 local SCALE_NAME = "_OceanTD_PopupScale"
 local MAX_SCALE = 2.25
+-- 720p-class HUD authored at mobile size reads ~60% small on desktop/tablet.
+local MIN_HUD_720P = 1.6
 local watched: { [UIScale]: boolean } = {}
+local hudWatched: { [UIScale]: boolean } = {}
 local sizeConn: RBXScriptConnection? = nil
 local camConn: RBXScriptConnection? = nil
 
@@ -28,13 +31,28 @@ function UiPopupScale.get(viewport: Vector2?): number
 	return math.clamp(short / UiViewportTags.HEIGHT_BREAKPOINT, 1, MAX_SCALE)
 end
 
+function UiPopupScale.getHud(viewport: Vector2?): number
+	if not UiViewportTags.is720p(viewport) then
+		return 1
+	end
+	return math.max(MIN_HUD_720P, UiPopupScale.get(viewport))
+end
+
 local function refreshAll()
 	local s = UiPopupScale.get()
+	local hudS = UiPopupScale.getHud()
 	for scaleObj in pairs(watched) do
 		if scaleObj.Parent then
 			scaleObj.Scale = s
 		else
 			watched[scaleObj] = nil
+		end
+	end
+	for scaleObj in pairs(hudWatched) do
+		if scaleObj.Parent then
+			scaleObj.Scale = hudS
+		else
+			hudWatched[scaleObj] = nil
 		end
 	end
 end
@@ -80,6 +98,26 @@ function UiPopupScale.attach(root: GuiObject): UIScale
 	end
 	watched[scaleObj] = true
 	scaleObj.Scale = UiPopupScale.get()
+	return scaleObj
+end
+
+function UiPopupScale.attachHud(root: GuiObject): UIScale
+	ensureWatch()
+	local existing = root:FindFirstChild(SCALE_NAME)
+	local scaleObj: UIScale
+	if existing and existing:IsA("UIScale") then
+		scaleObj = existing
+	else
+		if existing then
+			existing:Destroy()
+		end
+		scaleObj = Instance.new("UIScale")
+		scaleObj.Name = SCALE_NAME
+		scaleObj.Parent = root
+	end
+	hudWatched[scaleObj] = true
+	watched[scaleObj] = nil
+	scaleObj.Scale = UiPopupScale.getHud()
 	return scaleObj
 end
 

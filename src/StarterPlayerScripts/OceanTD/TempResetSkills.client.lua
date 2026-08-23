@@ -16,11 +16,14 @@ local UiTheme = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiTheme")
 
 local resetRf = Remotes.getFunction("RequestResetSkillStages")
 
+local SKILLS_OPEN_ATTR = "OceanTD_SkillsBubblesOpen"
+
 local sg = Instance.new("ScreenGui")
 sg.Name = "OceanTD_TempResetSkills"
 sg.ResetOnSpawn = false
 sg.IgnoreGuiInset = true
 sg.DisplayOrder = 120
+sg.Enabled = false
 sg.Parent = playerGui
 
 local btn = Instance.new("TextButton")
@@ -39,6 +42,13 @@ btn.Parent = sg
 local corner = Instance.new("UICorner")
 corner.CornerRadius = UDim.new(0, 8)
 corner.Parent = btn
+
+local function syncVisible()
+	sg.Enabled = playerGui:GetAttribute(SKILLS_OPEN_ATTR) == true
+end
+
+syncVisible()
+playerGui:GetAttributeChangedSignal(SKILLS_OPEN_ATTR):Connect(syncVisible)
 
 local busy = false
 btn.Activated:Connect(function()
@@ -62,4 +72,4 @@ btn.Activated:Connect(function()
 	end)
 end)
 
-print("[TEMP] Reset Skills button ready (bottom-right)")
+print("[TEMP] Reset Skills button ready (only while skills bubbles open)")

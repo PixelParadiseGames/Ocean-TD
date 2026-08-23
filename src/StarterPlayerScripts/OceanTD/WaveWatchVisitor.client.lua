@@ -24,6 +24,7 @@ export type RosterEntry = {
 	cframe: CFrame,
 	size: Vector3,
 	ownerUserId: number,
+	ringCFrame: CFrame?,
 }
 
 local player = Players.LocalPlayer
@@ -61,6 +62,7 @@ local function applyRoster(payload: any)
 				cframe = entry.cframe,
 				size = entry.size,
 				ownerUserId = num(entry.ownerUserId, 0),
+				ringCFrame = if typeof(entry.ringCFrame) == "CFrame" then entry.ringCFrame else entry.cframe,
 			})
 		end
 	end
@@ -198,7 +200,7 @@ RunService.Heartbeat:Connect(function(dt)
 	end
 	if fresh and snap and snap.running then
 		WaveWatchMode.set(true, snap)
-		WaveGhostSim.apply(snap, entry.cframe, pendingKind, entry.size)
+		WaveGhostSim.apply(snap, entry.cframe, pendingKind, entry.size, entry.ringCFrame)
 	elseif snap and not snap.running then
 		WaveWatchMode.set(false, nil)
 		WaveGhostSim.stop(true)

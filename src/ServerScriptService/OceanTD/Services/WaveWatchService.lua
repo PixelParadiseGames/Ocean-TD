@@ -73,6 +73,7 @@ local function onPush(player: Player, payload: any)
 		hungerDanger = payload.hungerDanger == true,
 		hungryMissToken = payload.hungryMissToken,
 		coralEpoch = payload.coralEpoch,
+		plotSizeStage = payload.plotSizeStage,
 	}
 
 	for _, visitor in ipairs(Players:GetPlayers()) do

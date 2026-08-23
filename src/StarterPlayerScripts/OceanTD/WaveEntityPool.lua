@@ -3,7 +3,7 @@
 	Typed acquire/release pools for wave visuals (client-local).
 
 	Hungry fish ("Tang" kind): one random MeshPart from ReplicatedStorage.HungryFish,
-	pooled for reuse; size jitter ±2 studs on longest axis at each acquire.
+	pooled for reuse; size jitter on longest axis (min 25% below prior floor, same max).
 	Crabs: ReplicatedStorage.Fish.CrabTemplate. Same acquireFish/releaseFish API.
 
 	Also pools food orbs, green-arrow sets, ammo balls, and short SFX clones.
@@ -22,7 +22,9 @@ local MAX_FOOD = 64
 local MAX_ARROW = 40
 local MAX_AMMO = 64
 local MAX_SOUND_PER_KEY = 12
-local HUNGRY_SIZE_JITTER = 2 -- ± studs on longest axis
+-- Longest-axis studs: floor = (longest + JITTER) * MIN_SCALE, max = longest + 3*JITTER.
+local HUNGRY_SIZE_JITTER = 2 * 1.2
+local HUNGRY_SIZE_MIN_SCALE = 0.75 -- smallest fish 25% below prior floor
 
 local ATTR_KIND = "OceanTD_PoolFishKind"
 local ATTR_BASE_SIZE = "OceanTD_FishBaseSize"
@@ -162,9 +164,11 @@ local function applyHungrySizeJitter(root: BasePart)
 	if longest < 1e-4 then
 		return
 	end
-	-- Old max (longest + jitter) is the new floor; same 4-stud span above it.
-	local minTarget = longest + HUNGRY_SIZE_JITTER
-	local target = minTarget + math.random() * (2 * HUNGRY_SIZE_JITTER)
+	-- Floor 25% below prior minimum; same max as before (longest + 3*JITTER).
+	local floorBase = longest + HUNGRY_SIZE_JITTER
+	local minTarget = floorBase * HUNGRY_SIZE_MIN_SCALE
+	local maxTarget = floorBase + 2 * HUNGRY_SIZE_JITTER
+	local target = minTarget + math.random() * (maxTarget - minTarget)
 	root.Size = base * (target / longest)
 end
 

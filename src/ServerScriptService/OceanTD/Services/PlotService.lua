@@ -336,7 +336,7 @@ function PlotService.getPlotOwner(plotId: PlotId): Player?
 	return if slot then slot.owner else nil
 end
 
-function PlotService.getRosterPayload(): { { plotId: string, cframe: CFrame, size: Vector3, ownerUserId: number } }
+function PlotService.getRosterPayload(): { { plotId: string, cframe: CFrame, size: Vector3, ownerUserId: number, ringCFrame: CFrame } }
 	local out = {}
 	for i = 1, Constants.MAX_PLOTS do
 		local plotId = plotIdFromIndex(i)
@@ -347,6 +347,7 @@ function PlotService.getRosterPayload(): { { plotId: string, cframe: CFrame, siz
 				cframe = slot.cframe,
 				size = slot.size,
 				ownerUserId = if slot.owner then slot.owner.UserId else 0,
+				ringCFrame = slot.ringCFrame,
 			})
 		end
 	end

@@ -15,17 +15,19 @@ local playerGui = player:WaitForChild("PlayerGui")
 
 local oceanRoot = ReplicatedStorage:WaitForChild("OceanTD")
 local Constants = require(oceanRoot:WaitForChild("Shared"):WaitForChild("Constants"))
+local LeftHudLayout = require(oceanRoot:WaitForChild("Shared"):WaitForChild("LeftHudLayout"))
 local SandDollarProducts = require(oceanRoot:WaitForChild("Shared"):WaitForChild("SandDollarProducts"))
 local UiTheme = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiTheme"))
 local UiHaptics = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiHaptics"))
 
 local ATTR = Constants.SAND_DOLLARS_ATTR
-local COUNT_NAME = Constants.SAND_DOLLARS_COUNT_NAME
+local LABEL_NAME = Constants.SAND_DOLLARS_LABEL_NAME
 
 local host: GuiObject? = nil
 local textTarget: TextLabel | TextButton | nil = nil
 local shopGui: ScreenGui? = nil
 local lastShown = 0
+local discoverConn: RBXScriptConnection? = nil
 
 local function formatCount(n: number): string
 	local v = math.max(0, math.floor(n))
@@ -88,10 +90,15 @@ local function applyText(amount: number)
 	lastShown = amount
 end
 
-local function findTextTarget(root: GuiObject): TextLabel | TextButton | nil
-	if root:IsA("TextLabel") or root:IsA("TextButton") then
-		return root
+local function hideInnerDLabel(countHost: GuiObject)
+	for _, d in ipairs(countHost:GetDescendants()) do
+		if (d:IsA("TextLabel") or d:IsA("TextButton")) and d.Name == LABEL_NAME then
+			d.Visible = false
+		end
 	end
+end
+
+local function findTextTarget(root: GuiObject): TextLabel | TextButton | nil
 	local named = root:FindFirstChild("Count")
 		or root:FindFirstChild("Amount")
 		or root:FindFirstChild("Label")
@@ -99,8 +106,11 @@ local function findTextTarget(root: GuiObject): TextLabel | TextButton | nil
 	if named and (named:IsA("TextLabel") or named:IsA("TextButton")) then
 		return named
 	end
+	if root:IsA("TextLabel") or root:IsA("TextButton") then
+		return root
+	end
 	for _, d in ipairs(root:GetDescendants()) do
-		if d:IsA("TextLabel") or d:IsA("TextButton") then
+		if (d:IsA("TextLabel") or d:IsA("TextButton")) and d.Name ~= LABEL_NAME then
 			return d
 		end
 	end
@@ -214,8 +224,16 @@ local function openShop()
 	TweenService:Create(scale, TweenInfo.new(0.2, Enum.EasingStyle.Back, Enum.EasingDirection.Out), { Scale = 1 }):Play()
 end
 
+local function stopDiscover()
+	if discoverConn then
+		discoverConn:Disconnect()
+		discoverConn = nil
+	end
+end
+
 local function wireHost(obj: GuiObject)
 	host = obj
+	hideInnerDLabel(obj)
 	lastShown = readBalance()
 	textTarget = findTextTarget(obj)
 	if not textTarget then
@@ -254,28 +272,49 @@ local function wireHost(obj: GuiObject)
 	end
 end
 
+local function tryBindHost(): boolean
+	local left = playerGui:FindFirstChild("MobileLeftUI")
+	if not left then
+		return false
+	end
+	local count = LeftHudLayout.findDCount(left)
+	if not count or not count:IsA("GuiObject") then
+		return false
+	end
+	if host == count and textTarget then
+		return true
+	end
+	wireHost(count)
+	return true
+end
+
 task.spawn(function()
 	local left = playerGui:WaitForChild("MobileLeftUI", 60)
 	if not left then
 		warn("[ECONOMY] PlayerGui.MobileLeftUI missing")
 		return
 	end
-	local dPad = left:WaitForChild("dPad", 30)
-	if not dPad then
-		warn("[ECONOMY] MobileLeftUI.dPad missing")
-		return
-	end
-	local count = dPad:WaitForChild(COUNT_NAME, 30)
-	if not count or not count:IsA("GuiObject") then
-		warn("[ECONOMY] MobileLeftUI.dPad.$DCount missing")
-		return
-	end
-	wireHost(count)
 
 	player:GetAttributeChangedSignal(ATTR):Connect(function()
 		applyText(readBalance())
 	end)
-	applyText(readBalance())
+
+	if not tryBindHost() then
+		discoverConn = left.DescendantAdded:Connect(function()
+			if tryBindHost() then
+				stopDiscover()
+			end
+		end)
+		task.delay(2, function()
+			if tryBindHost() then
+				stopDiscover()
+			else
+				warn("[ECONOMY] MobileLeftUI $DCount missing")
+			end
+		end)
+	else
+		stopDiscover()
+	end
 
 	print("[ECONOMY] $DCount ready — balance", readBalance())
 end)

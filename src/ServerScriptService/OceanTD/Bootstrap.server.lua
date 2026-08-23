@@ -105,7 +105,7 @@ local function onPlayerAdded(player: Player)
 
 	plotAssignedRemote:FireClient(player, payload)
 	sessionReadyRemote:FireClient(player)
-	Remotes.get("SkillStagesSync"):FireClient(player, PersistenceService.getSkillStages(player))
+	Remotes.get("SkillStagesSync"):FireClient(player, PersistenceService.getSkillStagesPayload(player))
 	-- Joiner first (race-safe), then everyone.
 	WaveWatchService.broadcastRoster(player)
 	WaveWatchService.broadcastRoster(nil)
@@ -283,7 +283,26 @@ end
 
 local requestGetSkillStages = Remotes.getFunction("RequestGetSkillStages")
 requestGetSkillStages.OnServerInvoke = function(player: Player)
-	return PersistenceService.getSkillStages(player)
+	return PersistenceService.getSkillStagesPayload(player)
+end
+
+local requestSetSkillActiveStage = Remotes.getFunction("RequestSetSkillActiveStage")
+requestSetSkillActiveStage.OnServerInvoke = function(player: Player, skillId: any, stage: any)
+	if typeof(skillId) ~= "string" or typeof(stage) ~= "number" then
+		return { ok = false, errorCode = "BadArgs" }
+	end
+	local result = PersistenceService.setSkillActiveStage(player, skillId, stage)
+	if result.ok then
+		Remotes.get("SkillStagesSync"):FireClient(player, PersistenceService.getSkillStagesPayload(player))
+		if skillId == "PlotSize" then
+			local payload = PlotService.applyOwnerPlotSizeStage(player, result.active :: number)
+			if payload then
+				Remotes.get("PlotAssigned"):FireClient(player, payload)
+				WaveWatchService.broadcastRoster(nil)
+			end
+		end
+	end
+	return result
 end
 
 local requestUnlockSkillStage = Remotes.getFunction("RequestUnlockSkillStage")
@@ -293,7 +312,7 @@ requestUnlockSkillStage.OnServerInvoke = function(player: Player, skillId: any)
 	end
 	local result = PersistenceService.tryUnlockSkillStage(player, skillId)
 	if result.ok then
-		Remotes.get("SkillStagesSync"):FireClient(player, PersistenceService.getSkillStages(player))
+		Remotes.get("SkillStagesSync"):FireClient(player, PersistenceService.getSkillStagesPayload(player))
 		if skillId == "PlotSize" then
 			-- Defer bounds apply until the client grow tween finishes (ReportPlotSizeCinematicDone).
 			-- Otherwise PlotAssigned snaps the outline to the new size before the cinematic.

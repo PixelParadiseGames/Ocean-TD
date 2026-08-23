@@ -37,6 +37,7 @@ local REMOTE_FUNCTIONS = {
 	"RequestSetPlotOutlineColor",
 	"RequestUnlockSkillStage",
 	"RequestGetSkillStages",
+	"RequestSetSkillActiveStage",
 	"RequestResetSkillStages",
 	"RequestCoralSize",
 	"RequestCoralColor",

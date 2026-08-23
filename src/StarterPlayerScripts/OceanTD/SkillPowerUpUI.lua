@@ -23,6 +23,8 @@ local POWERUP_OPEN_ATTR = "OceanTD_SkillPowerUpOpen"
 local GREEN = Color3.fromRGB(40, 170, 70)
 local DESC_PULSE_GREEN = Color3.fromRGB(70, 255, 110)
 local DESC_PULSE_WHITE = Color3.new(1, 1, 1)
+local GREY_DARK = Color3.fromRGB(90, 90, 90)
+local GREY_LIGHT = Color3.fromRGB(175, 175, 175)
 local RED = Color3.fromRGB(220, 50, 55)
 local PANEL_BG = Color3.fromRGB(12, 28, 36)
 local POWERUP_Z = 500
@@ -32,7 +34,9 @@ local UNLOCK_STROKE_THICKNESS = 2
 local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
 
-local stagesMap: { [string]: number } = SkillStages.defaultMap()
+local unlockedMap: { [string]: number } = SkillStages.defaultMap()
+local activeMap: { [string]: number } = SkillStages.defaultMap()
+local stageColorCache: { [GuiObject]: { [Instance]: Color3 } } = {}
 local panelRoot: Instance? = nil
 local hostScreenGui: ScreenGui? = nil
 local dPad: Instance? = nil
@@ -45,6 +49,7 @@ local closeBtn: GuiObject? = nil
 local lockedTemplate: GuiObject? = nil
 local stageButtons: { GuiObject } = {}
 local lockOverlays: { GuiObject } = {}
+local refreshTemplate: () -> ()
 local activeSkillId: string? = nil
 local popupOpen = false
 local confirmGui: ScreenGui? = nil
@@ -67,6 +72,7 @@ local lastPowerUpClickAt = 0
 
 local unlockRf = Remotes.getFunction("RequestUnlockSkillStage")
 local getStagesRf = Remotes.getFunction("RequestGetSkillStages")
+local setActiveRf = Remotes.getFunction("RequestSetSkillActiveStage")
 local syncRemote = Remotes.get("SkillStagesSync")
 
 local function powerUpClickGuard(): boolean
@@ -176,6 +182,8 @@ local function startUnlockDescPulse(skillId: string, buildRichText: (Color3) -> 
 	end
 	unlockDescLbl.RichText = true
 	unlockDescLbl.Visible = true
+	-- Apply immediately so dial-down doesn't wait a frame (or stick on old copy).
+	unlockDescLbl.Text = buildRichText(DESC_PULSE_GREEN)
 	local token = unlockDescPulseToken
 	unlockDescPulseConn = RunService.Heartbeat:Connect(function()
 		if token ~= unlockDescPulseToken or not unlockDescLbl then
@@ -342,20 +350,175 @@ local function syncCloseGlyph()
 end
 
 local function applyStages(raw: any)
-	stagesMap = SkillStages.sanitizeMap(raw)
+	if typeof(raw) == "table" and typeof(raw.unlocked) == "table" then
+		unlockedMap = SkillStages.sanitizeMap(raw.unlocked)
+		activeMap = SkillStages.sanitizeActiveMap(raw.active, unlockedMap)
+	elseif typeof(raw) == "table" and typeof(raw.active) == "table" then
+		-- Alternate payload shape
+		unlockedMap = SkillStages.sanitizeMap(raw.unlocked or raw)
+		activeMap = SkillStages.sanitizeActiveMap(raw.active, unlockedMap)
+	else
+		-- Legacy flat map = both unlocked and active
+		unlockedMap = SkillStages.sanitizeMap(raw)
+		activeMap = SkillStages.sanitizeActiveMap(unlockedMap, unlockedMap)
+	end
 	if SkillsBubbleSim.isRunning() then
 		SkillsBubbleSim.refreshStageLayouts()
 	end
 end
 
+-- Gameplay / bubble size: currently enabled stage.
 local function currentStage(skillId: string): number
-	return SkillStages.clampStageFor(skillId, stagesMap[skillId])
+	return SkillStages.clampStageFor(skillId, activeMap[skillId])
+end
+
+-- Purchase progress: highest unlocked stage.
+local function unlockedStage(skillId: string): number
+	return SkillStages.clampStageFor(skillId, unlockedMap[skillId])
+end
+
+local function isGreenish(c: Color3): boolean
+	return c.G > c.R + 0.04 and c.G > c.B + 0.04 and c.G > 0.2
+end
+
+local function cacheStageColors(root: GuiObject)
+	if stageColorCache[root] then
+		return
+	end
+	local cache: { [Instance]: Color3 } = {}
+	local function store(inst: Instance, color: Color3)
+		cache[inst] = color
+	end
+	if root:IsA("GuiObject") and root.BackgroundTransparency < 0.99 then
+		store(root, root.BackgroundColor3)
+	end
+	if root:IsA("ImageLabel") or root:IsA("ImageButton") then
+		store(root, (root :: any).ImageColor3)
+	end
+	for _, d in ipairs(root:GetDescendants()) do
+		if d:IsA("ImageLabel") or d:IsA("ImageButton") then
+			store(d, d.ImageColor3)
+		elseif d:IsA("GuiObject") and d.BackgroundTransparency < 0.99 then
+			store(d, d.BackgroundColor3)
+		elseif d:IsA("UIStroke") then
+			store(d, d.Color)
+		end
+	end
+	stageColorCache[root] = cache
+end
+
+-- mode: "on" = dark/bright green, "off" = dark/light grey (unlocked but disabled)
+local function paintStageCheckmarks(root: GuiObject, mode: "on" | "off")
+	cacheStageColors(root)
+	local cache = stageColorCache[root]
+	if not cache then
+		return
+	end
+	for inst, orig in pairs(cache) do
+		if not inst.Parent then
+			continue
+		end
+		local useBright = false
+		if inst:IsA("ImageLabel") or inst:IsA("ImageButton") then
+			useBright = true
+		elseif inst:IsA("UIStroke") then
+			useBright = true
+		elseif isGreenish(orig) and orig.G > 0.45 then
+			useBright = true
+		end
+		local color: Color3
+		if mode == "on" then
+			color = if useBright then DESC_PULSE_GREEN else GREEN
+			-- Prefer original green when restoring "on"
+			if isGreenish(orig) then
+				color = orig
+			end
+		else
+			color = if useBright then GREY_LIGHT else GREY_DARK
+		end
+		if inst:IsA("ImageLabel") or inst:IsA("ImageButton") then
+			(inst :: any).ImageColor3 = color
+		elseif inst:IsA("UIStroke") then
+			(inst :: UIStroke).Color = color
+		elseif inst:IsA("GuiObject") then
+			(inst :: GuiObject).BackgroundColor3 = color
+		end
+	end
+end
+
+local function applyGameplayForActiveStages()
+	local ok, err = pcall(function()
+		local WaveEndVfx = require(script.Parent:WaitForChild("WaveEndVfx"))
+		local WaveSim = require(script.Parent:WaitForChild("WaveSim"))
+		WaveEndVfx.syncToPlotSizeStage(currentStage("PlotSize"))
+		WaveSim.applyReefHealthStage(currentStage("RHealth"))
+		WaveSim.clampSpeedToMaxStep(SkillStages.waveSpeedMaxStep(currentStage("WaveSpeed")))
+		if WaveSim.isRunning() then
+			WaveSim.rebuildRouteForPlotSize(currentStage("PlotSize"))
+		end
+		if SkillsBubbleSim.isRunning() then
+			SkillsBubbleSim.refreshStageLayouts()
+		end
+	end)
+	if not ok then
+		warn("[SkillPowerUp] applyGameplayForActiveStages failed:", err)
+	end
+end
+
+local function requestSetActiveStage(skillId: string, stage: number)
+	local ok, result = pcall(function()
+		return setActiveRf:InvokeServer(skillId, stage)
+	end)
+	if not ok or typeof(result) ~= "table" or result.ok ~= true then
+		return false
+	end
+	if typeof(result.active) == "number" then
+		activeMap[skillId] = SkillStages.clampStageFor(skillId, result.active)
+	else
+		activeMap[skillId] = SkillStages.clampStageFor(skillId, stage)
+	end
+	if typeof(result.unlocked) == "number" then
+		unlockedMap[skillId] = SkillStages.clampStageFor(skillId, result.unlocked)
+	end
+	applyGameplayForActiveStages()
+	if popupOpen then
+		refreshTemplate()
+	end
+	return true
 end
 
 local function findTextLabel(host: Instance, name: string): TextLabel?
 	local n = host:FindFirstChild(name, true)
 	if n and n:IsA("TextLabel") then
 		return n
+	end
+	return nil
+end
+
+-- Studio sometimes renames the blurb under the title; keep dial-down text working.
+local function findUnlockDescLabel(host: Instance): TextLabel?
+	local aliases = { "UnlockDesc", "UnlockDescription", "Desc", "Description", "SkillDesc", "PowerUpDesc" }
+	for _, name in ipairs(aliases) do
+		local found = findTextLabel(host, name)
+		if found then
+			return found
+		end
+	end
+	local nameLbl = findTextLabel(host, "UnlockName")
+	if nameLbl and nameLbl.Parent then
+		for _, ch in ipairs(nameLbl.Parent:GetChildren()) do
+			if ch:IsA("TextLabel") and ch ~= nameLbl then
+				local lower = string.lower(ch.Name)
+				if ch.Name ~= "NextStage" and (string.find(lower, "desc", 1, true) or string.find(lower, "info", 1, true)) then
+					return ch
+				end
+			end
+		end
+		for _, ch in ipairs(nameLbl.Parent:GetChildren()) do
+			if ch:IsA("TextLabel") and ch ~= nameLbl and ch.Name ~= "NextStage" then
+				return ch
+			end
+		end
 	end
 	return nil
 end
@@ -510,7 +673,7 @@ local function placeLockOn(stageBtn: GuiObject)
 	end
 end
 
-local function refreshTemplate()
+refreshTemplate = function()
 	if not template or not activeSkillId then
 		return
 	end
@@ -518,11 +681,12 @@ local function refreshTemplate()
 	if not def then
 		return
 	end
-	local stage = currentStage(activeSkillId)
+	local active = currentStage(activeSkillId)
+	local unlocked = unlockedStage(activeSkillId)
 	if unlockNameLbl then
 		unlockNameLbl.Text = def.displayName
 	end
-	local nextS = SkillStages.nextStageFor(activeSkillId, stage)
+	local nextS = SkillStages.nextStageFor(activeSkillId, unlocked)
 	if nextStageLbl then
 		if nextS then
 			nextStageLbl.Text = "Stage " .. tostring(nextS)
@@ -533,19 +697,90 @@ local function refreshTemplate()
 		end
 	end
 	if unlockDescLbl then
-		-- Describe the next unlock; if maxed, describe the current stage.
-		local descStage = nextS or stage
-		if activeSkillId == "PlaceMore" then
-			local newMax = SkillStages.placeMoreMaxAtStage(descStage)
-			if nextS == nil then
+		-- Climbing unlocks (active at unlocked tip): preview the next purchase.
+		-- Maxed or dialed down: show what the *active* stage currently gives.
+		local showActiveStatus = nextS == nil or active < unlocked
+
+		if showActiveStatus then
+			-- Always driven by `active`, never unlocked max.
+			if activeSkillId == "PlaceMore" then
+				local newMax = SkillStages.placeMoreMaxAtStage(active)
 				startUnlockDescPulse("PlaceMore", function(c: Color3)
-					return string.format(
-						'Max: <font color="%s">%d</font>',
-						rgbFontTag(c),
-						newMax
-					)
+					return string.format('Max: <font color="%s">%d</font>', rgbFontTag(c), newMax)
 				end)
+			elseif activeSkillId == "EarnMore" then
+				local mult = SkillStages.clampStage(active)
+				if mult <= 1 then
+					stopUnlockDescPulse()
+					unlockDescLbl.RichText = false
+					unlockDescLbl.Text = SkillStages.activeStatusDesc(activeSkillId, active)
+					unlockDescLbl.Visible = true
+				else
+					startUnlockDescPulse("EarnMore", function(c: Color3)
+						return string.format(
+							'Get <font color="%s">%dx</font> per fish fed',
+							rgbFontTag(c),
+							mult
+						)
+					end)
+				end
+			elseif activeSkillId == "RHealth" then
+				local newMax = SkillStages.reefHealthAtStage(active)
+				startUnlockDescPulse("RHealth", function(c: Color3)
+					return string.format('Max: <font color="%s">%d</font>', rgbFontTag(c), newMax)
+				end)
+			elseif activeSkillId == "Skip" then
+				if SkillStages.isSkipUnlimited(active) then
+					startUnlockDescPulse("Skip", function(c: Color3)
+						return string.format('<font color="%s">Unlimited Skips</font>', rgbFontTag(c))
+					end)
+				else
+					local uses = SkillStages.skipUsesAtStage(active)
+					if uses <= 0 then
+						stopUnlockDescPulse()
+						unlockDescLbl.RichText = false
+						unlockDescLbl.Text = "0 Skips"
+						unlockDescLbl.Visible = true
+					elseif uses == 1 then
+						startUnlockDescPulse("Skip", function(c: Color3)
+							return string.format('<font color="%s">1 Skip</font>', rgbFontTag(c))
+						end)
+					else
+						startUnlockDescPulse("Skip", function(c: Color3)
+							return string.format('<font color="%s">%d Skips</font>', rgbFontTag(c), uses)
+						end)
+					end
+				end
+			elseif activeSkillId == "WaveSpeed" then
+				if SkillStages.waveSpeedPauseUnlocked(active) then
+					startUnlockDescPulse("WaveSpeed", function(c: Color3)
+						return string.format('<font color="%s">All speeds + pause</font>', rgbFontTag(c))
+					end)
+				elseif active >= 3 then
+					startUnlockDescPulse("WaveSpeed", function(c: Color3)
+						return string.format('<font color="%s">2x</font> wave speed', rgbFontTag(c))
+					end)
+				elseif active >= 2 then
+					startUnlockDescPulse("WaveSpeed", function(c: Color3)
+						return string.format('<font color="%s">1.5x</font> wave speed', rgbFontTag(c))
+					end)
+				else
+					stopUnlockDescPulse()
+					unlockDescLbl.RichText = false
+					unlockDescLbl.Text = "Normal wave speed"
+					unlockDescLbl.Visible = true
+				end
 			else
+				stopUnlockDescPulse()
+				unlockDescLbl.RichText = false
+				unlockDescLbl.Text = SkillStages.activeStatusDesc(activeSkillId, active)
+				unlockDescLbl.Visible = true
+			end
+		else
+			-- Still climbing: preview the next unlock purchase.
+			local descStage = nextS :: number
+			if activeSkillId == "PlaceMore" then
+				local newMax = SkillStages.placeMoreMaxAtStage(descStage)
 				local inc = SkillStages.placeMoreIncrementAtStage(descStage)
 				startUnlockDescPulse("PlaceMore", function(c: Color3)
 					return string.format(
@@ -555,34 +790,24 @@ local function refreshTemplate()
 						newMax
 					)
 				end)
-			end
-		elseif activeSkillId == "EarnMore" then
-			local mult = SkillStages.clampStage(descStage)
-			if mult <= 1 then
-				stopUnlockDescPulse()
-				unlockDescLbl.RichText = false
-				unlockDescLbl.Text = SkillStages.unlockDesc(activeSkillId, descStage)
-				unlockDescLbl.Visible = true
-			else
-				startUnlockDescPulse("EarnMore", function(c: Color3)
-					return string.format(
-						'Get <font color="%s">%dx</font> per fish fed',
-						rgbFontTag(c),
-						mult
-					)
-				end)
-			end
-		elseif activeSkillId == "RHealth" then
-			local newMax = SkillStages.reefHealthAtStage(descStage)
-			if nextS == nil then
-				startUnlockDescPulse("RHealth", function(c: Color3)
-					return string.format(
-						'Max: <font color="%s">%d</font>',
-						rgbFontTag(c),
-						newMax
-					)
-				end)
-			else
+			elseif activeSkillId == "EarnMore" then
+				local mult = SkillStages.clampStage(descStage)
+				if mult <= 1 then
+					stopUnlockDescPulse()
+					unlockDescLbl.RichText = false
+					unlockDescLbl.Text = SkillStages.unlockDesc(activeSkillId, descStage)
+					unlockDescLbl.Visible = true
+				else
+					startUnlockDescPulse("EarnMore", function(c: Color3)
+						return string.format(
+							'Get <font color="%s">%dx</font> per fish fed',
+							rgbFontTag(c),
+							mult
+						)
+					end)
+				end
+			elseif activeSkillId == "RHealth" then
+				local newMax = SkillStages.reefHealthAtStage(descStage)
 				local inc = SkillStages.reefHealthIncrementAtStage(descStage)
 				startUnlockDescPulse("RHealth", function(c: Color3)
 					return string.format(
@@ -592,13 +817,7 @@ local function refreshTemplate()
 						newMax
 					)
 				end)
-			end
-		elseif activeSkillId == "Skip" then
-			if SkillStages.isSkipUnlimited(descStage) or nextS == nil then
-				startUnlockDescPulse("Skip", function(c: Color3)
-					return string.format('<font color="%s">Unlimited Skips</font>', rgbFontTag(c))
-				end)
-			else
+			elseif activeSkillId == "Skip" then
 				local uses = SkillStages.skipUsesAtStage(descStage)
 				if uses <= 0 then
 					stopUnlockDescPulse()
@@ -616,30 +835,26 @@ local function refreshTemplate()
 						)
 					end)
 				end
-			end
-		elseif activeSkillId == "WaveSpeed" then
-			if nextS == nil then
-				startUnlockDescPulse("WaveSpeed", function(c: Color3)
-					return string.format('<font color="%s">All speeds + pause</font>', rgbFontTag(c))
-				end)
-			elseif descStage == 2 then
-				startUnlockDescPulse("WaveSpeed", function(c: Color3)
-					return string.format('Unlock <font color="%s">1.5x</font> wave speed', rgbFontTag(c))
-				end)
-			elseif descStage == 3 then
-				startUnlockDescPulse("WaveSpeed", function(c: Color3)
-					return string.format('Unlock <font color="%s">2x</font> wave speed', rgbFontTag(c))
-				end)
+			elseif activeSkillId == "WaveSpeed" then
+				if descStage == 2 then
+					startUnlockDescPulse("WaveSpeed", function(c: Color3)
+						return string.format('Unlock <font color="%s">1.5x</font> wave speed', rgbFontTag(c))
+					end)
+				elseif descStage == 3 then
+					startUnlockDescPulse("WaveSpeed", function(c: Color3)
+						return string.format('Unlock <font color="%s">2x</font> wave speed', rgbFontTag(c))
+					end)
+				else
+					startUnlockDescPulse("WaveSpeed", function(c: Color3)
+						return string.format('Unlock wave <font color="%s">pause</font>', rgbFontTag(c))
+					end)
+				end
 			else
-				startUnlockDescPulse("WaveSpeed", function(c: Color3)
-					return string.format('Unlock wave <font color="%s">pause</font>', rgbFontTag(c))
-				end)
+				stopUnlockDescPulse()
+				unlockDescLbl.RichText = false
+				unlockDescLbl.Text = SkillStages.unlockDesc(activeSkillId, descStage)
+				unlockDescLbl.Visible = true
 			end
-		else
-			stopUnlockDescPulse()
-			unlockDescLbl.RichText = false
-			unlockDescLbl.Text = SkillStages.unlockDesc(activeSkillId, descStage)
-			unlockDescLbl.Visible = true
 		end
 	end
 	if unlockBtn then
@@ -683,10 +898,14 @@ local function refreshTemplate()
 		if leftoverNum then
 			leftoverNum:Destroy()
 		end
-		if i <= stage then
-			-- Unlocked: green StageN visible, no lock
-		else
+		if i > unlocked then
 			placeLockOn(sb)
+		elseif i <= active then
+			-- Enabled: dark / bright green checkmarks
+			paintStageCheckmarks(sb, "on")
+		else
+			-- Unlocked but dialed off: dark / light grey checkmarks
+			paintStageCheckmarks(sb, "off")
 		end
 	end
 	-- Locks / stage chrome can cover UNLOCK — keep interactives above.
@@ -805,16 +1024,18 @@ local function doUnlockRemote()
 				WaveEndVfx.setRouteEndWorldPos(park)
 			end
 		end
-		stagesMap[skillId] = SkillStages.clampStageFor(skillId, result.stage)
+		local newStage = SkillStages.clampStageFor(skillId, result.stage)
+		unlockedMap[skillId] = newStage
+		activeMap[skillId] = newStage
 		hideConfirm()
 		refreshTemplate()
 		if skillId == "RHealth" then
 			local WaveSim = require(script.Parent:WaitForChild("WaveSim"))
-			WaveSim.applyReefHealthStage(result.stage)
+			WaveSim.applyReefHealthStage(newStage)
 		end
 		if skillId == "WaveSpeed" then
 			local WaveSim = require(script.Parent:WaitForChild("WaveSim"))
-			WaveSim.clampSpeedToMaxStep(SkillStages.waveSpeedMaxStep(result.stage))
+			WaveSim.clampSpeedToMaxStep(SkillStages.waveSpeedMaxStep(newStage))
 		end
 		if skillId == "PlotSize" then
 			-- ForceClose always tears down skills + powerup; avoid close() while open
@@ -844,7 +1065,7 @@ local function showConfirmUnlock()
 	if not activeSkillId then
 		return
 	end
-	local stage = currentStage(activeSkillId)
+	local stage = unlockedStage(activeSkillId)
 	local nextS = SkillStages.nextStageFor(activeSkillId, stage)
 	if not nextS then
 		showToast("Max Stage")
@@ -954,11 +1175,15 @@ function SkillPowerUpUI.getStage(skillId: string): number
 	return currentStage(skillId)
 end
 
+function SkillPowerUpUI.getUnlockedStage(skillId: string): number
+	return unlockedStage(skillId)
+end
+
 function SkillPowerUpUI.requestUnlockNext()
 	if not activeSkillId or not popupOpen then
 		return
 	end
-	local stage = currentStage(activeSkillId)
+	local stage = unlockedStage(activeSkillId)
 	local nextS = SkillStages.nextStageFor(activeSkillId, stage)
 	if not nextS then
 		showToast("Max Stage")
@@ -1024,7 +1249,7 @@ function SkillPowerUpUI.open(skillId: string)
 		warn("[SkillPowerUp] Unknown skill", skillId)
 		return
 	end
-	if SkillStages.isSkillLocked(skillId, stagesMap) then
+	if SkillStages.isSkillLocked(skillId, unlockedMap) then
 		SkillsBubbleSim.playLockedRejectFx(skillId)
 		return
 	end
@@ -1111,7 +1336,10 @@ function SkillPowerUpUI.bind(mobileSkillsRoot: Instance)
 
 	unlockNameLbl = findTextLabel(template, "UnlockName")
 	nextStageLbl = findTextLabel(template, "NextStage")
-	unlockDescLbl = findTextLabel(template, "UnlockDesc")
+	unlockDescLbl = findUnlockDescLabel(template)
+	if not unlockDescLbl then
+		warn("[SkillPowerUp] UnlockDesc TextLabel missing under PowerUpTemplate — stage dial text won't update")
+	end
 	unlockBtn = findGuiButton(template, "UNLOCKbtn")
 	lockedTemplate = template:FindFirstChild("LOCKEDtemplate")
 	if lockedTemplate and lockedTemplate:IsA("GuiObject") then
@@ -1127,9 +1355,40 @@ function SkillPowerUpUI.bind(mobileSkillsRoot: Instance)
 			if leftoverNum then
 				leftoverNum:Destroy()
 			end
-			if s:IsA("GuiButton") then
-				s.Active = true
+			local stageIndex = i
+			local function onStagePressed()
+				if not popupOpen or not activeSkillId or not powerUpClickGuard() then
+					return
+				end
+				if confirmGui then
+					return
+				end
+				local unlocked = unlockedStage(activeSkillId)
+				if stageIndex > unlocked then
+					SkillPowerUpUI.requestUnlockNext()
+					return
+				end
+				if stageIndex == currentStage(activeSkillId) then
+					return
+				end
+				requestSetActiveStage(activeSkillId, stageIndex)
 			end
+			local hit: GuiButton? = if s:IsA("GuiButton") then s :: GuiButton else s:FindFirstChildWhichIsA("GuiButton", true)
+			if not hit then
+				local b = Instance.new("TextButton")
+				b.Name = "_OceanTD_StageHit"
+				b.Text = ""
+				b.BackgroundTransparency = 1
+				b.TextTransparency = 1
+				b.Size = UDim2.fromScale(1, 1)
+				b.ZIndex = s.ZIndex + 10
+				b.Selectable = false
+				b.Parent = s
+				hit = b
+			end
+			hit.Active = true
+			hit.Selectable = false
+			bindButtonPress(hit, "_OceanTD_StageBound", onStagePressed)
 		end
 	end
 
@@ -1247,6 +1506,21 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
 				onUnlockPressed()
 				return
 			end
+			if activeSkillId and not confirmGui then
+				for stageIndex, sb in ipairs(stageButtons) do
+					if sb.Visible and (obj == sb or obj:IsDescendantOf(sb)) then
+						local unlocked = unlockedStage(activeSkillId)
+						if stageIndex > unlocked then
+							SkillPowerUpUI.requestUnlockNext()
+						elseif stageIndex ~= currentStage(activeSkillId) then
+							if powerUpClickGuard() then
+								requestSetActiveStage(activeSkillId, stageIndex)
+							end
+						end
+						return
+					end
+				end
+			end
 			-- First non-matching GUI under the cursor wins; don't dig through whole stack.
 			if obj:IsA("GuiButton") then
 				return
@@ -1294,6 +1568,7 @@ syncRemote.OnClientEvent:Connect(function(payload)
 	WaveEndVfx.syncToPlotSizeStage(currentStage("PlotSize"))
 	local WaveSim = require(script.Parent:WaitForChild("WaveSim"))
 	WaveSim.applyReefHealthStage(currentStage("RHealth"))
+	WaveSim.clampSpeedToMaxStep(SkillStages.waveSpeedMaxStep(currentStage("WaveSpeed")))
 	if WaveSim.isRunning() then
 		WaveSim.rebuildRouteForPlotSize(currentStage("PlotSize"))
 	end

@@ -70,6 +70,7 @@ export type PlayerProfile = {
 	longestWaveSec: number, -- all-time longest run duration (seconds)
 	plotOutlineColorIndex: number, -- 1–15 (15 = no stroke); see PlotOutlineColors
 	skillStages: { [string]: number }, -- skillId → highest unlocked stage 1..8
+	skillActiveStages: { [string]: number }, -- skillId → currently enabled stage (≤ unlocked)
 }
 
 local Constants = require(script.Parent.Constants)
@@ -116,6 +117,7 @@ function PlotTypes.defaultProfile(): PlayerProfile
 		longestWaveSec = 0,
 		plotOutlineColorIndex = 2, -- teal
 		skillStages = SkillStages.defaultMap(),
+		skillActiveStages = SkillStages.defaultMap(),
 	}
 end
 

@@ -26,6 +26,7 @@ local UiTheme = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiTheme")
 local UiIdleCycle = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiIdleCycle"))
 local UiHaptics = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiHaptics"))
 local UiViewportTags = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiViewportTags"))
+local LeftHudLayout = require(oceanRoot:WaitForChild("Shared"):WaitForChild("LeftHudLayout"))
 local UiPopupScale = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiPopupScale"))
 local InventoryState = require(script.Parent:WaitForChild("InventoryState"))
 local PlacementController = require(script.Parent:WaitForChild("PlacementController"))
@@ -82,13 +83,13 @@ local function setLeftUiHiddenForBackpack(hide: boolean)
 		if dPad then
 			for _, ch in ipairs(dPad:GetChildren()) do
 				-- FreeCam syncs dPadIcon from InventoryState.isOpen().
-				if ch:IsA("GuiObject") and ch.Name ~= "dPadIcon" and ch.Name ~= "$DCount" then
+				if ch:IsA("GuiObject") and ch.Name ~= "dPadIcon" and not LeftHudLayout.isSandDollarChrome(ch) then
 					rememberHideLeftForBackpack(ch)
 				end
 			end
 		end
 		for _, ch in ipairs(left:GetChildren()) do
-			if ch:IsA("GuiObject") and ch.Name ~= "dPad" then
+			if ch:IsA("GuiObject") and ch.Name ~= "dPad" and not LeftHudLayout.isSandDollarChrome(ch) then
 				rememberHideLeftForBackpack(ch)
 			end
 		end

@@ -37,7 +37,7 @@ local C = {
 	PATH_TARGET_PAST = 32, -- was 8; fish that slip past still get fed
 	PATH_PROJECT_STEP = 4, -- studs between samples when projecting coral→path
 	-- School stay readable: clamp dive below the path sample (studs).
-	FISH_MIN_PATH_Y = -1.25,
+	FISH_MIN_PATH_Y = -8.5, -- allow deeper swim lanes
 	COMBAT_HZ = COMBAT_HZ,
 	COMBAT_DT = 1 / COMBAT_HZ,
 	PATH_SAMPLE_STEP = 1.5,
@@ -45,9 +45,9 @@ local C = {
 	STAGGER_MIN_SEC = 0.16, -- cap so late waves still read as separate fish
 	STAGGER_PER_WAVE_MULT = 0.985, -- each wave spawns ~1.5% faster
 	LATERAL_SPREAD = 7.5, -- base left/right spread across the school
-	VERT_SPREAD = 2.8, -- base height spread
+	VERT_SPREAD = 9.5, -- base height spread across the school
 	BOB_AMP_MIN = 2.5,
-	BOB_AMP_MAX = 5.0, -- slow vertical wander
+	BOB_AMP_MAX = 9.0, -- slow vertical wander
 	WANDER_AMP_MIN = 3.5,
 	WANDER_AMP_MAX = 7.25,
 	HASH_CELL = 30,
@@ -60,14 +60,18 @@ local C = {
 	HUNGER_PER_TIER = 2, -- +2 food to fill the bar every 10 waves
 	FOOD_RADIUS = 0.65,
 	AMMO_RADIUS = 0.75,
-	HUNGER_BAR_PX_W = 40 * 0.8,
+	HUNGER_BAR_PX_W = 28 * 0.8, -- fill strip (was 40 * 0.8)
 	HUNGER_BAR_STRIP_H = HUNGER_BAR_STRIP_H,
 	HUNGER_EMOJI_SIZE = HUNGER_EMOJI_SIZE,
 	HUNGER_BAR_GAP = 3 * 0.8,
 	HUNGER_BAR_PX_H = HUNGER_EMOJI_SIZE,
+	HUNGER_REMAIN_W = 20, -- "N" between fork emoji and bar
+	HUNGER_REMAIN_GAP = 2,
+	HUNGER_REMAIN_TEXT_SIZE = HUNGER_EMOJI_SIZE - 1, -- one size under the fork
 	HUNGER_BAR_HEIGHT = 2.85 * 0.8, -- studs above fish
 	HUNGER_BAR_MAX_DIST = 0, -- 0 = always show hungry bars (was 220; hidden “ghost” fish)
 	HUNGER_BAR_DANGER_MAX_DIST = 0, -- 0 = no distance cull while flashing red
+	DANGER_NEAR_END_STUDS = 100, -- hungry bars flash red within this many studs of route end
 	HAPPY_EMOJIS = { "😊", "😄", "😁", "😆", "🥰", "😍", "💖", "🤩" },
 	HAPPY_FLASH_ON = 2,
 	HAPPY_FLASH_OFF = 3,
@@ -154,9 +158,11 @@ local C = {
 	CRAB_FIGHT_SPIN = math.rad(155), -- rad/sec while zapping a coral
 	CRAB_FIGHT_YAW_WOBBLE = math.rad(32),
 	CRAB_FIGHT_PITCH = math.rad(14),
-	TURN_RATE = 14, -- higher = snappier yaw toward path tangent
+	TURN_RATE = 14, -- legacy; fish facing uses PATH_TANG_SMOOTH_RATE
+	-- Smooth path heading so school lateral offsets don't snap at waypoint joins.
+	PATH_TANG_SMOOTH_RATE = 11,
 	-- Soften G1 breaks between independent quadratic segments (lateral offset snaps without this).
-	TANGENT_BLEND_STUDS = 5,
+	TANGENT_BLEND_STUDS = 8,
 }
 
 function C.tangHungerForWave(wave: number): number

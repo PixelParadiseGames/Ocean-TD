@@ -78,6 +78,46 @@ local heartHideToken = 0
 local heartHideUntil = 0
 local reefTickStreak = 0
 local rng = Random.new()
+local happyExitVisible = true
+local activeHappyExits: { Instance } = {}
+
+local function unregisterHappyExit(anchor: Instance)
+	local i = table.find(activeHappyExits, anchor)
+	if i then
+		table.remove(activeHappyExits, i)
+	end
+end
+
+local function registerHappyExit(anchor: Instance)
+	table.insert(activeHappyExits, anchor)
+	anchor.Destroying:Connect(function()
+		unregisterHappyExit(anchor)
+	end)
+end
+
+local function clearActiveHappyExits()
+	for i = #activeHappyExits, 1, -1 do
+		local anchor = activeHappyExits[i]
+		if anchor.Parent then
+			anchor:Destroy()
+		end
+	end
+	table.clear(activeHappyExits)
+end
+
+function WaveEndVfx.setHappyExitVisible(visible: boolean)
+	if happyExitVisible == visible then
+		return
+	end
+	happyExitVisible = visible
+	if not visible then
+		clearActiveHappyExits()
+	end
+end
+
+function WaveEndVfx.areHappyExitVisible(): boolean
+	return happyExitVisible
+end
 
 -- Authored EndPoint sits at W8; plot-size routes end earlier — show a local heart at route end.
 local routeEndPosByPlot: { [string]: Vector3 } = {}
@@ -644,6 +684,9 @@ local function characterAimPos(fallback: Vector3): Vector3
 end
 
 function WaveEndVfx.pulseHappyExit(emoji: string, at: Vector3)
+	if not happyExitVisible then
+		return
+	end
 	playHappyExitSound()
 
 	local folder = resolveFolder()
@@ -665,6 +708,7 @@ function WaveEndVfx.pulseHappyExit(emoji: string, at: Vector3)
 	anchor.Size = Vector3.new(1, 1, 1)
 	anchor.CFrame = CFrame.new(startPos)
 	anchor.Parent = folder
+	registerHappyExit(anchor)
 
 	local bb = Instance.new("BillboardGui")
 	bb.Name = "HappyFace"
@@ -689,6 +733,13 @@ function WaveEndVfx.pulseHappyExit(emoji: string, at: Vector3)
 	local t0 = os.clock()
 	local conn: RBXScriptConnection
 	conn = RunService.RenderStepped:Connect(function()
+		if not happyExitVisible then
+			conn:Disconnect()
+			if anchor.Parent then
+				anchor:Destroy()
+			end
+			return
+		end
 		local u = math.clamp((os.clock() - t0) / HAPPY_EXIT_SEC, 0, 1)
 		local ease = 1 - (1 - u) * (1 - u)
 		local goal = characterAimPos(startPos) + fanSide + fanUp
@@ -714,7 +765,7 @@ end
 
 -- Finish-button burst: tiny sparks that explode outward from the endpoint and arc down.
 function WaveEndVfx.burstHappyFirework(emojis: { string }, at: Vector3)
-	if #emojis == 0 then
+	if #emojis == 0 or not happyExitVisible then
 		return
 	end
 	playHappyExitSound()
@@ -727,6 +778,9 @@ function WaveEndVfx.burstHappyFirework(emojis: { string }, at: Vector3)
 		local emoji = emojis[((i - 1) % #emojis) + 1]
 		local delaySec = rng:NextNumber(0, 0.08)
 		task.delay(delaySec, function()
+			if not happyExitVisible then
+				return
+			end
 			local anchor = Instance.new("Part")
 			anchor.Name = "OceanTD_HappyFirework"
 			anchor.Anchored = true
@@ -738,6 +792,7 @@ function WaveEndVfx.burstHappyFirework(emojis: { string }, at: Vector3)
 			anchor.Size = Vector3.new(0.4, 0.4, 0.4)
 			anchor.CFrame = CFrame.new(origin)
 			anchor.Parent = folder
+			registerHappyExit(anchor)
 
 			local sizeStuds = rng:NextNumber(FIREWORK_SIZE_MIN, FIREWORK_SIZE_MAX)
 			local bb = Instance.new("BillboardGui")
@@ -781,6 +836,13 @@ function WaveEndVfx.burstHappyFirework(emojis: { string }, at: Vector3)
 			local t0 = os.clock()
 			local conn: RBXScriptConnection
 			conn = RunService.RenderStepped:Connect(function(dt)
+				if not happyExitVisible then
+					conn:Disconnect()
+					if anchor.Parent then
+						anchor:Destroy()
+					end
+					return
+				end
 				local age = os.clock() - t0
 				if age >= life then
 					conn:Disconnect()

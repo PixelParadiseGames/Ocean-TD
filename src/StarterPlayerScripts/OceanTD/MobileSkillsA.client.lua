@@ -13,6 +13,7 @@ local GuiService = game:GetService("GuiService")
 local RunService = game:GetService("RunService")
 local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
+local Workspace = game:GetService("Workspace")
 
 local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
@@ -22,6 +23,8 @@ local SkillPowerUpUI = require(script.Parent:WaitForChild("SkillPowerUpUI"))
 local InventoryState = require(script.Parent:WaitForChild("InventoryState"))
 
 local oceanRoot = game:GetService("ReplicatedStorage"):WaitForChild("OceanTD")
+local LeftHudLayout = require(oceanRoot:WaitForChild("Shared"):WaitForChild("LeftHudLayout"))
+local UiPopupScale = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiPopupScale"))
 local UiViewportTags = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiViewportTags"))
 
 local CLOSE_NAMES = {
@@ -48,6 +51,35 @@ local cachedControls: any = nil
 local hiddenHudGuis: { { gui: GuiObject, wasVisible: boolean, scale: UIScale?, wasScale: number? } } = {}
 
 local SKILLS_OPEN_ATTR = "OceanTD_SkillsBubblesOpen"
+local skillsScaleConn: RBXScriptConnection? = nil
+
+local function applySkillsViewportScale(panel: Instance)
+	local sg: ScreenGui? = if panel:IsA("ScreenGui") then panel else panel:FindFirstAncestorOfClass("ScreenGui")
+	if not sg then
+		return
+	end
+	for _, ch in sg:GetChildren() do
+		if ch:IsA("GuiObject") and ch.Name ~= "_OceanTD_BubbleLayer" then
+			UiPopupScale.attachHud(ch)
+		end
+	end
+end
+
+local function bindSkillsViewportScale(panel: Instance)
+	if skillsScaleConn then
+		skillsScaleConn:Disconnect()
+		skillsScaleConn = nil
+	end
+	local cam = Workspace.CurrentCamera
+	if not cam then
+		applySkillsViewportScale(panel)
+		return
+	end
+	skillsScaleConn = cam:GetPropertyChangedSignal("ViewportSize"):Connect(function()
+		applySkillsViewportScale(panel)
+	end)
+	applySkillsViewportScale(panel)
+end
 
 local function ancestorScreenGui(inst: Instance): ScreenGui?
 	if inst:IsA("ScreenGui") then
@@ -257,13 +289,13 @@ local function hideLeftUiExceptSkillsClose()
 	if dPad then
 		for _, ch in ipairs(dPad:GetChildren()) do
 			-- dPadIcon is owned by FreeCam via OceanTD_SkillsBubblesOpen attribute.
-			if ch:IsA("GuiObject") and ch.Name ~= "Skills" and ch.Name ~= "dPadIcon" and ch.Name ~= "$DCount" then
+			if ch:IsA("GuiObject") and ch.Name ~= "Skills" and ch.Name ~= "dPadIcon" and not LeftHudLayout.isSandDollarChrome(ch) then
 				rememberHide(ch)
 			end
 		end
 	end
 	for _, ch in ipairs(left:GetChildren()) do
-		if ch:IsA("GuiObject") and ch.Name ~= "dPad" then
+		if ch:IsA("GuiObject") and ch.Name ~= "dPad" and not LeftHudLayout.isSandDollarChrome(ch) then
 			rememberHide(ch)
 		end
 	end
@@ -319,10 +351,12 @@ local function setSkillsOpenHud(hide: boolean)
 		if already and #hiddenHudGuis > 0 then
 			return
 		end
+		-- Flag first so FreeCam cancels pending carousel collapse before we hide dPad icons.
+		-- FreeCam must not set FreeCam/FishCam/OffCam.Visible here (rememberHide needs wasVisible).
+		playerGui:SetAttribute(SKILLS_OPEN_ATTR, true)
 		restoreHiddenHud()
 		hideLeftUiExceptSkillsClose()
 		hideBackpackAndWaveUi()
-		playerGui:SetAttribute(SKILLS_OPEN_ATTR, true)
 	else
 		-- Always restore — never early-out; cinematic / ForceClose can desync the flag.
 		restoreHiddenHud()
@@ -417,6 +451,7 @@ task.spawn(function()
 		warn("[Skills] PlayerGui.MobileSkillsA missing")
 		return
 	end
+	bindSkillsViewportScale(panel)
 
 	SkillPowerUpUI.bind(panel)
 	SkillsBubbleSim.setOnBubbleActivated(function(buttonName: string)
@@ -602,6 +637,7 @@ task.spawn(function()
 			if skillsBtn then
 				skillsBtn.Visible = true
 			end
+			applySkillsViewportScale(panel)
 			ensureCloseChrome()
 			SkillsBubbleSim.preHide(panel)
 			if panel:IsA("ScreenGui") then

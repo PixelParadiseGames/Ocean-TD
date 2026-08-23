@@ -260,9 +260,9 @@ function WaveCrab.buildLocal(): PathData?
 	end)
 end
 
-function WaveCrab.buildOn(targetPlotId: string, targetCf: CFrame, targetSize: Vector3): PathData?
+function WaveCrab.buildOn(targetPlotId: string, targetCf: CFrame, targetSize: Vector3, targetRingCf: CFrame?): PathData?
 	return buildFromRemap(function(part: BasePart): Vector3
-		return ClientPlot.remapFromPlot1To(part.Position, targetPlotId, targetCf, targetSize)
+		return ClientPlot.remapFromPlot1To(part.Position, targetPlotId, targetCf, targetSize, targetRingCf)
 	end)
 end
 

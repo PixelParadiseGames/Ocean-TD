@@ -67,6 +67,7 @@ local hudWaveBar: Frame? = nil
 local hudWaveFill: Frame? = nil
 local hudWaveLabel: TextLabel? = nil
 local hudWaveHit: TextButton? = nil
+local hudCritterBarsEye: TextButton? = nil
 local hudWaveStroke: UIStroke? = nil
 local hudBarFork: TextLabel? = nil
 local hudBarHeart: TextLabel? = nil
@@ -121,6 +122,7 @@ local SUMMARY_SCALE_OUT = TweenInfo.new(0.22, Enum.EasingStyle.Quad, Enum.Easing
 
 local summaryGui: ScreenGui? = nil
 local summaryOpen = false
+local summaryPausedForSkills = false
 local finishBtn: TextButton? = nil
 local continueBtn: TextButton? = nil
 local prevGuiSelected: GuiObject? = nil
@@ -133,6 +135,8 @@ local summaryStrokeConn: RBXScriptConnection? = nil
 local summaryScaleToken = 0
 local SUMMARY_CORNER = 32
 local SUMMARY_STROKE_THICKNESS = 3.5
+-- Pull stroke inward so top/bottom aren't clipped by safe-area / scale.
+local SUMMARY_STROKE_INSET = SUMMARY_STROKE_THICKNESS
 local SUMMARY_PANEL_W = 540
 local SUMMARY_PANEL_H = 380
 -- Full rainbow once every ~12s.
@@ -510,6 +514,14 @@ local function refreshRightForkEmoji()
 	hudBarHeart.Visible = not feedCompleteUi
 	hudBarHeart.Text = "🍴"
 	hudBarHeart.TextSize = LABEL_TEXT_SIZE
+end
+
+local function refreshCritterBarsEye()
+	if not hudCritterBarsEye then
+		return
+	end
+	local on = WaveSim.areCritterHungerBarsVisible()
+	hudCritterBarsEye.BackgroundColor3 = if on then HELP_GREEN else HELP_RED
 end
 
 local function playFinishFirework(emojis: { string })
@@ -1252,7 +1264,7 @@ local function ensureHud()
 	local timeLabel = Instance.new("TextLabel")
 	timeLabel.Name = "Time"
 	timeLabel.BackgroundTransparency = 1
-	timeLabel.Size = UDim2.new(0.38, -4, 0, LINE_H)
+	timeLabel.Size = UDim2.new(0.34, -4, 0, LINE_H)
 	timeLabel.Position = UDim2.new(1, 0, 0, waveY + BAR_H + 4)
 	timeLabel.AnchorPoint = Vector2.new(1, 0)
 	timeLabel.Font = UiTheme.Font
@@ -1267,10 +1279,39 @@ local function ensureHud()
 	timeLabel.Parent = f
 	hudTime = timeLabel
 
+	local eyeBtn = Instance.new("TextButton")
+	eyeBtn.Name = "CritterBarsEye"
+	eyeBtn.BackgroundTransparency = 0
+	eyeBtn.BackgroundColor3 = HELP_GREEN
+	eyeBtn.BorderSizePixel = 0
+	eyeBtn.AutoButtonColor = false
+	eyeBtn.Text = "👁️"
+	eyeBtn.Size = UDim2.fromOffset(LINE_H, LINE_H)
+	eyeBtn.Position = UDim2.new(0.62, 0, 0, waveY + BAR_H + 4)
+	eyeBtn.Font = UiTheme.Font
+	eyeBtn.TextSize = 15
+	eyeBtn.TextColor3 = Color3.new(1, 1, 1)
+	eyeBtn.TextStrokeTransparency = 0.35
+	eyeBtn.TextStrokeColor3 = Color3.new(0, 0, 0)
+	eyeBtn.ZIndex = 27
+	eyeBtn.Visible = false
+	eyeBtn.Active = false
+	eyeBtn.Parent = f
+	UiCircles.ensure(eyeBtn)
+	eyeBtn.Activated:Connect(function()
+		if not WaveSim.isRunning() then
+			return
+		end
+		WaveSim.toggleCritterHungerBarsVisible()
+		UiHaptics.pulseShort()
+		refreshCritterBarsEye()
+	end)
+	hudCritterBarsEye = eyeBtn
+
 	local fishNeed = Instance.new("TextLabel")
 	fishNeed.Name = "FishNeed"
 	fishNeed.BackgroundTransparency = 1
-	fishNeed.Size = UDim2.new(0.62, -4, 0, LINE_H)
+	fishNeed.Size = UDim2.new(0.58, -4, 0, LINE_H)
 	fishNeed.Position = UDim2.fromOffset(0, waveY + BAR_H + 4)
 	fishNeed.Font = UiTheme.Font
 	fishNeed.TextSize = 15
@@ -1392,6 +1433,10 @@ local function setHudVisible(on: boolean)
 			hudWaveHit.Visible = false
 			hudWaveHit.Active = false
 		end
+		if hudCritterBarsEye then
+			hudCritterBarsEye.Visible = false
+			hudCritterBarsEye.Active = false
+		end
 	end
 end
 
@@ -1503,6 +1548,11 @@ local function updateHud(snap: WaveSim.HudSnapshot)
 		end
 		hudFishNeed.Text = line
 	end
+	if hudCritterBarsEye then
+		hudCritterBarsEye.Visible = snap.running
+		hudCritterBarsEye.Active = snap.running
+		refreshCritterBarsEye()
+	end
 end
 
 local function stopConfetti()
@@ -1591,6 +1641,14 @@ local function playConfetti(parent: Frame)
 			end
 		end
 	end)
+end
+
+local function styleSummaryEdge(edge: UIStroke)
+	edge.Name = "SummaryEdge"
+	edge.Thickness = SUMMARY_STROKE_THICKNESS
+	edge.BorderOffset = UDim.new(0, SUMMARY_STROKE_INSET)
+	edge.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+	edge.LineJoinMode = Enum.LineJoinMode.Round
 end
 
 local function stopSummaryStrokeCycle()
@@ -1694,10 +1752,11 @@ local function reefBarScreenCenter(): Vector2?
 end
 
 local function hideSummary()
-	if not summaryOpen and not (summaryGui and summaryGui.Enabled) then
+	if not summaryOpen and not (summaryGui and summaryGui.Enabled) and not summaryPausedForSkills then
 		return
 	end
 	summaryOpen = false
+	summaryPausedForSkills = false
 	stopConfetti()
 	stopSummaryStrokeCycle()
 	endSummaryGamepadNav()
@@ -1715,7 +1774,7 @@ local function hideSummary()
 	if dim and dim:IsA("GuiObject") then
 		dim.Visible = false
 	end
-	if panel and panel:IsA("Frame") and panel.Visible then
+	if panel and panel:IsA("Frame") and panel.Visible and g and g.Enabled then
 		local cam = Workspace.CurrentCamera
 		local vp = if cam then cam.ViewportSize else Vector2.new(1920, 1080)
 		local origin = reefBarScreenCenter()
@@ -1739,7 +1798,75 @@ local function hideSummary()
 		end)
 	elseif g then
 		g.Enabled = false
+		if panel and panel:IsA("Frame") then
+			panel.Visible = false
+		end
 	end
+end
+
+local function pauseSummaryForSkills()
+	if not summaryOpen or summaryPausedForSkills then
+		return
+	end
+	summaryPausedForSkills = true
+	endSummaryGamepadNav()
+	stopConfetti()
+	stopSummaryStrokeCycle()
+	local g = summaryGui
+	if g then
+		g.Enabled = false
+	end
+end
+
+local function resumeSummaryAfterSkills()
+	if not summaryPausedForSkills then
+		return
+	end
+	summaryPausedForSkills = false
+	if not summaryOpen then
+		return
+	end
+	local g = summaryGui
+	if not g then
+		return
+	end
+	g.Enabled = true
+	local dim = g:FindFirstChild("Dim")
+	if dim and dim:IsA("GuiObject") then
+		dim.Visible = true
+	end
+	local panel = g:FindFirstChild("Panel")
+	if panel and panel:IsA("Frame") then
+		panel.ClipsDescendants = false
+		panel.Visible = true
+		panel.Position = UDim2.fromScale(0.5, 0.5)
+		panel.Size = UDim2.fromOffset(SUMMARY_PANEL_W, SUMMARY_PANEL_H)
+		local edge = panel:FindFirstChild("SummaryEdge")
+		if edge and edge:IsA("UIStroke") then
+			styleSummaryEdge(edge)
+			summaryStroke = edge
+		end
+		startSummaryStrokeCycle()
+	end
+	if isUsingGamepad() and continueBtn and finishBtn then
+		prevGuiSelected = GuiService.SelectedObject
+		beginSummaryGamepadNav()
+	end
+end
+
+local function openReefHealthFromSummary()
+	if not summaryOpen or summaryPausedForSkills then
+		return
+	end
+	local pg = deps.playerGui
+	if not pg then
+		return
+	end
+	UiHaptics.pulseShort()
+	pauseSummaryForSkills()
+	pg:SetAttribute("OceanTD_ForceOpenSkillId", "RHealth")
+	pg:SetAttribute("OceanTD_ForceOpenSkills", os.clock())
+	deps.log("Summary — opened Skills / Reef Health")
 end
 
 function WaveSlot.dismissSummary()
@@ -1779,7 +1906,12 @@ function WaveSlot.handleSummaryPrimaryConfirm(): boolean
 end
 
 local function ensureSummaryPanelContent(panel: Frame)
-	local c, f, titleStroke = WaveSummaryUi.ensurePanelContent(panel, continueFromSummary, hideSummary)
+	local c, f, titleStroke = WaveSummaryUi.ensurePanelContent(
+		panel,
+		continueFromSummary,
+		hideSummary,
+		openReefHealthFromSummary
+	)
 	continueBtn = c
 	finishBtn = f
 	summaryTitleStroke = titleStroke
@@ -1799,6 +1931,7 @@ local function showSummary(summary: WaveSim.Summary)
 		g.Name = "OceanTD_WaveSummary"
 		g.ResetOnSpawn = false
 		g.IgnoreGuiInset = true
+		g.ClipToDeviceSafeArea = false
 		g.DisplayOrder = 13000
 		g.Parent = deps.playerGui
 		summaryGui = g
@@ -1819,6 +1952,7 @@ local function showSummary(summary: WaveSim.Summary)
 		panel.Size = UDim2.fromOffset(SUMMARY_PANEL_W, SUMMARY_PANEL_H)
 		panel.BackgroundColor3 = Color3.fromRGB(16, 26, 38)
 		panel.BorderSizePixel = 0
+		panel.ClipsDescendants = false
 		panel.ZIndex = 2
 		panel.Parent = g
 		UiPopupScale.attach(panel)
@@ -1826,9 +1960,7 @@ local function showSummary(summary: WaveSim.Summary)
 		pc.CornerRadius = UDim.new(0, SUMMARY_CORNER)
 		pc.Parent = panel
 		local edge = Instance.new("UIStroke")
-		edge.Name = "SummaryEdge"
-		edge.Thickness = SUMMARY_STROKE_THICKNESS
-		edge.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+		styleSummaryEdge(edge)
 		edge.Color = Color3.fromHSV(0, 1, 1)
 		edge.Parent = panel
 		summaryStroke = edge
@@ -1838,12 +1970,14 @@ local function showSummary(summary: WaveSim.Summary)
 
 	local g = summaryGui :: ScreenGui
 	g.Enabled = true
+	g.ClipToDeviceSafeArea = false
 	local dim = g:FindFirstChild("Dim")
 	if dim and dim:IsA("GuiObject") then
 		dim.Visible = true
 	end
 	local panel = g:FindFirstChild("Panel")
 	if panel and panel:IsA("Frame") then
+		panel.ClipsDescendants = false
 		UiPopupScale.attach(panel)
 		local corner = panel:FindFirstChildOfClass("UICorner")
 		if corner then
@@ -1851,19 +1985,17 @@ local function showSummary(summary: WaveSim.Summary)
 		end
 		local edge = panel:FindFirstChild("SummaryEdge")
 		if edge and edge:IsA("UIStroke") then
+			styleSummaryEdge(edge)
 			summaryStroke = edge
-			edge.Thickness = SUMMARY_STROKE_THICKNESS
 		elseif not summaryStroke then
 			local stroke = Instance.new("UIStroke")
-			stroke.Name = "SummaryEdge"
-			stroke.Thickness = SUMMARY_STROKE_THICKNESS
-			stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+			styleSummaryEdge(stroke)
 			stroke.Color = Color3.fromHSV(0, 1, 1)
 			stroke.Parent = panel
 			summaryStroke = stroke
 		end
 		ensureSummaryPanelContent(panel)
-		WaveSummaryUi.fillStats(panel, summary, records)
+		WaveSummaryUi.fillStats(panel, summary, records, openReefHealthFromSummary)
 		panel.Visible = true
 		summaryScaleToken += 1
 		local cam = Workspace.CurrentCamera
@@ -2310,6 +2442,7 @@ function WaveSlot.mount(d: Deps)
 			if WaveSim.isRunning() then
 				setHudVisible(true)
 			end
+			resumeSummaryAfterSkills()
 		end
 	end)
 

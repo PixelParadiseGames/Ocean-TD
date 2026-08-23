@@ -64,6 +64,7 @@ type GhostFish = {
 	fill: Frame?,
 	forkLabel: TextLabel?,
 	happyLabel: TextLabel?,
+	remainLabel: TextLabel?,
 	barStroke: UIStroke?,
 	smoothTang: Vector3,
 	lastWorld: Vector3,
@@ -196,6 +197,34 @@ local function quadBezierTangent(w0: Vector3, c: Vector3, w1: Vector3, t: number
 	return d
 end
 
+local function blendUnitTangents(a: Vector3, b: Vector3, u: number): Vector3
+	local t = math.clamp(u, 0, 1)
+	t = t * t * (3 - 2 * t)
+	if a:Dot(b) < -0.92 then
+		return if t < 0.5 then a else b
+	end
+	local v = a:Lerp(b, t)
+	if v.Magnitude < 1e-5 then
+		return if t < 0.5 then a else b
+	end
+	return v.Unit
+end
+
+local function stepSwimTang(agent: GhostFish, tang: Vector3, dt: number): Vector3
+	local goal = if tang.Magnitude > 1e-5 then tang.Unit else agent.smoothTang
+	if goal.Magnitude < 1e-5 then
+		goal = Vector3.new(0, 0, -1)
+	end
+	local prev = agent.smoothTang
+	if prev.Magnitude < 1e-5 then
+		agent.smoothTang = goal
+		return goal
+	end
+	local alpha = 1 - math.exp(-C.PATH_TANG_SMOOTH_RATE * math.max(dt, 1e-4))
+	agent.smoothTang = blendUnitTangents(prev, goal, alpha)
+	return agent.smoothTang
+end
+
 local function estimateSegLength(w0: Vector3, c: Vector3, w1: Vector3): number
 	local len = 0
 	local prev = w0
@@ -207,7 +236,13 @@ local function estimateSegLength(w0: Vector3, c: Vector3, w1: Vector3): number
 	return math.max(len, 0.01)
 end
 
-local function buildPath(targetCf: CFrame, targetPlotId: string, targetSize: Vector3, plotSizeStage: number?): PathData?
+local function buildPath(
+	targetCf: CFrame,
+	targetPlotId: string,
+	targetSize: Vector3,
+	plotSizeStage: number?,
+	targetRingCf: CFrame?
+): PathData?
 	local plot1 = ClientPlot.getPlot1CFrame()
 	if not plot1 then
 		return nil
@@ -245,7 +280,7 @@ local function buildPath(targetCf: CFrame, targetPlotId: string, targetSize: Vec
 	end
 	-- Rigid remap only — keep authored height (no terrain floor snap).
 	local function wpPos(part: BasePart): Vector3
-		return ClientPlot.remapFromPlot1To(part.Position, targetPlotId, targetCf, targetSize)
+		return ClientPlot.remapFromPlot1To(part.Position, targetPlotId, targetCf, targetSize, targetRingCf)
 	end
 	local segments: { PathSeg } = {}
 	local total = 0
@@ -406,29 +441,9 @@ local function fishWorldOffset(agent: GhostFish, pos: Vector3, tang: Vector3): V
 	return pos + right * (agent.lateral + wander) + Vector3.new(0, agent.vert + bob, 0)
 end
 
-local function setFishCFrame(agent: GhostFish, world: Vector3, pathTang: Vector3, dt: number)
-	local move = world - agent.lastWorld
-	if move.Magnitude < 0.02 then
-		move = pathTang
-	end
-	if move.Magnitude < 1e-5 then
-		move = agent.smoothTang
-	end
-	if move.Magnitude < 1e-5 then
-		move = Vector3.new(0, 0, -1)
-	else
-		move = move.Unit
-	end
+local function setFishCFrame(agent: GhostFish, world: Vector3, swimTang: Vector3, dt: number)
 	agent.lastWorld = world
-	local prev = agent.smoothTang
-	if prev.Magnitude > 1e-5 then
-		local alpha = 1 - math.exp(-C.TURN_RATE * math.max(dt, 1e-4))
-		local blended = prev:Lerp(move, alpha)
-		if blended.Magnitude > 1e-5 then
-			move = blended.Unit
-		end
-	end
-	agent.smoothTang = move
+	local move = if swimTang.Magnitude > 1e-5 then swimTang.Unit else Vector3.new(0, 0, -1)
 	local desired = if agent.isCrab
 		then WaveCrab.facingCFrame(world, move)
 		else CFrame.lookAt(world, world + move, Vector3.yAxis) * CFrame.Angles(C.TANG_PITCH, C.TANG_YAW, C.TANG_ROLL)
@@ -1054,20 +1069,21 @@ local function tick(dt: number)
 				WaveEntityPool.releaseFish(WaveEntityPool.FISH_CRAB, agent.model)
 			else
 				local pos, tang = WaveCrab.sample(ground, agent.dist)
+				local swimTang = stepSwimTang(agent, tang, simDt)
 				pos = WaveCrab.worldOnGround(pos, agent.lastWorld.Y, simDt)
 				if paused then
 					WaveCrab.applyFightPose(
 						agent.root,
 						agent.crabAnim,
 						pos,
-						tang,
+						swimTang,
 						simDt,
 						WaveCrab.pauseElapsed(agent.pauseUntil, agent.pauseDur),
 						agent.id,
 						agent.pauseDur
 					)
 				else
-					setFishCFrame(agent, pos, tang, simDt)
+					setFishCFrame(agent, pos, swimTang, simDt)
 				end
 				if agent.hunger < agent.maxHunger and not paused then
 					local shell = agent.shellHitbox
@@ -1117,7 +1133,8 @@ local function tick(dt: number)
 			WaveEntityPool.releaseFish(WaveEntityPool.FISH_TANG, agent.model)
 		else
 			local pos, tang = samplePath(path, agent.dist)
-			setFishCFrame(agent, fishWorldOffset(agent, pos, tang), tang, simDt)
+			local swimTang = stepSwimTang(agent, tang, simDt)
+			setFishCFrame(agent, fishWorldOffset(agent, pos, swimTang), swimTang, simDt)
 		end
 	end
 end
@@ -1220,7 +1237,7 @@ function WaveGhostSim.markCoralDirty()
 	coralDirty = true
 end
 
-function WaveGhostSim.apply(snap: WaveWatchMode.WatchSnap, plotCf: CFrame, kind: string?, plotSize: Vector3?)
+function WaveGhostSim.apply(snap: WaveWatchMode.WatchSnap, plotCf: CFrame, kind: string?, plotSize: Vector3?, plotRingCf: CFrame?)
 	if not snap.running then
 		WaveGhostSim.stop(true)
 		return
@@ -1231,8 +1248,9 @@ function WaveGhostSim.apply(snap: WaveWatchMode.WatchSnap, plotCf: CFrame, kind:
 	if pathData == nil or plotChanged then
 		hardClear()
 		local size = plotSize or Vector3.new(64, 32, 64)
-		pathData = buildPath(plotCf, snap.plotId, size, snap.plotSizeStage)
-		pathDataGround = WaveCrab.buildOn(snap.plotId, plotCf, size)
+		local ringCf = plotRingCf or plotCf
+		pathData = buildPath(plotCf, snap.plotId, size, snap.plotSizeStage, ringCf)
+		pathDataGround = WaveCrab.buildOn(snap.plotId, plotCf, size, ringCf)
 		if not pathData then
 			return
 		end

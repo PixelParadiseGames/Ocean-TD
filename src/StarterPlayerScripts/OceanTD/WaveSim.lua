@@ -67,7 +67,7 @@ export type HudSnapshot = {
 	running: boolean,
 	feedProgress: number, -- 0..1 hunger filled this wave
 	feedComplete: boolean, -- all wave fish fully fed; early finish available
-	hungerDanger: boolean, -- any fish hunger bar flashing red (final path)
+	hungerDanger: boolean, -- any hungry fish bar flashing red near route end
 	hungryMissToken: number, -- bumps when a hungry fish reaches the end (broken heart)
 	fishFull: number, -- fully-fed fish this wave (alive + finished happy)
 	fishTotal: number, -- fish expected this wave
@@ -115,6 +115,7 @@ type FishAgent = {
 	barFrame: Frame,
 	forkLabel: TextLabel,
 	happyLabel: TextLabel,
+	remainLabel: TextLabel,
 	barScale: UIScale,
 	barStroke: UIStroke?,
 	pulseToken: number,
@@ -189,6 +190,7 @@ local folder: Folder? = nil
 local pathData: PathData? = nil
 local pathDataGround: WaveCrab.PathData? = nil
 local fishList: { FishAgent } = {}
+local critterHungerBarsVisible = true
 local coralList: { CoralAgent } = {}
 local fishPathBuckets: { { FishAgent } } = {}
 local activeShots: { FoodShot } = {}
@@ -496,6 +498,22 @@ local function blendUnitTangents(a: Vector3, b: Vector3, u: number): Vector3
 	return v.Unit
 end
 
+-- One smoothed heading per fish: drives lateral offset frame and facing (no world-step clamp).
+local function stepSwimTang(agent: FishAgent, tang: Vector3, dt: number): Vector3
+	local goal = if tang.Magnitude > 1e-5 then tang.Unit else agent.smoothTang
+	if goal.Magnitude < 1e-5 then
+		goal = Vector3.new(0, 0, -1)
+	end
+	local prev = agent.smoothTang
+	if prev.Magnitude < 1e-5 then
+		agent.smoothTang = goal
+		return goal
+	end
+	local alpha = 1 - math.exp(-C.PATH_TANG_SMOOTH_RATE * math.max(dt, 1e-4))
+	agent.smoothTang = blendUnitTangents(prev, goal, alpha)
+	return agent.smoothTang
+end
+
 local function findIndexedPart(folder: Instance, prefix: string, index: number): BasePart?
 	local name = prefix .. tostring(index)
 	local inst = folder:FindFirstChild(name)
@@ -662,6 +680,11 @@ local function samplePath(path: PathData, dist: number): (Vector3, Vector3)
 	local pos = quadBezier(seg.w0, seg.c, seg.w1, t)
 	local tang = quadBezierTangent(seg.w0, seg.c, seg.w1, t)
 
+	local fromStart = d - seg.cumStart
+	if fromStart < C.TANGENT_BLEND_STUDS and lo > 1 then
+		local blend = 1 - math.clamp(fromStart / C.TANGENT_BLEND_STUDS, 0, 1)
+		tang = blendUnitTangents(segs[lo - 1].outTang, tang, blend)
+	end
 	-- Independent W/C quads are only G0 at waypoints — blend heading into the next
 	-- segment so lateral school offsets don't snap when the tangent jumps.
 	local toEnd = seg.cumStart + seg.length - d
@@ -672,34 +695,8 @@ local function samplePath(path: PathData, dist: number): (Vector3, Vector3)
 	return pos, tang
 end
 
--- 1-based segment index along the route (W_i → W_{i+1}).
-local function pathSegmentIndex(path: PathData, dist: number): number
-	local d = math.clamp(dist, 0, path.totalLen)
-	local segs = path.segments
-	if #segs == 0 then
-		return 1
-	end
-	local lo = 1
-	local hi = #segs
-	while lo < hi do
-		local mid = (lo + hi) // 2
-		local s = segs[mid]
-		if d > s.cumStart + s.length then
-			lo = mid + 1
-		else
-			hi = mid
-		end
-	end
-	return lo
-end
-
--- Final two waypoints ≈ last two curve segments.
-local function isOnFinalTwoWaypoints(path: PathData, dist: number): boolean
-	local n = #path.segments
-	if n <= 0 then
-		return false
-	end
-	return pathSegmentIndex(path, dist) >= math.max(1, n - 1)
+local function isNearPathEnd(totalLen: number, dist: number): boolean
+	return totalLen - dist <= C.DANGER_NEAR_END_STUDS
 end
 
 local function getGreenArrowsTemplate(): Instance?
@@ -888,31 +885,9 @@ local function tickArrowPreview(dt: number)
 	end
 end
 
-local function setFishCFrame(agent: FishAgent, pos: Vector3, pathTang: Vector3, dt: number)
-	-- Prefer actual swim velocity (path + wander) so the mouth leads the motion.
-	local move = pos - agent.lastWorld
-	if move.Magnitude < 0.02 then
-		move = pathTang
-	end
-	if move.Magnitude < 1e-5 then
-		move = agent.smoothTang
-	end
-	if move.Magnitude < 1e-5 then
-		move = Vector3.new(0, 0, -1)
-	else
-		move = move.Unit
-	end
+local function setFishCFrame(agent: FishAgent, pos: Vector3, swimTang: Vector3, dt: number)
 	agent.lastWorld = pos
-
-	local prev = agent.smoothTang
-	if prev.Magnitude > 1e-5 then
-		local alpha = 1 - math.exp(-C.TURN_RATE * math.max(dt, 1e-4))
-		local blended = prev:Lerp(move, alpha)
-		if blended.Magnitude > 1e-5 then
-			move = blended.Unit
-		end
-	end
-	agent.smoothTang = move
+	local move = if swimTang.Magnitude > 1e-5 then swimTang.Unit else Vector3.new(0, 0, -1)
 
 	-- Same as GreenArrows: look along swim dir, then fixed authored yaw/pitch/roll.
 	local desired = if agent.isCrab
@@ -945,11 +920,14 @@ local function setFishCFrame(agent: FishAgent, pos: Vector3, pathTang: Vector3, 
 	end
 end
 
-local function makeHungerBillboard(adornee: BasePart, hungryGlyphs: string?): (BillboardGui, Frame, Frame, TextLabel, TextLabel, UIScale)
+local function makeHungerBillboard(adornee: BasePart, hungryGlyphs: string?): (BillboardGui, Frame, Frame, TextLabel, TextLabel, TextLabel, UIScale)
 	local glyphs = hungryGlyphs or "🍴"
 	local glyphN = utf8.len(glyphs) or 1
 	local emojiW = C.HUNGER_EMOJI_SIZE * glyphN
-	local totalW = emojiW + C.HUNGER_BAR_GAP + C.HUNGER_BAR_PX_W
+	local remainW = C.HUNGER_REMAIN_W
+	local remainGap = C.HUNGER_REMAIN_GAP
+	-- [fork] [N] [bar]
+	local totalW = emojiW + remainGap + remainW + C.HUNGER_BAR_GAP + C.HUNGER_BAR_PX_W
 	local bb = Instance.new("BillboardGui")
 	bb.Name = "HungerBar"
 	bb.Size = UDim2.fromOffset(totalW, C.HUNGER_BAR_PX_H)
@@ -959,7 +937,6 @@ local function makeHungerBillboard(adornee: BasePart, hungryGlyphs: string?): (B
 	bb.Adornee = adornee
 	bb.Parent = adornee
 
-	-- Bar on the right; emoji sits outside in front (left), 3x bar height.
 	local barHost = Instance.new("Frame")
 	barHost.Name = "BarHost"
 	barHost.BackgroundTransparency = 1
@@ -1029,7 +1006,28 @@ local function makeHungerBillboard(adornee: BasePart, hungryGlyphs: string?): (B
 	happy.ZIndex = 5
 	happy.Parent = bb
 
-	return bb, fill, barHost, fork, happy, scale
+	local remain = Instance.new("TextLabel")
+	remain.Name = "Remain"
+	remain.BackgroundTransparency = 1
+	remain.AnchorPoint = Vector2.new(0, 0.5)
+	remain.Position = UDim2.new(0, emojiW + remainGap, 0.5, 0)
+	remain.Size = UDim2.fromOffset(remainW, C.HUNGER_REMAIN_TEXT_SIZE + 2)
+	remain.Font = Enum.Font.FredokaOne
+	remain.Text = ""
+	remain.TextColor3 = Color3.new(1, 1, 1)
+	remain.TextSize = C.HUNGER_REMAIN_TEXT_SIZE
+	remain.TextScaled = false
+	remain.TextXAlignment = Enum.TextXAlignment.Center
+	remain.TextYAlignment = Enum.TextYAlignment.Center
+	remain.ZIndex = 6
+	remain.Parent = bb
+	local remainStroke = Instance.new("UIStroke")
+	remainStroke.Color = Color3.fromRGB(48, 48, 48)
+	remainStroke.Thickness = 1.35
+	remainStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Contextual
+	remainStroke.Parent = remain
+
+	return bb, fill, barHost, fork, happy, remain, scale
 end
 
 local function setDangerFlash(agent: FishAgent, enable: boolean)
@@ -1107,10 +1105,23 @@ end
 local function updateHungerVisual(agent: FishAgent)
 	local u = agent.hunger / agent.maxHunger
 	agent.fill.Size = UDim2.fromScale(math.clamp(u, 0, 1), 1)
+	local left = math.max(0, math.ceil(agent.maxHunger - agent.hunger))
+	if agent.remainLabel then
+		if left > 0 then
+			agent.remainLabel.Text = tostring(left)
+			agent.remainLabel.Visible = true
+		else
+			agent.remainLabel.Text = ""
+			agent.remainLabel.Visible = false
+		end
+	end
 	if agent.hunger >= agent.maxHunger then
 		markFishFullyFed(agent)
 		agent.barFrame.Visible = false
 		agent.forkLabel.Visible = false
+		if agent.remainLabel then
+			agent.remainLabel.Visible = false
+		end
 		setDangerFlash(agent, false)
 		startHappyFlash(agent)
 	else
@@ -1123,6 +1134,15 @@ local function updateHungerVisual(agent: FishAgent)
 		end
 	end
 	notifyHud()
+end
+
+local function applyCritterHungerBarsVisible()
+	for _, agent in ipairs(fishList) do
+		if agent.billboard then
+			agent.billboard.Enabled = critterHungerBarsVisible
+		end
+	end
+	WaveEndVfx.setHappyExitVisible(critterHungerBarsVisible)
 end
 
 local function applySizeStats(coral: CoralAgent)
@@ -1545,6 +1565,7 @@ local function spawnOneFish(spawnIndex: number)
 		barFrame = nil :: any,
 		forkLabel = nil :: any,
 		happyLabel = nil :: any,
+		remainLabel = nil :: any,
 		barScale = nil :: any,
 		barStroke = nil :: any,
 		pulseToken = 0,
@@ -1564,12 +1585,13 @@ local function spawnOneFish(spawnIndex: number)
 	nextFishId += 1
 	waveFishSpawned += 1
 	notifyHud()
-	local bb, fill, barFrame, forkLabel, happyLabel, barScale = makeHungerBillboard(root)
+	local bb, fill, barFrame, forkLabel, happyLabel, remainLabel, barScale = makeHungerBillboard(root)
 	agent.billboard = bb
 	agent.fill = fill
 	agent.barFrame = barFrame
 	agent.forkLabel = forkLabel
 	agent.happyLabel = happyLabel
+	agent.remainLabel = remainLabel
 	agent.barScale = barScale
 	local bg = barFrame:FindFirstChild("Bg")
 	if bg then
@@ -1578,6 +1600,10 @@ local function spawnOneFish(spawnIndex: number)
 			agent.barStroke = stroke
 		end
 	end
+	if bb then
+		bb.Enabled = critterHungerBarsVisible
+	end
+	updateHungerVisual(agent)
 	local world0 = fishWorldOffset(agent, pos, tang)
 	agent.lastWorld = world0
 	setFishCFrame(agent, world0, tang, 1)
@@ -1636,6 +1662,7 @@ local function spawnOneCrab(startDist: number?)
 		barFrame = nil :: any,
 		forkLabel = nil :: any,
 		happyLabel = nil :: any,
+		remainLabel = nil :: any,
 		barScale = nil :: any,
 		barStroke = nil :: any,
 		pulseToken = 0,
@@ -1656,12 +1683,13 @@ local function spawnOneCrab(startDist: number?)
 	nextFishId += 1
 	WaveCrab.markSpawned()
 	notifyHud()
-	local bb, fill, barFrame, forkLabel, happyLabel, barScale = makeHungerBillboard(root, "⚡🍴")
+	local bb, fill, barFrame, forkLabel, happyLabel, remainLabel, barScale = makeHungerBillboard(root, "⚡🍴")
 	agent.billboard = bb
 	agent.fill = fill
 	agent.barFrame = barFrame
 	agent.forkLabel = forkLabel
 	agent.happyLabel = happyLabel
+	agent.remainLabel = remainLabel
 	agent.barScale = barScale
 	local bg = barFrame:FindFirstChild("Bg")
 	if bg then
@@ -1670,6 +1698,10 @@ local function spawnOneCrab(startDist: number?)
 			agent.barStroke = stroke
 		end
 	end
+	if bb then
+		bb.Enabled = critterHungerBarsVisible
+	end
+	updateHungerVisual(agent)
 	agent.lastWorld = pos
 	setFishCFrame(agent, pos, tang, 1)
 	table.insert(fishList, agent)
@@ -2209,26 +2241,25 @@ local function tickFish(dt: number)
 				continue
 			end
 			local pathPos, tang = WaveCrab.sample(ground, agent.dist)
-			local offset = fishWorldOffset(agent, pathPos, tang, agent.dist)
+			local swimTang = stepSwimTang(agent, tang, dt)
+			local offset = fishWorldOffset(agent, pathPos, swimTang, agent.dist)
 			local pos = WaveCrab.worldOnGround(offset, agent.lastWorld.Y, dt)
 			if paused then
 				WaveCrab.applyFightPose(
 					agent.root,
 					agent.crabAnim,
 					pos,
-					tang,
+					swimTang,
 					dt,
 					WaveCrab.pauseElapsed(agent.pauseUntil, agent.pauseDur),
 					agent.id,
 					agent.pauseDur
 				)
 			else
-				setFishCFrame(agent, pos, tang, dt)
+				setFishCFrame(agent, pos, swimTang, dt)
 			end
 			local hungry = agent.hunger < agent.maxHunger
-			local nSeg = #ground.segments
-			local onFinal = nSeg > 0 and agent.dist >= ground.segments[math.max(1, nSeg - 1)].cumStart
-			setDangerFlash(agent, hungry and onFinal)
+			setDangerFlash(agent, hungry and isNearPathEnd(ground.totalLen, agent.dist))
 			-- Only hungry crabs fight; a full crab walks through without stunning the coral.
 			if hungry and not paused then
 				local shell = agent.shellHitbox
@@ -2274,10 +2305,11 @@ local function tickFish(dt: number)
 			continue
 		end
 		local pos, tang = samplePath(path, agent.dist)
-		local world = fishWorldOffset(agent, pos, tang)
-		setFishCFrame(agent, world, tang, dt)
+		local swimTang = stepSwimTang(agent, tang, dt)
+		local world = fishWorldOffset(agent, pos, swimTang)
+		setFishCFrame(agent, world, swimTang, dt)
 		local hungry = agent.hunger < agent.maxHunger
-		setDangerFlash(agent, hungry and isOnFinalTwoWaypoints(path, agent.dist))
+		setDangerFlash(agent, hungry and isNearPathEnd(path.totalLen, agent.dist))
 	end
 end
 
@@ -2368,6 +2400,24 @@ end
 
 function WaveSim.isRunning(): boolean
 	return running
+end
+
+function WaveSim.areCritterHungerBarsVisible(): boolean
+	return critterHungerBarsVisible
+end
+
+function WaveSim.setCritterHungerBarsVisible(visible: boolean)
+	if critterHungerBarsVisible == visible then
+		return
+	end
+	critterHungerBarsVisible = visible
+	applyCritterHungerBarsVisible()
+end
+
+function WaveSim.toggleCritterHungerBarsVisible(): boolean
+	critterHungerBarsVisible = not critterHungerBarsVisible
+	applyCritterHungerBarsVisible()
+	return critterHungerBarsVisible
 end
 
 function WaveSim.healReef(amount: number): boolean
@@ -2547,6 +2597,8 @@ function WaveSim.stop(): Summary
 	running = false
 	disconnectMove()
 	local summary = makeSummary()
+	critterHungerBarsVisible = true
+	WaveEndVfx.setHappyExitVisible(true)
 	resetSpeedState()
 	hardCleanup()
 	lastHudWave = -1

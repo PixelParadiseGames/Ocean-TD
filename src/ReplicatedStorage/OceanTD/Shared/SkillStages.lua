@@ -26,6 +26,21 @@ local DEFS: { SkillDef } = {
 	{ id = "WaveSpeed", displayName = "Wave Speed", buttonName = "WaveSpeedBTN" },
 }
 
+-- Shown on skill bubbles once stage layout templates include an Icon ImageLabel (larger stages).
+local ICON_IMAGE_BY_SKILL: { [string]: string } = {
+	PlotSize = "rbxassetid://122444984108444",
+	Skip = "rbxassetid://126639503263064",
+	EarnMore = "rbxassetid://86150178739980",
+	RHealth = "rbxassetid://85263927394609",
+	PlaceMore = "rbxassetid://78740084531049",
+	Luck = "rbxassetid://77867192113507", -- More Luck (dice)
+	WaveSpeed = "rbxassetid://125774374435124",
+}
+
+function SkillStages.iconImageFor(skillId: string): string?
+	return ICON_IMAGE_BY_SKILL[skillId]
+end
+
 local BY_ID: { [string]: SkillDef } = {}
 local BY_BUTTON: { [string]: SkillDef } = {}
 for _, def in ipairs(DEFS) do
@@ -109,7 +124,7 @@ function SkillStages.clampStage(n: any): number
 	return math.clamp(v, SkillStages.MIN_STAGE, SkillStages.MAX_STAGE)
 end
 
--- Per-skill stage cap (Wave Speed is 1–3; others use MAX_STAGE).
+-- Per-skill stage cap (Wave Speed is 1–4; others use MAX_STAGE).
 function SkillStages.maxStageFor(skillId: string): number
 	if skillId == "WaveSpeed" then
 		return 4
@@ -120,6 +135,18 @@ end
 function SkillStages.clampStageFor(skillId: string, n: any): number
 	local v = math.floor(tonumber(n) or SkillStages.MIN_STAGE)
 	return math.clamp(v, SkillStages.MIN_STAGE, SkillStages.maxStageFor(skillId))
+end
+
+-- Bubble size template stage for this skill level (Wave Speed jumps +2 so max = full size 8).
+function SkillStages.bubbleLayoutStageFor(skillId: string, skillStage: number): number
+	local stage = SkillStages.clampStageFor(skillId, skillStage)
+	local skillMax = SkillStages.maxStageFor(skillId)
+	if skillMax >= SkillStages.MAX_STAGE then
+		return stage
+	end
+	-- Even steps: Wave Speed 1→2, 2→4, 3→6, 4→8.
+	local layout = math.floor((stage / skillMax) * SkillStages.MAX_STAGE + 0.5)
+	return math.clamp(layout, SkillStages.MIN_STAGE, SkillStages.MAX_STAGE)
 end
 
 function SkillStages.defaultMap(): { [string]: number }
@@ -137,6 +164,19 @@ function SkillStages.sanitizeMap(raw: any): { [string]: number }
 	end
 	for _, def in ipairs(DEFS) do
 		m[def.id] = SkillStages.clampStageFor(def.id, raw[def.id])
+	end
+	return m
+end
+
+-- Active stage is always ≤ unlocked stage for that skill.
+function SkillStages.sanitizeActiveMap(rawActive: any, unlockedMap: { [string]: number }): { [string]: number }
+	local unlocked = SkillStages.sanitizeMap(unlockedMap)
+	local m = SkillStages.defaultMap()
+	local src = if typeof(rawActive) == "table" then rawActive else unlocked
+	for _, def in ipairs(DEFS) do
+		local cap = unlocked[def.id] or SkillStages.MIN_STAGE
+		local v = math.floor(tonumber(src[def.id]) or cap)
+		m[def.id] = math.clamp(v, SkillStages.MIN_STAGE, cap)
 	end
 	return m
 end
@@ -283,7 +323,7 @@ function SkillStages.unlockDesc(skillId: string, stage: number): string
 		return "+" .. tostring(inc) .. "  New Max: " .. tostring(newMax)
 	end
 	if skillId == "Skip" then
-		if SkillStages.isSkipUnlimited(s) or SkillStages.nextStage(s) == nil then
+		if SkillStages.isSkipUnlimited(s) then
 			return "Unlimited Skips"
 		end
 		local uses = SkillStages.skipUsesAtStage(s)
@@ -384,6 +424,49 @@ function SkillStages.skipUsesIncrementAtStage(stage: number): number
 		return 0
 	end
 	return 1
+end
+
+-- Plain status line for the player's *active* stage (dialed or maxed), not the next unlock preview.
+function SkillStages.activeStatusDesc(skillId: string, stage: number): string
+	local s = SkillStages.clampStageFor(skillId, stage)
+	if skillId == "PlaceMore" then
+		return "Max: " .. tostring(SkillStages.placeMoreMaxAtStage(s))
+	end
+	if skillId == "EarnMore" then
+		if s <= 1 then
+			return SkillStages.unlockDesc(skillId, s)
+		end
+		return "Get " .. tostring(s) .. "x per fish fed"
+	end
+	if skillId == "RHealth" then
+		return "Max: " .. tostring(SkillStages.reefHealthAtStage(s))
+	end
+	if skillId == "Skip" then
+		if SkillStages.isSkipUnlimited(s) then
+			return "Unlimited Skips"
+		end
+		local uses = SkillStages.skipUsesAtStage(s)
+		if uses <= 0 then
+			return "0 Skips"
+		elseif uses == 1 then
+			return "1 Skip"
+		end
+		return tostring(uses) .. " Skips"
+	end
+	if skillId == "WaveSpeed" then
+		if SkillStages.waveSpeedPauseUnlocked(s) then
+			return "All speeds + pause"
+		elseif s >= 3 then
+			return "2x wave speed"
+		elseif s >= 2 then
+			return "1.5x wave speed"
+		end
+		return "Normal wave speed"
+	end
+	if skillId == "PlotSize" then
+		return SkillStages.unlockDesc(skillId, s)
+	end
+	return SkillStages.unlockDesc(skillId, s)
 end
 
 return SkillStages

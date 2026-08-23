@@ -15,6 +15,7 @@ local Workspace = game:GetService("Workspace")
 local oceanRoot = ReplicatedStorage:WaitForChild("OceanTD")
 local Remotes = require(oceanRoot:WaitForChild("Remotes"))
 local Constants = require(oceanRoot:WaitForChild("Shared"):WaitForChild("Constants"))
+local LeftHudLayout = require(oceanRoot:WaitForChild("Shared"):WaitForChild("LeftHudLayout"))
 local UiTheme = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiTheme"))
 
 local WaveFeedPayout = {}
@@ -84,9 +85,11 @@ local function getCountGui(): GuiObject?
 		return nil
 	end
 	local left = pg:FindFirstChild("MobileLeftUI")
-	local dPad = left and left:FindFirstChild("dPad")
-	local count = dPad and dPad:FindFirstChild(COUNT_NAME)
-	if count and count:IsA("GuiObject") then
+	if not left then
+		return nil
+	end
+	local count = LeftHudLayout.findDCount(left)
+	if count then
 		cachedCount = count
 		return count
 	end
@@ -133,9 +136,10 @@ local function punchCount()
 	if not count then
 		return
 	end
-	local scale = count:FindFirstChildOfClass("UIScale")
-	if not scale then
+	local scale = count:FindFirstChild(LeftHudLayout.PUNCH_SCALE_NAME)
+	if not scale or not scale:IsA("UIScale") then
 		scale = Instance.new("UIScale")
+		scale.Name = LeftHudLayout.PUNCH_SCALE_NAME
 		scale.Scale = 1
 		scale.Parent = count
 	end

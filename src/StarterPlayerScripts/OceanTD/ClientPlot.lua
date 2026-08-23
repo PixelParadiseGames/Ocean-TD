@@ -229,12 +229,19 @@ function ClientPlot.remapCFrameFromPlot1(worldCf: CFrame): CFrame
 end
 
 -- Remap into an arbitrary plot (spectate / ghost waves).
-function ClientPlot.remapFromPlot1To(worldPos: Vector3, _targetPlotId: string, targetCf: CFrame, _targetSize: Vector3): Vector3
+function ClientPlot.remapFromPlot1To(
+	worldPos: Vector3,
+	_targetPlotId: string,
+	targetCf: CFrame,
+	_targetSize: Vector3,
+	targetRingCf: CFrame?
+): Vector3
 	local p1 = ClientPlot.getPlot1CFrame()
 	if not p1 then
 		return worldPos
 	end
-	return targetCf * p1:PointToObjectSpace(worldPos)
+	local base = targetRingCf or targetCf
+	return base * p1:PointToObjectSpace(worldPos)
 end
 
 function ClientPlot.onChanged(cb: (MirroredPlot?) -> ()): RBXScriptConnection

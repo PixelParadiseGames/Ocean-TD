@@ -11,6 +11,7 @@ local oceanRoot = ReplicatedStorage:WaitForChild("OceanTD")
 local Constants = require(oceanRoot:WaitForChild("Shared"):WaitForChild("Constants"))
 local Remotes = require(oceanRoot:WaitForChild("Remotes"))
 local UiTheme = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiTheme"))
+local UiCircles = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiCircles"))
 
 local WaveSim = require(script.Parent:WaitForChild("WaveSim"))
 
@@ -20,6 +21,8 @@ local FINISH_RED = Color3.fromRGB(200, 45, 50)
 local FINISH_STROKE = Color3.fromRGB(255, 55, 60)
 local CONTINUE_GREEN = Color3.fromRGB(40, 180, 80)
 local CONTINUE_STROKE = Color3.fromRGB(70, 255, 110)
+local REEF_PLUS_GREEN = Color3.fromRGB(50, 230, 100)
+local REEF_PLUS_STROKE = Color3.fromRGB(12, 70, 28)
 
 local SUMMARY_BTN_W = 200
 local SUMMARY_BTN_H = 44
@@ -30,6 +33,7 @@ local SUMMARY_COL_HEADER_SIZE = 23
 local SUMMARY_TITLE_SIZE = 30
 local SUMMARY_TITLE_TOP = 12
 local SUMMARY_STATS_TOP = SUMMARY_TITLE_TOP + SUMMARY_TITLE_SIZE + 14
+local SUMMARY_REEF_PLUS_SIZE = 28
 local TITLE_STROKE_BRIGHT = Color3.fromRGB(255, 70, 70)
 
 local reportWaveRecordsRemote = Remotes.get("ReportWaveRecords")
@@ -214,8 +218,39 @@ local function makeSummaryColHeader(parent: Instance, name: string, text: string
 	return hdr
 end
 
-function WaveSummaryUi.ensureTitle(panel: Frame): UIStroke?
-	local title = panel:FindFirstChild("OutOfReefTitle")
+function WaveSummaryUi.ensureTitle(panel: Frame, onReefPlus: (() -> ())?): UIStroke?
+	-- Migrate old full-width title into a centered [text][+] row.
+	local oldTitle = panel:FindFirstChild("OutOfReefTitle")
+	if oldTitle and not panel:FindFirstChild("OutOfReefTitleRow") then
+		oldTitle:Destroy()
+	end
+
+	local row = panel:FindFirstChild("OutOfReefTitleRow")
+	local host: Frame
+	if row and row:IsA("Frame") then
+		host = row
+	else
+		if row then
+			row:Destroy()
+		end
+		host = Instance.new("Frame")
+		host.Name = "OutOfReefTitleRow"
+		host.BackgroundTransparency = 1
+		host.ZIndex = 3
+		host.Parent = panel
+		local lay = Instance.new("UIListLayout")
+		lay.FillDirection = Enum.FillDirection.Horizontal
+		lay.HorizontalAlignment = Enum.HorizontalAlignment.Center
+		lay.VerticalAlignment = Enum.VerticalAlignment.Center
+		lay.SortOrder = Enum.SortOrder.LayoutOrder
+		lay.Padding = UDim.new(0, 10)
+		lay.Parent = host
+	end
+	host.AnchorPoint = Vector2.new(0.5, 0)
+	host.Position = UDim2.new(0.5, 0, 0, SUMMARY_TITLE_TOP)
+	host.Size = UDim2.new(1, -24, 0, SUMMARY_TITLE_SIZE + 8)
+
+	local title = host:FindFirstChild("OutOfReefTitle")
 	local lbl: TextLabel
 	if title and title:IsA("TextLabel") then
 		lbl = title
@@ -231,8 +266,10 @@ function WaveSummaryUi.ensureTitle(panel: Frame): UIStroke?
 		lbl.TextColor3 = Color3.new(1, 1, 1)
 		lbl.TextXAlignment = Enum.TextXAlignment.Center
 		lbl.TextYAlignment = Enum.TextYAlignment.Center
+		lbl.AutomaticSize = Enum.AutomaticSize.X
+		lbl.LayoutOrder = 1
 		lbl.ZIndex = 3
-		lbl.Parent = panel
+		lbl.Parent = host
 		local outline = Instance.new("UIStroke")
 		outline.Name = "RedOutline"
 		outline.Color = TITLE_STROKE_BRIGHT
@@ -240,22 +277,59 @@ function WaveSummaryUi.ensureTitle(panel: Frame): UIStroke?
 		outline.ApplyStrokeMode = Enum.ApplyStrokeMode.Contextual
 		outline.Parent = lbl
 	end
-	lbl.AnchorPoint = Vector2.new(0.5, 0)
-	lbl.Position = UDim2.new(0.5, 0, 0, SUMMARY_TITLE_TOP)
-	lbl.Size = UDim2.new(1, -24, 0, SUMMARY_TITLE_SIZE + 8)
+	lbl.Size = UDim2.fromOffset(0, SUMMARY_TITLE_SIZE + 8)
 	lbl.TextSize = SUMMARY_TITLE_SIZE
 	lbl.Text = "Out Of Reef Health"
 	local stroke = lbl:FindFirstChild("RedOutline")
 	if stroke and stroke:IsA("UIStroke") then
 		stroke.Thickness = 1.25
 		stroke.Color = TITLE_STROKE_BRIGHT
+	end
+
+	local plus = host:FindFirstChild("ReefHealthPlus")
+	local plusBtn: TextButton
+	if plus and plus:IsA("TextButton") then
+		plusBtn = plus
+	else
+		if plus then
+			plus:Destroy()
+		end
+		plusBtn = Instance.new("TextButton")
+		plusBtn.Name = "ReefHealthPlus"
+		plusBtn.BackgroundColor3 = REEF_PLUS_GREEN
+		plusBtn.BackgroundTransparency = 0
+		plusBtn.BorderSizePixel = 0
+		plusBtn.Text = "+"
+		plusBtn.Font = Enum.Font.SourceSansBold
+		plusBtn.TextColor3 = Color3.new(1, 1, 1)
+		plusBtn.TextStrokeColor3 = REEF_PLUS_STROKE
+		plusBtn.TextStrokeTransparency = 0
+		plusBtn.AutoButtonColor = true
+		plusBtn.LayoutOrder = 2
+		plusBtn.ZIndex = 4
+		plusBtn.Parent = host
+		UiCircles.ensure(plusBtn)
+		local plusStroke = Instance.new("UIStroke")
+		plusStroke.Color = REEF_PLUS_STROKE
+		plusStroke.Thickness = 1.5
+		plusStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+		plusStroke.Parent = plusBtn
+	end
+	if onReefPlus and plusBtn:GetAttribute("_OceanTD_ReefPlusBound") ~= true then
+		plusBtn:SetAttribute("_OceanTD_ReefPlusBound", true)
+		plusBtn.Activated:Connect(onReefPlus)
+	end
+	plusBtn.Size = UDim2.fromOffset(SUMMARY_REEF_PLUS_SIZE, SUMMARY_REEF_PLUS_SIZE)
+	plusBtn.TextSize = math.floor(SUMMARY_REEF_PLUS_SIZE * 0.78)
+
+	if stroke and stroke:IsA("UIStroke") then
 		return stroke
 	end
 	return nil
 end
 
-local function ensureSummaryStats(panel: Frame): Frame
-	WaveSummaryUi.ensureTitle(panel)
+local function ensureSummaryStats(panel: Frame, onReefPlus: (() -> ())?): Frame
+	WaveSummaryUi.ensureTitle(panel, onReefPlus)
 	local root = panel:FindFirstChild("StatsRoot")
 	if root and root:IsA("Frame") then
 		local left = root:FindFirstChild("ThisRun")
@@ -339,8 +413,8 @@ local function ensureSummaryStats(panel: Frame): Frame
 	return root
 end
 
-function WaveSummaryUi.fillStats(panel: Frame, summary: WaveSim.Summary, records: Records)
-	local root = ensureSummaryStats(panel)
+function WaveSummaryUi.fillStats(panel: Frame, summary: WaveSim.Summary, records: Records, onReefPlus: (() -> ())?)
+	local root = ensureSummaryStats(panel, onReefPlus)
 	local left = root:FindFirstChild("ThisRun")
 	local right = root:FindFirstChild("Record")
 	local function setCol(col: Instance?, wave: number, fed: number, sec: number)
@@ -364,10 +438,15 @@ function WaveSummaryUi.fillStats(panel: Frame, summary: WaveSim.Summary, records
 	setCol(right, records.wave, records.fishFed, records.elapsedSec)
 end
 
-function WaveSummaryUi.ensurePanelContent(panel: Frame, onContinue: () -> (), onFinish: () -> ()): (TextButton, TextButton, UIStroke?)
-	ensureSummaryStats(panel)
+function WaveSummaryUi.ensurePanelContent(
+	panel: Frame,
+	onContinue: () -> (),
+	onFinish: () -> (),
+	onReefPlus: (() -> ())?
+): (TextButton, TextButton, UIStroke?)
+	ensureSummaryStats(panel, onReefPlus)
 	local c, f = WaveSummaryUi.ensureButtons(panel, onContinue, onFinish)
-	local titleStroke = WaveSummaryUi.ensureTitle(panel)
+	local titleStroke = WaveSummaryUi.ensureTitle(panel, onReefPlus)
 	return c, f, titleStroke
 end
 

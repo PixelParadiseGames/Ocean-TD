@@ -7,6 +7,7 @@ local RunService = game:GetService("RunService")
 local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
 local SoundService = game:GetService("SoundService")
+local TextService = game:GetService("TextService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local player = Players.LocalPlayer
@@ -32,10 +33,11 @@ local PULSE_GREEN = Color3.fromRGB(70, 255, 110)
 local STROKE_DARK = Color3.fromRGB(16, 80, 32)
 local ACTIVE_GREEN = Color3.fromRGB(40, 255, 90)
 local WHITE = Color3.new(1, 1, 1)
-local STAT_GREY = Color3.fromRGB(200, 200, 205)
+local STAT_GREY = Color3.fromRGB(140, 140, 145)
 local RED = Color3.fromRGB(220, 50, 55)
 local PANEL_BG = Color3.fromRGB(12, 28, 36)
 local GROW_SOUND_ID = "rbxassetid://134057288"
+local DICE_SPIN_SOUND_ID = "rbxassetid://130406186928352"
 
 local function pulseWave(): number
 	return (math.sin(os.clock() * math.pi * 2) + 1) * 0.5
@@ -63,6 +65,7 @@ local h1s: { TextButton } = {}
 local h2s: { TextLabel } = {}
 local h3s: { Frame } = {}
 local h3Labels: { { TextLabel } } = {}
+local h3Hits: { TextButton } = {}
 local confirmGui: ScreenGui? = nil
 local pulseConn: RBXScriptConnection? = nil
 local hintConn: RBXScriptConnection? = nil
@@ -156,6 +159,16 @@ local function stopPulses()
 end
 
 local STAT_ICONS = { "↔️", "🍴", "🔄", "🛡️" }
+local STAT_KEY_NAMES = { "Feed Range", "Food Count", "Reload", "Defense" }
+
+local statsKeyPopup: GuiObject? = nil
+
+local function hideStatsKey()
+	if statsKeyPopup then
+		statsKeyPopup:Destroy()
+		statsKeyPopup = nil
+	end
+end
 
 local function statValues(st: CoralSize.SizeStats): { number }
 	return { st.range, st.food, st.reload, st.defense }
@@ -279,6 +292,24 @@ local function playGrowSound()
 	local s = Instance.new("Sound")
 	s.SoundId = GROW_SOUND_ID
 	s.Volume = 0.85
+	s.Parent = SoundService
+	s:Play()
+	s.Ended:Connect(function()
+		s:Destroy()
+	end)
+	task.delay(4, function()
+		if s.Parent then
+			s:Destroy()
+		end
+	end)
+end
+
+local function playDiceSpinSound()
+	local s = Instance.new("Sound")
+	s.SoundId = DICE_SPIN_SOUND_ID
+	s.Volume = 0.85
+	-- Slight pitch variance so re-rolls don't sound identical.
+	s.PlaybackSpeed = 0.92 + math.random() * 0.16
 	s.Parent = SoundService
 	s:Play()
 	s.Ended:Connect(function()
@@ -685,6 +716,7 @@ local function spinColorDice()
 	diceSpinToken += 1
 	local token = diceSpinToken
 	dice.Rotation = 0
+	playDiceSpinSound()
 	local tw = TweenService:Create(
 		dice,
 		TweenInfo.new(0.42, Enum.EasingStyle.Back, Enum.EasingDirection.Out),
@@ -787,6 +819,7 @@ local function setVisible(on: boolean)
 		stopPulses()
 		hideRangeRing()
 		hideConfirm()
+		hideStatsKey()
 		cineToken += 1
 	end
 end
@@ -868,22 +901,28 @@ function CoralInspectPanel.bind(panel: GuiObject, catalogFrame: GuiObject)
 	scroll.ScrollingDirection = Enum.ScrollingDirection.X
 	scroll.CanvasSize = UDim2.new(0, 0, 0, 0)
 	scroll.AutomaticCanvasSize = Enum.AutomaticSize.X
+	scroll.ClipsDescendants = true
 	scroll.Parent = colorRow
 	colorScroll = scroll
+
+	local COLOR_SWATCH_GAP = 6
+	local COLOR_SWATCH_PAD = 4
+	local COLOR_VISIBLE = 6.5 -- sixth full + half of next until scroll
 
 	local scrollLay = Instance.new("UIListLayout")
 	scrollLay.FillDirection = Enum.FillDirection.Horizontal
 	scrollLay.VerticalAlignment = Enum.VerticalAlignment.Center
 	scrollLay.SortOrder = Enum.SortOrder.LayoutOrder
-	scrollLay.Padding = UDim.new(0, 6)
+	scrollLay.Padding = UDim.new(0, COLOR_SWATCH_GAP)
 	scrollLay.Parent = scroll
 	local scrollPad = Instance.new("UIPadding")
-	scrollPad.PaddingLeft = UDim.new(0, 4)
-	scrollPad.PaddingRight = UDim.new(0, 4)
+	scrollPad.PaddingLeft = UDim.new(0, COLOR_SWATCH_PAD)
+	scrollPad.PaddingRight = UDim.new(0, COLOR_SWATCH_PAD)
 	scrollPad.Parent = scroll
 
 	table.clear(colorSwatchBtns)
 	table.clear(colorSwatchStrokes)
+	local colorDragMoved = false
 	for _, sw in ipairs(PlotOutlineColors.coralSwatches()) do
 		local btn = Instance.new("TextButton")
 		btn.Name = "Color_" .. tostring(sw.index)
@@ -906,9 +945,82 @@ function CoralInspectPanel.bind(panel: GuiObject, catalogFrame: GuiObject)
 		colorSwatchStrokes[sw.index] = stroke
 		local idx = sw.index
 		btn.Activated:Connect(function()
+			if colorDragMoved then
+				return
+			end
 			selectCoralColor(idx)
 		end)
 	end
+
+	-- Mouse/touch drag to slide the color row (scroll wheel still works).
+	local COLOR_DRAG_PX = 8
+	local function bindColorRowDrag(gui: GuiObject)
+		gui.InputBegan:Connect(function(input)
+			if input.UserInputType ~= Enum.UserInputType.MouseButton1 and input.UserInputType ~= Enum.UserInputType.Touch then
+				return
+			end
+			local start = Vector2.new(input.Position.X, input.Position.Y)
+			local startCanvas = scroll.CanvasPosition
+			colorDragMoved = false
+			local moveConn: RBXScriptConnection
+			local endConn: RBXScriptConnection
+			moveConn = UserInputService.InputChanged:Connect(function(chg)
+				if input.UserInputType == Enum.UserInputType.Touch then
+					if chg.UserInputType ~= Enum.UserInputType.Touch then
+						return
+					end
+				elseif chg.UserInputType ~= Enum.UserInputType.MouseMovement then
+					return
+				end
+				local now = Vector2.new(chg.Position.X, chg.Position.Y)
+				local dx = now.X - start.X
+				if not colorDragMoved and math.abs(dx) < COLOR_DRAG_PX then
+					return
+				end
+				colorDragMoved = true
+				local maxX = math.max(0, scroll.AbsoluteCanvasSize.X - scroll.AbsoluteSize.X)
+				scroll.CanvasPosition = Vector2.new(math.clamp(startCanvas.X - dx, 0, maxX), 0)
+			end)
+			endConn = UserInputService.InputEnded:Connect(function(ended)
+				if ended.UserInputType ~= input.UserInputType and ended.UserInputType ~= Enum.UserInputType.MouseButton1 then
+					return
+				end
+				if input.UserInputType == Enum.UserInputType.Touch and ended.UserInputType ~= Enum.UserInputType.Touch then
+					return
+				end
+				moveConn:Disconnect()
+				endConn:Disconnect()
+				-- Keep suppress through Activated; clear next frame.
+				task.defer(function()
+					colorDragMoved = false
+				end)
+			end)
+		end)
+	end
+	scroll.Active = true
+	bindColorRowDrag(scroll)
+	for _, btn in pairs(colorSwatchBtns) do
+		bindColorRowDrag(btn)
+	end
+
+	local function refreshColorSwatchSizes()
+		local viewW = scroll.AbsoluteSize.X
+		local viewH = scroll.AbsoluteSize.Y
+		if viewW < 8 or viewH < 8 then
+			return
+		end
+		-- Fit 6.5 circles (+ gaps between them) into the visible width.
+		local gaps = math.floor(COLOR_VISIBLE) -- 6 gaps among 6.5 slots
+		local inner = viewW - COLOR_SWATCH_PAD * 2 - gaps * COLOR_SWATCH_GAP
+		local diam = math.floor(inner / COLOR_VISIBLE)
+		diam = math.clamp(diam, 22, math.max(22, math.floor(viewH * 0.92)))
+		for _, btn in pairs(colorSwatchBtns) do
+			btn.Size = UDim2.fromOffset(diam, diam)
+		end
+	end
+	scroll:GetPropertyChangedSignal("AbsoluteSize"):Connect(refreshColorSwatchSizes)
+	colorRow:GetPropertyChangedSignal("AbsoluteSize"):Connect(refreshColorSwatchSizes)
+	task.defer(refreshColorSwatchSizes)
 
 	local dice = Instance.new("ImageLabel")
 	dice.Name = "ColorDice"
@@ -924,44 +1036,10 @@ function CoralInspectPanel.bind(panel: GuiObject, catalogFrame: GuiObject)
 	dice.Parent = scroll
 	colorDice = dice
 
-	local upRow = Instance.new("Frame")
-	upRow.BackgroundTransparency = 1
-	upRow.Size = UDim2.new(1, 0, 0.16, 0)
-	upRow.LayoutOrder = 3
-	upRow.Parent = frame
-
-	local up = Instance.new("TextButton")
-	up.Name = "UPGRADE"
-	up.Text = "UPGRADE"
-	up.Font = UiTheme.Font
-	up.TextScaled = true
-	up.TextColor3 = WHITE
-	up.BackgroundColor3 = GREEN
-	up.BorderSizePixel = 0
-	up.AnchorPoint = Vector2.new(0.5, 0.5)
-	up.Position = UDim2.fromScale(0.5, 0.5)
-	up.Size = UDim2.new(0.9, 0, 0.7, 0)
-	up.AutoButtonColor = true
-	up.Parent = upRow
-	local upPad = Instance.new("UIPadding")
-	upPad.PaddingLeft = UDim.new(0.05, 0)
-	upPad.PaddingRight = UDim.new(0.05, 0)
-	upPad.PaddingTop = UDim.new(0.05, 0)
-	upPad.PaddingBottom = UDim.new(0.05, 0)
-	upPad.Parent = up
-	local uc = Instance.new("UICorner")
-	uc.CornerRadius = UDim.new(0, 10)
-	uc.Parent = up
-	applyUnlockStroke(up)
-	upgradeBtn = up
-	up.Activated:Connect(function()
-		showConfirmUnlock()
-	end)
-
 	local row3 = Instance.new("Frame")
 	row3.BackgroundTransparency = 1
 	row3.Size = UDim2.new(1, 0, 0.48, 0)
-	row3.LayoutOrder = 4
+	row3.LayoutOrder = 3
 	row3.Parent = frame
 	local sizeGrid = Instance.new("UIGridLayout")
 	sizeGrid.Name = "SizeGrid"
@@ -1000,8 +1078,14 @@ function CoralInspectPanel.bind(panel: GuiObject, catalogFrame: GuiObject)
 		word.Font = UiTheme.Font
 		word.Text = WORDS[i]
 		word.TextColor3 = WHITE
-		word.TextScaled = false
+		word.TextScaled = true
+		word.TextXAlignment = Enum.TextXAlignment.Center
 		word.Parent = cell
+		local wordLimit = Instance.new("UITextSizeConstraint")
+		wordLimit.Name = "_OceanTD_WordSize"
+		wordLimit.MinTextSize = 10
+		wordLimit.MaxTextSize = 140
+		wordLimit.Parent = word
 		h2s[i] = word
 		local vals = statValues(CoralSize.statsFor(i))
 		local stats = Instance.new("Frame")
@@ -1032,10 +1116,175 @@ function CoralInspectPanel.bind(panel: GuiObject, catalogFrame: GuiObject)
 		end
 		h3s[i] = stats
 		h3Labels[i] = labels
+		-- Hit target on the cell (NOT inside stats UIListLayout — that pushed stats down).
+		local hit = Instance.new("TextButton")
+		hit.Name = "StatsHit"
+		hit.Text = ""
+		hit.BackgroundTransparency = 1
+		hit.AnchorPoint = Vector2.new(0.5, 0)
+		hit.Position = stats.Position
+		hit.Size = stats.Size
+		hit.ZIndex = 8
+		hit.AutoButtonColor = false
+		hit.Parent = cell
+		hit.Activated:Connect(function()
+			CoralInspectPanel.toggleStatsKey()
+		end)
+		h3Hits[i] = hit
 		local idx = i
 		letter.Activated:Connect(function()
+			hideStatsKey()
 			onLetter(idx)
 		end)
+	end
+
+	local upRow = Instance.new("Frame")
+	upRow.BackgroundTransparency = 1
+	upRow.Size = UDim2.new(1, 0, 0.16, 0)
+	upRow.LayoutOrder = 4
+	upRow.Parent = frame
+
+	local up = Instance.new("TextButton")
+	up.Name = "UPGRADE"
+	up.Text = "UPGRADE"
+	up.Font = UiTheme.Font
+	up.TextScaled = true
+	up.TextColor3 = WHITE
+	up.BackgroundColor3 = GREEN
+	up.BorderSizePixel = 0
+	up.AnchorPoint = Vector2.new(0.5, 0.5)
+	up.Position = UDim2.fromScale(0.5, 0.5)
+	up.Size = UDim2.new(0.9, 0, 0.7, 0)
+	up.AutoButtonColor = true
+	up.Parent = upRow
+	local upPad = Instance.new("UIPadding")
+	upPad.PaddingLeft = UDim.new(0.05, 0)
+	upPad.PaddingRight = UDim.new(0.05, 0)
+	upPad.PaddingTop = UDim.new(0.05, 0)
+	upPad.PaddingBottom = UDim.new(0.05, 0)
+	upPad.Parent = up
+	local uc = Instance.new("UICorner")
+	uc.CornerRadius = UDim.new(0, 10)
+	uc.Parent = up
+	applyUnlockStroke(up)
+	upgradeBtn = up
+	up.Activated:Connect(function()
+		showConfirmUnlock()
+	end)
+
+	local function showStatsKey()
+		hideStatsKey()
+		local minX, minY = math.huge, math.huge
+		local maxX, maxY = -math.huge, -math.huge
+		local any = false
+		for i = 1, 3 do
+			local s = h3s[i]
+			if s and s.AbsoluteSize.X > 1 then
+				any = true
+				local p = s.AbsolutePosition
+				local sz = s.AbsoluteSize
+				minX = math.min(minX, p.X)
+				minY = math.min(minY, p.Y)
+				maxX = math.max(maxX, p.X + sz.X)
+				maxY = math.max(maxY, p.Y + sz.Y)
+			end
+		end
+		if not any then
+			return
+		end
+		local boxW = math.max(120, maxX - minX)
+		local lineH = math.max(18, math.floor((maxY - minY) / 4))
+		local boxH = math.max(maxY - minY, lineH * 4 + 16)
+		local pad = 10
+
+		-- ScreenGui so AbsolutePosition maps 1:1 (inspect frame may be scaled/inset).
+		local sg = Instance.new("ScreenGui")
+		sg.Name = "OceanTD_StatsKey"
+		sg.ResetOnSpawn = false
+		sg.IgnoreGuiInset = true
+		sg.DisplayOrder = 25010
+		sg.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+		sg.Parent = playerGui
+
+		local box = Instance.new("TextButton")
+		box.Name = "StatsKey"
+		box.AutoButtonColor = false
+		box.Text = ""
+		box.BackgroundColor3 = Color3.new(0, 0, 0)
+		box.BackgroundTransparency = 0.12
+		box.BorderSizePixel = 0
+		box.ZIndex = 10
+		box.AnchorPoint = Vector2.new(0.5, 0.5)
+		box.Position = UDim2.fromOffset((minX + maxX) * 0.5, (minY + maxY) * 0.5)
+		box.Size = UDim2.fromOffset(boxW + pad * 2, boxH + pad * 2)
+		box.Parent = sg
+		local corner = Instance.new("UICorner")
+		corner.CornerRadius = UDim.new(0, 8)
+		corner.Parent = box
+		local stroke = Instance.new("UIStroke")
+		stroke.Color = WHITE
+		stroke.Thickness = 1.5
+		stroke.Transparency = 0.35
+		stroke.Parent = box
+
+		local lay = Instance.new("UIListLayout")
+		lay.FillDirection = Enum.FillDirection.Vertical
+		lay.HorizontalAlignment = Enum.HorizontalAlignment.Center
+		lay.VerticalAlignment = Enum.VerticalAlignment.Center
+		lay.SortOrder = Enum.SortOrder.LayoutOrder
+		lay.Padding = UDim.new(0, 2)
+		lay.Parent = box
+		local boxPad = Instance.new("UIPadding")
+		boxPad.PaddingTop = UDim.new(0, pad)
+		boxPad.PaddingBottom = UDim.new(0, pad)
+		boxPad.PaddingLeft = UDim.new(0, pad)
+		boxPad.PaddingRight = UDim.new(0, pad)
+		boxPad.Parent = box
+
+		local textSize = math.clamp(math.floor(lineH * 0.85), 14, 28)
+		for i, name in ipairs(STAT_KEY_NAMES) do
+			local row = Instance.new("TextLabel")
+			row.BackgroundTransparency = 1
+			row.Size = UDim2.new(1, 0, 0, lineH)
+			row.LayoutOrder = i
+			row.Font = UiTheme.Font
+			row.Text = string.format("%s  %s", STAT_ICONS[i], name)
+			row.TextColor3 = WHITE
+			row.TextSize = textSize
+			row.TextXAlignment = Enum.TextXAlignment.Center
+			row.ZIndex = 11
+			row.Parent = box
+		end
+
+		statsKeyPopup = sg
+		box.Activated:Connect(function()
+			hideStatsKey()
+		end)
+	end
+
+	function CoralInspectPanel.toggleStatsKey()
+		if statsKeyPopup then
+			hideStatsKey()
+		else
+			showStatsKey()
+		end
+	end
+
+	local function textSizeToFitWidth(text: string, maxWidth: number, maxSize: number, minSize: number): number
+		local lo = minSize
+		local hi = maxSize
+		local best = minSize
+		while lo <= hi do
+			local mid = math.floor((lo + hi) * 0.5)
+			local bounds = TextService:GetTextSize(text, mid, UiTheme.Font, Vector2.new(4096, mid * 2))
+			if bounds.X <= maxWidth then
+				best = mid
+				lo = mid + 1
+			else
+				hi = mid - 1
+			end
+		end
+		return best
 	end
 
 	local function refreshSizeRow()
@@ -1045,10 +1294,14 @@ function CoralInspectPanel.bind(panel: GuiObject, catalogFrame: GuiObject)
 		end
 		local pad = 6
 		local cellW = math.floor((w - pad * 2) / 3)
-		local circle = math.clamp(math.floor(cellW * 0.72), 36, 72)
-		local wordH = 16
-		local statText = 13
-		local statLine = math.floor(statText * 1.15 + 0.5)
+		-- Circles fill ~80% of each column.
+		local circle = math.max(36, math.floor(cellW * 0.8))
+		-- Fit "Medium" to circle width so S/M/L don't clip; shared TextSize.
+		local wordSize = textSizeToFitWidth("Medium", circle, math.floor(circle * 0.55), 10)
+		local wordH = math.floor(wordSize * 1.25)
+		-- Stats unchanged (~35% of circle).
+		local statText = math.max(12, math.floor(circle * 0.35))
+		local statLine = math.floor(statText * 1.2 + 0.5)
 		local statH = statLine * 4
 		local cellH = 2 + circle + 4 + wordH + 2 + statH + 4
 		sizeGrid.CellSize = UDim2.fromOffset(math.max(1, cellW), cellH)
@@ -1062,12 +1315,23 @@ function CoralInspectPanel.bind(panel: GuiObject, catalogFrame: GuiObject)
 			local wordY = 2 + circle + 4
 			if word then
 				word.Position = UDim2.new(0.5, 0, 0, wordY)
-				word.Size = UDim2.new(1, -4, 0, wordH)
-				word.TextSize = math.max(10, math.floor(wordH * 0.9))
+				word.Size = UDim2.fromOffset(circle, wordH)
+				word.TextScaled = false
+				word.TextSize = wordSize
+				local lim = word:FindFirstChild("_OceanTD_WordSize")
+				if lim and lim:IsA("UITextSizeConstraint") then
+					lim.MinTextSize = wordSize
+					lim.MaxTextSize = wordSize
+				end
 			end
 			if stats then
 				stats.Position = UDim2.new(0.5, 0, 0, wordY + wordH + 2)
-				stats.Size = UDim2.new(1, -2, 0, statH)
+				stats.Size = UDim2.fromOffset(math.max(circle, cellW - 2), statH)
+				local hit = h3Hits[i]
+				if hit then
+					hit.Position = stats.Position
+					hit.Size = stats.Size
+				end
 				for _, row in ipairs(stats:GetChildren()) do
 					if row:IsA("TextLabel") then
 						row.TextSize = statText

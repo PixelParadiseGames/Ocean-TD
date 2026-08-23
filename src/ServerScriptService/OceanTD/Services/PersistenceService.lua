@@ -327,6 +327,7 @@ local function sanitizeProfile(raw: any): PlayerProfile
 	profile.longestWaveSec = if ls and ls > 0 then math.floor(ls) else 0
 	profile.plotOutlineColorIndex = PlotOutlineColors.clampIndex(raw.plotOutlineColorIndex)
 	profile.skillStages = SkillStages.sanitizeMap(raw.skillStages)
+	profile.skillActiveStages = SkillStages.sanitizeActiveMap(raw.skillActiveStages, profile.skillStages)
 	profile.version = math.max(profile.version, Constants.PROFILE_VERSION)
 	return profile
 end
@@ -497,9 +498,54 @@ function PersistenceService.getSkillStages(player: Player): { [string]: number }
 	return SkillStages.sanitizeMap(profile.skillStages)
 end
 
+function PersistenceService.getSkillActiveStages(player: Player): { [string]: number }
+	local profile = profiles[player]
+	if not profile then
+		return SkillStages.defaultMap()
+	end
+	profile.skillActiveStages = SkillStages.sanitizeActiveMap(profile.skillActiveStages, profile.skillStages)
+	return SkillStages.sanitizeActiveMap(profile.skillActiveStages, profile.skillStages)
+end
+
+-- Payload for client sync: unlocked (purchase progress) + active (currently enabled).
+function PersistenceService.getSkillStagesPayload(player: Player): { unlocked: { [string]: number }, active: { [string]: number } }
+	return {
+		unlocked = PersistenceService.getSkillStages(player),
+		active = PersistenceService.getSkillActiveStages(player),
+	}
+end
+
+-- Gameplay reads the *active* stage (player may dial below unlocked max).
 function PersistenceService.getSkillStage(player: Player, skillId: string): number
-	local stages = PersistenceService.getSkillStages(player)
-	return SkillStages.clampStageFor(skillId, stages[skillId])
+	local active = PersistenceService.getSkillActiveStages(player)
+	return SkillStages.clampStageFor(skillId, active[skillId])
+end
+
+function PersistenceService.getSkillUnlockedStage(player: Player, skillId: string): number
+	local unlocked = PersistenceService.getSkillStages(player)
+	return SkillStages.clampStageFor(skillId, unlocked[skillId])
+end
+
+function PersistenceService.setSkillActiveStage(player: Player, skillId: string, stage: number): {
+	ok: boolean,
+	active: number?,
+	unlocked: number?,
+	errorCode: string?,
+}
+	local profile = profiles[player]
+	if not profile then
+		return { ok = false, errorCode = "NoProfile" }
+	end
+	if not SkillStages.get(skillId) then
+		return { ok = false, errorCode = "BadSkill" }
+	end
+	profile.skillStages = SkillStages.sanitizeMap(profile.skillStages)
+	local unlocked = SkillStages.clampStageFor(skillId, profile.skillStages[skillId])
+	local want = math.floor(tonumber(stage) or unlocked)
+	local active = math.clamp(want, SkillStages.MIN_STAGE, unlocked)
+	profile.skillActiveStages = SkillStages.sanitizeActiveMap(profile.skillActiveStages, profile.skillStages)
+	profile.skillActiveStages[skillId] = active
+	return { ok = true, active = active, unlocked = unlocked }
 end
 
 -- Unlock next stage for skillId. Returns { ok, stage, prevStage?, errorCode?, sandDollars? }.
@@ -548,6 +594,9 @@ function PersistenceService.tryUnlockSkillStage(player: Player, skillId: string)
 	end
 	profile.currencies.sandDollars = cash - cost
 	profile.skillStages[skillId] = nextStage
+	-- Newly unlocked stage becomes the enabled stage.
+	profile.skillActiveStages = SkillStages.sanitizeActiveMap(profile.skillActiveStages, profile.skillStages)
+	profile.skillActiveStages[skillId] = nextStage
 	PersistenceService.syncSandDollarsAttribute(player)
 	return {
 		ok = true,
@@ -558,13 +607,15 @@ function PersistenceService.tryUnlockSkillStage(player: Player, skillId: string)
 end
 
 -- TEMP / debug: reset every skill to stage 1.
-function PersistenceService.resetSkillStages(player: Player): { [string]: number }
+function PersistenceService.resetSkillStages(player: Player): { unlocked: { [string]: number }, active: { [string]: number } }
 	local profile = profiles[player]
 	if not profile then
-		return SkillStages.defaultMap()
+		local d = SkillStages.defaultMap()
+		return { unlocked = d, active = SkillStages.defaultMap() }
 	end
 	profile.skillStages = SkillStages.defaultMap()
-	return SkillStages.sanitizeMap(profile.skillStages)
+	profile.skillActiveStages = SkillStages.defaultMap()
+	return PersistenceService.getSkillStagesPayload(player)
 end
 
 -- Atomic Robux $D grant. Idempotent on PurchaseId. Safe if the player is offline
@@ -670,7 +721,7 @@ function PersistenceService.creditSandDollarsFromFeed(player: Player, fishCount:
 	n = math.min(n, room)
 	window.count += n
 
-	local stage = SkillStages.clampStage(profile.skillStages.EarnMore)
+	local stage = PersistenceService.getSkillStage(player, "EarnMore")
 	local per = SkillStages.earnMorePerFish(stage)
 	local grant = clampSandDollars(n * per)
 	if grant <= 0 then
@@ -927,6 +978,7 @@ function PersistenceService.save(player: Player, layoutOverride: { LayoutObject 
 		longestWaveSec = profile.longestWaveSec or 0,
 		plotOutlineColorIndex = PlotOutlineColors.clampIndex(profile.plotOutlineColorIndex),
 		skillStages = SkillStages.sanitizeMap(profile.skillStages),
+		skillActiveStages = SkillStages.sanitizeActiveMap(profile.skillActiveStages, profile.skillStages),
 	}
 
 	local saved = false
