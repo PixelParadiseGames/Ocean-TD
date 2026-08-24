@@ -284,6 +284,7 @@ local function sanitizeInventory(raw: any, isNewProfile: boolean): { [string]: a
 			return {
 				BrainCoral = Constants.STARTING_BRAIN_CORAL_SEEDS,
 				Sponge = Constants.STARTING_SPONGE_SEEDS,
+				SeaGrass = Constants.STARTING_SEA_GRASS_SEEDS,
 			}
 		end
 		return {}
@@ -924,7 +925,7 @@ function PersistenceService.load(player: Player): PlayerProfile
 			log("Starter BrainCoral grant userId=", userId, "x", Constants.STARTING_BRAIN_CORAL_SEEDS)
 		end
 	end
-	-- Soft grant Sponge seeds when the item is missing (new species roll-out).
+	-- Soft grant mesh-species seeds when the item is missing (new species roll-out).
 	do
 		local inv = profile.inventory
 		if typeof(inv) ~= "table" then
@@ -934,6 +935,10 @@ function PersistenceService.load(player: Player): PlayerProfile
 		if inv.Sponge == nil then
 			inv.Sponge = Constants.STARTING_SPONGE_SEEDS
 			log("Starter Sponge grant userId=", userId, "x", Constants.STARTING_SPONGE_SEEDS)
+		end
+		if inv.SeaGrass == nil then
+			inv.SeaGrass = Constants.STARTING_SEA_GRASS_SEEDS
+			log("Starter SeaGrass grant userId=", userId, "x", Constants.STARTING_SEA_GRASS_SEEDS)
 		end
 	end
 	profiles[player] = profile

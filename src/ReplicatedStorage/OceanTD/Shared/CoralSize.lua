@@ -2,6 +2,8 @@
 -- Coral size bands (studs) and per-coral unlock tier (1=S, 2=M, 3=L).
 -- Combat stats are per-species; BrainCoral keeps the original table.
 
+local SpeciesCatalog = require(script.Parent.SpeciesCatalog)
+
 local CoralSize = {}
 
 CoralSize.SMALL = 1
@@ -13,6 +15,14 @@ CoralSize.RANGES = {
 	[2] = { min = 4, max = 6 },
 	[3] = { min = 6, max = 9 },
 }
+
+local function isMeshSpecies(speciesId: any): boolean
+	if typeof(speciesId) ~= "string" then
+		return false
+	end
+	local def = SpeciesCatalog.get(speciesId)
+	return def ~= nil and typeof(def.meshFolder) == "string" and def.meshFolder ~= ""
+end
 
 function CoralSize.clampTier(raw: any): number
 	local n = math.floor(tonumber(raw) or 1)
@@ -62,7 +72,7 @@ function CoralSize.applyToPart(part: BasePart, diameter: number, class: number, 
 	local t = math.max(CoralSize.clampTier(tier), c)
 	local speciesId = part:GetAttribute("OceanTD_SpeciesId")
 	-- Mesh species keep authored Size; diameter is a persisted height/scale cue only.
-	if speciesId ~= "Sponge" then
+	if not isMeshSpecies(speciesId) then
 		local d = CoralSize.sanitizeDiameter(diameter, class)
 		part.Size = Vector3.new(d, d, d)
 		part:SetAttribute("OceanTD_Diameter", d)
@@ -112,10 +122,12 @@ CoralSize.STATS = {
 
 CoralSize.STATS_BY_SPECIES = {
 	BrainCoral = CoralSize.STATS,
+	-- Same as Brain for now (will be tuned later).
+	SeaGrass = CoralSize.STATS,
 	Sponge = {
 		[1] = { range = 40, reload = 6, food = 1, defense = 1 },
 		[2] = { range = 70, reload = 4, food = 2, defense = 2 },
-		[3] = { range = 90, reload = 2, food = 3, defense = 3 },
+		[3] = { range = 90, reload = 2, food = 4, defense = 3 },
 	},
 }
 
@@ -135,10 +147,10 @@ function CoralSize.ammoSizeScale(foodCount: number): number
 end
 
 -- Radius used for ammo Y offset from part.Position.
--- Ball corals: half diameter from center. Sponge meshes: half height (pivot at AABB center).
+-- Ball corals: half diameter from center. Mesh species: half height (pivot at AABB center).
 function CoralSize.ammoAnchorRadius(part: BasePart): number
 	local speciesId = part:GetAttribute("OceanTD_SpeciesId")
-	if speciesId == "Sponge" then
+	if isMeshSpecies(speciesId) then
 		return math.max(part.Size.Y * 0.5, 0.5)
 	end
 	return math.max(part.Size.X, part.Size.Y, part.Size.Z) * 0.5
@@ -149,10 +161,69 @@ function CoralSize.visualCenter(part: BasePart): Vector3
 	return part.Position
 end
 
--- Local offsets from coral center (Y up). 2 = side by side; 3 = triangle, same height.
-function CoralSize.ammoLocalOffsets(foodCount: number, coralRadius: number, ammoRadius: number): { Vector3 }
+-- Local offsets from coral center (Y up).
+-- Sponge: wide top spread. SeaGrass: stacked along height by size tier.
+function CoralSize.ammoLocalOffsets(
+	foodCount: number,
+	coralRadius: number,
+	ammoRadius: number,
+	speciesId: string?,
+	partSize: Vector3?
+): { Vector3 }
 	local y = coralRadius + ammoRadius
-	local n = math.clamp(math.floor(foodCount), 1, 3)
+	local n = math.clamp(math.floor(foodCount), 1, 4)
+
+	if speciesId == "SeaGrass" then
+		local h = if partSize then partSize.Y else coralRadius * 2
+		local half = h * 0.5
+		local function yAtFrac(fracFromBottom: number): number
+			return -half + fracFromBottom * h + ammoRadius * 0.35
+		end
+		-- Small: top. Medium: half + top. Large: top + 66% + 33%.
+		if n <= 1 then
+			return { Vector3.new(0, yAtFrac(1), 0) }
+		end
+		if n == 2 then
+			return {
+				Vector3.new(0, yAtFrac(0.5), 0),
+				Vector3.new(0, yAtFrac(1), 0),
+			}
+		end
+		return {
+			Vector3.new(0, yAtFrac(1), 0),
+			Vector3.new(0, yAtFrac(0.66), 0),
+			Vector3.new(0, yAtFrac(0.33), 0),
+		}
+	end
+
+	if speciesId == "Sponge" then
+		local size = partSize or Vector3.new(coralRadius * 2, coralRadius * 2, coralRadius * 2)
+		local topY = coralRadius + ammoRadius * 0.9
+		local spread = math.max(ammoRadius * 2.4, math.min(size.X, size.Z) * 0.24)
+		if n <= 1 then
+			return { Vector3.new(0, topY, 0) }
+		end
+		if n == 2 then
+			return {
+				Vector3.new(-spread, topY, 0),
+				Vector3.new(spread, topY, 0),
+			}
+		end
+		if n == 3 then
+			return {
+				Vector3.new(0, topY, spread),
+				Vector3.new(-spread * 0.866, topY, -spread * 0.5),
+				Vector3.new(spread * 0.866, topY, -spread * 0.5),
+			}
+		end
+		-- Four slots: one per side (diamond) so large sponge doesn't stack on one tube.
+		return {
+			Vector3.new(0, topY, spread),
+			Vector3.new(-spread, topY, 0),
+			Vector3.new(spread, topY, 0),
+			Vector3.new(0, topY, -spread),
+		}
+	end
 	if n <= 1 then
 		return { Vector3.new(0, y, 0) }
 	end

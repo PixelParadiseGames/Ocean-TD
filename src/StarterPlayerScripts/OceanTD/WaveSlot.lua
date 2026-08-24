@@ -1447,17 +1447,11 @@ local function userCamCycleBusy(): boolean
 end
 
 local function syncWaveCamera(snap: WaveSim.HudSnapshot)
-	-- FreeCam / FishCam cycle owns Scriptable cam — don't fight it.
-	if userCamCycleBusy() then
-		if waveCamConn then
-			setWaveCameraActive(false)
-		end
-		return
-	end
-	if snap.running then
-		setWaveCameraActive(true)
-	else
+	-- No Humanoid.CameraOffset during waves in standard/follow mode (was shifting the view up).
+	if waveCamConn then
 		setWaveCameraActive(false)
+	else
+		clearWaveCameraOffset()
 	end
 end
 
@@ -1889,7 +1883,7 @@ local function continueFromSummary()
 	if WaveSim.continueWithHearts(CONTINUE_HEARTS) then
 		applyIcon(true)
 		setHudVisible(true)
-		setWaveCameraActive(true)
+		clearWaveCameraOffset()
 		deps.log("Waves continued (+" .. tostring(CONTINUE_HEARTS) .. " hearts)")
 	end
 end
@@ -2480,12 +2474,9 @@ function WaveSlot.mount(d: Deps)
 				cam.CameraType = Enum.CameraType.Custom
 			end
 		end
-		if WaveSim.isRunning() then
-			if waveCamConn then
-				bakeWaveCameraOffset()
-			else
-				setWaveCameraActive(true)
-			end
+		-- Follow/standard mode: never re-apply wave CameraOffset.
+		if waveCamConn then
+			setWaveCameraActive(false)
 		else
 			clearWaveCameraOffset()
 		end
@@ -2498,8 +2489,10 @@ function WaveSlot.mount(d: Deps)
 			end
 			return
 		end
-		if WaveSim.isRunning() then
-			syncWaveCamera(WaveSim.getHudSnapshot())
+		-- Returning to follow/standard during a wave: keep offset cleared.
+		clearWaveCameraOffset()
+		if waveCamConn then
+			setWaveCameraActive(false)
 		end
 	end)
 

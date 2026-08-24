@@ -766,10 +766,10 @@ local function updateGhostAt(anchorPos: Vector3)
 		if speciesId == "BrainCoral" then
 			ghostDiameter = CoralVisual.randomBrainDiameter()
 			ghostPlaceDiameter = ghostDiameter
-		elseif speciesId == "Sponge" then
+		elseif CoralVisual.isMeshSpecies(speciesId) then
 			ghostPlaceDiameter = nil
-			ghostPlaceVariant = CoralVisual.randomSpongeVariant()
-			ghostPlaceScale = CoralVisual.randomSpongeScale()
+			ghostPlaceVariant = CoralVisual.randomMeshVariant()
+			ghostPlaceScale = CoralVisual.randomMeshScale()
 		else
 			ghostPlaceDiameter = nil
 		end
@@ -786,7 +786,7 @@ local function updateGhostAt(anchorPos: Vector3)
 			ensureWarnBillboard(ghost)
 			ghostBaseColor = readGhostBaseColor(ghost)
 			local sp = SpeciesCatalog.get(speciesId)
-			if speciesId == "Sponge" then
+			if CoralVisual.isMeshSpecies(speciesId) then
 				ghostBaseMaterial = Enum.Material.ForceField
 			else
 				ghostBaseMaterial = if sp then sp.material else Enum.Material.Pebble
@@ -804,8 +804,8 @@ local function updateGhostAt(anchorPos: Vector3)
 			end)
 		end
 	else
-		if speciesId == "Sponge" then
-			CoralVisual.alignSpongeToSurface(ghost, anchorPos)
+		if CoralVisual.isMeshSpecies(speciesId) then
+			CoralVisual.alignMeshToSurface(ghost, anchorPos)
 		else
 			ghost.CFrame = CFrame.new(anchorPos)
 		end
@@ -1401,7 +1401,7 @@ local function commitPlace()
 
 	local rf = Remotes.getFunction("RequestPlace")
 	local placePayload: any = ghostPlaceDiameter
-	if armedItemId == "Sponge" or ghostPlaceVariant ~= nil then
+	if CoralVisual.isMeshSpecies(armedItemId) or ghostPlaceVariant ~= nil then
 		placePayload = {
 			diameter = ghostPlaceDiameter,
 			variantIndex = ghostPlaceVariant,

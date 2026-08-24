@@ -36,6 +36,9 @@ local WHITE = Color3.new(1, 1, 1)
 local STAT_GREY = Color3.fromRGB(140, 140, 145)
 local RED = Color3.fromRGB(220, 50, 55)
 local PANEL_BG = Color3.fromRGB(12, 28, 36)
+-- Match RelocateController recycle chrome.
+local REC_GREEN = Color3.fromRGB(48, 145, 70)
+local RECYCLE_ICON_IMAGE = "rbxassetid://75091344292202"
 local GROW_SOUND_ID = "rbxassetid://134057288"
 local DICE_SPIN_SOUND_ID = "rbxassetid://130406186928352"
 
@@ -50,11 +53,15 @@ local root: Frame? = nil
 local catalog: GuiObject? = nil
 local iconLbl: ImageLabel? = nil
 local nameLbl: TextLabel? = nil
+local recycleBtn: TextButton? = nil
 local upgradeBtn: TextButton? = nil
 local colorScroll: ScrollingFrame? = nil
 local colorSwatchBtns: { [number]: GuiButton } = {}
 local colorSwatchStrokes: { [number]: UIStroke } = {}
 local colorDice: ImageLabel? = nil
+local fedLbl: TextLabel? = nil
+local wavesLbl: TextLabel? = nil
+local lifePad: UIPadding? = nil
 local diceSpinToken = 0
 local activeColorIndex: number? = nil
 local focusColorIndex: number = PlotOutlineColors.DEFAULT_INDEX
@@ -73,6 +80,9 @@ local confirmStrokeConn: RBXScriptConnection? = nil
 local sizeFlashConn: RBXScriptConnection? = nil
 local cineToken = 0
 local bound = false
+local fedAttrConn: RBXScriptConnection? = nil
+local wavesAttrConn: RBXScriptConnection? = nil
+local lifePart: BasePart? = nil
 
 local sizeRf = Remotes.getFunction("RequestCoralSize")
 local colorRf = Remotes.getFunction("RequestCoralColor")
@@ -318,14 +328,14 @@ local function tweenSpongeScale(
 	sec: number
 )
 	part.Size = fullSize * fromMult
-	CoralVisual.alignSpongeToSurface(part, surfaceAnchor)
+	CoralVisual.alignMeshToSurface(part, surfaceAnchor)
 	local t0 = os.clock()
 	while true do
 		local u = math.clamp((os.clock() - t0) / sec, 0, 1)
 		local ease = 1 - (1 - u) * (1 - u)
 		local mult = fromMult + (toMult - fromMult) * ease
 		part.Size = fullSize * mult
-		CoralVisual.alignSpongeToSurface(part, surfaceAnchor)
+		CoralVisual.alignMeshToSurface(part, surfaceAnchor)
 		if u >= 1 then
 			break
 		end
@@ -333,14 +343,14 @@ local function tweenSpongeScale(
 	end
 end
 
-local function findPlacedByPlaceId(id: string): BasePart?
+local function findPlacedByPlaceId(id: string, exclude: BasePart?): BasePart?
 	local root = workspace:FindFirstChild("OceanTD_Placed")
 	if not root then
 		return nil
 	end
 	for _, folder in ipairs(root:GetChildren()) do
 		for _, child in ipairs(folder:GetChildren()) do
-			if child:IsA("BasePart") and child:GetAttribute("OceanTD_PlaceId") == id then
+			if child:IsA("BasePart") and child ~= exclude and child:GetAttribute("OceanTD_PlaceId") == id then
 				return child
 			end
 		end
@@ -348,10 +358,10 @@ local function findPlacedByPlaceId(id: string): BasePart?
 	return nil
 end
 
-local function waitForPlacedByPlaceId(id: string, timeoutSec: number): BasePart?
+local function waitForPlacedByPlaceId(id: string, timeoutSec: number, exclude: BasePart?): BasePart?
 	local deadline = os.clock() + timeoutSec
 	while os.clock() < deadline do
-		local p = findPlacedByPlaceId(id)
+		local p = findPlacedByPlaceId(id, exclude)
 		if p then
 			return p
 		end
@@ -402,7 +412,8 @@ local function zoomToward(part: BasePart, fromCf: CFrame, closer: boolean): CFra
 	if mag < 0.05 then
 		return fromCf
 	end
-	local dist = if closer then mag * 0.6 else mag
+	-- closer: pull in; farther: push out so tall SeaGrass Large stays in frame
+	local dist = if closer then mag * 0.6 else mag * 1.85
 	local pos = look - delta.Unit * dist
 	return CFrame.lookAt(pos, look)
 end
@@ -498,7 +509,9 @@ applyServerSize = function(result: any, unlock: boolean, partOverride: BasePart?
 	end
 
 	local speciesId = part:GetAttribute("OceanTD_SpeciesId")
-	if speciesId == "Sponge" then
+	if CoralVisual.isMeshSpecies(speciesId) then
+		part.Transparency = 0
+		part.LocalTransparencyModifier = 0
 		if fromCinematic then
 			RelocateController.swapSelectedPart(part)
 		else
@@ -528,7 +541,8 @@ applyServerSize = function(result: any, unlock: boolean, partOverride: BasePart?
 	end
 end
 
-local function armImmediateSpongeShrink(placeId: string): () -> ()
+local function armHideReplacement(placeId: string): () -> ()
+	-- SeaGrass clone replicates at full size for a frame; hide+shrink the instant it appears.
 	local root = workspace:FindFirstChild("OceanTD_Placed")
 	if not root then
 		return function() end
@@ -540,20 +554,16 @@ local function armImmediateSpongeShrink(placeId: string): () -> ()
 		if desc:GetAttribute("OceanTD_PlaceId") ~= placeId then
 			return
 		end
-		if desc:GetAttribute("OceanTD_CineShrunk") == true then
+		if desc:GetAttribute("OceanTD_CinePrep") == true then
 			return
 		end
 		local full = desc.Size
-		desc:SetAttribute("OceanTD_CineShrunk", true)
+		desc:SetAttribute("OceanTD_CinePrep", true)
 		desc:SetAttribute("OceanTD_CineFullX", full.X)
 		desc:SetAttribute("OceanTD_CineFullY", full.Y)
 		desc:SetAttribute("OceanTD_CineFullZ", full.Z)
-		desc.Transparency = 1
+		desc.LocalTransparencyModifier = 1
 		desc.Size = full * 0.05
-		local anchor = CoralVisual.readGridAnchor(desc)
-		if anchor then
-			CoralVisual.alignSpongeToSurface(desc, anchor)
-		end
 	end)
 	return function()
 		conn:Disconnect()
@@ -570,7 +580,11 @@ local function runSpongeSizeCinematic(oldPart: BasePart, placeId: string, target
 
 	if unlockNext and startCf and workspace.CurrentCamera then
 		local cam = workspace.CurrentCamera
-		local zoomCf = zoomToward(oldPart, startCf, true)
+		-- SeaGrass Large is huge — zoom out so the grow stays on screen.
+		local zoomCloser = not (
+			oldPart:GetAttribute("OceanTD_SpeciesId") == "SeaGrass" and targetClass >= CoralSize.LARGE
+		)
+		local zoomCf = zoomToward(oldPart, startCf, zoomCloser)
 		RelocateController.setCinematicHold(true)
 		local camTw = TweenService:Create(
 			cam,
@@ -581,10 +595,12 @@ local function runSpongeSizeCinematic(oldPart: BasePart, placeId: string, target
 		camTw.Completed:Wait()
 	end
 
-	if anchor then
-		tweenSpongeScale(oldPart, fullSize, anchor, 1, 0.05, 0.5)
-	else
-		tweenMeshScale(oldPart, fullSize, 1, 0.05, 0.5)
+	if oldPart.Parent then
+		if anchor then
+			tweenSpongeScale(oldPart, fullSize, anchor, 1, 0.05, 0.5)
+		else
+			tweenMeshScale(oldPart, fullSize, 1, 0.05, 0.5)
+		end
 	end
 	if token ~= cineToken or not oldPart.Parent then
 		if unlockNext then
@@ -593,21 +609,26 @@ local function runSpongeSizeCinematic(oldPart: BasePart, placeId: string, target
 		return
 	end
 
-	local disarmShrink = armImmediateSpongeShrink(placeId)
+	oldPart.LocalTransparencyModifier = 1
+	local disarmHide = armHideReplacement(placeId)
+
 	local ok, result = pcall(function()
 		return sizeRf:InvokeServer(placeId, targetClass, unlockNext)
 	end)
 	if not ok or typeof(result) ~= "table" or result.ok ~= true then
-		disarmShrink()
+		disarmHide()
+		if oldPart.Parent then
+			oldPart.LocalTransparencyModifier = 0
+		end
 		if unlockNext then
 			RelocateController.setCinematicHold(false)
 		end
 		return
 	end
 
-	local newPart = waitForPlacedByPlaceId(placeId, 2)
-	disarmShrink()
-	if not newPart then
+	local part: BasePart? = if oldPart.Parent then oldPart else waitForPlacedByPlaceId(placeId, 2.5, oldPart)
+	disarmHide()
+	if not part then
 		applyServerSize(result, unlockNext, nil, true)
 		if unlockNext then
 			RelocateController.setCinematicHold(false)
@@ -615,28 +636,31 @@ local function runSpongeSizeCinematic(oldPart: BasePart, placeId: string, target
 		return
 	end
 
-	local fx = tonumber(newPart:GetAttribute("OceanTD_CineFullX"))
-	local fy = tonumber(newPart:GetAttribute("OceanTD_CineFullY"))
-	local fz = tonumber(newPart:GetAttribute("OceanTD_CineFullZ"))
+	local fx = tonumber(part:GetAttribute("OceanTD_CineFullX"))
+	local fy = tonumber(part:GetAttribute("OceanTD_CineFullY"))
+	local fz = tonumber(part:GetAttribute("OceanTD_CineFullZ"))
 	local newFull = if typeof(fx) == "number" and typeof(fy) == "number" and typeof(fz) == "number"
 		then Vector3.new(fx, fy, fz)
-		else newPart.Size
-	newPart:SetAttribute("OceanTD_CineShrunk", nil)
-	newPart:SetAttribute("OceanTD_CineFullX", nil)
-	newPart:SetAttribute("OceanTD_CineFullY", nil)
-	newPart:SetAttribute("OceanTD_CineFullZ", nil)
-	local growAnchor = anchor or CoralVisual.readGridAnchor(newPart)
-	newPart.Size = newFull * 0.05
-	if growAnchor then
-		CoralVisual.alignSpongeToSurface(newPart, growAnchor)
-	end
+		else part.Size
+	part:SetAttribute("OceanTD_CinePrep", nil)
+	part:SetAttribute("OceanTD_CineFullX", nil)
+	part:SetAttribute("OceanTD_CineFullY", nil)
+	part:SetAttribute("OceanTD_CineFullZ", nil)
 
-	newPart.Transparency = 0
+	local growAnchor = anchor or CoralVisual.readGridAnchor(part)
+	part.LocalTransparencyModifier = 1
+	part.Size = newFull * 0.05
+	if growAnchor then
+		CoralVisual.alignMeshToSurface(part, growAnchor)
+	end
+	part.Transparency = 0
+	part.LocalTransparencyModifier = 0
+
 	playGrowSound()
 	if growAnchor then
-		tweenSpongeScale(newPart, newFull, growAnchor, 0.05, 1, 0.9)
+		tweenSpongeScale(part, newFull, growAnchor, 0.05, 1, 0.9)
 	else
-		tweenMeshScale(newPart, newFull, 0.05, 1, 0.9)
+		tweenMeshScale(part, newFull, 0.05, 1, 0.9)
 	end
 
 	if unlockNext and startCf and workspace.CurrentCamera then
@@ -656,7 +680,7 @@ local function runSpongeSizeCinematic(oldPart: BasePart, placeId: string, target
 		RelocateController.setLiveCameraCFrame(saved)
 	end
 
-	applyServerSize(result, unlockNext, newPart, true)
+	applyServerSize(result, unlockNext, part, true)
 end
 
 local function invokeSize(targetClass: number, unlockNext: boolean)
@@ -670,7 +694,7 @@ local function invokeSize(targetClass: number, unlockNext: boolean)
 	end
 	UiHaptics.pulseShort()
 	local speciesId = part:GetAttribute("OceanTD_SpeciesId")
-	if speciesId == "Sponge" then
+	if CoralVisual.isMeshSpecies(speciesId) then
 		task.spawn(function()
 			runSpongeSizeCinematic(part, placeId, targetClass, unlockNext)
 		end)
@@ -1037,6 +1061,70 @@ local function fillHeader(part: BasePart)
 	syncColorFromPart(part)
 end
 
+local function onDeletePressed()
+	if not RelocateController.isActive() then
+		return
+	end
+	hideStatsKey()
+	hideConfirm()
+	UiHaptics.pulseShort()
+	RelocateController.beginRecycleConfirm()
+end
+
+local function refreshLifeRows(part: BasePart?)
+	if not fedLbl or not wavesLbl then
+		return
+	end
+	local fed = 0
+	local waves = 0
+	if part then
+		local a = part:GetAttribute("OceanTD_CoralFedTotal")
+		if typeof(a) == "number" then
+			fed = math.floor(a)
+		elseif typeof(a) == "string" then
+			fed = math.floor(tonumber(a) or 0)
+		end
+		local b = part:GetAttribute("OceanTD_CoralWavesTotal")
+		if typeof(b) == "number" then
+			waves = math.floor(b)
+		elseif typeof(b) == "string" then
+			waves = math.floor(tonumber(b) or 0)
+		end
+	end
+	fedLbl.Text = "Fed: " .. tostring(math.max(0, fed))
+	wavesLbl.Text = "Waves: " .. tostring(math.max(0, waves))
+end
+
+local function clearLifeConns()
+	if fedAttrConn then
+		fedAttrConn:Disconnect()
+		fedAttrConn = nil
+	end
+	if wavesAttrConn then
+		wavesAttrConn:Disconnect()
+		wavesAttrConn = nil
+	end
+	lifePart = nil
+end
+
+local function bindLifeAttrs(part: BasePart)
+	clearLifeConns()
+	lifePart = part
+	refreshLifeRows(part)
+	fedAttrConn = part:GetAttributeChangedSignal("OceanTD_CoralFedTotal"):Connect(function()
+		if lifePart ~= part then
+			return
+		end
+		refreshLifeRows(part)
+	end)
+	wavesAttrConn = part:GetAttributeChangedSignal("OceanTD_CoralWavesTotal"):Connect(function()
+		if lifePart ~= part then
+			return
+		end
+		refreshLifeRows(part)
+	end)
+end
+
 local function setVisible(on: boolean)
 	if root then
 		root.Visible = on
@@ -1045,10 +1133,13 @@ local function setVisible(on: boolean)
 		catalog.Visible = not on
 	end
 	if on then
+		RelocateController.setInspectPanelVisible(true)
 		local part = selectedPart()
 		if part then
 			fillHeader(part)
 			refreshSizeColors()
+			refreshLifeRows(part)
+			bindLifeAttrs(part)
 			startUpgradeFx()
 			showRangeRing(part)
 		end
@@ -1057,6 +1148,8 @@ local function setVisible(on: boolean)
 		hideRangeRing()
 		hideConfirm()
 		hideStatsKey()
+		RelocateController.setInspectPanelVisible(false)
+		clearLifeConns()
 		cineToken += 1
 	end
 end
@@ -1089,13 +1182,18 @@ function CoralInspectPanel.bind(panel: GuiObject, catalogFrame: GuiObject)
 	row1.LayoutOrder = 1
 	row1.Parent = frame
 
+	local row1Pad = Instance.new("UIPadding")
+	row1Pad.PaddingLeft = UDim.new(0, 4)
+	row1Pad.PaddingRight = UDim.new(0, 4)
+	row1Pad.Parent = row1
+
 	local icon = Instance.new("ImageLabel")
 	icon.Name = "Circle"
 	icon.BackgroundColor3 = Color3.fromRGB(20, 30, 45)
 	icon.BackgroundTransparency = 0.15
 	icon.AnchorPoint = Vector2.new(0, 0.5)
-	icon.Position = UDim2.new(0, 4, 0.5, 0)
-	icon.Size = UDim2.new(0.28, 0, 0.9, 0)
+	icon.Position = UDim2.new(0, 0, 0.5, 0)
+	icon.Size = UDim2.fromOffset(40, 40)
 	icon.ScaleType = Enum.ScaleType.Fit
 	icon.Parent = row1
 	UiCircles.ensure(icon)
@@ -1108,8 +1206,9 @@ function CoralInspectPanel.bind(panel: GuiObject, catalogFrame: GuiObject)
 	local nm = Instance.new("TextLabel")
 	nm.BackgroundTransparency = 1
 	nm.AnchorPoint = Vector2.new(0, 0.5)
-	nm.Position = UDim2.new(0.32, 8, 0.5, 0)
-	nm.Size = UDim2.new(0.66, -12, 0.42, 0)
+	-- Keep label centered within row1, with a small down nudge.
+	nm.Position = UDim2.new(0, 52, 0.5, 2)
+	nm.Size = UDim2.new(1, -108, 0.42, 0)
 	nm.Font = UiTheme.Font
 	nm.Text = "Coral"
 	nm.TextColor3 = WHITE
@@ -1118,12 +1217,113 @@ function CoralInspectPanel.bind(panel: GuiObject, catalogFrame: GuiObject)
 	nm.Parent = row1
 	nameLbl = nm
 
+	local recycle = Instance.new("TextButton")
+	recycle.Name = "Recycle"
+	recycle.Text = ""
+	recycle.Font = UiTheme.Font
+	recycle.TextScaled = true
+	recycle.TextColor3 = WHITE
+	recycle.BackgroundColor3 = REC_GREEN
+	recycle.BorderSizePixel = 0
+	recycle.AnchorPoint = Vector2.new(1, 0.5)
+	recycle.Position = UDim2.new(1, 0, 0.5, 2)
+	recycle.Size = UDim2.fromOffset(40, 40)
+	recycle.AutoButtonColor = false
+	recycle.Parent = row1
+	UiCircles.ensure(recycle)
+	local edge = Instance.new("UIStroke")
+	edge.Color = WHITE
+	edge.Thickness = 2
+	edge.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+	edge.Parent = recycle
+
+	local icon = Instance.new("ImageLabel")
+	icon.Name = "Icon"
+	icon.BackgroundTransparency = 1
+	icon.AnchorPoint = Vector2.new(0.5, 0.5)
+	icon.Position = UDim2.fromScale(0.5, 0.5)
+	icon.Size = UDim2.fromScale(0.62, 0.62)
+	icon.Image = RECYCLE_ICON_IMAGE
+	icon.ScaleType = Enum.ScaleType.Fit
+	icon.ZIndex = 2
+	icon.Active = false
+	icon.Parent = recycle
+
+	recycleBtn = recycle
+	recycle.Activated:Connect(onDeletePressed)
+
+	local function refreshHeaderRow()
+		local h = row1.AbsoluteSize.Y
+		if h < 8 then
+			return
+		end
+		-- 20% smaller than old 90%-height icon => 72% of row height.
+		local side = math.max(28, math.floor(h * 0.72 + 0.5))
+		icon.Size = UDim2.fromOffset(side, side)
+		if recycleBtn then
+			recycleBtn.Size = UDim2.fromOffset(side, side)
+		end
+		nm.Position = UDim2.new(0, side + 12, 0.5, 2)
+		nm.Size = UDim2.new(1, -(side * 2 + 20), 0.42, 0)
+		if lifePad then
+			-- Align Fed/Waves rows under the coral name.
+			lifePad.PaddingLeft = UDim.new(0, side + 12)
+		end
+	end
+	row1:GetPropertyChangedSignal("AbsoluteSize"):Connect(refreshHeaderRow)
+	task.defer(refreshHeaderRow)
+
+	-- Fed / Waves rows under the coral title.
+	local lifeRow = Instance.new("Frame")
+	lifeRow.Name = "LifeRow"
+	lifeRow.BackgroundTransparency = 1
+	lifeRow.Size = UDim2.new(1, 0, 0.11, 0)
+	lifeRow.LayoutOrder = 2
+	lifeRow.Parent = frame
+	local lifeLayout = Instance.new("UIListLayout")
+	lifeLayout.FillDirection = Enum.FillDirection.Vertical
+	lifeLayout.SortOrder = Enum.SortOrder.LayoutOrder
+	lifeLayout.HorizontalAlignment = Enum.HorizontalAlignment.Left
+	lifeLayout.VerticalAlignment = Enum.VerticalAlignment.Center
+	lifeLayout.Padding = UDim.new(0, 2)
+	lifeLayout.Parent = lifeRow
+	lifePad = Instance.new("UIPadding")
+	lifePad.PaddingLeft = UDim.new(0, 52)
+	lifePad.PaddingRight = UDim.new(0, 4)
+	lifePad.Parent = lifeRow
+
+	local fed = Instance.new("TextLabel")
+	fed.Name = "FedRow"
+	fed.BackgroundTransparency = 1
+	fed.LayoutOrder = 1
+	fed.Size = UDim2.new(1, 0, 0.5, 0)
+	fed.Font = UiTheme.Font
+	fed.Text = "Fed: 0"
+	fed.TextColor3 = STAT_GREY
+	fed.TextScaled = true
+	fed.TextXAlignment = Enum.TextXAlignment.Left
+	fed.Parent = lifeRow
+	fedLbl = fed
+
+	local waves = Instance.new("TextLabel")
+	waves.Name = "WavesRow"
+	waves.BackgroundTransparency = 1
+	waves.LayoutOrder = 2
+	waves.Size = UDim2.new(1, 0, 0.5, 0)
+	waves.Font = UiTheme.Font
+	waves.Text = "Waves: 0"
+	waves.TextColor3 = STAT_GREY
+	waves.TextScaled = true
+	waves.TextXAlignment = Enum.TextXAlignment.Left
+	waves.Parent = lifeRow
+	wavesLbl = waves
+
 	-- Color swatch row (above UPGRADE).
 	local colorRow = Instance.new("Frame")
 	colorRow.Name = "ColorRow"
 	colorRow.BackgroundTransparency = 1
 	colorRow.Size = UDim2.new(1, 0, 0.14, 0)
-	colorRow.LayoutOrder = 2
+	colorRow.LayoutOrder = 3
 	colorRow.Parent = frame
 
 	local scroll = Instance.new("ScrollingFrame")
@@ -1276,7 +1476,7 @@ function CoralInspectPanel.bind(panel: GuiObject, catalogFrame: GuiObject)
 	local row3 = Instance.new("Frame")
 	row3.BackgroundTransparency = 1
 	row3.Size = UDim2.new(1, 0, 0.48, 0)
-	row3.LayoutOrder = 3
+	row3.LayoutOrder = 4
 	row3.Parent = frame
 	local sizeGrid = Instance.new("UIGridLayout")
 	sizeGrid.Name = "SizeGrid"
@@ -1378,7 +1578,7 @@ function CoralInspectPanel.bind(panel: GuiObject, catalogFrame: GuiObject)
 	local upRow = Instance.new("Frame")
 	upRow.BackgroundTransparency = 1
 	upRow.Size = UDim2.new(1, 0, 0.16, 0)
-	upRow.LayoutOrder = 4
+	upRow.LayoutOrder = 5
 	upRow.Parent = frame
 
 	local up = Instance.new("TextButton")

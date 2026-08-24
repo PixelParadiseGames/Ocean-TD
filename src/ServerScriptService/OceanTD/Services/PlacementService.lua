@@ -322,11 +322,11 @@ function PlacementService.placeFromSave(
 		then PlotOutlineColors.resolveCoralPaint(paintIdx, colorR, colorG, colorB)
 		else nil
 	local class = CoralSize.clampTier(sizeClass or 1)
-	local variant = if species.speciesId == "Sponge"
-		then CoralVisual.clampSpongeVariant(variantIndex)
+	local variant = if CoralVisual.isMeshSpecies(species.speciesId)
+		then CoralVisual.clampMeshVariant(variantIndex)
 		else nil
-	local scale = if species.speciesId == "Sponge"
-		then CoralVisual.sanitizeSpongeScale(scaleMult)
+	local scale = if CoralVisual.isMeshSpecies(species.speciesId)
+		then CoralVisual.sanitizeMeshScale(scaleMult)
 		else nil
 	local occupied, occupyErr = GridService.tryOccupy(
 		plotId,
@@ -459,10 +459,10 @@ function PlacementService.place(
 	if species.speciesId == "BrainCoral" or itemId == "BrainCoral" then
 		-- Prefer client ghost size so preview matches the placed coral.
 		diameter = CoralVisual.sanitizeBrainDiameter(opts.diameter)
-	elseif species.speciesId == "Sponge" or itemId == "Sponge" then
+	elseif CoralVisual.isMeshSpecies(species.speciesId) then
 		sizeClass = CoralSize.clampTier(opts.sizeClass or 1)
-		variant = CoralVisual.clampSpongeVariant(opts.variantIndex)
-		scale = CoralVisual.sanitizeSpongeScale(opts.scaleMult)
+		variant = CoralVisual.clampMeshVariant(opts.variantIndex)
+		scale = CoralVisual.sanitizeMeshScale(opts.scaleMult)
 	end
 	local gx, gy, gz = GridMath.worldToGrid(localPos, Vector3.zero)
 	local occupied, occupyErr = GridService.tryOccupy(
@@ -511,8 +511,8 @@ function PlacementService.place(
 		return { ok = false, errorCode = "VisualFail" }
 	end
 
-	-- Persist resolved height for sponge (mesh Size.Y after scale jitter).
-	if species.speciesId == "Sponge" then
+	-- Persist resolved height for mesh species (Size.Y after scale jitter).
+	if CoralVisual.isMeshSpecies(species.speciesId) then
 		diameter = visual.Size.Y
 		local cell = GridService.getCellAtGrid(plotId, gx, gy, gz)
 		if cell then
@@ -620,8 +620,8 @@ function PlacementService.move(
 	local fgx, fgy, fgz = GridMath.worldToGrid(fromLocal, Vector3.zero)
 	local tgx, tgy, tgz = GridMath.worldToGrid(toLocal, Vector3.zero)
 	if fgx == tgx and fgy == tgy and fgz == tgz then
-		if fromCell.id == "Sponge" or visual:GetAttribute("OceanTD_SpeciesId") == "Sponge" then
-			CoralVisual.alignSpongeToSurface(visual, toWorldPos)
+		if CoralVisual.isMeshSpecies(fromCell.id) or CoralVisual.isMeshSpecies(visual:GetAttribute("OceanTD_SpeciesId")) then
+			CoralVisual.alignMeshToSurface(visual, toWorldPos)
 		else
 			visual.CFrame = CFrame.new(toWorldPos)
 		end
@@ -688,8 +688,8 @@ function PlacementService.move(
 	end
 
 	local species = SpeciesCatalog.getByItemId(cell.id)
-	if species and species.speciesId == "Sponge" then
-		CoralVisual.alignSpongeToSurface(visual, toWorldPos)
+	if species and CoralVisual.isMeshSpecies(species.speciesId) then
+		CoralVisual.alignMeshToSurface(visual, toWorldPos)
 	else
 		visual.CFrame = CFrame.new(toWorldPos)
 	end
@@ -1142,11 +1142,20 @@ function PlacementService.setCoralSize(
 	local newDiam: number
 	local variant: number? = nil
 	local scale: number? = nil
-	if speciesId == "Sponge" then
+	-- Lock grid cell from the planted anchor BEFORE restyle (mesh swap must not drift cell lookup).
+	local slot = PlotService.getSlot(plotId)
+	if not slot then
+		return { ok = false, errorCode = "BadPlot" }
+	end
+	local savedAnchor = CoralVisual.readGridAnchor(visual) or visual.Position
+	local localPos = GridMath.worldToPlotLocal(savedAnchor, slot.cframe)
+	local gx, gy, gz = GridMath.worldToGrid(localPos, Vector3.zero)
+
+	if CoralVisual.isMeshSpecies(speciesId) then
 		-- New random mesh + scale jitter each size change / unlock.
-		variant = CoralVisual.randomSpongeVariant()
-		scale = CoralVisual.randomSpongeScale()
-		local newPart, height, vOut, sOut = CoralVisual.restyleSponge(visual, want, variant, scale)
+		variant = CoralVisual.randomMeshVariant()
+		scale = CoralVisual.randomMeshScale()
+		local newPart, height, vOut, sOut = CoralVisual.restyleMesh(visual, want, variant, scale, savedAnchor)
 		if newPart then
 			visual = newPart
 			newDiam = height or newPart.Size.Y
@@ -1160,15 +1169,15 @@ function PlacementService.setCoralSize(
 		newDiam = CoralSize.randomDiameter(want)
 	end
 
-	local slot = PlotService.getSlot(plotId)
-	if not slot then
-		return { ok = false, errorCode = "BadPlot" }
-	end
-	local anchorWorld = CoralVisual.readGridAnchor(visual) or visual.Position
-	local localPos = GridMath.worldToPlotLocal(anchorWorld, slot.cframe)
-	local gx, gy, gz = GridMath.worldToGrid(localPos, Vector3.zero)
 	if not GridService.setSizeAtGrid(plotId, gx, gy, gz, newDiam, newTier, want, variant, scale) then
 		return { ok = false, errorCode = "Missing" }
+	end
+	-- Keep saved VisualPos on the cell matching the plant anchor (restyle must not relocate the cell).
+	local cell = GridService.getCellAtGrid(plotId, gx, gy, gz)
+	if cell then
+		cell.lx = localPos.X
+		cell.ly = localPos.Y
+		cell.lz = localPos.Z
 	end
 	-- Client plays the scale cinematic; persist attributes now so a leave/rejoin matches.
 	visual:SetAttribute("OceanTD_Diameter", newDiam)

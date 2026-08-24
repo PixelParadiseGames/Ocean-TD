@@ -35,7 +35,7 @@ export type LayoutObject = {
 	colorR: number?,
 	colorG: number?,
 	colorB: number?,
-	-- Mesh species (Sponge): which SmallN/MediumN/LargeN was rolled. Missing → random on hydrate.
+	-- Mesh species (Sponge, SeaGrass): which SmallN/MediumN/LargeN was rolled. Missing → random on hydrate.
 	variantIndex: number?,
 	-- Mesh species: random size jitter applied to template Size. Missing → 1 / re-roll.
 	scaleMult: number?,
@@ -113,6 +113,7 @@ function PlotTypes.defaultProfile(): PlayerProfile
 		inventory = {
 			BrainCoral = Constants.STARTING_BRAIN_CORAL_SEEDS,
 			Sponge = Constants.STARTING_SPONGE_SEEDS,
+			SeaGrass = Constants.STARTING_SEA_GRASS_SEEDS,
 		},
 		skillTree = {},
 		layout = {},

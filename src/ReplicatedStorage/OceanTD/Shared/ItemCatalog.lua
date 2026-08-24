@@ -4,7 +4,7 @@ export type ItemDef = {
 	id: string,
 	displayName: string,
 	icon: string,
-	category: string, -- "Coral" | "Sponge" | "Critter" | ...
+	category: string, -- "Coral" | "Sponge" | "Seagrass" | "Critter" | ...
 	sortOrder: number,
 	speciesId: string?,
 }
@@ -30,6 +30,14 @@ local BY_ID: { [string]: ItemDef } = {
 		category = "Sponge",
 		sortOrder = 20,
 		speciesId = "Sponge",
+	},
+	SeaGrass = {
+		id = "SeaGrass",
+		displayName = "Sea Grass",
+		icon = SPONGE_ICON, -- placeholder until a Sea Grass icon exists
+		category = "Seagrass",
+		sortOrder = 30,
+		speciesId = "SeaGrass",
 	},
 }
 

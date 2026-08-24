@@ -66,6 +66,7 @@ local GAMEPAD_AIM_SPEED = 343 -- px/sec at full deflection
 
 local cinematicHold = false
 local inspectModal = false
+local inspectPanelVisible = false
 local activeChanged = Instance.new("BindableEvent")
 local r1WhileActive: (() -> boolean)? = nil
 local aWhileIdle: (() -> boolean)? = nil
@@ -444,7 +445,7 @@ end
 
 -- Balls: center (screen then lifts ~52px). Sponges: mesh pivot is mid-body — use the top.
 local function coralChromeWorldPos(p: BasePart): Vector3
-	if p:GetAttribute("OceanTD_SpeciesId") == "Sponge" then
+	if CoralVisual.isMeshSpecies(p:GetAttribute("OceanTD_SpeciesId")) then
 		return p.Position + Vector3.new(0, p.Size.Y * 0.5, 0)
 	end
 	return p.Position
@@ -452,7 +453,7 @@ end
 
 local function coralChromeScreenLift(p: BasePart): number
 	-- Sponges already project from the tip; only a small gap. Balls need the larger lift from center.
-	if p:GetAttribute("OceanTD_SpeciesId") == "Sponge" then
+	if CoralVisual.isMeshSpecies(p:GetAttribute("OceanTD_SpeciesId")) then
 		return 8
 	end
 	return 52
@@ -667,6 +668,21 @@ local function makeUi()
 	-- BillboardGui Click is flaky on phone — commit on InputEnded via chromePressTarget.
 end
 
+local function syncMoveIconToGround()
+	if not moveBillboard or not part then
+		return
+	end
+	local anchor = moveGridAnchor or gridAnchorPos
+	if anchor and CoralVisual.isMeshSpecies(part:GetAttribute("OceanTD_SpeciesId")) then
+		-- Billboard is Adorned to the mesh; offset so the handle sits on the plant grid point.
+		moveBillboard.StudsOffsetWorldSpace = anchor - part.Position
+		moveBillboard.StudsOffset = Vector3.zero
+	else
+		moveBillboard.StudsOffsetWorldSpace = Vector3.zero
+		moveBillboard.StudsOffset = Vector3.zero
+	end
+end
+
 local function attachMoveIcon(adornee: BasePart)
 	if moveBillboard then
 		moveBillboard:Destroy()
@@ -695,6 +711,7 @@ local function attachMoveIcon(adornee: BasePart)
 	scale.Parent = img
 	moveBillboard = bb
 	moveIcon = img
+	syncMoveIconToGround()
 end
 
 local function findBlockingCoral(worldPos: Vector3, ignorePart: BasePart?): BasePart?
@@ -1281,6 +1298,10 @@ local function syncChrome()
 	if recycleBtn then
 		-- Hide recycle while dragging a move; show again after confirm, or during recycle confirm.
 		local showRecycle = (not hasMoved) or recyclePending
+		-- Coral inspect UI owns the recycle affordance; hide the in-world one while idle.
+		if inspectPanelVisible and not recyclePending then
+			showRecycle = false
+		end
 		recycleBtn.Visible = showRecycle
 		if showRecycle then
 			recycleBtn.AnchorPoint = Vector2.new(0.5, 1)
@@ -1348,13 +1369,14 @@ local function updateAt(worldPos: Vector3)
 		return
 	end
 	local surfacePos = worldPos
-	if part:GetAttribute("OceanTD_SpeciesId") == "Sponge" then
-		CoralVisual.alignSpongeToSurface(part, surfacePos)
+	if CoralVisual.isMeshSpecies(part:GetAttribute("OceanTD_SpeciesId")) then
+		CoralVisual.alignMeshToSurface(part, surfacePos)
 		moveGridAnchor = surfacePos
 	else
 		part.CFrame = CFrame.new(surfacePos)
 		moveGridAnchor = surfacePos
 	end
+	syncMoveIconToGround()
 	local ok, reason = evaluate(surfacePos)
 	validSpot = ok
 	rejectReason = reason
@@ -1468,6 +1490,9 @@ local function playIntro(fromScreen: Vector2)
 	end
 	local recScale: UIScale? = nil
 	recycleBtn.Visible = true
+	if inspectPanelVisible then
+		recycleBtn.Visible = false
+	end
 	recycleBtn.AnchorPoint = Vector2.new(0.5, 0.5)
 	recycleBtn.Position = UDim2.fromOffset(fromScreen.X, fromScreen.Y)
 	recycleBtn.Size = UDim2.fromOffset(REC_BTN_SIZE, REC_BTN_SIZE)
@@ -1485,6 +1510,9 @@ local function playIntro(fromScreen: Vector2)
 			return
 		end
 		keepCameraFrozen()
+		if inspectPanelVisible and recycleBtn then
+			recycleBtn.Visible = false
+		end
 		local u = math.clamp((os.clock() - t0) / INTRO_SEC, 0, 1)
 		local a = 1 - (1 - u) * (1 - u)
 		if moveScale and moveScale.Parent then
@@ -1597,6 +1625,17 @@ function RelocateController.setInspectModal(on: boolean)
 	end
 end
 
+function RelocateController.setInspectPanelVisible(on: boolean)
+	inspectPanelVisible = on
+	-- Hide the idle recycle button above the coral while the inspect UI owns recycle.
+	if on and recycleBtn then
+		recycleBtn.Visible = false
+	end
+	if not on then
+		syncChrome()
+	end
+end
+
 function RelocateController.setR1WhileActiveHandler(cb: (() -> boolean)?)
 	r1WhileActive = cb
 end
@@ -1644,8 +1683,8 @@ function RelocateController.swapSelectedPart(target: BasePart)
 		return
 	end
 	part = target
-	originPos = target.Position
 	gridAnchorPos = CoralVisual.readGridAnchor(target) or target.Position
+	originPos = gridAnchorPos
 	moveGridAnchor = gridAnchorPos
 	SelectRing.ensure(selectRing, target, playerGui)
 	attachMoveIcon(target)
@@ -1681,8 +1720,8 @@ function RelocateController.cancel(instant: boolean?)
 
 	local function snapHome()
 		if p and p.Parent then
-			if p:GetAttribute("OceanTD_SpeciesId") == "Sponge" and gridAnchorPos then
-				CoralVisual.alignSpongeToSurface(p, gridAnchorPos)
+			if CoralVisual.isMeshSpecies(p:GetAttribute("OceanTD_SpeciesId")) and gridAnchorPos then
+				CoralVisual.alignMeshToSurface(p, gridAnchorPos)
 			elseif origin then
 				p.CFrame = CFrame.new(origin)
 			end
@@ -1691,7 +1730,7 @@ function RelocateController.cancel(instant: boolean?)
 	end
 
 	if moved and p and origin and p.Parent and not instant then
-		if p:GetAttribute("OceanTD_SpeciesId") == "Sponge" and gridAnchorPos then
+		if CoralVisual.isMeshSpecies(p:GetAttribute("OceanTD_SpeciesId")) and gridAnchorPos then
 			snapHome()
 			log("Cancelled — reverted")
 			return
@@ -1734,8 +1773,8 @@ function RelocateController.beginRecycleConfirm()
 	end
 	-- Snap home so recycle matches the grid cell about to be vacated.
 	clearBlockHighlight()
-	if part:GetAttribute("OceanTD_SpeciesId") == "Sponge" and gridAnchorPos then
-		CoralVisual.alignSpongeToSurface(part, gridAnchorPos)
+	if CoralVisual.isMeshSpecies(part:GetAttribute("OceanTD_SpeciesId")) and gridAnchorPos then
+		CoralVisual.alignMeshToSurface(part, gridAnchorPos)
 	else
 		part.CFrame = CFrame.new(originPos)
 	end
@@ -1935,8 +1974,8 @@ function RelocateController.commit()
 		UiHaptics.pulseShort()
 		if part and part.Parent then
 			local finalPos = if typeof(result.worldPos) == "Vector3" then result.worldPos else toPos
-			if part:GetAttribute("OceanTD_SpeciesId") == "Sponge" then
-				CoralVisual.alignSpongeToSurface(part, finalPos)
+			if CoralVisual.isMeshSpecies(part:GetAttribute("OceanTD_SpeciesId")) then
+				CoralVisual.alignMeshToSurface(part, finalPos)
 			else
 				part.CFrame = CFrame.new(finalPos)
 			end
@@ -2012,8 +2051,9 @@ function RelocateController.begin(target: BasePart)
 	pendingCoralSwitch = nil
 	pendingCoralSwitchScreen = nil
 	part = target
-	originPos = target.Position
 	gridAnchorPos = CoralVisual.readGridAnchor(target) or target.Position
+	-- Mesh species: home / out-of-plot checks use the planted grid point, not mesh center.
+	originPos = gridAnchorPos
 	moveGridAnchor = gridAnchorPos
 	itemId = iid
 	baseColor = restColor

@@ -151,6 +151,9 @@ type CoralAgent = {
 	rangeSq: number,
 	defenseSec: number,
 	diameter: number,
+	-- Lifetime session stats (used by CoralInspectPanel while this client is running).
+	fedTotal: number,
+	wavesTotal: number,
 	readyAt: number,
 	ammo: BasePart?,
 	ammoSlots: { BasePart },
@@ -198,6 +201,11 @@ local pathDataGround: WaveCrab.PathData? = nil
 local fishList: { FishAgent } = {}
 local critterHungerBarsVisible = true
 local coralList: { CoralAgent } = {}
+type CoralStats = {
+	fed: number, -- fish fully fed (credited when they hit max hunger)
+	waves: number, -- waves completed while this coral existed (session-only)
+}
+local coralStatsByPlaceId: { [string]: CoralStats } = {}
 local fishPathBuckets: { { FishAgent } } = {}
 local activeShots: { FoodShot } = {}
 local spawnQueue = 0
@@ -222,6 +230,7 @@ local fishFed = 0
 local waveFishExpected = 0
 local waveFishSpawned = 0 -- successfully spawned this wave (denominator once spawning ends)
 local waveFishFullyFed = 0 -- fish that reached full hunger this wave (alive or finished happy)
+local lastCoralWaveAwarded = 0
 local startedAt = 0
 local simClock = 0 -- advances with dt * speedMult (ammo/combat); HUD clock freezes while paused
 local speedMult = 1 -- 1 | 1.5 | 2 | 0 (pause); session-only, player-controlled
@@ -333,13 +342,49 @@ local function anyHungerDanger(): boolean
 	return false
 end
 
-local function markFishFullyFed(agent: FishAgent)
+local function markFishFullyFed(agent: FishAgent, fedBy: CoralAgent?)
 	if agent.fedCounted then
 		return
 	end
 	agent.fedCounted = true
 	waveFishFullyFed += 1
+	-- Attribute the "fed" credit to the coral that delivered the final shot.
+	if fedBy then
+		local pid = fedBy.part:GetAttribute("OceanTD_PlaceId")
+		if typeof(pid) == "string" and pid ~= "" then
+			local st = coralStatsByPlaceId[pid]
+			if not st then
+				st = { fed = 0, waves = 0 }
+				coralStatsByPlaceId[pid] = st
+			end
+			st.fed += 1
+			fedBy.fedTotal = st.fed
+			fedBy.part:SetAttribute("OceanTD_CoralFedTotal", fedBy.fedTotal)
+		end
+	end
 	notifyHud()
+end
+
+local function awardCoralWaveCompleted(waveNum: number)
+	-- Prevent double-awards when multiple "wave complete" paths converge.
+	if waveNum <= lastCoralWaveAwarded then
+		return
+	end
+	lastCoralWaveAwarded = waveNum
+
+	for _, coral in ipairs(coralList) do
+		local part = coral.part
+		if part.Parent then
+			local pid = part:GetAttribute("OceanTD_PlaceId")
+			if typeof(pid) == "string" and pid ~= "" then
+				local st = coralStatsByPlaceId[pid] or { fed = 0, waves = 0 }
+				coralStatsByPlaceId[pid] = st
+				st.waves += 1
+				coral.wavesTotal = st.waves
+				part:SetAttribute("OceanTD_CoralWavesTotal", st.waves)
+			end
+		end
+	end
 end
 
 local function waveFishDenominator(): number
@@ -1169,7 +1214,7 @@ local function updateHungerVisual(agent: FishAgent)
 		end
 	end
 	if agent.hunger >= agent.maxHunger then
-		markFishFullyFed(agent)
+		markFishFullyFed(agent, nil)
 		agent.barFrame.Visible = false
 		agent.forkLabel.Visible = false
 		if agent.remainLabel then
@@ -1238,7 +1283,9 @@ local function ammoWorldPos(coral: CoralAgent, slot: number?): Vector3
 	if nVis < 1 then
 		nVis = coral.foodCount
 	end
-	local offs = CoralSize.ammoLocalOffsets(nVis, r, ammoR)
+	local speciesId = coral.part:GetAttribute("OceanTD_SpeciesId")
+	local sid = if typeof(speciesId) == "string" then speciesId else nil
+	local offs = CoralSize.ammoLocalOffsets(nVis, r, ammoR, sid, coral.part.Size)
 	local i = math.clamp(slot or 1, 1, #offs)
 	return coral.part.Position + offs[i]
 end
@@ -1346,6 +1393,15 @@ local function makeCoralAgent(part: BasePart): CoralAgent?
 		reload = species.reloadSec or C.DEFAULT_RELOAD
 		fillAmt = species.foodFill or C.DEFAULT_FOOD_FILL
 	end
+	local pid = part:GetAttribute("OceanTD_PlaceId")
+	local initFed = 0
+	local initWaves = 0
+	if typeof(pid) == "string" and pid ~= "" then
+		local st = coralStatsByPlaceId[pid] or { fed = 0, waves = 0 }
+		coralStatsByPlaceId[pid] = st
+		initFed = st.fed
+		initWaves = st.waves
+	end
 	local agent: CoralAgent = {
 		part = part,
 		color = select(2, CoralVisual.readRestLook(part)),
@@ -1367,8 +1423,15 @@ local function makeCoralAgent(part: BasePart): CoralAgent?
 		pathDist = 0,
 		pathSideDist = 0,
 		stunned = false,
+		fedTotal = initFed,
+		wavesTotal = initWaves,
 	}
 	applySizeStats(agent)
+	-- Expose lifetime counters on the part for the inspect UI.
+	if typeof(pid) == "string" and pid ~= "" then
+		part:SetAttribute("OceanTD_CoralFedTotal", initFed)
+		part:SetAttribute("OceanTD_CoralWavesTotal", initWaves)
+	end
 	part:GetPropertyChangedSignal("Size"):Connect(function()
 		agent.diameter = math.max(part.Size.X, part.Size.Y, part.Size.Z)
 		applySizeStats(agent)
@@ -1557,7 +1620,7 @@ local function finishFish(agent: FishAgent, skipHappyVfx: boolean?)
 		end
 	else
 		fishFed += 1
-		markFishFullyFed(agent)
+		markFishFullyFed(agent, nil)
 		if not skipHappyVfx then
 			local emoji = agent.happyLabel.Text
 			if emoji == "" then
@@ -2258,7 +2321,7 @@ local function finishShot(shot: FoodShot, fed: boolean)
 			WaveFeedPayout.noteFilled(target.root.Position)
 		end
 		if target.hunger >= target.maxHunger then
-			markFishFullyFed(target)
+			markFishFullyFed(target, coral)
 		end
 		updateHungerVisual(target)
 		playFeedSound()
@@ -2775,6 +2838,7 @@ function WaveSim.finishWaveEarly(): boolean
 	if endPos and #burstEmojis > 0 then
 		WaveEndVfx.burstHappyFirework(burstEmojis, endPos)
 	end
+	awardCoralWaveCompleted(waveIndex)
 	clearActiveWaveEntities()
 	UiHaptics.pulseTriple()
 	resumeNormalSpeedIfPaused()
@@ -2788,6 +2852,7 @@ function WaveSim.skipToNextWave(): boolean
 	if not running then
 		return false
 	end
+	awardCoralWaveCompleted(waveIndex)
 	clearActiveWaveEntities()
 	UiHaptics.pulseTriple()
 	resumeNormalSpeedIfPaused()
@@ -2926,6 +2991,7 @@ local function attachSimLoop(myToken: number)
 		-- Wave complete → next wave immediately (no intermission pause).
 		finishFedUrchinsEarlyIfReady()
 		if not waveSpawning and spawnQueue <= 0 and crabSpawnQueue <= 0 and urchinSpawnQueue <= 0 and countAliveFish() == 0 then
+			awardCoralWaveCompleted(waveIndex)
 			UiHaptics.pulseTriple()
 			resumeNormalSpeedIfPaused()
 			beginWave(waveIndex + 1)

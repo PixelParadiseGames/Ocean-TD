@@ -50,6 +50,8 @@ local Constants = {
 	STARTING_BRAIN_CORAL_SEEDS = 50,
 	-- Sponge seeds for new / empty-plot soft grant.
 	STARTING_SPONGE_SEEDS = 50,
+	-- Sea Grass seeds for new / empty-plot soft grant.
+	STARTING_SEA_GRASS_SEEDS = 50,
 }
 
 return Constants

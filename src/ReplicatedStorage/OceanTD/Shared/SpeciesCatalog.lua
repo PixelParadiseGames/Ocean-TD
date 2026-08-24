@@ -51,6 +51,22 @@ local BY_ID: { [string]: SpeciesDef } = {
 		meshFolder = "Sponge",
 		defaultColorIndex = 5, -- purple
 	},
+	SeaGrass = {
+		speciesId = "SeaGrass",
+		itemId = "SeaGrass",
+		displayName = "Sea Grass",
+		diameter = 4,
+		material = Enum.Material.Pebble,
+		-- Fallback tint if mesh has no Color; place uses imported mesh green by default.
+		colorMin = Color3.fromRGB(40, 140, 55),
+		colorMax = Color3.fromRGB(70, 180, 80),
+		castShadow = false,
+		canCollide = true,
+		reloadSec = 6, -- same as BrainCoral for now
+		foodFill = 1,
+		meshFolder = "Seagrass",
+		defaultColorIndex = 11, -- green
+	},
 }
 
 function SpeciesCatalog.get(speciesId: string): SpeciesDef?
