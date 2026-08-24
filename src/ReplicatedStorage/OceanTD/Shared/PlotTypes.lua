@@ -35,6 +35,10 @@ export type LayoutObject = {
 	colorR: number?,
 	colorG: number?,
 	colorB: number?,
+	-- Mesh species (Sponge): which SmallN/MediumN/LargeN was rolled. Missing → random on hydrate.
+	variantIndex: number?,
+	-- Mesh species: random size jitter applied to template Size. Missing → 1 / re-roll.
+	scaleMult: number?,
 }
 
 export type PlotSaveSlot = {
@@ -108,6 +112,7 @@ function PlotTypes.defaultProfile(): PlayerProfile
 		processedReceipts = {},
 		inventory = {
 			BrainCoral = Constants.STARTING_BRAIN_CORAL_SEEDS,
+			Sponge = Constants.STARTING_SPONGE_SEEDS,
 		},
 		skillTree = {},
 		layout = {},

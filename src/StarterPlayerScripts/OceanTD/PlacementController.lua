@@ -29,16 +29,16 @@ local UiHaptics = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiHapti
 
 local InventoryState = require(script.Parent:WaitForChild("InventoryState"))
 local ClientPlot = require(script.Parent:WaitForChild("ClientPlot"))
-local PlacedCoralIndex = require(script.Parent:WaitForChild("PlacedCoralIndex"))
 local PlaceVfx = require(script.Parent:WaitForChild("PlaceVfx"))
 local HandOrb = require(script.Parent:WaitForChild("HandOrb"))
 local SelectRing = require(script.Parent:WaitForChild("SelectRing"))
-local SkillPowerUpUI = require(script.Parent:WaitForChild("SkillPowerUpUI"))
 local PlaceConfirmHitTest = require(script.Parent:WaitForChild("PlaceConfirmHitTest"))
 local PlaceConfirmChrome = require(script.Parent:WaitForChild("PlaceConfirmChrome"))
 local PlaceAimScreen = require(script.Parent:WaitForChild("PlaceAimScreen"))
+local PlaceBlockFlash = require(script.Parent:WaitForChild("PlaceBlockFlash"))
+local PlaceRaycast = require(script.Parent:WaitForChild("PlaceRaycast"))
+local PlaceArmDisarmAnim = require(script.Parent:WaitForChild("PlaceArmDisarmAnim"))
 local CoralRangeRings = require(script.Parent:WaitForChild("CoralRangeRings"))
-local SkillStages = require(oceanRoot:WaitForChild("Shared"):WaitForChild("SkillStages"))
 local CoralSize = require(oceanRoot:WaitForChild("Shared"):WaitForChild("CoralSize"))
 
 local PlacementController = {}
@@ -51,6 +51,8 @@ local mode = MODE_OFF
 local armedItemId: string? = nil
 local ghost: BasePart? = nil
 local ghostPlaceDiameter: number? = nil
+local ghostPlaceVariant: number? = nil
+local ghostPlaceScale: number? = nil
 local warnLabel: TextLabel? = nil
 local moveHintImage: ImageLabel? = nil
 local moveHintBillboard: BillboardGui? = nil
@@ -63,10 +65,6 @@ local confirmPos: Vector3? = nil -- ground anchor under finger (actual place pos
 local placeAnchor: Vector3? = nil
 local validSpot = false
 local rejectReason: string? = nil
--- Placed coral occupying the aimed cell — neon red/white flash while "Spot Taken".
-local blockFlashPart: BasePart? = nil
-local blockFlashBaseMaterial: Enum.Material? = nil
-local blockFlashBaseColor: Color3? = nil
 local backpackDrag = false -- pointer-driven aim from backpack pull
 local aimFingerDown = false -- world drag after tap-select (mobile/PC)
 -- Press started during AIM (including on the backpack). Park on lift unless still on the backpack.
@@ -90,14 +88,6 @@ local gamepadReturnCbs: { () -> () } = {}
 local GAMEPAD_STICK_DEADZONE = 0.22
 -- Precision aim: 50% of original, then another ~30% slower (980 → 343).
 local GAMEPAD_AIM_SPEED = 343 -- px/sec at full deflection
--- Aim loop: freeze cam every frame; raycast ≤25 Hz or when pointer moves ≥1px.
-local AIM_RAYCAST_HZ = 25
-local AIM_RAYCAST_DT = 1 / AIM_RAYCAST_HZ
-local AIM_MOVE_PX = 1
-local aimRayAccum = 0
-local lastAimScreen: Vector2? = nil
-local placeRayParams: RaycastParams? = nil
-
 -- Defined early so destroyConfirmUi / exitPlacement never hit a nil forward-ref.
 local function stopCheckPrompt()
 	if checkPromptConn then
@@ -117,10 +107,6 @@ local GHOST_INVALID_COLOR = Color3.fromRGB(220, 70, 70)
 local GHOST_PULSE_SPEED = 5
 local CHECK_BRIGHT_GREEN = Color3.fromRGB(90, 255, 120)
 local CHECK_HUNTER_GREEN = Color3.fromRGB(35, 85, 45)
-local CANCEL_FLASH_RED = Color3.fromRGB(255, 70, 70)
-local DISARM_SCALE_SEC = 1
-local ARM_INTRO_SEC = 0.38
-local ARM_INTRO_START_SCALE = 0.22
 local POST_PLACE_GHOST_DELAY = 1
 local GHOST_SCALE_IN_SEC = 0.5
 
@@ -131,15 +117,6 @@ local placeResumeToken = 0
 local postPlaceWaiting = false
 local pendingGhostScaleIn = false
 local ghostScaleConn: RBXScriptConnection? = nil
-local disarmAnimating = false
-local disarmConn: RBXScriptConnection? = nil
-local armIntroAnimating = false
-local armIntroConn: RBXScriptConnection? = nil
-local armIntroFullSize: Vector3? = nil
--- Parallel item-switch: old ghost/UI flies home while the new one flies out.
-local outgoingConn: RBXScriptConnection? = nil
-local outgoingGhost: BasePart? = nil
-local outgoingGui: ScreenGui? = nil
 -- Optional slot targets when switching items (capture before pulse moves).
 local pendingDisarmSlotScreen: Vector2? = nil
 local pendingArmSlotScreen: Vector2? = nil
@@ -158,7 +135,6 @@ local startMoveHintAttract: () -> ()
 local detachMoveHintToScreen: () -> ()
 local attachMoveHintToGhost: () -> ()
 local releaseHandPin: () -> ()
-local stopArmIntro: () -> ()
 local startAimLoop: () -> ()
 local beginAim: (string, boolean?, boolean?) -> ()
 
@@ -415,16 +391,16 @@ local function startGhostScaleIn(part: BasePart)
 	end)
 end
 
-local clearBlockFlash: () -> ()
-
 local function clearGhost()
 	stopGhostScaleIn()
-	clearBlockFlash()
+	PlaceBlockFlash.clear()
 	ClientPlot.setOutOfPlotFlash(false)
 	warnLabel = nil
 	ghostBaseColor = nil
 	ghostBaseMaterial = nil
 	ghostPlaceDiameter = nil
+	ghostPlaceVariant = nil
+	ghostPlaceScale = nil
 	SelectRing.destroy(placeSelectRing)
 	CoralRangeRings.hide()
 	-- Keep move icon alive (billboard may be Adorned to this ghost).
@@ -466,152 +442,45 @@ local function destroyConfirmUi()
 	chromeBtnPointerDown = false
 end
 
-local function findBlockingCoral(worldPos: Vector3): BasePart?
-	local plot = ClientPlot.get()
-	if not plot then
-		return nil
-	end
-	return PlacedCoralIndex.getAtWorld(plot.plotId, worldPos, plot.cframe, nil)
+local function rayExclude(): PlaceRaycast.ExcludeRefs
+	return {
+		ghost = ghost,
+		outgoingGhost = PlaceArmDisarmAnim.getOutgoingGhost(),
+		character = player.Character,
+	}
 end
 
-local function isSpotTakenClient(worldPos: Vector3): boolean
-	return findBlockingCoral(worldPos) ~= nil
+local function placeAimOpts(): PlaceRaycast.PlaceAimOpts
+	return {
+		gamepadPlacement = gamepadPlacement,
+		aimRaiseForTouch = aimRaiseForTouch,
+		gamepadCursor = gamepadCursor,
+		aimPinnedToCenter = aimPinnedToCenter,
+		exclude = rayExclude(),
+	}
 end
 
-clearBlockFlash = function()
-	if blockFlashPart and blockFlashPart.Parent then
-		if blockFlashBaseMaterial then
-			blockFlashPart.Material = blockFlashBaseMaterial
-		end
-		if blockFlashBaseColor then
-			blockFlashPart.Color = blockFlashBaseColor
-		end
-	end
-	blockFlashPart = nil
-	blockFlashBaseMaterial = nil
-	blockFlashBaseColor = nil
-end
-
-local function setBlockFlash(target: BasePart?)
-	if blockFlashPart == target then
-		return
-	end
-	clearBlockFlash()
-	if not target or not target.Parent then
-		return
-	end
-	-- Clear backpack hover neon first so we don't save Neon as the restore base.
-	pcall(function()
-		local Relocate = require(script.Parent:WaitForChild("RelocateController"))
-		if typeof(Relocate.clearHoverHighlight) == "function" then
-			Relocate.clearHoverHighlight()
-		end
-	end)
-	local restMat, restColor = CoralVisual.readRestLook(target)
-	CoralVisual.applyRestLook(target)
-	blockFlashPart = target
-	blockFlashBaseMaterial = restMat
-	blockFlashBaseColor = restColor
-	target.Material = Enum.Material.Neon
-end
-
-local function updateBlockFlash()
-	if not blockFlashPart or not blockFlashPart.Parent then
-		if blockFlashPart then
-			clearBlockFlash()
-		end
-		return
-	end
-	-- Alternate bright white ↔ red neon.
-	local pulse = (math.sin(os.clock() * 12) + 1) * 0.5
-	blockFlashPart.Material = Enum.Material.Neon
-	blockFlashPart.Color = Color3.new(1, 1, 1):Lerp(Color3.fromRGB(255, 45, 45), pulse)
-end
-
-local function syncBlockFlashForAim(worldPos: Vector3?)
-	if aimPinnedToHand or not worldPos or validSpot or rejectReason ~= "Spot Taken" then
-		clearBlockFlash()
-		return
-	end
-	setBlockFlash(findBlockingCoral(worldPos))
-end
-
-local function preparePlaceRayParams()
-	if not placeRayParams then
-		placeRayParams = RaycastParams.new()
-		placeRayParams.FilterType = Enum.RaycastFilterType.Exclude
-	end
-	local exclude: { Instance } = {}
-	if ghost then
-		table.insert(exclude, ghost)
-	end
-	if outgoingGhost then
-		table.insert(exclude, outgoingGhost)
-	end
-	local placed = Workspace:FindFirstChild("OceanTD_Placed")
-	if placed then
-		table.insert(exclude, placed)
-	end
-	if player.Character then
-		table.insert(exclude, player.Character)
-	end
-	placeRayParams.FilterDescendantsInstances = exclude
-end
-
-local function castPlaceRay(origin: Vector3, direction: Vector3): Vector3?
-	preparePlaceRayParams()
-	local hit = Workspace:Raycast(origin, direction.Unit * 800, placeRayParams)
-	if hit then
-		return hit.Position
-	end
-	local plot = ClientPlot.get()
-	if plot then
-		local plotOrigin = plot.cframe.Position
-		local t = (plotOrigin.Y - origin.Y) / direction.Y
-		if t == t and t > 0 then
-			return origin + direction.Unit * t
-		end
-	end
-	return nil
-end
-
-local function raycastPointer(screenPos: Vector2): Vector3?
-	local cam = Workspace.CurrentCamera
-	if not cam then
-		return nil
-	end
-	-- ScreenPointToRay matches GetMouseLocation (inset-inclusive).
-	local ray = cam:ScreenPointToRay(screenPos.X, screenPos.Y)
-	return castPlaceRay(ray.Origin, ray.Direction)
-end
-
--- Park on finger-up: use this release's screen pos, then last ghost, never fail silently.
-local function resolveParkPos(screenPos: Vector2?): Vector3?
-	if screenPos then
-		local raised = PlaceAimScreen.raiseIfTouch(screenPos, aimRaiseForTouch, gamepadPlacement)
-		local hit = raycastPointer(raised)
-		if hit then
-			return hit
-		end
-		if raised ~= screenPos then
-			hit = raycastPointer(screenPos)
-			if hit then
-				return hit
-			end
-		end
-	end
-	if placeAnchor then
-		return placeAnchor
-	end
-	if ghost then
-		return ghost.Position
-	end
-	return nil
-end
-
--- Finger / chrome aim point helpers live in PlaceAimScreen (register budget).
 local function getPlaceAimScreenPos(): Vector2
-	return PlaceAimScreen.getPlaceAimPos(gamepadPlacement, gamepadCursor, aimPinnedToCenter, aimRaiseForTouch)
+	return PlaceRaycast.getPlaceAimScreenPos(placeAimOpts())
+end
+
+local function resolveParkPos(screenPos: Vector2?): Vector3?
+	return PlaceRaycast.resolveParkPos({
+		screenPos = screenPos,
+		aimRaiseForTouch = aimRaiseForTouch,
+		gamepadPlacement = gamepadPlacement,
+		placeAnchor = placeAnchor,
+		ghostPos = if ghost then ghost.Position else nil,
+		exclude = rayExclude(),
+	})
+end
+
+local function raycastForPlace(): Vector3?
+	return PlaceRaycast.forPlace(placeAimOpts())
+end
+
+local function raycastAimThrottled(dt: number): Vector3?
+	return PlaceRaycast.aimThrottled(dt, placeAimOpts(), placeAnchor)
 end
 
 local function notePlacePointerInput(input: InputObject)
@@ -629,18 +498,6 @@ local function notePlacePointerInput(input: InputObject)
 	then
 		aimRaiseForTouch = false
 	end
-end
-
-local function resetGamepadCursor()
-	gamepadCursor = PlaceAimScreen.resetGamepadCursor()
-end
-
-local function readThumbstick1(): Vector2
-	return PlaceAimScreen.readThumbstick1()
-end
-
-local function clampGamepadCursor(pos: Vector2): Vector2
-	return PlaceAimScreen.clampGamepadCursor(pos)
 end
 
 local function setCheckGlyphText(text: string)
@@ -683,49 +540,18 @@ local function fireGamepadReturnToList()
 	end
 end
 
-local function raycastForPlace(): Vector3?
-	-- Mouse: PlayerMouse.UnitRay tracks the hardware cursor (incl. Scriptable cam).
-	-- Touch / gamepad keep screen-point rays (touch uses the above-finger aim pos).
-	if not gamepadPlacement and not PlaceAimScreen.isTouchAim(aimRaiseForTouch, gamepadPlacement) then
-		local mouse = player:GetMouse()
-		local unit = mouse.UnitRay
-		return castPlaceRay(unit.Origin, unit.Direction)
-	end
-	return raycastPointer(getPlaceAimScreenPos())
-end
-
-local function shouldRaycastAim(screenPos: Vector2, dt: number): boolean
-	aimRayAccum += dt
-	local moved = lastAimScreen == nil or (screenPos - lastAimScreen).Magnitude >= AIM_MOVE_PX
-	if moved or aimRayAccum >= AIM_RAYCAST_DT then
-		aimRayAccum = 0
-		lastAimScreen = screenPos
-		return true
-	end
-	return false
-end
-
--- World aim at ≤25 Hz, or immediately when the pointer moves ≥1px.
-local function raycastAimThrottled(dt: number): Vector3?
-	local screen = getPlaceAimScreenPos()
-	if not shouldRaycastAim(screen, dt) then
-		return placeAnchor
-	end
-	return raycastForPlace()
-end
-
 local function evaluatePos(worldPos: Vector3): (boolean, string?)
-	local placeMax = SkillStages.placeMoreMaxAtStage(SkillPowerUpUI.getStage("PlaceMore"))
-	if PlacedCoralIndex.countLocal() >= placeMax then
-		return false, "Max Placed"
-	end
-	if not ClientPlot.isInside(worldPos) then
-		return false, "Out Of Plot"
-	end
-	if isSpotTakenClient(worldPos) then
-		return false, "Spot Taken"
-	end
-	return true, nil
+	return PlaceRaycast.evaluatePos(worldPos)
+end
+
+local function syncBlockFlashForAim(worldPos: Vector3?)
+	PlaceBlockFlash.syncForAim(
+		worldPos,
+		aimPinnedToHand,
+		validSpot,
+		rejectReason,
+		if worldPos then PlaceRaycast.findBlockingCoral(worldPos) else nil
+	)
 end
 
 local function ensureWarnBillboard(parent: BasePart)
@@ -935,9 +761,15 @@ local function updateGhostAt(anchorPos: Vector3)
 	end
 	if not ghost then
 		local ghostDiameter: number? = nil
+		ghostPlaceVariant = nil
+		ghostPlaceScale = nil
 		if speciesId == "BrainCoral" then
 			ghostDiameter = CoralVisual.randomBrainDiameter()
 			ghostPlaceDiameter = ghostDiameter
+		elseif speciesId == "Sponge" then
+			ghostPlaceDiameter = nil
+			ghostPlaceVariant = CoralVisual.randomSpongeVariant()
+			ghostPlaceScale = CoralVisual.randomSpongeScale()
 		else
 			ghostPlaceDiameter = nil
 		end
@@ -945,26 +777,38 @@ local function updateGhostAt(anchorPos: Vector3)
 			ghost = true,
 			valid = validSpot,
 			diameter = ghostDiameter,
+			sizeClass = 1,
+			variantIndex = ghostPlaceVariant,
+			scaleMult = ghostPlaceScale,
 		})
 		if ghost then
 			ghost.Parent = Workspace
 			ensureWarnBillboard(ghost)
 			ghostBaseColor = readGhostBaseColor(ghost)
 			local sp = SpeciesCatalog.get(speciesId)
-			ghostBaseMaterial = if sp then sp.material else Enum.Material.Pebble
+			if speciesId == "Sponge" then
+				ghostBaseMaterial = Enum.Material.ForceField
+			else
+				ghostBaseMaterial = if sp then sp.material else Enum.Material.Pebble
+			end
 			if pendingGhostScaleIn then
 				pendingGhostScaleIn = false
 				startGhostScaleIn(ghost)
 			end
 			-- Range preview until place confirms or cancels (ghost cleared).
+			local sid = speciesId
 			CoralRangeRings.show(ghost, function()
 				return ghost
 			end, function()
-				return CoralSize.statsFor(1).range
+				return CoralSize.statsFor(1, sid).range
 			end)
 		end
 	else
-		ghost.CFrame = CFrame.new(anchorPos)
+		if speciesId == "Sponge" then
+			CoralVisual.alignSpongeToSurface(ghost, anchorPos)
+		else
+			ghost.CFrame = CFrame.new(anchorPos)
+		end
 		if validSpot then
 			ghost.Color = ghostBaseColor or ghost.Color
 		else
@@ -993,7 +837,7 @@ end
 
 local function syncConfirmButtonsImpl()
 	-- Intro owns button tween layout; once parked, always sync ✓ visibility.
-	if armIntroAnimating and mode ~= MODE_CONFIRM then
+	if PlaceArmDisarmAnim.isArmIntroAnimating() and mode ~= MODE_CONFIRM then
 		return
 	end
 	if not confirmGui or not checkBtn or not cancelBtn or not ghost then
@@ -1196,349 +1040,127 @@ local function keepCameraFrozen()
 	end
 end
 
-local function stopDisarmAnim()
-	if disarmConn then
-		disarmConn:Disconnect()
-		disarmConn = nil
-	end
-	disarmAnimating = false
-end
-
-local function stopOutgoingFlyback()
-	if outgoingConn then
-		outgoingConn:Disconnect()
-		outgoingConn = nil
-	end
-	if outgoingGhost then
-		outgoingGhost:Destroy()
-		outgoingGhost = nil
-	end
-	if outgoingGui then
-		outgoingGui:Destroy()
-		outgoingGui = nil
-	end
-end
-
-local function guiCenterOf(go: GuiObject): Vector2
-	local p = go.AbsolutePosition
-	local s = go.AbsoluteSize
-	return Vector2.new(p.X + s.X * 0.5, p.Y + s.Y * 0.5)
-end
-
-local function resolveDisarmTargetScreen(itemId: string?): Vector2
-	local targetScreen = pendingDisarmSlotScreen
-	pendingDisarmSlotScreen = nil
-	if not targetScreen and itemId then
-		targetScreen = InventoryState.getItemSlotScreenCenter(itemId)
-	end
-	if not targetScreen then
-		local vp = camera and camera.ViewportSize or Vector2.new(800, 600)
-		targetScreen = Vector2.new(vp.X * 0.85, vp.Y * 0.55)
-	end
-	return targetScreen
-end
-
--- Steal ghost (+ optional move-icon clone) for parallel switch. Keeps ✓/X chrome in place.
-local function detachGhostForSwitch(): (BasePart?, ImageLabel?, ScreenGui?)
-	detachMoveHintToScreen()
-	local g = ghost
-	ghost = nil
-	placeAnchor = nil
-	warnLabel = nil
-	ghostBaseColor = nil
-	ghostBaseMaterial = nil
-
-	local outMove: ImageLabel? = nil
-	local outGui: ScreenGui? = nil
-	if moveHintImage and moveHintImage.Parent and moveHintImage.Visible then
-		outGui = Instance.new("ScreenGui")
-		outGui.Name = "OceanTD_PlaceOutgoing"
-		outGui.ResetOnSpawn = false
-		outGui.IgnoreGuiInset = true
-		outGui.ClipToDeviceSafeArea = false
-		outGui.DisplayOrder = 11999
-		outGui.Parent = playerGui
-		outMove = moveHintImage:Clone()
-		outMove.Parent = outGui
-		moveHintImage.Visible = false
-		moveHintImage.ImageTransparency = 0
-		moveHintImage.Size = UDim2.fromOffset(MOVE_ICON_SIZE, MOVE_ICON_SIZE)
-	end
-	stopMoveHintAttract()
-
-	-- Ensure the live X stays usable and parked on torso (not mid-flash / not flying).
-	if cancelBtn then
-		cancelBtn.BackgroundColor3 = Color3.fromRGB(200, 50, 50)
-		cancelBtn.AutoButtonColor = true
-		cancelBtn.Active = true
-		cancelBtn.Visible = true
-		cancelBtn.BackgroundTransparency = 0
-	end
-	if checkBtn then
-		checkBtn.Visible = false
-		checkBtn.BackgroundTransparency = 0
-		checkBtn.Active = true
-	end
-	do
-		local bb, adornee = PlaceConfirmChrome.layoutOnTorso(
-			BTN_SIZE,
-			playerGui,
-			confirmGui,
-			chromeBillboard,
-			chromeAdorneePart,
-			checkBtn,
-			cancelBtn
-		)
-		chromeBillboard = bb
-		chromeAdorneePart = adornee
-	end
-
-	return g, outMove, outGui
-end
-
--- Fly detached ghost + move icon into a backpack slot (✓/X stay on the live chrome).
-local function startOutgoingFlyback(
-	ghostPart: BasePart?,
-	moveRef: ImageLabel?,
-	guiRef: ScreenGui?,
-	targetScreen: Vector2,
-	worldPos: Vector3
-)
-	stopOutgoingFlyback()
-	outgoingGhost = ghostPart
-	outgoingGui = guiRef
-
-	if not ghostPart and not guiRef then
-		return
-	end
-
-	local ghostStartSize = if ghostPart then ghostPart.Size else nil
-	local ghostStartPos = if ghostPart then ghostPart.Position else nil
-	local moveStart = if moveRef then guiCenterOf(moveRef) else targetScreen
-	local moveStartSize = if moveRef then moveRef.AbsoluteSize.X else MOVE_ICON_SIZE
-
-	local endWorld = worldPos
-	if camera and ghostStartPos then
-		local ray = camera:ViewportPointToRay(targetScreen.X, targetScreen.Y)
-		endWorld = ray.Origin + ray.Direction * 4
-	end
-
-	local t0 = os.clock()
-	outgoingConn = RunService.RenderStepped:Connect(function()
-		keepCameraFrozen()
-		local u = math.clamp((os.clock() - t0) / DISARM_SCALE_SEC, 0, 1)
-		local a = 1 - (1 - u) * (1 - u)
-		local scale = math.max(1 - a, 0.02)
-
-		if moveRef and moveRef.Parent then
-			moveRef.Visible = true
-			moveRef.AnchorPoint = Vector2.new(0.5, 0.5)
-			local mpos = moveStart:Lerp(targetScreen, a)
-			local msize = moveStartSize * scale
-			moveRef.Position = UDim2.fromOffset(mpos.X, mpos.Y)
-			moveRef.Size = UDim2.fromOffset(msize, msize)
-			moveRef.ImageTransparency = a
-		end
-
-		if ghostPart and ghostPart.Parent and ghostStartSize and ghostStartPos then
-			ghostPart.Size = ghostStartSize * scale
-			ghostPart.Transparency = 0.4 + 0.55 * a
-			ghostPart.CFrame = CFrame.new(ghostStartPos:Lerp(endWorld, a))
-		end
-
-		if u >= 1 then
-			stopOutgoingFlyback()
-		end
-	end)
-end
-
-local function playDisarmOutro(thenExit: () -> ())
-	if disarmAnimating then
-		return
-	end
-	stopOutgoingFlyback()
-	if armIntroAnimating then
-		stopArmIntro()
-	end
-	detachMoveHintToScreen()
-	-- Nothing to animate — finish immediately.
-	if not ghost and not confirmGui then
-		pendingDisarmSlotScreen = nil
-		thenExit()
-		return
-	end
-	disarmAnimating = true
-	stopAimLoop()
-	stopGhostScaleIn()
-	stopMoveHintAttract()
-
-	local itemId = armedItemId
-	local worldPos = placeAnchor or confirmPos or (ghost and ghost.Position) or Vector3.zero
-	PlaceVfx.playCancelSound(worldPos)
-
-	if cancelBtn then
-		cancelBtn.BackgroundColor3 = CANCEL_FLASH_RED
-		cancelBtn.AutoButtonColor = false
-	end
-
-	local ghostPart = ghost
-	local ghostStartSize = if ghostPart then ghostPart.Size else nil
-	local ghostStartPos = if ghostPart then ghostPart.Position else nil
-
-	local targetScreen = resolveDisarmTargetScreen(itemId)
-
-	local cancelStart = if cancelBtn then guiCenterOf(cancelBtn) else targetScreen
-	local checkStart = if checkBtn and checkBtn.Visible then guiCenterOf(checkBtn) else nil
-	local moveStart = if moveHintImage and moveHintImage.Visible then guiCenterOf(moveHintImage) else targetScreen
-	local cancelStartSize = if cancelBtn then cancelBtn.AbsoluteSize.X else BTN_SIZE
-	local checkStartSize = if checkBtn then checkBtn.AbsoluteSize.X else BTN_SIZE
-	local moveStartSize = if moveHintImage then moveHintImage.AbsoluteSize.X else MOVE_ICON_SIZE
-
-	-- Park buttons in ScreenGui space for the fly-out (AbsolutePosition → Position).
-	if confirmGui then
-		if cancelBtn then
-			cancelBtn.Parent = confirmGui
-			cancelBtn.AnchorPoint = Vector2.new(0.5, 0.5)
-			cancelBtn.Position = UDim2.fromOffset(cancelStart.X, cancelStart.Y)
-		end
-		if checkBtn then
-			checkBtn.Parent = confirmGui
-			checkBtn.AnchorPoint = Vector2.new(0.5, 0.5)
-			if checkStart then
-				checkBtn.Position = UDim2.fromOffset(checkStart.X, checkStart.Y)
-			end
-		end
-	end
-
-	-- Ghost flies toward a near-camera point under the item slot so it reads as UI suck-in.
-	local endWorld = worldPos
-	if camera and ghostStartPos then
-		local ray = camera:ViewportPointToRay(targetScreen.X, targetScreen.Y)
-		endWorld = ray.Origin + ray.Direction * 4
-	end
-
-	HandOrb.disarm(DISARM_SCALE_SEC)
-
-	local t0 = os.clock()
-	disarmConn = RunService.RenderStepped:Connect(function()
-		keepCameraFrozen()
-		local u = math.clamp((os.clock() - t0) / DISARM_SCALE_SEC, 0, 1)
-		local a = 1 - (1 - u) * (1 - u)
-		local scale = math.max(1 - a, 0.02)
-
-		-- Flash bright red for the first quarter, then hold bright red.
-		if cancelBtn and cancelBtn.Parent then
-			if u < 0.28 then
-				local pulse = (math.floor(os.clock() * 14) % 2) == 0
-				cancelBtn.BackgroundColor3 = if pulse then CANCEL_FLASH_RED else Color3.fromRGB(160, 15, 15)
-			else
-				cancelBtn.BackgroundColor3 = CANCEL_FLASH_RED
-			end
-			cancelBtn.Visible = true
-			cancelBtn.AnchorPoint = Vector2.new(0.5, 0.5)
-			local cpos = cancelStart:Lerp(targetScreen, a)
-			local csize = cancelStartSize * scale
-			cancelBtn.Position = UDim2.fromOffset(cpos.X, cpos.Y)
-			cancelBtn.Size = UDim2.fromOffset(csize, csize)
-		end
-
-		if checkBtn and checkBtn.Parent and checkStart then
-			checkBtn.Visible = true
-			checkBtn.AnchorPoint = Vector2.new(0.5, 0.5)
-			local cpos = checkStart:Lerp(targetScreen, a)
-			local csize = checkStartSize * scale
-			checkBtn.Position = UDim2.fromOffset(cpos.X, cpos.Y)
-			checkBtn.Size = UDim2.fromOffset(csize, csize)
-			checkBtn.BackgroundTransparency = a
-		end
-
-		if moveHintImage and moveHintImage.Parent then
-			moveHintImage.Visible = true
-			moveHintImage.AnchorPoint = Vector2.new(0.5, 0.5)
-			local mpos = (moveStart or targetScreen):Lerp(targetScreen, a)
-			local msize = moveStartSize * scale
-			moveHintImage.Position = UDim2.fromOffset(mpos.X, mpos.Y)
-			moveHintImage.Size = UDim2.fromOffset(msize, msize)
-			moveHintImage.ImageTransparency = a
-		end
-
-		if ghostPart and ghostPart.Parent and ghostStartSize and ghostStartPos then
-			ghostPart.Size = ghostStartSize * scale
-			ghostPart.Transparency = 0.4 + 0.55 * a
-			ghostPart.CFrame = CFrame.new(ghostStartPos:Lerp(endWorld, a))
-		end
-
-		if u >= 1 then
-			stopDisarmAnim()
-			thenExit()
-		end
-	end)
-end
-
-stopArmIntro = function()
-	if armIntroConn then
-		armIntroConn:Disconnect()
-		armIntroConn = nil
-	end
-	armIntroAnimating = false
-end
-
--- Finger left the backpack during the slot→hand fly-in: snap to aim under the pointer.
-local function abortArmIntroToAim(screenPos: Vector2)
-	if not armIntroAnimating then
-		return
-	end
-	stopArmIntro()
-	if ghost and ghost.Parent and armIntroFullSize then
-		ghost.Size = armIntroFullSize
-		ghost.Transparency = 0.4
-	end
-	if moveHintImage then
-		moveHintImage.Size = UDim2.fromOffset(MOVE_ICON_SIZE, MOVE_ICON_SIZE)
-	end
-	if checkBtn then
-		checkBtn.Visible = false
-	end
-	if cancelBtn then
-		cancelBtn.Visible = true
-	end
-	do
-		local bb, adornee = PlaceConfirmChrome.layoutOnTorso(
-			BTN_SIZE,
-			playerGui,
-			confirmGui,
-			chromeBillboard,
-			chromeAdorneePart,
-			checkBtn,
-			cancelBtn
-		)
-		chromeBillboard = bb
-		chromeAdorneePart = adornee
-	end
-	local color = ghostBaseColor
-	if color then
-		HandOrb.arm(color)
-	end
-	aimFingerDown = true
-	releaseHandPin()
-	startMoveHintAttract()
-	startAimLoop()
-	local pos = resolveParkPos(screenPos)
-	if pos then
-		updateGhostAt(pos)
-	end
-	syncConfirmButtons()
-end
+local animEnv: PlaceArmDisarmAnim.Env = {
+	modeOff = MODE_OFF,
+	playerGui = playerGui,
+	camera = camera,
+	getMode = function()
+		return mode
+	end,
+	getGhost = function()
+		return ghost
+	end,
+	setGhost = function(v)
+		ghost = v
+	end,
+	getPlaceAnchor = function()
+		return placeAnchor
+	end,
+	setPlaceAnchor = function(v)
+		placeAnchor = v
+	end,
+	getConfirmPos = function()
+		return confirmPos
+	end,
+	getArmedItemId = function()
+		return armedItemId
+	end,
+	getGhostBaseColor = function()
+		return ghostBaseColor
+	end,
+	setGhostBaseColor = function(v)
+		ghostBaseColor = v
+	end,
+	setGhostBaseMaterial = function(v)
+		ghostBaseMaterial = v
+	end,
+	setWarnLabel = function(v)
+		warnLabel = v
+	end,
+	getConfirmGui = function()
+		return confirmGui
+	end,
+	getChromeBillboard = function()
+		return chromeBillboard
+	end,
+	setChromeBillboard = function(v)
+		chromeBillboard = v
+	end,
+	getChromeAdorneePart = function()
+		return chromeAdorneePart
+	end,
+	setChromeAdorneePart = function(v)
+		chromeAdorneePart = v
+	end,
+	getCheckBtn = function()
+		return checkBtn
+	end,
+	getCancelBtn = function()
+		return cancelBtn
+	end,
+	getMoveHintImage = function()
+		return moveHintImage
+	end,
+	getPendingDisarmSlotScreen = function()
+		return pendingDisarmSlotScreen
+	end,
+	setPendingDisarmSlotScreen = function(v)
+		pendingDisarmSlotScreen = v
+	end,
+	getPendingArmSlotScreen = function()
+		return pendingArmSlotScreen
+	end,
+	setPendingArmSlotScreen = function(v)
+		pendingArmSlotScreen = v
+	end,
+	getAimPinnedToHand = function()
+		return aimPinnedToHand
+	end,
+	setAimPinnedToHand = function(v)
+		aimPinnedToHand = v
+	end,
+	getAimPinOrigin = function()
+		return aimPinOrigin
+	end,
+	setAimPinOrigin = function(v)
+		aimPinOrigin = v
+	end,
+	getAimFingerDown = function()
+		return aimFingerDown
+	end,
+	setAimFingerDown = function(v)
+		aimFingerDown = v
+	end,
+	getPlacePointerHeld = function()
+		return placePointerHeld
+	end,
+	keepCameraFrozen = keepCameraFrozen,
+	detachMoveHintToScreen = detachMoveHintToScreen,
+	stopMoveHintAttract = stopMoveHintAttract,
+	startMoveHintAttract = startMoveHintAttract,
+	releaseHandPin = releaseHandPin,
+	makeConfirmUi = makeConfirmUi,
+	syncConfirmButtons = syncConfirmButtons,
+	setMoveHintVisible = setMoveHintVisible,
+	stopAimLoop = stopAimLoop,
+	stopGhostScaleIn = stopGhostScaleIn,
+	updateGhostAt = updateGhostAt,
+	resolveParkPos = resolveParkPos,
+	startAimLoop = function()
+		startAimLoop()
+	end,
+	setPendingGhostScaleIn = function(v)
+		pendingGhostScaleIn = v
+	end,
+}
 
 startAimLoop = function()
 	stopAimLoop()
-	aimRayAccum = 0
-	lastAimScreen = nil
+	PlaceRaycast.resetAimThrottle()
 	aimConn = RunService.RenderStepped:Connect(function(dt)
 		if mode ~= MODE_AIM then
 			return
 		end
-		-- Sticky Touch LastInputType must not keep raising once the mouse is aiming.
 		do
 			local last = UserInputService:GetLastInputType()
 			if last ~= Enum.UserInputType.Touch then
@@ -1546,21 +1168,21 @@ startAimLoop = function()
 			end
 		end
 		keepCameraFrozen()
-		if postPlaceWaiting or armIntroAnimating then
+		if postPlaceWaiting or PlaceArmDisarmAnim.isArmIntroAnimating() then
 			return
 		end
 		updateGhostPulse()
-		updateBlockFlash()
+		PlaceBlockFlash.update()
 		syncConfirmButtons()
 
 		if gamepadPlacement then
-			local stick = readThumbstick1()
+			local stick = PlaceAimScreen.readThumbstick1()
 			local mag = stick.Magnitude
 			if mag > GAMEPAD_STICK_DEADZONE and gamepadCursor then
 				releaseHandPin()
 				local dir = stick.Unit
 				local speed = GAMEPAD_AIM_SPEED * math.clamp((mag - GAMEPAD_STICK_DEADZONE) / (1 - GAMEPAD_STICK_DEADZONE), 0, 1)
-				gamepadCursor = clampGamepadCursor(gamepadCursor + dir * speed * dt)
+				gamepadCursor = PlaceAimScreen.clampGamepadCursor(gamepadCursor + dir * speed * dt)
 			end
 			if aimPinnedToHand then
 				local handPos = HandOrb.getHoldWorldPos()
@@ -1570,7 +1192,6 @@ startAimLoop = function()
 				return
 			end
 			chromeScreenPos = nil
-			-- Stick motion already moves cursor; still throttle world rays.
 			local pos = raycastAimThrottled(dt)
 			if pos then
 				updateGhostAt(pos)
@@ -1621,205 +1242,9 @@ startAimLoop = function()
 	end)
 end
 
--- Tween ghost + move icon from the backpack item cell into the avatar's hand.
--- keepChromePinned: leave ✓/X at torso (used when swapping corals).
-local function playArmIntroFromSlot(itemId: string, seedColor: Color3, onDone: () -> (), keepChromePinned: boolean?)
-	stopArmIntro()
-	armIntroAnimating = true
-	aimPinnedToHand = true
-	pendingGhostScaleIn = false
-	detachMoveHintToScreen()
-
-	local slotScreen = pendingArmSlotScreen
-	pendingArmSlotScreen = nil
-	if not slotScreen then
-		slotScreen = InventoryState.getItemSlotScreenCenter(itemId)
-	end
-	if not slotScreen then
-		local vp = if camera then camera.ViewportSize else Vector2.new(800, 600)
-		slotScreen = Vector2.new(vp.X * 0.85, vp.Y * 0.5)
-	end
-
-	local startWorld: Vector3
-	if camera then
-		local ray = camera:ViewportPointToRay(slotScreen.X, slotScreen.Y)
-		startWorld = ray.Origin + ray.Direction * 7
-	else
-		startWorld = HandOrb.getHoldWorldPos() or Vector3.zero
-	end
-
-	HandOrb.clear()
-	updateGhostAt(startWorld)
-	local ghostPart = ghost
-	if not ghostPart then
-		armIntroAnimating = false
-		HandOrb.arm(seedColor)
-		onDone()
-		return
-	end
-
-	local fullSize = ghostPart.Size
-	armIntroFullSize = fullSize
-	ghostPart.Size = fullSize * ARM_INTRO_START_SCALE
-	makeConfirmUi()
-	setMoveHintVisible(true)
-
-	local chromePos = PlaceConfirmChrome.screenPos(chromeAdorneePart)
-	-- Swap path: park X on torso immediately; only ghost + move fly in.
-	if keepChromePinned then
-		if cancelBtn then
-			cancelBtn.Visible = true
-			cancelBtn.BackgroundColor3 = Color3.fromRGB(200, 50, 50)
-			cancelBtn.AutoButtonColor = true
-			cancelBtn.Active = true
-			cancelBtn.BackgroundTransparency = 0
-		end
-		if checkBtn then
-			checkBtn.Visible = false
-		end
-		do
-			local bb, adornee = PlaceConfirmChrome.layoutOnTorso(
-				BTN_SIZE,
-				playerGui,
-				confirmGui,
-				chromeBillboard,
-				chromeAdorneePart,
-				checkBtn,
-				cancelBtn
-			)
-			chromeBillboard = bb
-			chromeAdorneePart = adornee
-		end
-	end
-
-	local t0 = os.clock()
-	armIntroConn = RunService.RenderStepped:Connect(function()
-		keepCameraFrozen()
-		if mode == MODE_OFF then
-			stopArmIntro()
-			return
-		end
-		local handWorld = HandOrb.getHoldWorldPos()
-		if not handWorld and player.Character then
-			local hand = player.Character:FindFirstChild("RightHand") or player.Character:FindFirstChild("Right Arm")
-			if hand and hand:IsA("BasePart") then
-				handWorld = hand.Position
-			end
-		end
-		handWorld = handWorld or startWorld
-
-		local handScreen: Vector2 = slotScreen
-		if camera then
-			local sp, _ = camera:WorldToViewportPoint(handWorld)
-			if sp.Z > 0 then
-				handScreen = Vector2.new(sp.X, sp.Y)
-			end
-		end
-		chromePos = PlaceConfirmChrome.screenPos(chromeAdorneePart)
-
-		local u = math.clamp((os.clock() - t0) / ARM_INTRO_SEC, 0, 1)
-		local a = 1 - (1 - u) * (1 - u)
-		local scale = ARM_INTRO_START_SCALE + (1 - ARM_INTRO_START_SCALE) * a
-
-		if ghostPart.Parent then
-			ghostPart.Size = fullSize * scale
-			ghostPart.Transparency = 0.4
-			ghostPart.CFrame = CFrame.new(startWorld:Lerp(handWorld, a))
-			if ghostBaseColor then
-				ghostPart.Color = ghostBaseColor
-			end
-		end
-
-		local travel = slotScreen:Lerp(handScreen, a)
-		if moveHintImage and moveHintImage.Parent then
-			moveHintImage.Visible = true
-			moveHintImage.AnchorPoint = Vector2.new(0.5, 0.5)
-			moveHintImage.Position = UDim2.fromOffset(travel.X, travel.Y)
-			local m = MOVE_ICON_SIZE * scale
-			moveHintImage.Size = UDim2.fromOffset(m, m)
-			moveHintImage.ImageTransparency = 0
-		end
-
-		if keepChromePinned then
-			if cancelBtn and cancelBtn.Parent then
-				cancelBtn.Visible = true
-			end
-			if checkBtn and checkBtn.Parent then
-				checkBtn.Visible = false
-			end
-			do
-				local bb, adornee = PlaceConfirmChrome.layoutOnTorso(
-					BTN_SIZE,
-					playerGui,
-					confirmGui,
-					chromeBillboard,
-					chromeAdorneePart,
-					checkBtn,
-					cancelBtn
-				)
-				chromeBillboard = bb
-				chromeAdorneePart = adornee
-			end
-		else
-			-- Fly ✓/X from backpack cell toward torso chrome.
-			local btnTravel = slotScreen:Lerp(chromePos, a)
-			local bsize = BTN_SIZE * math.max(scale, 0.35)
-			PlaceConfirmChrome.layoutAt(btnTravel, bsize, confirmGui, chromeBillboard, checkBtn, cancelBtn)
-			if cancelBtn and cancelBtn.Parent then
-				cancelBtn.Visible = true
-			end
-			if checkBtn and checkBtn.Parent then
-				checkBtn.Visible = false
-			end
-		end
-
-		if u >= 1 then
-			stopArmIntro()
-			if ghostPart.Parent then
-				ghostPart.Size = fullSize
-				ghostPart.CFrame = CFrame.new(handWorld)
-			end
-			if moveHintImage then
-				moveHintImage.Size = UDim2.fromOffset(MOVE_ICON_SIZE, MOVE_ICON_SIZE)
-			end
-			if checkBtn then
-				checkBtn.Visible = false
-			end
-			if cancelBtn then
-				cancelBtn.Visible = true
-			end
-			do
-				local bb, adornee = PlaceConfirmChrome.layoutOnTorso(
-					BTN_SIZE,
-					playerGui,
-					confirmGui,
-					chromeBillboard,
-					chromeAdorneePart,
-					checkBtn,
-					cancelBtn
-				)
-				chromeBillboard = bb
-				chromeAdorneePart = adornee
-			end
-			local color = ghostBaseColor or seedColor
-			HandOrb.arm(color)
-			aimPinnedToHand = true
-			aimPinOrigin = UserInputService:GetMouseLocation()
-			-- Finger still down off the backpack: treat as an aim drag so lift parks + shows ✓.
-			if placePointerHeld and not InventoryState.isPointerOverBackpack(aimPinOrigin) then
-				aimFingerDown = true
-				releaseHandPin()
-			end
-			startMoveHintAttract()
-			syncConfirmButtons()
-			onDone()
-		end
-	end)
-end
-
 beginAim = function(itemId: string, scaleIn: boolean?, keepChromePinned: boolean?)
 	postPlaceWaiting = false
-	stopArmIntro()
+	PlaceArmDisarmAnim.stopArmIntro()
 	armedItemId = itemId
 	mode = MODE_AIM
 	confirmPos = nil
@@ -1845,7 +1270,7 @@ beginAim = function(itemId: string, scaleIn: boolean?, keepChromePinned: boolean
 	local seedColor = if sp then sp.colorMin:Lerp(sp.colorMax, 0.5) else Color3.fromRGB(255, 220, 80)
 
 	if gamepadPlacement and not gamepadCursor then
-		resetGamepadCursor()
+		gamepadCursor = PlaceAimScreen.resetGamepadCursor()
 	end
 
 	freeze()
@@ -1873,13 +1298,13 @@ beginAim = function(itemId: string, scaleIn: boolean?, keepChromePinned: boolean
 
 	-- Armed from backpack: fly ghost + move from the item cell into the hand.
 	pendingGhostScaleIn = false
-	playArmIntroFromSlot(itemId, seedColor, function()
+	PlaceArmDisarmAnim.playArmIntroFromSlot(animEnv, itemId, seedColor, function()
 		if gamepadPlacement then
 			local handPos = HandOrb.getHoldWorldPos()
 			if handPos and camera then
 				local spoint, _ = camera:WorldToViewportPoint(handPos)
 				if spoint.Z > 0 then
-					gamepadCursor = clampGamepadCursor(Vector2.new(spoint.X, spoint.Y))
+					gamepadCursor = PlaceAimScreen.clampGamepadCursor(Vector2.new(spoint.X, spoint.Y))
 				end
 			end
 		end
@@ -1891,7 +1316,7 @@ end
 -- Drag-out from backpack: skip slot intro, aim under the finger immediately.
 local function beginAimFromDrag(itemId: string)
 	postPlaceWaiting = false
-	stopArmIntro()
+	PlaceArmDisarmAnim.stopArmIntro()
 	armedItemId = itemId
 	mode = MODE_AIM
 	confirmPos = nil
@@ -1927,9 +1352,9 @@ local function exitPlacement(clearArmed: boolean)
 	placeResumeToken += 1
 	postPlaceWaiting = false
 	pendingGhostScaleIn = false
-	stopDisarmAnim()
-	stopOutgoingFlyback()
-	stopArmIntro()
+	PlaceArmDisarmAnim.stopDisarmAnim()
+	PlaceArmDisarmAnim.stopOutgoingFlyback()
+	PlaceArmDisarmAnim.stopArmIntro()
 	stopMoveHintAttract()
 	chromeBtnPointerDown = false
 	mode = MODE_OFF
@@ -1965,7 +1390,7 @@ local function commitPlace()
 	if not armedItemId or not confirmPos or not validSpot then
 		return
 	end
-	if postPlaceWaiting or disarmAnimating or armIntroAnimating then
+	if postPlaceWaiting or PlaceArmDisarmAnim.isDisarmAnimating() or PlaceArmDisarmAnim.isArmIntroAnimating() then
 		return
 	end
 	local placePos = confirmPos
@@ -1975,7 +1400,16 @@ local function commitPlace()
 	HandOrb.flyToPlant(placePos)
 
 	local rf = Remotes.getFunction("RequestPlace")
-	local result = rf:InvokeServer(armedItemId, placePos, ghostPlaceDiameter)
+	local placePayload: any = ghostPlaceDiameter
+	if armedItemId == "Sponge" or ghostPlaceVariant ~= nil then
+		placePayload = {
+			diameter = ghostPlaceDiameter,
+			variantIndex = ghostPlaceVariant,
+			scaleMult = ghostPlaceScale,
+			sizeClass = 1,
+		}
+	end
+	local result = rf:InvokeServer(armedItemId, placePos, placePayload)
 	if typeof(result) == "table" and result.ok then
 		log("Committed", armedItemId)
 		UiHaptics.rampOpen(1)
@@ -2063,15 +1497,15 @@ onCheck = function()
 end
 
 onCancel = function()
-	if disarmAnimating or mode == MODE_OFF then
+	if PlaceArmDisarmAnim.isDisarmAnimating() or mode == MODE_OFF then
 		return
 	end
-	if armIntroAnimating then
-		stopArmIntro()
+	if PlaceArmDisarmAnim.isArmIntroAnimating() then
+		PlaceArmDisarmAnim.stopArmIntro()
 	end
 	if gamepadPlacement then
 		-- Deactivate coral, keep backpack open, restore D-pad list select.
-		playDisarmOutro(function()
+		PlaceArmDisarmAnim.playDisarmOutro(animEnv, function()
 			gamepadPlacement = false
 			gamepadCursor = nil
 			exitPlacement(false)
@@ -2081,18 +1515,19 @@ onCancel = function()
 		return
 	end
 	-- Pointer: exit placement (deactivate armed coral) after scale-out.
-	playDisarmOutro(function()
+	PlaceArmDisarmAnim.playDisarmOutro(animEnv, function()
 		exitPlacement(true)
 	end)
 end
 
 local function enterConfirm(worldPos: Vector3)
 	-- Parking must win over a mid-flight arm intro (otherwise ✓ sync is skipped).
-	if armIntroAnimating then
-		stopArmIntro()
+	if PlaceArmDisarmAnim.isArmIntroAnimating() then
+		PlaceArmDisarmAnim.stopArmIntro()
 	end
-	if ghost and ghost.Parent and armIntroFullSize then
-		ghost.Size = armIntroFullSize
+	local introFullSize = PlaceArmDisarmAnim.getArmIntroFullSize()
+	if ghost and ghost.Parent and introFullSize then
+		ghost.Size = introFullSize
 		ghost.Transparency = 0.4
 	end
 	mode = MODE_CONFIRM
@@ -2116,7 +1551,7 @@ local function enterConfirm(worldPos: Vector3)
 		end
 		keepCameraFrozen()
 		updateGhostPulse()
-		updateBlockFlash()
+		PlaceBlockFlash.update()
 		syncConfirmButtons()
 	end)
 	syncConfirmButtons()
@@ -2128,8 +1563,8 @@ local function parkAtPointer(screenPos: Vector2)
 	if gamepadPlacement then
 		return
 	end
-	if armIntroAnimating then
-		abortArmIntroToAim(screenPos)
+	if PlaceArmDisarmAnim.isArmIntroAnimating() then
+		PlaceArmDisarmAnim.abortArmIntroToAim(animEnv, screenPos)
 	else
 		releaseHandPin()
 	end
@@ -2167,7 +1602,7 @@ function PlacementController.setGamepadPlacement(enabled: boolean)
 	gamepadPlacement = enabled
 	if enabled then
 		if not gamepadCursor then
-			resetGamepadCursor()
+			gamepadCursor = PlaceAimScreen.resetGamepadCursor()
 		end
 	else
 		gamepadCursor = nil
@@ -2207,7 +1642,7 @@ function PlacementController.beginForItem(itemId: string)
 		return
 	end
 	-- Selecting a backpack coral cancels relocate (RelocateController listens to selection too).
-	if disarmAnimating then
+	if PlaceArmDisarmAnim.isDisarmAnimating() then
 		-- Full cancel fly-home in progress — arm this item when it finishes.
 		queuedSwitchItemId = itemId
 		pendingDisarmSlotScreen = nil
@@ -2218,19 +1653,19 @@ function PlacementController.beginForItem(itemId: string)
 		local nextId = queuedSwitchItemId or itemId
 		queuedSwitchItemId = nil
 
-		if armIntroAnimating then
-			stopArmIntro()
+		if PlaceArmDisarmAnim.isArmIntroAnimating() then
+			PlaceArmDisarmAnim.stopArmIntro()
 		end
 		stopAimLoop()
 		stopGhostScaleIn()
 		stopMoveHintAttract()
 
 		local worldPos = placeAnchor or confirmPos or (ghost and ghost.Position) or Vector3.zero
-		local targetScreen = resolveDisarmTargetScreen(armedItemId)
+		local targetScreen = PlaceArmDisarmAnim.resolveDisarmTargetScreen(animEnv, armedItemId)
 		PlaceVfx.playCancelSound(worldPos)
 
-		local outGhost, outMove, outGui = detachGhostForSwitch()
-		startOutgoingFlyback(outGhost, outMove, outGui, targetScreen, worldPos)
+		local outGhost, outMove, outGui = PlaceArmDisarmAnim.detachGhostForSwitch(animEnv)
+		PlaceArmDisarmAnim.startOutgoingFlyback(animEnv, outGhost, outMove, outGui, targetScreen, worldPos)
 
 		confirmPos = nil
 		chromeScreenPos = nil
@@ -2256,12 +1691,12 @@ end
 
 -- Instant exit (no disarm outro) — used when picking a placed coral to relocate.
 function PlacementController.forceExit()
-	if mode == MODE_OFF and not disarmAnimating then
+	if mode == MODE_OFF and not PlaceArmDisarmAnim.isDisarmAnimating() then
 		return
 	end
-	stopDisarmAnim()
-	stopOutgoingFlyback()
-	stopArmIntro()
+	PlaceArmDisarmAnim.stopDisarmAnim()
+	PlaceArmDisarmAnim.stopOutgoingFlyback()
+	PlaceArmDisarmAnim.stopArmIntro()
 	exitPlacement(true)
 end
 
@@ -2282,12 +1717,12 @@ function PlacementController.notifyPointerDownFromBackpack(itemId: string, _scre
 		end
 	end
 	if mode ~= MODE_OFF then
-		if disarmAnimating then
+		if PlaceArmDisarmAnim.isDisarmAnimating() then
 			return
 		end
 		-- Pulling the same coral during the slot→hand fly-in: follow the finger.
 		-- Don't fly the ghost home first or the lift can happen before AIM is ready and ✓ never shows.
-		if armIntroAnimating and (armedItemId == nil or armedItemId == itemId) then
+		if PlaceArmDisarmAnim.isArmIntroAnimating() and (armedItemId == nil or armedItemId == itemId) then
 			parkAtPointer(_screenPos)
 			backpackDrag = true
 			aimFingerDown = true
@@ -2295,7 +1730,7 @@ function PlacementController.notifyPointerDownFromBackpack(itemId: string, _scre
 			aimRaiseForTouch = fromTouch == true
 			return
 		end
-		playDisarmOutro(function()
+		PlaceArmDisarmAnim.playDisarmOutro(animEnv, function()
 			exitPlacement(false)
 			startDrag()
 			parkAtPointer(_screenPos)
@@ -2342,7 +1777,7 @@ InventoryState.onSelectionChanged(function(id)
 		if not InventoryState.isOpen() then
 			return
 		end
-		if mode ~= MODE_OFF and not disarmAnimating then
+		if mode ~= MODE_OFF and not PlaceArmDisarmAnim.isDisarmAnimating() then
 			onCancel()
 		end
 		return
@@ -2353,11 +1788,11 @@ end)
 -- Closing backpack ends placement so the player can move again.
 InventoryState.onOpenChanged(function(isOpen)
 	if not isOpen then
-		if disarmAnimating then
+		if PlaceArmDisarmAnim.isDisarmAnimating() then
 			return
 		end
 		if mode ~= MODE_OFF then
-			playDisarmOutro(function()
+			PlaceArmDisarmAnim.playDisarmOutro(animEnv, function()
 				exitPlacement(true)
 			end)
 		else
@@ -2379,10 +1814,10 @@ table.insert(inputConns, UserInputService.InputBegan:Connect(function(input, _pr
 	if mode == MODE_OFF then
 		return
 	end
-	if disarmAnimating then
+	if PlaceArmDisarmAnim.isDisarmAnimating() then
 		return
 	end
-	if armIntroAnimating then
+	if PlaceArmDisarmAnim.isArmIntroAnimating() then
 		-- Allow cancel during the slot→hand fly-in; ignore aim/place.
 		if input.KeyCode == Enum.KeyCode.Escape or input.KeyCode == Enum.KeyCode.X or input.KeyCode == Enum.KeyCode.ButtonB then
 			onCancel()
@@ -2501,14 +1936,14 @@ table.insert(inputConns, UserInputService.InputChanged:Connect(function(input, _
 	if PlaceAimScreen.isEmulatedMouse(input) then
 		return
 	end
-	if postPlaceWaiting or mode == MODE_OFF or disarmAnimating or chromeBtnPointerDown then
+	if postPlaceWaiting or mode == MODE_OFF or PlaceArmDisarmAnim.isDisarmAnimating() or chromeBtnPointerDown then
 		return
 	end
 	if input.UserInputType ~= Enum.UserInputType.MouseMovement and input.UserInputType ~= Enum.UserInputType.Touch then
 		return
 	end
 	local now = PlaceConfirmHitTest.pointerScreenPos(input)
-	if armIntroAnimating then
+	if PlaceArmDisarmAnim.isArmIntroAnimating() then
 		if (placePointerHeld or aimFingerDown) and not InventoryState.isPointerOverBackpack(now) then
 			parkAtPointer(now)
 		end
@@ -2570,7 +2005,7 @@ table.insert(inputConns, UserInputService.InputEnded:Connect(function(input, _pr
 		end
 		return
 	end
-	if disarmAnimating then
+	if PlaceArmDisarmAnim.isDisarmAnimating() then
 		return
 	end
 	if mode == MODE_AIM then

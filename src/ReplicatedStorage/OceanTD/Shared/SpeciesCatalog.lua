@@ -13,6 +13,10 @@ export type SpeciesDef = {
 	-- Client wave combat (optional; defaults applied by WaveSim).
 	reloadSec: number?,
 	foodFill: number?,
+	-- Mesh folder under ReplicatedStorage.Coral (e.g. "Sponge").
+	meshFolder: string?,
+	-- Default paint palette index (PlotOutlineColors coral 1–14).
+	defaultColorIndex: number?,
 }
 
 local SpeciesCatalog = {}
@@ -30,6 +34,22 @@ local BY_ID: { [string]: SpeciesDef } = {
 		canCollide = true,
 		reloadSec = 6, -- half as fast as previous 3s (original was 2s)
 		foodFill = 1,
+		defaultColorIndex = 9, -- yellow
+	},
+	Sponge = {
+		speciesId = "Sponge",
+		itemId = "Sponge",
+		displayName = "Sponge",
+		diameter = 4,
+		material = Enum.Material.Pebble,
+		colorMin = Color3.fromRGB(120, 60, 180),
+		colorMax = Color3.fromRGB(170, 90, 230),
+		castShadow = false,
+		canCollide = true,
+		reloadSec = 6,
+		foodFill = 1,
+		meshFolder = "Sponge",
+		defaultColorIndex = 5, -- purple
 	},
 }
 

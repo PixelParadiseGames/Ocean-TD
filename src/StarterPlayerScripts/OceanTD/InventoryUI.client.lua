@@ -110,7 +110,8 @@ end
 
 -- TEMP layout fill only. Set to 0 to show real ItemCatalog entries.
 -- Does not register fake items in ItemCatalog.
-local TEMP_BRAIN_CORAL_SLOT_COUNT = 24
+local TEMP_BRAIN_CORAL_SLOT_COUNT = 0
+local BACKPACK_SLOT_COUNT = 24
 
 local function log(...: any)
 	print("[INV]", ...)
@@ -1576,6 +1577,68 @@ local function makeItemButton(def, layoutOrder: number, instanceSuffix: string?)
 	return btn
 end
 
+local function makeLockedPlaceholder(layoutOrder: number): ImageButton
+	local btn = Instance.new("ImageButton")
+	btn.Name = "_LockedSlot" .. tostring(layoutOrder)
+	btn.BackgroundTransparency = 1
+	btn.AutoButtonColor = false
+	btn.Active = false
+	btn.Selectable = false
+	btn.LayoutOrder = layoutOrder
+	btn.Image = ""
+
+	local icon = Instance.new("ImageLabel")
+	icon.Name = "Circle"
+	icon.BackgroundColor3 = Color3.fromRGB(20, 30, 45)
+	icon.BackgroundTransparency = 0.15
+	icon.AnchorPoint = Vector2.new(0.5, 0)
+	icon.Position = UDim2.new(0.5, 0, 0, 2)
+	icon.Size = UDim2.new(0.72, 0, 0.72, 0)
+	icon.Image = ""
+	icon.Parent = btn
+	UiCircles.ensure(icon)
+	local aspect = Instance.new("UIAspectRatioConstraint")
+	aspect.AspectRatio = 1
+	aspect.DominantAxis = Enum.DominantAxis.Width
+	aspect.Parent = icon
+
+	local q = Instance.new("TextLabel")
+	q.Name = "LockedMark"
+	q.BackgroundTransparency = 1
+	q.Size = UDim2.fromScale(1, 1)
+	q.Font = UiTheme.Font
+	q.Text = "?"
+	q.TextColor3 = Color3.new(1, 1, 1)
+	q.TextScaled = true
+	q.Parent = icon
+
+	local label = Instance.new("TextLabel")
+	label.Name = "Name"
+	label.BackgroundTransparency = 1
+	label.AnchorPoint = Vector2.new(0.5, 0)
+	label.Position = UDim2.new(0.5, 0, 0, 0)
+	label.Size = UDim2.new(1, -4, 0, backpackItemLabelHeight())
+	label.Font = UiTheme.Font
+	label.Text = ""
+	label.TextColor3 = Color3.fromRGB(120, 130, 145)
+	label.TextScaled = true
+	label.Parent = btn
+
+	local function placeLabelUnderIcon()
+		local y = icon.AbsoluteSize.Y
+		if y < 1 then
+			return
+		end
+		label.Position = UDim2.new(0.5, 0, 0, 2 + y + 2)
+	end
+	icon:GetPropertyChangedSignal("AbsoluteSize"):Connect(placeLabelUnderIcon)
+	task.defer(placeLabelUnderIcon)
+
+	table.insert(itemButtons, btn)
+	btn.Parent = scroll
+	return btn
+end
+
 local function rebuildItems()
 	for _, child in ipairs(scroll:GetChildren()) do
 		if child:IsA("GuiButton") then
@@ -1593,8 +1656,14 @@ local function rebuildItems()
 		end
 		log("TEMP grid fill", TEMP_BRAIN_CORAL_SLOT_COUNT, "x BrainCoral — set TEMP_BRAIN_CORAL_SLOT_COUNT=0 for real catalog")
 	else
+		local order = 1
 		for _, def in ipairs(ItemCatalog.all()) do
-			makeItemButton(def, def.sortOrder, nil)
+			makeItemButton(def, order, nil)
+			order += 1
+		end
+		while order <= BACKPACK_SLOT_COUNT do
+			makeLockedPlaceholder(order)
+			order += 1
 		end
 	end
 	refreshGridCellSize()

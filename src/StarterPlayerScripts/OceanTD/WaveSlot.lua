@@ -87,6 +87,7 @@ local fillHurtToken = 0
 local lastFishFull = 0
 local lastFishTotal = 0
 local lastCrabTotal = 0
+local lastUrchinTotal = 0
 local lastWaveIndex = 0
 local lastReefHealth = -1
 local lastReefMax = 10
@@ -503,7 +504,7 @@ local function refreshForkLabel()
 		hudBarFork.Text = "100%"
 		return
 	end
-	hudBarFork.Text = string.format("%d of %d", lastFishFull, lastFishTotal + lastCrabTotal)
+	hudBarFork.Text = string.format("%d of %d", lastFishFull, lastFishTotal + lastCrabTotal + lastUrchinTotal)
 end
 
 local function refreshRightForkEmoji()
@@ -1479,6 +1480,7 @@ local function updateHud(snap: WaveSim.HudSnapshot)
 	lastFishFull = snap.fishFull or 0
 	lastFishTotal = snap.fishTotal or 0
 	lastCrabTotal = math.max(0, snap.crabTotal or 0)
+	lastUrchinTotal = math.max(0, snap.urchinTotal or 0)
 	lastWaveIndex = snap.wave or 0
 	local complete = snap.feedComplete == true
 	local danger = snap.hungerDanger == true
@@ -1543,6 +1545,10 @@ local function updateHud(snap: WaveSim.HudSnapshot)
 		local fishCount = math.max(snap.fishTotal or 0, 0)
 		local line = "🍴:" .. tostring(need) .. "x 🐟:" .. tostring(fishCount)
 		local crabs = math.max(0, snap.crabTotal or 0)
+		local urchins = math.max(0, snap.urchinTotal or 0)
+		if urchins > 0 then
+			line ..= " ✴:" .. tostring(urchins)
+		end
 		if crabs > 0 then
 			line ..= " 🦀:" .. tostring(crabs)
 		end

@@ -126,6 +126,14 @@ local function sanitizeLayout(raw: any): { LayoutObject }
 				entry.colorG = math.clamp(colorG, 0, 1)
 				entry.colorB = math.clamp(colorB, 0, 1)
 			end
+			local variantIndex = tonumber(obj.variantIndex)
+			if variantIndex then
+				entry.variantIndex = math.clamp(math.floor(variantIndex), 1, 5)
+			end
+			local scaleMult = tonumber(obj.scaleMult)
+			if scaleMult and scaleMult > 0 then
+				entry.scaleMult = math.clamp(scaleMult, 0.7, 1.35)
+			end
 			table.insert(layout, entry)
 		end
 	end
@@ -150,6 +158,8 @@ local function cloneLayout(layout: { LayoutObject }): { LayoutObject }
 			colorR = obj.colorR,
 			colorG = obj.colorG,
 			colorB = obj.colorB,
+			variantIndex = obj.variantIndex,
+			scaleMult = obj.scaleMult,
 		})
 	end
 	return out
@@ -273,6 +283,7 @@ local function sanitizeInventory(raw: any, isNewProfile: boolean): { [string]: a
 		if isNewProfile then
 			return {
 				BrainCoral = Constants.STARTING_BRAIN_CORAL_SEEDS,
+				Sponge = Constants.STARTING_SPONGE_SEEDS,
 			}
 		end
 		return {}
@@ -911,6 +922,18 @@ function PersistenceService.load(player: Player): PlayerProfile
 		if (tonumber(inv.BrainCoral) or 0) <= 0 then
 			inv.BrainCoral = Constants.STARTING_BRAIN_CORAL_SEEDS
 			log("Starter BrainCoral grant userId=", userId, "x", Constants.STARTING_BRAIN_CORAL_SEEDS)
+		end
+	end
+	-- Soft grant Sponge seeds when the item is missing (new species roll-out).
+	do
+		local inv = profile.inventory
+		if typeof(inv) ~= "table" then
+			inv = {}
+			profile.inventory = inv
+		end
+		if inv.Sponge == nil then
+			inv.Sponge = Constants.STARTING_SPONGE_SEEDS
+			log("Starter Sponge grant userId=", userId, "x", Constants.STARTING_SPONGE_SEEDS)
 		end
 	end
 	profiles[player] = profile

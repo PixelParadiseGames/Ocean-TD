@@ -5,6 +5,7 @@
 	Hungry fish ("Tang" kind): one random MeshPart from ReplicatedStorage.HungryFish,
 	pooled for reuse; size jitter on longest axis (min 25% below prior floor, same max).
 	Crabs: ReplicatedStorage.Fish.CrabTemplate. Same acquireFish/releaseFish API.
+	Urchins: ReplicatedStorage.Fish.Urchin.UrchinMesh (RootPart + ShellHitbox under UrchinMesh).
 
 	Also pools food orbs, green-arrow sets, ammo balls, and short SFX clones.
 ]]
@@ -16,6 +17,7 @@ local WaveEntityPool = {}
 
 WaveEntityPool.FISH_TANG = "Tang"
 WaveEntityPool.FISH_CRAB = "CrabTemplate"
+WaveEntityPool.FISH_URCHIN = "Urchin"
 
 local MAX_FISH_PER_KIND = 48
 local MAX_FOOD = 64
@@ -76,19 +78,28 @@ local function prepareLocalFxInstance(inst: Instance)
 	end
 end
 
--- Root stays anchored so Pivot/CFrame drives the assembly; welded legs stay
--- unanchored so C0 walk-cycle offsets actually move them.
-local function prepareCrabInstance(inst: Instance)
-	local root = findPrimary(inst)
+-- RootPart when present (crab/urchin rigs); else PrimaryPart / first BasePart.
+local function resolveMovementRoot(inst: Instance): BasePart?
 	if inst:IsA("Model") then
-		local named = inst:FindFirstChild("RootPart")
+		local named = inst:FindFirstChild("RootPart", true)
 		if named and named:IsA("BasePart") then
-			root = named
-			inst.PrimaryPart = named
-		elseif root and not inst.PrimaryPart then
-			inst.PrimaryPart = root
+			if not inst.PrimaryPart then
+				inst.PrimaryPart = named
+			end
+			return named
 		end
 	end
+	local named = inst:FindFirstChild("RootPart", true)
+	if named and named:IsA("BasePart") then
+		return named
+	end
+	return findPrimary(inst)
+end
+
+-- Root stays anchored so Pivot/CFrame drives the assembly; welded legs stay
+-- unanchored so C0 walk-cycle offsets actually move them.
+local function prepareCrabInstance(inst: Instance): BasePart?
+	local root = resolveMovementRoot(inst)
 	local toDestroy: { Instance } = {}
 	for _, d in ipairs(inst:GetDescendants()) do
 		if d:IsA("BasePart") then
@@ -111,13 +122,21 @@ local function prepareCrabInstance(inst: Instance)
 	for _, d in ipairs(toDestroy) do
 		d:Destroy()
 	end
+	-- Container MeshPart (e.g. UrchinMesh) is not in GetDescendants — unanchor so
+	-- BodyToRoot / ShellHitboxToRoot can follow the movement RootPart.
 	if inst:IsA("BasePart") then
-		inst.Anchored = true
 		inst.CanCollide = false
 		inst.CanTouch = false
 		inst.CanQuery = false
 		inst.CastShadow = false
+		if inst == root then
+			inst.Anchored = true
+		else
+			inst.Anchored = false
+			inst.Massless = true
+		end
 	end
+	return root
 end
 
 local function stripHungerUi(root: BasePart)
@@ -181,6 +200,33 @@ local function getFishTemplate(kind: string): Instance?
 	if cached and cached.Parent then
 		return cached
 	end
+	if kind == WaveEntityPool.FISH_URCHIN then
+		local fishFolder = ReplicatedStorage:FindFirstChild("Fish")
+		local tmpl: Instance? = nil
+		if fishFolder then
+			local urchinFolder = fishFolder:FindFirstChild("Urchin")
+			if urchinFolder then
+				tmpl = urchinFolder:FindFirstChild("UrchinMesh") or urchinFolder
+			end
+			if not tmpl then
+				tmpl = fishFolder:FindFirstChild("UrchinTemplate")
+			end
+		end
+		if not tmpl then
+			local legacy = ReplicatedStorage:FindFirstChild("Urchin")
+			if legacy then
+				tmpl = legacy:FindFirstChild("UrchinMesh")
+					or legacy:FindFirstChild("UrchinTemplate")
+					or legacy:FindFirstChild("Urchin")
+			end
+		end
+		if not tmpl then
+			warn("[WAVEPOOL] Urchin missing (Fish.Urchin.UrchinMesh)")
+			return nil
+		end
+		fishTemplateCache[kind] = tmpl
+		return tmpl
+	end
 	local fishFolder = ReplicatedStorage:FindFirstChild("Fish")
 	if not fishFolder then
 		warn("[WAVEPOOL] ReplicatedStorage.Fish missing")
@@ -233,12 +279,13 @@ local function newFishFromTemplate(kind: string): (Instance?, BasePart?)
 		return nil, nil
 	end
 	local clone = tmpl:Clone()
-	if kind == WaveEntityPool.FISH_CRAB then
-		prepareCrabInstance(clone)
+	local root: BasePart?
+	if kind == WaveEntityPool.FISH_CRAB or kind == WaveEntityPool.FISH_URCHIN then
+		root = prepareCrabInstance(clone)
 	else
 		prepareLocalFxInstance(clone)
+		root = findPrimary(clone)
 	end
-	local root = findPrimary(clone)
 	if not root then
 		clone:Destroy()
 		return nil, nil
@@ -284,7 +331,9 @@ function WaveEntityPool.acquireFish(kind: string, name: string): (Instance?, Bas
 	while #pool > 0 do
 		local inst = table.remove(pool) :: Instance
 		if inst and not fishInUse[inst] then
-			local root = findPrimary(inst)
+			local root = if kind == WaveEntityPool.FISH_CRAB or kind == WaveEntityPool.FISH_URCHIN
+				then resolveMovementRoot(inst)
+				else findPrimary(inst)
 			if root then
 				return finish(inst, root)
 			end

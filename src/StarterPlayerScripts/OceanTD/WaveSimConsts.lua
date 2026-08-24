@@ -158,6 +158,14 @@ local C = {
 	CRAB_FIGHT_SPIN = math.rad(155), -- rad/sec while zapping a coral
 	CRAB_FIGHT_YAW_WOBBLE = math.rad(32),
 	CRAB_FIGHT_PITCH = math.rad(14),
+	-- Urchins: waves 10/20/30… count = wave/10; spawn before fish; half crab base speed.
+	URCHIN_FIRST_WAVE = 10,
+	URCHIN_EVERY_WAVES = 10,
+	URCHIN_SPEED_MULT = 0.5, -- × crab base (crab base = FISH_SPEED × CRAB_SPEED_MULT)
+	URCHIN_STAGGER_MIN = 0.45,
+	URCHIN_STAGGER_MAX = 2.8,
+	URCHIN_FIRST_DELAY_MIN = 0.08,
+	URCHIN_FIRST_DELAY_MAX = 0.65,
 	TURN_RATE = 14, -- legacy; fish facing uses PATH_TANG_SMOOTH_RATE
 	-- Smooth path heading so school lateral offsets don't snap at waypoint joins.
 	PATH_TANG_SMOOTH_RATE = 11,

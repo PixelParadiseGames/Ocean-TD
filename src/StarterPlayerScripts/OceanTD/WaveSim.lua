@@ -23,6 +23,7 @@ local SkillStages = require(oceanRoot:WaitForChild("Shared"):WaitForChild("Skill
 local ClientPlot = require(script.Parent:WaitForChild("ClientPlot"))
 local WaveEntityPool = require(script.Parent:WaitForChild("WaveEntityPool"))
 local WaveCrab = require(script.Parent:WaitForChild("WaveCrab"))
+local WaveUrchin = require(script.Parent:WaitForChild("WaveUrchin"))
 local WaveEndVfx = require(script.Parent:WaitForChild("WaveEndVfx"))
 local WaveStartVfx = require(script.Parent:WaitForChild("WaveStartVfx"))
 local Wave1LeadArrow = require(script.Parent:WaitForChild("Wave1LeadArrow"))
@@ -72,6 +73,7 @@ export type HudSnapshot = {
 	fishFull: number, -- fully-fed fish this wave (alive + finished happy)
 	fishTotal: number, -- fish expected this wave
 	crabTotal: number, -- crabs rolled for this wave
+	urchinTotal: number, -- urchins on x10 waves (wave / 10)
 	speedMult: number,
 }
 
@@ -127,8 +129,12 @@ type FishAgent = {
 	payoutDone: boolean, -- $D already reported for this fill
 	fedCounted: boolean, -- counted toward this wave's feed bar / early-finish
 	isCrab: boolean?,
+	isUrchin: boolean?,
 	crabAnim: any?,
 	shellHitbox: BasePart?,
+	-- Root-local offsets so ShellHitbox / mesh stay glued when RootPart teleports.
+	shellLocalCf: CFrame?,
+	bodyLocalCf: CFrame?,
 	pauseUntil: number?,
 	pauseDur: number?,
 	stunSkullPart: BasePart?,
@@ -198,9 +204,15 @@ local spawnQueue = 0
 local spawnDelay = 0
 local crabSpawnQueue = 0
 local crabSpawnDelay = 0
+local urchinSpawnQueue = 0
+local urchinSpawnDelay = 0
 local waveIndex = 0
 local reefMaxHealth = C.REEF_START_HEALTH
 local reefHealth = C.REEF_START_HEALTH
+
+local function isGroundCritter(f: FishAgent): boolean
+	return f.isCrab == true or f.isUrchin == true
+end
 
 local function reefMaxFromSkills(): number
 	return SkillStages.reefHealthAtStage(SkillPowerUpUI.getStage("RHealth"))
@@ -341,10 +353,17 @@ end
 local function waveProgressDenominator(): number
 	local n = waveFishDenominator()
 	if WaveCrab.shouldSpawn(waveIndex) and pathDataGround then
-		if (not waveSpawning) and spawnQueue <= 0 and crabSpawnQueue <= 0 then
+		if (not waveSpawning) and spawnQueue <= 0 and crabSpawnQueue <= 0 and urchinSpawnQueue <= 0 then
 			n += WaveCrab.spawnedCount()
 		else
 			n += WaveCrab.expectedCount()
+		end
+	end
+	if WaveUrchin.shouldSpawn(waveIndex) and pathDataGround then
+		if (not waveSpawning) and spawnQueue <= 0 and crabSpawnQueue <= 0 and urchinSpawnQueue <= 0 then
+			n += WaveUrchin.spawnedCount()
+		else
+			n += WaveUrchin.expectedCount()
 		end
 	end
 	return math.max(1, n)
@@ -371,9 +390,9 @@ local function getFeedProgress(): (number, boolean)
 		end
 	end
 	local progress = math.clamp(filled / total, 0, 1)
-	local spawningDone = (not waveSpawning) and spawnQueue <= 0 and crabSpawnQueue <= 0
+	local spawningDone = (not waveSpawning) and spawnQueue <= 0 and crabSpawnQueue <= 0 and urchinSpawnQueue <= 0
 	-- Complete only when every spawned unit was fully fed (underfed exits permanently block).
-	local unitsSpawned = waveFishSpawned + WaveCrab.spawnedCount()
+	local unitsSpawned = waveFishSpawned + WaveCrab.spawnedCount() + WaveUrchin.spawnedCount()
 	local complete = spawningDone
 		and unitsSpawned > 0
 		and (not anyHungryAlive)
@@ -425,6 +444,7 @@ local function flushHud()
 		fishFull = fishFull,
 		fishTotal = fishTotal,
 		crabTotal = WaveCrab.expectedCount(),
+		urchinTotal = WaveUrchin.expectedCount(),
 		speedMult = speedMult,
 	}
 	for _, cb in ipairs(hudListeners) do
@@ -885,12 +905,40 @@ local function tickArrowPreview(dt: number)
 	end
 end
 
+-- UrchinMesh is a MeshPart container with RootPart + ShellHitbox children. WeldConstraints
+-- don't reliably follow Anchored RootPart teleports, so snap body/shell from stored locals.
+local function syncUrchinRig(agent: FishAgent)
+	local rootCf = agent.root.CFrame
+	local shell = agent.shellHitbox
+	local shellLocal = agent.shellLocalCf
+	if shell and shell.Parent and shellLocal then
+		shell.CFrame = rootCf * shellLocal
+	end
+	local bodyLocal = agent.bodyLocalCf
+	local model = agent.model
+	if bodyLocal and model:IsA("BasePart") and model ~= agent.root then
+		model.CFrame = rootCf * bodyLocal
+	end
+end
+
+local function captureUrchinRigLocals(agent: FishAgent)
+	local root = agent.root
+	local shell = agent.shellHitbox
+	if shell and shell.Parent then
+		agent.shellLocalCf = root.CFrame:ToObjectSpace(shell.CFrame)
+	end
+	local model = agent.model
+	if model:IsA("BasePart") and model ~= root then
+		agent.bodyLocalCf = root.CFrame:ToObjectSpace(model.CFrame)
+	end
+end
+
 local function setFishCFrame(agent: FishAgent, pos: Vector3, swimTang: Vector3, dt: number)
 	agent.lastWorld = pos
 	local move = if swimTang.Magnitude > 1e-5 then swimTang.Unit else Vector3.new(0, 0, -1)
 
 	-- Same as GreenArrows: look along swim dir, then fixed authored yaw/pitch/roll.
-	local desired = if agent.isCrab
+	local desired = if isGroundCritter(agent)
 		then WaveCrab.facingCFrame(pos, move)
 		else CFrame.lookAt(pos, pos + move, Vector3.yAxis) * CFrame.Angles(C.TANG_PITCH, C.TANG_YAW, C.TANG_ROLL)
 
@@ -900,6 +948,11 @@ local function setFishCFrame(agent: FishAgent, pos: Vector3, swimTang: Vector3, 
 		if anim then
 			WaveCrab.stepAnim(anim, dt, pos)
 		end
+		return
+	end
+	if agent.isUrchin then
+		WaveCrab.applyPose(agent.root, desired)
+		syncUrchinRig(agent)
 		return
 	end
 
@@ -1147,7 +1200,9 @@ end
 
 local function applySizeStats(coral: CoralAgent)
 	local _d, class = CoralSize.readFromPart(coral.part)
-	local st = CoralSize.statsFor(class)
+	local speciesId = coral.part:GetAttribute("OceanTD_SpeciesId")
+	local sid = if typeof(speciesId) == "string" then speciesId else nil
+	local st = CoralSize.statsFor(class, sid)
 	coral.foodCount = st.food
 	coral.range = st.range
 	coral.rangeSq = st.range * st.range
@@ -1177,8 +1232,7 @@ end
 
 local function ammoWorldPos(coral: CoralAgent, slot: number?): Vector3
 	applySizeStats(coral)
-	local d = math.max(coral.part.Size.X, coral.part.Size.Y, coral.part.Size.Z)
-	local r = d * 0.5
+	local r = CoralSize.ammoAnchorRadius(coral.part)
 	local ammoR = C.AMMO_RADIUS * coral.ammoSizeMult * CoralSize.ammoSizeScale(coral.foodCount)
 	local nVis = #coral.ammoSlots
 	if nVis < 1 then
@@ -1468,6 +1522,8 @@ local function destroyFish(agent: FishAgent)
 	if agent.isCrab then
 		WaveCrab.resetAnim(agent.crabAnim)
 		WaveEntityPool.releaseFish(WaveEntityPool.FISH_CRAB, agent.model)
+	elseif agent.isUrchin then
+		WaveEntityPool.releaseFish(WaveEntityPool.FISH_URCHIN, agent.model)
 	else
 		WaveEntityPool.releaseFish(WaveEntityPool.FISH_TANG, agent.model)
 	end
@@ -1518,6 +1574,39 @@ local function finishFish(agent: FishAgent, skipHappyVfx: boolean?)
 	end
 	destroyFish(agent)
 	notifyHud()
+end
+
+-- Fed urchins are slow; once crabs are off the path and every fish/urchin is full,
+-- clear remaining urchins so the next wave isn't gated on their full GroundA walk.
+local function finishFedUrchinsEarlyIfReady()
+	if waveSpawning or spawnQueue > 0 or crabSpawnQueue > 0 or urchinSpawnQueue > 0 then
+		return
+	end
+	local anyUrchinLeft = false
+	for _, f in ipairs(fishList) do
+		if f.finished then
+			continue
+		end
+		if f.isCrab then
+			return -- crabs still on path
+		end
+		if f.isUrchin then
+			anyUrchinLeft = true
+			if f.hunger < f.maxHunger then
+				return -- hungry urchin must finish (reef damage)
+			end
+		elseif f.hunger < f.maxHunger then
+			return -- hungry fish still out
+		end
+	end
+	if not anyUrchinLeft then
+		return
+	end
+	for _, f in ipairs(fishList) do
+		if not f.finished and f.isUrchin and f.hunger >= f.maxHunger then
+			finishFish(f, true)
+		end
+	end
 end
 
 local function spawnOneFish(spawnIndex: number)
@@ -1577,6 +1666,7 @@ local function spawnOneFish(spawnIndex: number)
 		payoutDone = false,
 		fedCounted = false,
 		isCrab = false,
+		isUrchin = false,
 		crabAnim = nil,
 		shellHitbox = nil,
 		pauseUntil = nil,
@@ -1674,6 +1764,7 @@ local function spawnOneCrab(startDist: number?)
 		payoutDone = false,
 		fedCounted = false,
 		isCrab = true,
+		isUrchin = false,
 		crabAnim = anim,
 		shellHitbox = WaveCrab.findShell(clone),
 		pauseUntil = nil,
@@ -1704,6 +1795,107 @@ local function spawnOneCrab(startDist: number?)
 	updateHungerVisual(agent)
 	agent.lastWorld = pos
 	setFishCFrame(agent, pos, tang, 1)
+	table.insert(fishList, agent)
+end
+
+local function spawnOneUrchin(startDist: number?)
+	if not WaveUrchin.shouldSpawn(waveIndex) then
+		return
+	end
+	local path = pathDataGround
+	if not path then
+		return
+	end
+	local clone, root = WaveEntityPool.acquireFish(WaveEntityPool.FISH_URCHIN, "Urchin_" .. tostring(nextFishId))
+	if not clone or not root then
+		return
+	end
+	clone.Parent = ensureFolder()
+	local dist0 = math.clamp(startDist or 0, 0, math.max(0, path.totalLen - 1))
+	local pos, tang = WaveUrchin.sample(path, dist0)
+	local lateral = fishRng:NextNumber(-C.CRAB_LATERAL_SPREAD, C.CRAB_LATERAL_SPREAD)
+	local wanderAmp = fishRng:NextNumber(C.CRAB_WANDER_AMP_MIN, C.CRAB_WANDER_AMP_MAX)
+	local wanderFreq = fishRng:NextNumber(0.08, 0.18)
+	local wanderPhase = fishRng:NextNumber(0, math.pi * 2)
+	do
+		local side = Vector3.new(-tang.Z, 0, tang.X)
+		if side.Magnitude > 1e-4 then
+			side = side.Unit
+			pos = pos + side * lateral
+		end
+	end
+	pos = WaveUrchin.worldOnGround(pos, nil, 1)
+	local agent: FishAgent = {
+		id = nextFishId,
+		root = root,
+		model = clone,
+		dist = dist0,
+		lateral = lateral,
+		vert = 0,
+		bobAmp = 0,
+		bobFreq = 1,
+		bobPhase = 0,
+		wanderAmp = wanderAmp,
+		wanderFreq = wanderFreq,
+		wanderPhase = wanderPhase,
+		speedPhase = 0,
+		speedFreq = 1,
+		hunger = 0,
+		maxHunger = WaveUrchin.hungerForWave(waveIndex),
+		finished = false,
+		billboard = nil :: any,
+		fill = nil :: any,
+		barFrame = nil :: any,
+		forkLabel = nil :: any,
+		happyLabel = nil :: any,
+		remainLabel = nil :: any,
+		barScale = nil :: any,
+		barStroke = nil :: any,
+		pulseToken = 0,
+		dangerToken = 0,
+		dangerActive = false,
+		smoothTang = tang.Magnitude > 1e-5 and tang.Unit or Vector3.new(0, 0, -1),
+		lastWorld = pos,
+		incomingFood = 0,
+		payoutDone = false,
+		fedCounted = false,
+		isCrab = false,
+		isUrchin = true,
+		crabAnim = nil,
+		shellHitbox = WaveUrchin.findShell(clone),
+		shellLocalCf = nil,
+		bodyLocalCf = nil,
+		pauseUntil = nil,
+		stunSkullPart = nil,
+		crabSprint = nil,
+	}
+	nextFishId += 1
+	WaveUrchin.markSpawned()
+	notifyHud()
+	captureUrchinRigLocals(agent)
+	local bb, fill, barFrame, forkLabel, happyLabel, remainLabel, barScale = makeHungerBillboard(root, "✴🍴")
+	agent.billboard = bb
+	agent.fill = fill
+	agent.barFrame = barFrame
+	agent.forkLabel = forkLabel
+	agent.happyLabel = happyLabel
+	agent.remainLabel = remainLabel
+	agent.barScale = barScale
+	local bg = barFrame:FindFirstChild("Bg")
+	if bg then
+		local stroke = bg:FindFirstChildWhichIsA("UIStroke")
+		if stroke then
+			agent.barStroke = stroke
+		end
+	end
+	if bb then
+		bb.Enabled = critterHungerBarsVisible
+	end
+	updateHungerVisual(agent)
+	agent.lastWorld = pos
+	setFishCFrame(agent, pos, tang, 1)
+	-- Re-capture after first pose so locals match the grounded spawn orientation.
+	captureUrchinRigLocals(agent)
 	table.insert(fishList, agent)
 end
 
@@ -1742,12 +1934,18 @@ local function beginWave(wave: number)
 	waveFishSpawned = 0
 	waveFishFullyFed = 0
 	WaveCrab.beginWave(WaveCrab.rollCount(wave))
+	WaveUrchin.beginWave(WaveUrchin.rollCount(wave))
 	restoreStunnedCorals(wave > 1)
 	-- Path preview: GreenArrows race the full route; fish follow 1s later.
 	startWaveArrowPreview()
 	waveSpawning = true
 	spawnQueue = waveFishCount(wave)
 	spawnDelay = C.ARROW_LEAD_SEC
+	local nUrchin = WaveUrchin.expectedCount()
+	urchinSpawnQueue = nUrchin
+	urchinSpawnDelay = if nUrchin > 0
+		then fishRng:NextNumber(C.URCHIN_FIRST_DELAY_MIN, C.URCHIN_FIRST_DELAY_MAX)
+		else 0
 	crabSpawnQueue = 0
 	crabSpawnDelay = 0
 	-- Session start: arm all corals. Later waves: keep reload state; only pick up new places.
@@ -1781,7 +1979,7 @@ local function rebuildFishPathBuckets()
 	end
 	for _, f in ipairs(fishList) do
 		-- Skip if already full or in-flight food will fill them.
-		if f.finished or f.isCrab or f.hunger + f.incomingFood >= f.maxHunger then
+		if f.finished or isGroundCritter(f) or f.hunger + f.incomingFood >= f.maxHunger then
 			continue
 		end
 		local bi = math.clamp(math.floor(f.dist / C.PATH_BUCKET_SIZE) + 1, 1, maxBi)
@@ -1825,7 +2023,7 @@ local function findClosestHungryFish(coral: CoralAgent): FishAgent?
 		local score = d2
 		-- Prefer fish at/past this coral so stragglers don't slip through unfed
 		-- while the school still approaching soaks every shot. Crabs use GroundA.
-		if not f.isCrab then
+		if not isGroundCritter(f) then
 			if f.dist >= cd - 1 then
 				score *= 0.4
 			elseif f.dist < cd then
@@ -1849,13 +2047,20 @@ local function findClosestHungryFish(coral: CoralAgent): FishAgent?
 		end
 		if not best then
 			for _, f in ipairs(fishList) do
-				if not f.isCrab then
+				if not isGroundCritter(f) then
 					consider(f)
 				end
 			end
 		end
 	end
-	-- Hungry fish first; crabs only if no hungry fish is in range.
+	-- Hungry fish first; urchins before crabs if no fish in range.
+	if not best then
+		for _, f in ipairs(fishList) do
+			if f.isUrchin then
+				consider(f)
+			end
+		end
+	end
 	if not best then
 		for _, f in ipairs(fishList) do
 			if f.isCrab then
@@ -1869,7 +2074,7 @@ end
 -- Predict mouth world pos using the same path + offset math the fish uses.
 -- Integrates each fish's ±FISH_SPEED_VAR surge (constant FISH_SPEED caused systematic misses).
 local function fishSpeedFactorAt(agent: FishAgent, clock: number): number
-	if agent.isCrab then
+	if isGroundCritter(agent) then
 		return 1
 	end
 	return 1 + C.FISH_SPEED_VAR * math.sin(clock * agent.speedFreq + agent.speedPhase)
@@ -1880,7 +2085,10 @@ local function predictFishDistAhead(agent: FishAgent, aheadSec: number): number
 	local stepDt = aheadSec / steps
 	local dist = agent.dist
 	local t = simClock
-	local speed = if agent.isCrab then WaveCrab.speedNow(agent.crabSprint, simClock) else C.FISH_SPEED
+	local speed = if agent.isUrchin
+		then WaveUrchin.speedNow()
+		elseif agent.isCrab then WaveCrab.speedNow(agent.crabSprint, simClock)
+		else C.FISH_SPEED
 	for _ = 1, steps do
 		dist += speed * fishSpeedFactorAt(agent, t) * stepDt
 		t += stepDt
@@ -1889,7 +2097,7 @@ local function predictFishDistAhead(agent: FishAgent, aheadSec: number): number
 end
 
 local function predictFishMeetPos(agent: FishAgent, aheadSec: number): Vector3?
-	if agent.isCrab then
+	if isGroundCritter(agent) then
 		local ground = pathDataGround
 		if not ground then
 			return nil
@@ -1968,9 +2176,9 @@ local function foodFlightPos(shot: FoodShot, u: number, meetPos: Vector3): Vecto
 		local sway = math.sin(t * math.pi * 2 + shot.swayPhase) * C.FOOD_SWAY_AMP * envelope
 		base = base + side * sway
 	end
-	-- Crabs: lob up then down onto the shell (fish keep the flatter path).
+	-- Ground critters: lob up then down onto the shell (fish keep the flatter path).
 	local target = shot.target
-	if target and target.isCrab then
+	if target and isGroundCritter(target) then
 		local flat = Vector3.new(along.X, 0, along.Z).Magnitude
 		local arcH = math.clamp(flat * C.FOOD_CRAB_ARC_FRAC, C.FOOD_CRAB_ARC_MIN, C.FOOD_CRAB_ARC_MAX)
 		base = base + Vector3.yAxis * (math.sin(t * math.pi) * arcH)
@@ -1992,8 +2200,10 @@ local function fireShot(coral: CoralAgent, target: FishAgent)
 	local flatZ = fp.Z - start.Z
 	local flat = math.sqrt(flatX * flatX + flatZ * flatZ)
 	-- Estimate duration from distance; prediction uses the fish's live speed curve.
-	local speedNow = (if target.isCrab then WaveCrab.speedNow(target.crabSprint, simClock) else C.FISH_SPEED)
-		* math.max(0.55, fishSpeedFactorAt(target, simClock))
+	local speedNow = (if target.isUrchin
+		then WaveUrchin.speedNow()
+		elseif target.isCrab then WaveCrab.speedNow(target.crabSprint, simClock)
+		else C.FISH_SPEED) * math.max(0.55, fishSpeedFactorAt(target, simClock))
 	local duration = math.clamp(flat / speedNow + C.FOOD_FIRE_LEAD_SEC, C.FOOD_RISE_MIN, C.FOOD_RISE_MAX)
 	local meet = predictFishMeetPos(target, duration)
 	-- Near route end (or bad predict): still fire at the live mouth — don't let them ghost past.
@@ -2201,11 +2411,12 @@ local function tickFish(dt: number)
 		if agent.finished then
 			continue
 		end
-		if agent.isCrab then
+		if isGroundCritter(agent) then
 			if not ground then
 				finishFish(agent)
 				continue
 			end
+			local isCrab = agent.isCrab == true
 			local wasFighting = agent.pauseUntil ~= nil
 			local paused = wasFighting and os.clock() < (agent.pauseUntil :: number)
 			-- Fed mid-fight: drop the attack, restore the coral, keep walking.
@@ -2230,11 +2441,15 @@ local function tickFish(dt: number)
 					end
 				end
 				agent.pauseUntil = nil
-				local sprint = agent.crabSprint
-				if sprint then
-					WaveCrab.tickSprint(sprint, simClock)
+				if isCrab then
+					local sprint = agent.crabSprint
+					if sprint then
+						WaveCrab.tickSprint(sprint, simClock)
+					end
+					agent.dist += WaveCrab.speedNow(sprint, simClock) * dt
+				else
+					agent.dist += WaveUrchin.speedNow() * dt
 				end
-				agent.dist += WaveCrab.speedNow(sprint, simClock) * dt
 			end
 			if agent.dist >= ground.totalLen then
 				finishFish(agent)
@@ -2255,23 +2470,31 @@ local function tickFish(dt: number)
 					agent.id,
 					agent.pauseDur
 				)
+				if agent.isUrchin then
+					syncUrchinRig(agent)
+				end
 			else
 				setFishCFrame(agent, pos, swimTang, dt)
 			end
 			local hungry = agent.hunger < agent.maxHunger
 			setDangerFlash(agent, hungry and isNearPathEnd(ground.totalLen, agent.dist))
-			-- Only hungry crabs fight; a full crab walks through without stunning the coral.
+			-- Only hungry ground critters fight; a full one walks through without stunning the coral.
 			if hungry and not paused then
 				local shell = agent.shellHitbox
-				if shell then
+				-- Fallback: root-centered box if shell never resolved (shouldn't happen).
+				local hitPart = shell or agent.root
+				if hitPart then
 					for _, coral in ipairs(coralList) do
 						if coral.stunned or not coral.part.Parent then
 							continue
 						end
-						if WaveCrab.shellOverlapsCoral(shell, coral.part) then
+						if WaveCrab.shellOverlapsCoral(hitPart, coral.part) then
 							stunCoralFromCrab(coral)
-							agent.pauseDur = coral.defenseSec
-							agent.pauseUntil = os.clock() + coral.defenseSec
+							local pauseSec = if isCrab
+								then coral.defenseSec
+								else WaveUrchin.coralPauseSec(coral.defenseSec)
+							agent.pauseDur = pauseSec
+							agent.pauseUntil = os.clock() + pauseSec
 							agent.stunSkullPart = coral.part
 							local follow = agent
 							WaveCrab.playZapBurst(
@@ -2286,7 +2509,7 @@ local function tickFish(dt: number)
 									end
 									return follow.root.Position
 								end,
-								coral.defenseSec,
+								pauseSec,
 								function()
 									local untilT = follow.pauseUntil
 									return untilT ~= nil and os.clock() < untilT
@@ -2359,6 +2582,8 @@ local function hardCleanup()
 	spawnQueue = 0
 	crabSpawnQueue = 0
 	crabSpawnDelay = 0
+	urchinSpawnQueue = 0
+	urchinSpawnDelay = 0
 	waveSpawning = false
 	destroyArrowPreview()
 	WaveStartVfx.cancel()
@@ -2387,6 +2612,8 @@ local function clearActiveWaveEntities()
 	spawnQueue = 0
 	crabSpawnQueue = 0
 	crabSpawnDelay = 0
+	urchinSpawnQueue = 0
+	urchinSpawnDelay = 0
 	waveSpawning = false
 	destroyArrowPreview()
 end
@@ -2453,6 +2680,7 @@ function WaveSim.getHudSnapshot(): HudSnapshot
 		fishFull = fishFull,
 		fishTotal = fishTotal,
 		crabTotal = WaveCrab.expectedCount(),
+		urchinTotal = WaveUrchin.expectedCount(),
 		speedMult = speedMult,
 	}
 end
@@ -2461,7 +2689,7 @@ end
 function WaveSim.getFurthestUnfedFish(): { id: number, position: Vector3 }?
 	local best: FishAgent? = nil
 	for _, f in ipairs(fishList) do
-		if f.finished or f.isCrab or f.hunger >= f.maxHunger then
+		if f.finished or isGroundCritter(f) or f.hunger >= f.maxHunger then
 			continue
 		end
 		if not f.root.Parent then
@@ -2481,7 +2709,7 @@ end
 function WaveSim.getFurthestLiveFish(): { id: number, position: Vector3 }?
 	local best: FishAgent? = nil
 	for _, f in ipairs(fishList) do
-		if f.finished or f.isCrab or not f.root.Parent then
+		if f.finished or isGroundCritter(f) or not f.root.Parent then
 			continue
 		end
 		if not best or f.dist > best.dist then
@@ -2626,6 +2854,17 @@ local function attachSimLoop(myToken: number)
 		end
 		local simDt = dt * speedMult
 		simClock += simDt
+		-- Urchins spawn before the fish school (waves 10/20/30…).
+		if urchinSpawnQueue > 0 then
+			urchinSpawnDelay -= simDt
+			if urchinSpawnDelay <= 0 then
+				spawnOneUrchin(0)
+				urchinSpawnQueue -= 1
+				urchinSpawnDelay = if urchinSpawnQueue > 0
+					then fishRng:NextNumber(C.URCHIN_STAGGER_MIN, C.URCHIN_STAGGER_MAX)
+					else 0
+			end
+		end
 		-- Spawning (first fish waits C.ARROW_LEAD_SEC after GreenArrows start)
 		if waveSpawning and spawnQueue > 0 then
 			spawnDelay -= simDt
@@ -2685,7 +2924,8 @@ local function attachSimLoop(myToken: number)
 		end
 
 		-- Wave complete → next wave immediately (no intermission pause).
-		if not waveSpawning and spawnQueue <= 0 and crabSpawnQueue <= 0 and countAliveFish() == 0 then
+		finishFedUrchinsEarlyIfReady()
+		if not waveSpawning and spawnQueue <= 0 and crabSpawnQueue <= 0 and urchinSpawnQueue <= 0 and countAliveFish() == 0 then
 			UiHaptics.pulseTriple()
 			resumeNormalSpeedIfPaused()
 			beginWave(waveIndex + 1)
@@ -2768,7 +3008,7 @@ function WaveSim.rebuildRouteForPlotSize(plotSizeStage: number?): boolean
 	pathDataGround = WaveCrab.buildLocal()
 	-- Fish already past the new end finish there; others keep swimming on the longer/shorter route.
 	for _, agent in ipairs(fishList) do
-		if agent.isCrab then
+		if agent.isCrab or agent.isUrchin then
 			continue
 		end
 		if not agent.finished and agent.dist >= p.totalLen then

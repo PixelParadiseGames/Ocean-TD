@@ -77,6 +77,9 @@ local gamepadChromeT0 = 0
 local relocateShownAt = 0
 local part: BasePart? = nil
 local originPos: Vector3? = nil
+local gridAnchorPos: Vector3? = nil -- terrain ray-hit stored in grid (sponge pivot is raised)
+local moveGridAnchor: Vector3? = nil
+local lastChromeScreen: Vector2? = nil -- keep Del locked to coral when projection briefly fails
 local placeId = ""
 local itemId: string? = nil
 local baseColor: Color3? = nil
@@ -430,11 +433,29 @@ local function worldToScreen(world: Vector3): Vector2?
 		return nil
 	end
 	-- IgnoreGuiInset ScreenGui layout space (includes top bar).
-	local sp, onScreen = cam:WorldToScreenPoint(world)
-	if not onScreen or sp.Z <= 0 then
+	local sp = cam:WorldToScreenPoint(world)
+	-- Behind camera only — still use projected X/Y when slightly off the viewport
+	-- (tall sponge tip can clip the top edge; falling back to the mouse made Del follow the cursor).
+	if sp.Z <= 0 then
 		return nil
 	end
 	return Vector2.new(sp.X, sp.Y)
+end
+
+-- Balls: center (screen then lifts ~52px). Sponges: mesh pivot is mid-body — use the top.
+local function coralChromeWorldPos(p: BasePart): Vector3
+	if p:GetAttribute("OceanTD_SpeciesId") == "Sponge" then
+		return p.Position + Vector3.new(0, p.Size.Y * 0.5, 0)
+	end
+	return p.Position
+end
+
+local function coralChromeScreenLift(p: BasePart): number
+	-- Sponges already project from the tip; only a small gap. Balls need the larger lift from center.
+	if p:GetAttribute("OceanTD_SpeciesId") == "Sponge" then
+		return 8
+	end
+	return 52
 end
 
 local WAIST_BB_DIST = 28
@@ -747,7 +768,12 @@ end
 
 local function ensureWarnBillboard(parent: BasePart)
 	if warnLabel and warnLabel.Parent then
-		return
+		local bb = warnLabel.Parent
+		if bb:IsA("BillboardGui") and bb.Parent == parent then
+			return
+		end
+		bb:Destroy()
+		warnLabel = nil
 	end
 	local bb = Instance.new("BillboardGui")
 	bb.Name = "RelocateWarn"
@@ -1185,13 +1211,21 @@ local function syncChrome()
 	if not active or not part or not checkBtn or not cancelBtn then
 		return
 	end
-	local screen = worldToScreen(part.Position)
+	local screen = worldToScreen(coralChromeWorldPos(part))
 	if not screen then
-		-- Behind camera / off-screen — still show chrome near pointer so the tool isn't blank.
-		screen = pointerScreenPos()
+		-- Tip can fail if behind camera; try body center before any soft fallback.
+		screen = worldToScreen(part.Position)
 	end
+	if not screen then
+		screen = lastChromeScreen
+	end
+	if not screen then
+		-- Last resort: leave chrome where it already is (never pin to the mouse).
+		return
+	end
+	lastChromeScreen = screen
 	local cx = screen.X
-	local cy = screen.Y - 52
+	local cy = screen.Y - coralChromeScreenLift(part)
 
 	if recycleSlideActive then
 		local u = math.clamp((os.clock() - recycleSlideT0) / REC_SLIDE_SEC, 0, 1)
@@ -1313,11 +1347,19 @@ local function updateAt(worldPos: Vector3)
 	if not part or not originPos then
 		return
 	end
-	part.CFrame = CFrame.new(worldPos)
-	local ok, reason = evaluate(worldPos)
+	local surfacePos = worldPos
+	if part:GetAttribute("OceanTD_SpeciesId") == "Sponge" then
+		CoralVisual.alignSpongeToSurface(part, surfacePos)
+		moveGridAnchor = surfacePos
+	else
+		part.CFrame = CFrame.new(surfacePos)
+		moveGridAnchor = surfacePos
+	end
+	local ok, reason = evaluate(surfacePos)
 	validSpot = ok
 	rejectReason = reason
-	if not sameGrid(worldPos, originPos) then
+	local homeAnchor = gridAnchorPos or originPos
+	if not sameGrid(surfacePos, homeAnchor) then
 		hasMoved = true
 	end
 	if validSpot or rejectReason ~= "Spot Taken" then
@@ -1392,7 +1434,7 @@ local function startLoop()
 			local stick = readThumbstick1()
 			local mag = stick.Magnitude
 			if mag > GAMEPAD_STICK_DEADZONE then
-				local screen = if part then worldToViewport(Workspace.CurrentCamera :: Camera, part.Position) else nil
+				local screen = if part then worldToViewport(Workspace.CurrentCamera :: Camera, coralChromeWorldPos(part)) else nil
 				if not gamepadCursor then
 					gamepadCursor = screen or UserInputService:GetMouseLocation()
 				end
@@ -1451,13 +1493,14 @@ local function playIntro(fromScreen: Vector2)
 		if recScale and recScale.Parent then
 			recScale.Scale = 0.05 + 0.95 * a
 		end
-		local screen = if part then worldToScreen(part.Position) else fromScreen
+		local screen = if part then worldToScreen(coralChromeWorldPos(part)) else fromScreen
 		if not screen then
 			screen = fromScreen
 		end
 		if recycleBtn then
 			local cx = screen.X
-			local cy = screen.Y - 52
+			local lift = if part then coralChromeScreenLift(part) else 52
+			local cy = screen.Y - lift
 			-- End: recycle where X will sit (right of coral).
 			local recEnd = Vector2.new(cx + 6 + BTN_SIZE * 0.5, cy - REC_BTN_SIZE * 0.5)
 			local rpos = fromScreen:Lerp(recEnd, a)
@@ -1499,6 +1542,9 @@ local function clearState()
 	gamepadCursor = nil
 	part = nil
 	originPos = nil
+	gridAnchorPos = nil
+	moveGridAnchor = nil
+	lastChromeScreen = nil
 	placeId = ""
 	itemId = nil
 	baseColor = nil
@@ -1588,6 +1634,27 @@ function RelocateController.setLiveCameraCFrame(cf: CFrame)
 	end
 end
 
+-- After server mesh swap (sponge upgrade), rebind selection without replaying intro chrome.
+function RelocateController.swapSelectedPart(target: BasePart)
+	if not active or not target.Parent then
+		return
+	end
+	local existingId = target:GetAttribute("OceanTD_PlaceId")
+	if typeof(existingId) ~= "string" or existingId == "" or existingId ~= placeId then
+		return
+	end
+	part = target
+	originPos = target.Position
+	gridAnchorPos = CoralVisual.readGridAnchor(target) or target.Position
+	moveGridAnchor = gridAnchorPos
+	SelectRing.ensure(selectRing, target, playerGui)
+	attachMoveIcon(target)
+	ensureWarnBillboard(target)
+	syncWarnLabel()
+	syncChrome()
+	activeChanged:Fire(true, target)
+end
+
 function RelocateController.refreshSelectRing()
 	if part then
 		SelectRing.ensure(selectRing, part, playerGui)
@@ -1613,15 +1680,25 @@ function RelocateController.cancel(instant: boolean?)
 	local color = baseColor
 
 	local function snapHome()
-		if p and origin and p.Parent then
-			p.CFrame = CFrame.new(origin)
+		if p and p.Parent then
+			if p:GetAttribute("OceanTD_SpeciesId") == "Sponge" and gridAnchorPos then
+				CoralVisual.alignSpongeToSurface(p, gridAnchorPos)
+			elseif origin then
+				p.CFrame = CFrame.new(origin)
+			end
 		end
 		clearState()
 	end
 
 	if moved and p and origin and p.Parent and not instant then
+		if p:GetAttribute("OceanTD_SpeciesId") == "Sponge" and gridAnchorPos then
+			snapHome()
+			log("Cancelled — reverted")
+			return
+		end
 		busy = true
 		local start = p.Position
+		local home = origin
 		local t0 = os.clock()
 		local conn: RBXScriptConnection
 		conn = RunService.RenderStepped:Connect(function()
@@ -1629,7 +1706,7 @@ function RelocateController.cancel(instant: boolean?)
 			local u = math.clamp((os.clock() - t0) / REVERT_SEC, 0, 1)
 			local a = 1 - (1 - u) * (1 - u)
 			if p.Parent then
-				p.CFrame = CFrame.new(start:Lerp(origin, a))
+				p.CFrame = CFrame.new(start:Lerp(home, a))
 				if color then
 					local pulse = 0.5 + 0.5 * math.sin(os.clock() * 9)
 					p.Material = Enum.Material.Neon
@@ -1657,7 +1734,11 @@ function RelocateController.beginRecycleConfirm()
 	end
 	-- Snap home so recycle matches the grid cell about to be vacated.
 	clearBlockHighlight()
-	part.CFrame = CFrame.new(originPos)
+	if part:GetAttribute("OceanTD_SpeciesId") == "Sponge" and gridAnchorPos then
+		CoralVisual.alignSpongeToSurface(part, gridAnchorPos)
+	else
+		part.CFrame = CFrame.new(originPos)
+	end
 	hasMoved = false
 	validSpot = true
 	rejectReason = nil
@@ -1754,7 +1835,7 @@ local function commitRecycle()
 		return
 	end
 	UiHaptics.pulseShort()
-	local fromPos = originPos
+	local fromPos = gridAnchorPos or originPos
 	local id = placeId
 	local p = part
 	local creditedId = itemId
@@ -1788,6 +1869,9 @@ local function commitRecycle()
 		gamepadRelocate = false
 		gamepadCursor = nil
 		unfreeze()
+		SelectRing.destroy(selectRing)
+		inspectModal = false
+		activeChanged:Fire(false, nil)
 		flyRecycleToBackpack(creditedId, function()
 			recycleFlying = false
 			-- A new relocate may have started mid-fly — don't wipe its chrome.
@@ -1798,6 +1882,8 @@ local function commitRecycle()
 			recycleSlideU = 0
 			recycleSlideActive = false
 			originPos = nil
+			gridAnchorPos = nil
+			moveGridAnchor = nil
 			placeId = ""
 			itemId = nil
 			baseColor = nil
@@ -1838,8 +1924,8 @@ function RelocateController.commit()
 	if not part or not originPos or not itemId then
 		return
 	end
-	local toPos = part.Position
-	local fromPos = originPos
+	local toPos = moveGridAnchor or CoralVisual.readGridAnchor(part) or part.Position
+	local fromPos = gridAnchorPos or originPos
 	local id = placeId
 	busy = true
 	PlaceVfx.playSound(toPos)
@@ -1849,7 +1935,11 @@ function RelocateController.commit()
 		UiHaptics.pulseShort()
 		if part and part.Parent then
 			local finalPos = if typeof(result.worldPos) == "Vector3" then result.worldPos else toPos
-			part.CFrame = CFrame.new(finalPos)
+			if part:GetAttribute("OceanTD_SpeciesId") == "Sponge" then
+				CoralVisual.alignSpongeToSurface(part, finalPos)
+			else
+				part.CFrame = CFrame.new(finalPos)
+			end
 			PlacedCoralIndex.reindex(part)
 			if typeof(result.placeId) == "string" and result.placeId ~= "" then
 				part:SetAttribute("OceanTD_PlaceId", result.placeId)
@@ -1923,6 +2013,8 @@ function RelocateController.begin(target: BasePart)
 	pendingCoralSwitchScreen = nil
 	part = target
 	originPos = target.Position
+	gridAnchorPos = CoralVisual.readGridAnchor(target) or target.Position
+	moveGridAnchor = gridAnchorPos
 	itemId = iid
 	baseColor = restColor
 	baseMaterial = restMat

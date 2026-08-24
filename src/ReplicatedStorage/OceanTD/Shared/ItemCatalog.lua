@@ -11,14 +11,25 @@ export type ItemDef = {
 
 local ItemCatalog = {}
 
+local BRAIN_ICON = "rbxassetid://137897292847744"
+local SPONGE_ICON = "rbxassetid://130951757133075"
+
 local BY_ID: { [string]: ItemDef } = {
 	BrainCoral = {
 		id = "BrainCoral",
 		displayName = "Brain Coral",
-		icon = "rbxassetid://137897292847744",
+		icon = BRAIN_ICON,
 		category = "Coral",
 		sortOrder = 10,
-		speciesId = "BrainCoral", -- links to SpeciesCatalog; may diverge later
+		speciesId = "BrainCoral",
+	},
+	Sponge = {
+		id = "Sponge",
+		displayName = "Sponge",
+		icon = SPONGE_ICON,
+		category = "Sponge",
+		sortOrder = 20,
+		speciesId = "Sponge",
 	},
 }
 

@@ -38,6 +38,18 @@ type LayoutObject = {
 	sizeTier: number?,
 	sizeClass: number?,
 	colorIndex: number?,
+	colorR: number?,
+	colorG: number?,
+	colorB: number?,
+	variantIndex: number?,
+	scaleMult: number?,
+}
+
+export type PlaceOpts = {
+	diameter: number?,
+	variantIndex: number?,
+	scaleMult: number?,
+	sizeClass: number?,
 }
 
 export type PlaceResult = {
@@ -47,6 +59,10 @@ export type PlaceResult = {
 	speciesId: string?,
 	itemId: string?,
 	placeId: string?,
+	diameter: number?,
+	variantIndex: number?,
+	scaleMult: number?,
+	sizeClass: number?,
 }
 
 local PlacementService = {}
@@ -158,9 +174,19 @@ function PlacementService.spawnVisual(
 	speciesId: string,
 	worldPos: Vector3,
 	color: Color3?,
-	diameter: number?
+	diameter: number?,
+	sizeClass: number?,
+	variantIndex: number?,
+	scaleMult: number?
 ): BasePart?
-	local part = CoralVisual.create(speciesId, worldPos, { ghost = false, color = color, diameter = diameter })
+	local part = CoralVisual.create(speciesId, worldPos, {
+		ghost = false,
+		color = color,
+		diameter = diameter,
+		sizeClass = sizeClass,
+		variantIndex = variantIndex,
+		scaleMult = scaleMult,
+	})
 	if not part then
 		return nil
 	end
@@ -208,13 +234,28 @@ function PlacementService.hydrateVisuals(plotId: string, boundsCFrame: CFrame)
 		end
 		-- Same anchor as save — PointToWorldSpace(VisualPos). Never re-raycast / grid-center.
 		local world = GridMath.plotLocalToWorld(Vector3.new(cell.lx, cell.ly, cell.lz), boundsCFrame)
-		local visual = PlacementService.spawnVisual(plotId, species.speciesId, world, nil, cell.diameter)
+		local visual = PlacementService.spawnVisual(
+			plotId,
+			species.speciesId,
+			world,
+			nil,
+			cell.diameter,
+			cell.sizeClass,
+			cell.variantIndex,
+			cell.scaleMult
+		)
 		if visual then
 			visual:SetAttribute("OceanTD_ItemId", cell.id)
 			visual:SetAttribute("OceanTD_SpeciesId", species.speciesId)
 			local class = CoralSize.clampTier(cell.sizeClass or CoralSize.classFromDiameter(cell.diameter or 4))
 			local tier = CoralSize.clampTier(cell.sizeTier or class)
 			CoralSize.applyToPart(visual, cell.diameter or visual.Size.X, class, tier)
+			if typeof(cell.variantIndex) == "number" then
+				visual:SetAttribute("OceanTD_VariantIndex", cell.variantIndex)
+			end
+			if typeof(cell.scaleMult) == "number" then
+				visual:SetAttribute("OceanTD_ScaleMult", cell.scaleMult)
+			end
 			if typeof(cell.colorIndex) == "number" then
 				local idx = PlotOutlineColors.clampCoralIndex(cell.colorIndex)
 				visual:SetAttribute("OceanTD_ColorIndex", idx)
@@ -242,7 +283,9 @@ function PlacementService.placeFromSave(
 	colorIndex: number?,
 	colorR: number?,
 	colorG: number?,
-	colorB: number?
+	colorB: number?,
+	variantIndex: number?,
+	scaleMult: number?
 ): PlaceResult
 	local shouldConsume = consumeSeed == true
 	local item = ItemCatalog.get(itemId)
@@ -278,6 +321,13 @@ function PlacementService.placeFromSave(
 	local paintColor = if paintIdx
 		then PlotOutlineColors.resolveCoralPaint(paintIdx, colorR, colorG, colorB)
 		else nil
+	local class = CoralSize.clampTier(sizeClass or 1)
+	local variant = if species.speciesId == "Sponge"
+		then CoralVisual.clampSpongeVariant(variantIndex)
+		else nil
+	local scale = if species.speciesId == "Sponge"
+		then CoralVisual.sanitizeSpongeScale(scaleMult)
+		else nil
 	local occupied, occupyErr = GridService.tryOccupy(
 		plotId,
 		player.UserId,
@@ -290,11 +340,13 @@ function PlacementService.placeFromSave(
 		gz,
 		diameter,
 		sizeTier,
-		sizeClass,
+		class,
 		paintIdx,
 		if paintColor then paintColor.R else nil,
 		if paintColor then paintColor.G else nil,
-		if paintColor then paintColor.B else nil
+		if paintColor then paintColor.B else nil,
+		variant,
+		scale
 	)
 	if not occupied then
 		if shouldConsume then
@@ -303,7 +355,16 @@ function PlacementService.placeFromSave(
 		return { ok = false, errorCode = occupyErr or "SpotTaken" }
 	end
 
-	local visual = PlacementService.spawnVisual(plotId, species.speciesId, worldPos, paintColor, diameter)
+	local visual = PlacementService.spawnVisual(
+		plotId,
+		species.speciesId,
+		worldPos,
+		paintColor,
+		diameter,
+		class,
+		variant,
+		scale
+	)
 	if not visual then
 		GridService.vacate(plotId, visualLocal.X, visualLocal.Y, visualLocal.Z, gx, gy, gz)
 		if shouldConsume then
@@ -320,9 +381,8 @@ function PlacementService.placeFromSave(
 	if paintIdx then
 		visual:SetAttribute("OceanTD_ColorIndex", paintIdx)
 	end
-	local class = CoralSize.clampTier(sizeClass or CoralSize.classFromDiameter(diameter or visual.Size.X))
 	local tier = CoralSize.clampTier(sizeTier or class)
-	CoralSize.applyToPart(visual, diameter or visual.Size.X, class, tier)
+	CoralSize.applyToPart(visual, diameter or visual.Size.Y, class, tier)
 
 	return {
 		ok = true,
@@ -333,15 +393,32 @@ function PlacementService.placeFromSave(
 	}
 end
 
+local function parsePlaceOpts(raw: any): PlaceOpts
+	if typeof(raw) == "number" then
+		return { diameter = raw }
+	end
+	if typeof(raw) == "table" then
+		return {
+			diameter = tonumber(raw.diameter),
+			variantIndex = tonumber(raw.variantIndex),
+			scaleMult = tonumber(raw.scaleMult),
+			sizeClass = tonumber(raw.sizeClass),
+		}
+	end
+	return {}
+end
+
 -- consumeSeed: player places debit inventory. Internal hydrate/load can pass false.
+-- placeOpts: legacy number diameter, or { diameter, variantIndex, scaleMult, sizeClass }.
 function PlacementService.place(
 	player: Player,
 	itemId: string,
 	worldPos: Vector3,
 	consumeSeed: boolean?,
-	diameterOverride: number?
+	placeOpts: any
 ): PlaceResult
 	local shouldConsume = consumeSeed ~= false
+	local opts = parsePlaceOpts(placeOpts)
 	local item = ItemCatalog.get(itemId)
 	if not item then
 		return { ok = false, errorCode = "UnknownItem" }
@@ -376,9 +453,16 @@ function PlacementService.place(
 
 	-- Snap visual to ray hit pos (client sends terrain hit); store exact VisualPos + rounded grid key.
 	local diameter: number? = nil
+	local sizeClass = 1
+	local variant: number? = nil
+	local scale: number? = nil
 	if species.speciesId == "BrainCoral" or itemId == "BrainCoral" then
 		-- Prefer client ghost size so preview matches the placed coral.
-		diameter = CoralVisual.sanitizeBrainDiameter(diameterOverride)
+		diameter = CoralVisual.sanitizeBrainDiameter(opts.diameter)
+	elseif species.speciesId == "Sponge" or itemId == "Sponge" then
+		sizeClass = CoralSize.clampTier(opts.sizeClass or 1)
+		variant = CoralVisual.clampSpongeVariant(opts.variantIndex)
+		scale = CoralVisual.sanitizeSpongeScale(opts.scaleMult)
 	end
 	local gx, gy, gz = GridMath.worldToGrid(localPos, Vector3.zero)
 	local occupied, occupyErr = GridService.tryOccupy(
@@ -393,7 +477,13 @@ function PlacementService.place(
 		gz,
 		diameter,
 		1,
-		1
+		sizeClass,
+		nil,
+		nil,
+		nil,
+		nil,
+		variant,
+		scale
 	)
 	if not occupied then
 		if shouldConsume then
@@ -402,7 +492,16 @@ function PlacementService.place(
 		return { ok = false, errorCode = occupyErr or "SpotTaken" }
 	end
 
-	local visual = PlacementService.spawnVisual(plotId, species.speciesId, worldPos, nil, diameter)
+	local visual = PlacementService.spawnVisual(
+		plotId,
+		species.speciesId,
+		worldPos,
+		nil,
+		diameter,
+		sizeClass,
+		variant,
+		scale
+	)
 	if not visual then
 		warnPlace("Visual spawn failed after occupy — rolling back cell")
 		GridService.vacate(plotId, localPos.X, localPos.Y, localPos.Z, gx, gy, gz)
@@ -412,12 +511,21 @@ function PlacementService.place(
 		return { ok = false, errorCode = "VisualFail" }
 	end
 
+	-- Persist resolved height for sponge (mesh Size.Y after scale jitter).
+	if species.speciesId == "Sponge" then
+		diameter = visual.Size.Y
+		local cell = GridService.getCellAtGrid(plotId, gx, gy, gz)
+		if cell then
+			cell.diameter = diameter
+		end
+	end
+
 	local placeIdAttr = visual:GetAttribute("OceanTD_PlaceId")
 	local placeId = if typeof(placeIdAttr) == "string" then placeIdAttr else HttpService:GenerateGUID(false)
 	visual:SetAttribute("OceanTD_PlaceId", placeId)
 	visual:SetAttribute("OceanTD_ItemId", itemId)
 	visual:SetAttribute("OceanTD_SpeciesId", species.speciesId)
-	CoralSize.applyToPart(visual, diameter or visual.Size.X, 1, 1)
+	CoralSize.applyToPart(visual, diameter or visual.Size.X, sizeClass, 1)
 
 	if not suppressUndoRecord then
 		UndoService.push(player, {
@@ -435,6 +543,10 @@ function PlacementService.place(
 		speciesId = species.speciesId,
 		itemId = itemId,
 		placeId = placeId,
+		diameter = diameter,
+		variantIndex = variant,
+		scaleMult = scale,
+		sizeClass = sizeClass,
 	}
 end
 
@@ -474,7 +586,11 @@ function PlacementService.move(
 		return { ok = false, errorCode = "OutOfPlot" }
 	end
 
-	local fromLocal = worldToPlotLocal(plotId, fromWorldPos)
+	local visualForFrom = findVisualByPlaceId(plotId, placeId)
+	local fromAnchor = if visualForFrom then CoralVisual.readGridAnchor(visualForFrom) else nil
+	fromAnchor = fromAnchor or fromWorldPos
+
+	local fromLocal = worldToPlotLocal(plotId, fromAnchor)
 	local toLocal = worldToPlotLocal(plotId, toWorldPos)
 	if not fromLocal or not toLocal then
 		return { ok = false, errorCode = "BadPlot" }
@@ -504,7 +620,11 @@ function PlacementService.move(
 	local fgx, fgy, fgz = GridMath.worldToGrid(fromLocal, Vector3.zero)
 	local tgx, tgy, tgz = GridMath.worldToGrid(toLocal, Vector3.zero)
 	if fgx == tgx and fgy == tgy and fgz == tgz then
-		visual.CFrame = CFrame.new(toWorldPos)
+		if fromCell.id == "Sponge" or visual:GetAttribute("OceanTD_SpeciesId") == "Sponge" then
+			CoralVisual.alignSpongeToSurface(visual, toWorldPos)
+		else
+			visual.CFrame = CFrame.new(toWorldPos)
+		end
 		return {
 			ok = true,
 			worldPos = toWorldPos,
@@ -538,7 +658,9 @@ function PlacementService.move(
 		cell.colorIndex,
 		cell.colorR,
 		cell.colorG,
-		cell.colorB
+		cell.colorB,
+		cell.variantIndex,
+		cell.scaleMult
 	)
 	if not occupied then
 		-- Roll back vacate so the coral isn't lost from the grid.
@@ -558,14 +680,20 @@ function PlacementService.move(
 			cell.colorIndex,
 			cell.colorR,
 			cell.colorG,
-			cell.colorB
+			cell.colorB,
+			cell.variantIndex,
+			cell.scaleMult
 		)
 		return { ok = false, errorCode = occupyErr or "SpotTaken" }
 	end
 
-	visual.CFrame = CFrame.new(toWorldPos)
-
 	local species = SpeciesCatalog.getByItemId(cell.id)
+	if species and species.speciesId == "Sponge" then
+		CoralVisual.alignSpongeToSurface(visual, toWorldPos)
+	else
+		visual.CFrame = CFrame.new(toWorldPos)
+	end
+
 	if not suppressUndoRecord then
 		UndoService.push(player, {
 			kind = "move",
@@ -613,7 +741,12 @@ function PlacementService.recycle(player: Player, placeId: string, worldPos: Vec
 		return { ok = false, errorCode = "OutOfPlot" }
 	end
 
-	local localPos = worldToPlotLocal(plotId, worldPos)
+	local visual = findVisualByPlaceId(plotId, placeId) or findVisualAtGrid(plotId, worldPos)
+	if not visual then
+		return { ok = false, errorCode = "NotFound" }
+	end
+	local anchorPos = CoralVisual.readGridAnchor(visual) or worldPos
+	local localPos = worldToPlotLocal(plotId, anchorPos)
 	if not localPos then
 		return { ok = false, errorCode = "BadPlot" }
 	end
@@ -624,11 +757,6 @@ function PlacementService.recycle(player: Player, placeId: string, worldPos: Vec
 	end
 	if cell.ownerUserId ~= player.UserId then
 		return { ok = false, errorCode = "NotOwner" }
-	end
-
-	local visual = findVisualByPlaceId(plotId, placeId) or findVisualAtGrid(plotId, worldPos)
-	if not visual then
-		return { ok = false, errorCode = "NotFound" }
 	end
 
 	local vacated, vacatedCell = GridService.vacate(plotId, localPos.X, localPos.Y, localPos.Z)
@@ -833,7 +961,9 @@ function PlacementService.applyLayout(player: Player, layout: { LayoutObject }):
 			obj.colorIndex,
 			obj.colorR,
 			obj.colorG,
-			obj.colorB
+			obj.colorB,
+			obj.variantIndex,
+			obj.scaleMult
 		)
 		if result.ok then
 			placed += 1
@@ -977,7 +1107,7 @@ function PlacementService.setCoralSize(
 	placeId: string,
 	targetClass: number,
 	unlockNext: boolean
-): { ok: boolean, errorCode: string?, diameter: number?, sizeClass: number?, sizeTier: number? }
+): { ok: boolean, errorCode: string?, diameter: number?, sizeClass: number?, sizeTier: number?, variantIndex: number?, scaleMult: number? }
 	if typeof(placeId) ~= "string" or placeId == "" then
 		return { ok = false, errorCode = "BadRequest" }
 	end
@@ -1007,23 +1137,59 @@ function PlacementService.setCoralSize(
 	elseif want > tier then
 		return { ok = false, errorCode = "Locked" }
 	end
-	local newDiam = CoralSize.randomDiameter(want)
+
+	local speciesId = visual:GetAttribute("OceanTD_SpeciesId")
+	local newDiam: number
+	local variant: number? = nil
+	local scale: number? = nil
+	if speciesId == "Sponge" then
+		-- New random mesh + scale jitter each size change / unlock.
+		variant = CoralVisual.randomSpongeVariant()
+		scale = CoralVisual.randomSpongeScale()
+		local newPart, height, vOut, sOut = CoralVisual.restyleSponge(visual, want, variant, scale)
+		if newPart then
+			visual = newPart
+			newDiam = height or newPart.Size.Y
+			variant = vOut or variant
+			scale = sOut or scale
+		else
+			newDiam = visual.Size.Y
+		end
+		visual:SetAttribute("OceanTD_SizeTier", newTier)
+	else
+		newDiam = CoralSize.randomDiameter(want)
+	end
+
 	local slot = PlotService.getSlot(plotId)
 	if not slot then
 		return { ok = false, errorCode = "BadPlot" }
 	end
-	local localPos = GridMath.worldToPlotLocal(visual.Position, slot.cframe)
+	local anchorWorld = CoralVisual.readGridAnchor(visual) or visual.Position
+	local localPos = GridMath.worldToPlotLocal(anchorWorld, slot.cframe)
 	local gx, gy, gz = GridMath.worldToGrid(localPos, Vector3.zero)
-	if not GridService.setSizeAtGrid(plotId, gx, gy, gz, newDiam, newTier, want) then
+	if not GridService.setSizeAtGrid(plotId, gx, gy, gz, newDiam, newTier, want, variant, scale) then
 		return { ok = false, errorCode = "Missing" }
 	end
 	-- Client plays the scale cinematic; persist attributes now so a leave/rejoin matches.
 	visual:SetAttribute("OceanTD_Diameter", newDiam)
 	visual:SetAttribute("OceanTD_SizeClass", want)
 	visual:SetAttribute("OceanTD_SizeTier", newTier)
+	if typeof(variant) == "number" then
+		visual:SetAttribute("OceanTD_VariantIndex", variant)
+	end
+	if typeof(scale) == "number" then
+		visual:SetAttribute("OceanTD_ScaleMult", scale)
+	end
 	PersistenceService.save(player, GridService.snapshot(plotId))
 	log("Size", placeId, "class", want, "tier", newTier, "d", newDiam)
-	return { ok = true, diameter = newDiam, sizeClass = want, sizeTier = newTier }
+	return {
+		ok = true,
+		diameter = newDiam,
+		sizeClass = want,
+		sizeTier = newTier,
+		variantIndex = variant,
+		scaleMult = scale,
+	}
 end
 
 function PlacementService.setCoralColor(

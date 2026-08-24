@@ -1,5 +1,6 @@
 --!strict
--- Brain Coral size bands (studs) and per-coral unlock tier (1=S, 2=M, 3=L).
+-- Coral size bands (studs) and per-coral unlock tier (1=S, 2=M, 3=L).
+-- Combat stats are per-species; BrainCoral keeps the original table.
 
 local CoralSize = {}
 
@@ -57,11 +58,22 @@ function CoralSize.readFromPart(part: BasePart): (number, number, number)
 end
 
 function CoralSize.applyToPart(part: BasePart, diameter: number, class: number, tier: number)
-	local d = CoralSize.sanitizeDiameter(diameter, class)
 	local c = CoralSize.clampTier(class)
 	local t = math.max(CoralSize.clampTier(tier), c)
-	part.Size = Vector3.new(d, d, d)
-	part:SetAttribute("OceanTD_Diameter", d)
+	local speciesId = part:GetAttribute("OceanTD_SpeciesId")
+	-- Mesh species keep authored Size; diameter is a persisted height/scale cue only.
+	if speciesId ~= "Sponge" then
+		local d = CoralSize.sanitizeDiameter(diameter, class)
+		part.Size = Vector3.new(d, d, d)
+		part:SetAttribute("OceanTD_Diameter", d)
+	else
+		local d = tonumber(diameter)
+		if typeof(d) == "number" and d == d and d > 0 then
+			part:SetAttribute("OceanTD_Diameter", d)
+		else
+			part:SetAttribute("OceanTD_Diameter", part.Size.Y)
+		end
+	end
 	part:SetAttribute("OceanTD_SizeClass", c)
 	part:SetAttribute("OceanTD_SizeTier", t)
 end
@@ -91,14 +103,28 @@ export type SizeStats = {
 	defense: number,
 }
 
+-- Default / BrainCoral
 CoralSize.STATS = {
 	[1] = { range = 30, reload = 6, food = 1, defense = 2 },
 	[2] = { range = 60, reload = 4, food = 2, defense = 3 },
 	[3] = { range = 80, reload = 2, food = 3, defense = 4 },
 }
 
-function CoralSize.statsFor(class: number): SizeStats
-	return CoralSize.STATS[CoralSize.clampTier(class)]
+CoralSize.STATS_BY_SPECIES = {
+	BrainCoral = CoralSize.STATS,
+	Sponge = {
+		[1] = { range = 40, reload = 6, food = 1, defense = 1 },
+		[2] = { range = 70, reload = 4, food = 2, defense = 2 },
+		[3] = { range = 90, reload = 2, food = 3, defense = 3 },
+	},
+}
+
+function CoralSize.statsFor(class: number, speciesId: string?): SizeStats
+	local tableFor = CoralSize.STATS
+	if typeof(speciesId) == "string" and CoralSize.STATS_BY_SPECIES[speciesId] then
+		tableFor = CoralSize.STATS_BY_SPECIES[speciesId]
+	end
+	return tableFor[CoralSize.clampTier(class)]
 end
 
 function CoralSize.ammoSizeScale(foodCount: number): number
@@ -106,6 +132,21 @@ function CoralSize.ammoSizeScale(foodCount: number): number
 		return 0.8
 	end
 	return 1
+end
+
+-- Radius used for ammo Y offset from part.Position.
+-- Ball corals: half diameter from center. Sponge meshes: half height (pivot at AABB center).
+function CoralSize.ammoAnchorRadius(part: BasePart): number
+	local speciesId = part:GetAttribute("OceanTD_SpeciesId")
+	if speciesId == "Sponge" then
+		return math.max(part.Size.Y * 0.5, 0.5)
+	end
+	return math.max(part.Size.X, part.Size.Y, part.Size.Z) * 0.5
+end
+
+-- Visual center for range rings / FX (not always part.Position).
+function CoralSize.visualCenter(part: BasePart): Vector3
+	return part.Position
 end
 
 -- Local offsets from coral center (Y up). 2 = side by side; 3 = triangle, same height.

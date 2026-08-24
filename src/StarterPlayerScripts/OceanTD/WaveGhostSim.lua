@@ -21,6 +21,7 @@ local SkillStages = require(oceanRoot:WaitForChild("Shared"):WaitForChild("Skill
 local ClientPlot = require(script.Parent:WaitForChild("ClientPlot"))
 local WaveEntityPool = require(script.Parent:WaitForChild("WaveEntityPool"))
 local WaveCrab = require(script.Parent:WaitForChild("WaveCrab"))
+local WaveUrchin = require(script.Parent:WaitForChild("WaveUrchin"))
 local WaveEndVfx = require(script.Parent:WaitForChild("WaveEndVfx"))
 local WaveStartVfx = require(script.Parent:WaitForChild("WaveStartVfx"))
 local C = require(script.Parent:WaitForChild("WaveSimConsts"))
@@ -69,8 +70,11 @@ type GhostFish = {
 	smoothTang: Vector3,
 	lastWorld: Vector3,
 	isCrab: boolean?,
+	isUrchin: boolean?,
 	crabAnim: any?,
 	shellHitbox: BasePart?,
+	shellLocalCf: CFrame?,
+	bodyLocalCf: CFrame?,
 	pauseUntil: number?,
 	pauseDur: number?,
 	stunSkullPart: BasePart?,
@@ -114,10 +118,17 @@ local spawnQueue = 0
 local spawnDelay = 0
 local crabSpawnQueue = 0
 local crabSpawnDelay = 0
+local urchinSpawnQueue = 0
+local urchinSpawnDelay = 0
 local waveSpawning = false
 local waveFishExpected = 0
 local waveCrabExpected = 0
+local waveUrchinExpected = 0
 local startedThisWave = false -- true after arrows+stagger begun for current waveIndex
+
+local function isGroundCritter(f: GhostFish): boolean
+	return f.isCrab == true or f.isUrchin == true
+end
 
 local lodFar = false
 local lodTickSkip = false
@@ -156,6 +167,8 @@ local function clearFish()
 		if f.isCrab then
 			WaveCrab.resetAnim(f.crabAnim)
 			WaveEntityPool.releaseFish(WaveEntityPool.FISH_CRAB, f.model)
+		elseif f.isUrchin then
+			WaveEntityPool.releaseFish(WaveEntityPool.FISH_URCHIN, f.model)
 		else
 			WaveEntityPool.releaseFish(WaveEntityPool.FISH_TANG, f.model)
 		end
@@ -441,10 +454,36 @@ local function fishWorldOffset(agent: GhostFish, pos: Vector3, tang: Vector3): V
 	return pos + right * (agent.lateral + wander) + Vector3.new(0, agent.vert + bob, 0)
 end
 
+local function syncUrchinRig(agent: GhostFish)
+	local rootCf = agent.root.CFrame
+	local shell = agent.shellHitbox
+	local shellLocal = agent.shellLocalCf
+	if shell and shell.Parent and shellLocal then
+		shell.CFrame = rootCf * shellLocal
+	end
+	local bodyLocal = agent.bodyLocalCf
+	local model = agent.model
+	if bodyLocal and model:IsA("BasePart") and model ~= agent.root then
+		model.CFrame = rootCf * bodyLocal
+	end
+end
+
+local function captureUrchinRigLocals(agent: GhostFish)
+	local root = agent.root
+	local shell = agent.shellHitbox
+	if shell and shell.Parent then
+		agent.shellLocalCf = root.CFrame:ToObjectSpace(shell.CFrame)
+	end
+	local model = agent.model
+	if model:IsA("BasePart") and model ~= root then
+		agent.bodyLocalCf = root.CFrame:ToObjectSpace(model.CFrame)
+	end
+end
+
 local function setFishCFrame(agent: GhostFish, world: Vector3, swimTang: Vector3, dt: number)
 	agent.lastWorld = world
 	local move = if swimTang.Magnitude > 1e-5 then swimTang.Unit else Vector3.new(0, 0, -1)
-	local desired = if agent.isCrab
+	local desired = if isGroundCritter(agent)
 		then WaveCrab.facingCFrame(world, move)
 		else CFrame.lookAt(world, world + move, Vector3.yAxis) * CFrame.Angles(C.TANG_PITCH, C.TANG_YAW, C.TANG_ROLL)
 	if agent.isCrab then
@@ -453,6 +492,11 @@ local function setFishCFrame(agent: GhostFish, world: Vector3, swimTang: Vector3
 		if anim then
 			WaveCrab.stepAnim(anim, dt, world)
 		end
+		return
+	end
+	if agent.isUrchin then
+		WaveCrab.applyPose(agent.root, desired)
+		syncUrchinRig(agent)
 		return
 	end
 	if agent.model:IsA("Model") then
@@ -526,6 +570,7 @@ local function spawnFishAt(path: PathData, dist: number, wave: number, hungerFra
 		smoothTang = Vector3.new(0, 0, -1),
 		lastWorld = Vector3.zero,
 		isCrab = false,
+		isUrchin = false,
 		crabAnim = nil,
 		shellHitbox = nil,
 		pauseUntil = nil,
@@ -583,6 +628,7 @@ local function spawnCrabAt(path: WaveCrab.PathData, dist: number, wave: number, 
 		smoothTang = Vector3.new(0, 0, -1),
 		lastWorld = Vector3.zero,
 		isCrab = true,
+		isUrchin = false,
 		crabAnim = anim,
 		shellHitbox = WaveCrab.findShell(clone),
 		pauseUntil = nil,
@@ -597,6 +643,78 @@ local function spawnCrabAt(path: WaveCrab.PathData, dist: number, wave: number, 
 	refreshHungerVisual(agent)
 	table.insert(fishList, agent)
 	return agent
+end
+
+local function spawnUrchinAt(path: WaveCrab.PathData, dist: number, wave: number, hungerFrac: number?): GhostFish?
+	if not WaveUrchin.shouldSpawn(wave) then
+		return nil
+	end
+	local clone, root = WaveEntityPool.acquireFish(WaveEntityPool.FISH_URCHIN, "GhostUrchin_" .. tostring(nextFishId))
+	if not clone or not root then
+		return nil
+	end
+	clone.Parent = ensureFolder()
+	local maxH = WaveUrchin.hungerForWave(wave)
+	local hunger = math.floor(maxH * math.clamp(hungerFrac or 0, 0, 0.95))
+	local bb, fill, _bar, fork, happy, _scale, stroke = makeHungerBillboard(root, "✴🍴")
+	if lodFar then
+		bb.Enabled = false
+	end
+	local agent: GhostFish = {
+		id = nextFishId,
+		root = root,
+		model = clone,
+		dist = dist,
+		lateral = 0,
+		vert = 0,
+		bobAmp = 0,
+		bobFreq = 1,
+		bobPhase = 0,
+		wanderAmp = 0,
+		wanderFreq = 1,
+		wanderPhase = 0,
+		speedPhase = 0,
+		speedFreq = 1,
+		hunger = hunger,
+		maxHunger = maxH,
+		finished = false,
+		billboard = bb,
+		fill = fill,
+		forkLabel = fork,
+		happyLabel = happy,
+		barStroke = stroke,
+		smoothTang = Vector3.new(0, 0, -1),
+		lastWorld = Vector3.zero,
+		isCrab = false,
+		isUrchin = true,
+		crabAnim = nil,
+		shellHitbox = WaveUrchin.findShell(clone),
+		shellLocalCf = nil,
+		bodyLocalCf = nil,
+		pauseUntil = nil,
+		stunSkullPart = nil,
+		crabSprint = nil,
+	}
+	nextFishId += 1
+	local pos, tang = WaveUrchin.sample(path, dist)
+	pos = WaveUrchin.worldOnGround(pos, nil, 1)
+	agent.lastWorld = pos
+	captureUrchinRigLocals(agent)
+	setFishCFrame(agent, pos, tang, 1)
+	captureUrchinRigLocals(agent)
+	refreshHungerVisual(agent)
+	table.insert(fishList, agent)
+	return agent
+end
+
+local function releaseGroundCritter(agent: GhostFish)
+	agent.finished = true
+	if agent.isCrab then
+		WaveCrab.resetAnim(agent.crabAnim)
+		WaveEntityPool.releaseFish(WaveEntityPool.FISH_CRAB, agent.model)
+	elseif agent.isUrchin then
+		WaveEntityPool.releaseFish(WaveEntityPool.FISH_URCHIN, agent.model)
+	end
 end
 
 local function setArrowCFrame(model: Instance, pos: Vector3, tang: Vector3, spin: number)
@@ -843,6 +961,7 @@ local function syncHungerFromHost(snap: WaveWatchMode.WatchSnap)
 
 	local total = math.max(1, if (snap.fishTotal or 0) > 0 then snap.fishTotal else #alive)
 	total += math.max(0, snap.crabTotal or 0)
+	total += math.max(0, snap.urchinTotal or 0)
 	-- How many fish should look fully fed vs still hungry.
 	local fullCount = math.clamp(math.floor((snap.fishFull or 0) + 0.5), 0, total)
 	local fromBar = math.clamp(math.floor((snap.feedProgress or 0) * total + 1e-4), 0, total)
@@ -889,6 +1008,8 @@ local function snapshotSchool(snap: WaveWatchMode.WatchSnap, path: PathData)
 	spawnQueue = 0
 	crabSpawnQueue = 0
 	crabSpawnDelay = 0
+	urchinSpawnQueue = 0
+	urchinSpawnDelay = 0
 	local total = math.max(1, snap.fishTotal > 0 and snap.fishTotal or waveFishCount(snap.wave))
 	local spawnN = total
 	if lodFar then
@@ -901,6 +1022,15 @@ local function snapshotSchool(snap: WaveWatchMode.WatchSnap, path: PathData)
 		local behind = (spawnN - i) * spacing
 		local dist = math.clamp(front - behind, 0.5, path.totalLen * 0.95)
 		spawnFishAt(path, dist, snap.wave, 0)
+	end
+	if pathDataGround and WaveUrchin.shouldSpawn(snap.wave) then
+		local g = pathDataGround
+		local nUrchin = math.max(0, snap.urchinTotal or 0)
+		local frontU = math.clamp(g.totalLen * math.clamp(0.12 + snap.feedProgress * 0.7, 0.12, 0.88), 0.5, g.totalLen * 0.95)
+		for ui = 1, nUrchin do
+			local urchinDist = math.clamp(frontU - (ui - 1) * 3.2, 0.5, g.totalLen * 0.95)
+			spawnUrchinAt(g, urchinDist, snap.wave, 0)
+		end
 	end
 	if pathDataGround and WaveCrab.shouldSpawn(snap.wave) then
 		local g = pathDataGround
@@ -922,10 +1052,15 @@ local function beginWaveFull(snap: WaveWatchMode.WatchSnap, path: PathData)
 	waveIndex = snap.wave
 	waveFishExpected = if snap.fishTotal > 0 then snap.fishTotal else waveFishCount(snap.wave)
 	waveCrabExpected = math.max(0, snap.crabTotal or 0)
+	waveUrchinExpected = math.max(0, snap.urchinTotal or 0)
 	spawnQueue = waveFishExpected
 	spawnDelay = C.ARROW_LEAD_SEC
 	crabSpawnQueue = 0
 	crabSpawnDelay = 0
+	urchinSpawnQueue = waveUrchinExpected
+	urchinSpawnDelay = if waveUrchinExpected > 0
+		then rng:NextNumber(C.URCHIN_FIRST_DELAY_MIN, C.URCHIN_FIRST_DELAY_MAX)
+		else 0
 	waveSpawning = true
 	startedThisWave = true
 	lastFeed = snap.feedProgress
@@ -980,6 +1115,17 @@ local function tick(dt: number)
 	simClock += simDt
 	tickArrowPreview(simDt)
 
+	if urchinSpawnQueue > 0 and pathDataGround then
+		urchinSpawnDelay -= simDt
+		if urchinSpawnDelay <= 0 then
+			spawnUrchinAt(pathDataGround, 0, waveIndex, 0)
+			urchinSpawnQueue -= 1
+			urchinSpawnDelay = if urchinSpawnQueue > 0
+				then rng:NextNumber(C.URCHIN_STAGGER_MIN, C.URCHIN_STAGGER_MAX)
+				else 0
+		end
+	end
+
 	if waveSpawning and spawnQueue > 0 and pathData then
 		spawnDelay -= simDt
 		if spawnDelay <= 0 then
@@ -1019,13 +1165,12 @@ local function tick(dt: number)
 		if agent.finished then
 			continue
 		end
-		if agent.isCrab then
+		if isGroundCritter(agent) then
 			if not ground then
-				agent.finished = true
-				WaveCrab.resetAnim(agent.crabAnim)
-				WaveEntityPool.releaseFish(WaveEntityPool.FISH_CRAB, agent.model)
+				releaseGroundCritter(agent)
 				continue
 			end
+			local isCrab = agent.isCrab == true
 			local wasFighting = agent.pauseUntil ~= nil
 			local paused = wasFighting and os.clock() < (agent.pauseUntil :: number)
 			if paused and agent.hunger >= agent.maxHunger then
@@ -1057,16 +1202,18 @@ local function tick(dt: number)
 					end
 				end
 				agent.pauseUntil = nil
-				local sprint = agent.crabSprint
-				if sprint then
-					WaveCrab.tickSprint(sprint, simClock)
+				if isCrab then
+					local sprint = agent.crabSprint
+					if sprint then
+						WaveCrab.tickSprint(sprint, simClock)
+					end
+					agent.dist += WaveCrab.speedNow(sprint, simClock) * simDt
+				else
+					agent.dist += WaveUrchin.speedNow() * simDt
 				end
-				agent.dist += WaveCrab.speedNow(sprint, simClock) * simDt
 			end
 			if agent.dist >= ground.totalLen then
-				agent.finished = true
-				WaveCrab.resetAnim(agent.crabAnim)
-				WaveEntityPool.releaseFish(WaveEntityPool.FISH_CRAB, agent.model)
+				releaseGroundCritter(agent)
 			else
 				local pos, tang = WaveCrab.sample(ground, agent.dist)
 				local swimTang = stepSwimTang(agent, tang, simDt)
@@ -1082,11 +1229,14 @@ local function tick(dt: number)
 						agent.id,
 						agent.pauseDur
 					)
+					if agent.isUrchin then
+						syncUrchinRig(agent)
+					end
 				else
 					setFishCFrame(agent, pos, swimTang, simDt)
 				end
 				if agent.hunger < agent.maxHunger and not paused then
-					local shell = agent.shellHitbox
+					local shell = agent.shellHitbox or agent.root
 					if shell then
 						if coralDirty or coralCachePlot ~= activePlotId then
 							if activePlotId then
@@ -1102,9 +1252,11 @@ local function tick(dt: number)
 								WaveCrab.stunCoralPart(part)
 								coralDirty = true
 								local _d, class = CoralSize.readFromPart(part)
-								local def = CoralSize.statsFor(class).defense
-								agent.pauseDur = def
-								agent.pauseUntil = os.clock() + def
+								local sid = part:GetAttribute("OceanTD_SpeciesId")
+								local def = CoralSize.statsFor(class, if typeof(sid) == "string" then sid else nil).defense
+								local pauseSec = if isCrab then def else WaveUrchin.coralPauseSec(def)
+								agent.pauseDur = pauseSec
+								agent.pauseUntil = os.clock() + pauseSec
 								agent.stunSkullPart = part
 								local follow = agent
 								local fallback = pos
@@ -1117,7 +1269,7 @@ local function tick(dt: number)
 										return shellNow.Position
 									end
 									return follow.root.Position
-								end, def)
+								end, pauseSec)
 								break
 							end
 						end
@@ -1173,6 +1325,8 @@ local function hardClear()
 	spawnQueue = 0
 	crabSpawnQueue = 0
 	crabSpawnDelay = 0
+	urchinSpawnQueue = 0
+	urchinSpawnDelay = 0
 	startedThisWave = false
 	waveIndex = 0
 end
@@ -1196,6 +1350,8 @@ function WaveGhostSim.stop(fade: boolean?)
 	spawnQueue = 0
 	crabSpawnQueue = 0
 	crabSpawnDelay = 0
+	urchinSpawnQueue = 0
+	urchinSpawnDelay = 0
 	startedThisWave = false
 	restoreGhostStunned(false)
 	if plotId then

@@ -25,6 +25,8 @@ export type CellData = {
 	colorR: number?,
 	colorG: number?,
 	colorB: number?,
+	variantIndex: number?,
+	scaleMult: number?,
 }
 
 local GridService = {}
@@ -107,7 +109,9 @@ function GridService.tryOccupy(
 	colorIndex: number?,
 	colorR: number?,
 	colorG: number?,
-	colorB: number?
+	colorB: number?,
+	variantIndex: number?,
+	scaleMult: number?
 ): (boolean, string?)
 	local rx, ry, rz, key = resolveGridKey(plotId, lx, ly, lz, gx, gy, gz)
 	if cells[key] then
@@ -116,6 +120,8 @@ function GridService.tryOccupy(
 	local cr = if typeof(colorR) == "number" and colorR == colorR then math.clamp(colorR, 0, 1) else nil
 	local cg = if typeof(colorG) == "number" and colorG == colorG then math.clamp(colorG, 0, 1) else nil
 	local cb = if typeof(colorB) == "number" and colorB == colorB then math.clamp(colorB, 0, 1) else nil
+	local vi = tonumber(variantIndex)
+	local sm = tonumber(scaleMult)
 	cells[key] = {
 		id = itemId,
 		lx = lx,
@@ -133,6 +139,8 @@ function GridService.tryOccupy(
 		colorR = cr,
 		colorG = cg,
 		colorB = cb,
+		variantIndex = if vi and vi == vi then math.clamp(math.floor(vi), 1, 5) else nil,
+		scaleMult = if sm and sm == sm and sm > 0 then math.clamp(sm, 0.7, 1.35) else nil,
 	}
 	plotObjectCounts[plotId] = (plotObjectCounts[plotId] or 0) + 1
 	return true, nil
@@ -145,7 +153,9 @@ function GridService.setSizeAtGrid(
 	gz: number,
 	diameter: number,
 	sizeTier: number,
-	sizeClass: number
+	sizeClass: number,
+	variantIndex: number?,
+	scaleMult: number?
 ): boolean
 	local cell = GridService.getCellAtGrid(plotId, gx, gy, gz)
 	if not cell then
@@ -154,6 +164,12 @@ function GridService.setSizeAtGrid(
 	cell.diameter = diameter
 	cell.sizeTier = sizeTier
 	cell.sizeClass = sizeClass
+	if typeof(variantIndex) == "number" then
+		cell.variantIndex = math.clamp(math.floor(variantIndex), 1, 5)
+	end
+	if typeof(scaleMult) == "number" and scaleMult > 0 then
+		cell.scaleMult = math.clamp(scaleMult, 0.7, 1.35)
+	end
 	return true
 end
 
@@ -222,6 +238,8 @@ function GridService.hydrate(plotId: PlotId, ownerUserId: number, layout: { Layo
 			local colorR = tonumber(obj.colorR)
 			local colorG = tonumber(obj.colorG)
 			local colorB = tonumber(obj.colorB)
+			local variantIndex = tonumber(obj.variantIndex)
+			local scaleMult = tonumber(obj.scaleMult)
 			local ok = GridService.tryOccupy(
 				plotId,
 				ownerUserId,
@@ -238,7 +256,9 @@ function GridService.hydrate(plotId: PlotId, ownerUserId: number, layout: { Layo
 				colorIndex,
 				colorR,
 				colorG,
-				colorB
+				colorB,
+				variantIndex,
+				scaleMult
 			)
 			if ok then
 				count += 1
@@ -276,6 +296,8 @@ function GridService.snapshot(plotId: PlotId): { LayoutObject }
 				colorR = cell.colorR,
 				colorG = cell.colorG,
 				colorB = cell.colorB,
+				variantIndex = cell.variantIndex,
+				scaleMult = cell.scaleMult,
 			})
 		end
 	end
@@ -318,7 +340,9 @@ function GridService.reframe(plotId: PlotId, oldCf: CFrame, newCf: CFrame): numb
 			cell.colorIndex,
 			cell.colorR,
 			cell.colorG,
-			cell.colorB
+			cell.colorB,
+			cell.variantIndex,
+			cell.scaleMult
 		)
 		moved += 1
 	end

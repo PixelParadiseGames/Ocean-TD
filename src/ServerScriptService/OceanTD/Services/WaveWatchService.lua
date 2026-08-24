@@ -68,6 +68,7 @@ local function onPush(player: Player, payload: any)
 		fishFull = payload.fishFull,
 		fishTotal = payload.fishTotal,
 		crabTotal = payload.crabTotal,
+		urchinTotal = payload.urchinTotal,
 		elapsedSec = payload.elapsedSec,
 		running = payload.running == true,
 		hungerDanger = payload.hungerDanger == true,

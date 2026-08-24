@@ -48,6 +48,8 @@ local Constants = {
 	PLOT_SAVE_SLOT_COUNT = 4,
 	-- New players start with this many BrainCoral seeds in inventory (not on plot).
 	STARTING_BRAIN_CORAL_SEEDS = 50,
+	-- Sponge seeds for new / empty-plot soft grant.
+	STARTING_SPONGE_SEEDS = 50,
 }
 
 return Constants

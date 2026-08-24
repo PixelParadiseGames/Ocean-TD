@@ -202,13 +202,23 @@ local function setActiveCircleStroke(btn: GuiObject, on: boolean)
 	end
 end
 
+local function selectedSpeciesId(): string?
+	local part = selectedPart()
+	if not part then
+		return nil
+	end
+	local sid = part:GetAttribute("OceanTD_SpeciesId")
+	return if typeof(sid) == "string" then sid else nil
+end
+
 local function paintStatColumn(i: number, asDelta: boolean, fromClass: number?, isActive: boolean)
 	local labels = h3Labels[i]
 	if not labels then
 		return
 	end
-	local vals = statValues(CoralSize.statsFor(i))
-	local fromVals = if asDelta and fromClass then statValues(CoralSize.statsFor(fromClass)) else nil
+	local sid = selectedSpeciesId()
+	local vals = statValues(CoralSize.statsFor(i, sid))
+	local fromVals = if asDelta and fromClass then statValues(CoralSize.statsFor(fromClass, sid)) else nil
 	for k, n in ipairs(vals) do
 		if fromVals then
 			n = n - fromVals[k]
@@ -288,6 +298,68 @@ local function tweenSize(part: BasePart, fromD: number, toD: number, sec: number
 	tw.Completed:Wait()
 end
 
+local function tweenMeshScale(part: BasePart, fullSize: Vector3, fromMult: number, toMult: number, sec: number)
+	part.Size = fullSize * fromMult
+	local tw = TweenService:Create(
+		part,
+		TweenInfo.new(sec, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+		{ Size = fullSize * toMult }
+	)
+	tw:Play()
+	tw.Completed:Wait()
+end
+
+local function tweenSpongeScale(
+	part: BasePart,
+	fullSize: Vector3,
+	surfaceAnchor: Vector3,
+	fromMult: number,
+	toMult: number,
+	sec: number
+)
+	part.Size = fullSize * fromMult
+	CoralVisual.alignSpongeToSurface(part, surfaceAnchor)
+	local t0 = os.clock()
+	while true do
+		local u = math.clamp((os.clock() - t0) / sec, 0, 1)
+		local ease = 1 - (1 - u) * (1 - u)
+		local mult = fromMult + (toMult - fromMult) * ease
+		part.Size = fullSize * mult
+		CoralVisual.alignSpongeToSurface(part, surfaceAnchor)
+		if u >= 1 then
+			break
+		end
+		RunService.RenderStepped:Wait()
+	end
+end
+
+local function findPlacedByPlaceId(id: string): BasePart?
+	local root = workspace:FindFirstChild("OceanTD_Placed")
+	if not root then
+		return nil
+	end
+	for _, folder in ipairs(root:GetChildren()) do
+		for _, child in ipairs(folder:GetChildren()) do
+			if child:IsA("BasePart") and child:GetAttribute("OceanTD_PlaceId") == id then
+				return child
+			end
+		end
+	end
+	return nil
+end
+
+local function waitForPlacedByPlaceId(id: string, timeoutSec: number): BasePart?
+	local deadline = os.clock() + timeoutSec
+	while os.clock() < deadline do
+		local p = findPlacedByPlaceId(id)
+		if p then
+			return p
+		end
+		task.wait(0.05)
+	end
+	return nil
+end
+
 local function playGrowSound()
 	local s = Instance.new("Sound")
 	s.SoundId = GROW_SOUND_ID
@@ -334,6 +406,9 @@ local function zoomToward(part: BasePart, fromCf: CFrame, closer: boolean): CFra
 	local pos = look - delta.Unit * dist
 	return CFrame.lookAt(pos, look)
 end
+
+-- Forward-declared; assigned after runUnlockCinematic (Luau strict needs this before runSpongeSizeCinematic).
+local applyServerSize: (any, boolean, BasePart?, boolean?) -> ()
 
 local function runUnlockCinematic(part: BasePart, newDiam: number)
 	cineToken += 1
@@ -392,11 +467,11 @@ local function runUnlockCinematic(part: BasePart, newDiam: number)
 	RelocateController.refreshSelectRing()
 end
 
-local function applyServerSize(result: any, unlock: boolean)
+applyServerSize = function(result: any, unlock: boolean, partOverride: BasePart?, fromCinematic: boolean?)
 	if typeof(result) ~= "table" or result.ok ~= true then
 		return
 	end
-	local part = selectedPart()
+	local part = partOverride or selectedPart()
 	if not part then
 		return
 	end
@@ -413,6 +488,30 @@ local function applyServerSize(result: any, unlock: boolean)
 	if typeof(tier) == "number" then
 		part:SetAttribute("OceanTD_SizeTier", tier)
 	end
+	local vi = tonumber(result.variantIndex)
+	local sm = tonumber(result.scaleMult)
+	if typeof(vi) == "number" then
+		part:SetAttribute("OceanTD_VariantIndex", vi)
+	end
+	if typeof(sm) == "number" then
+		part:SetAttribute("OceanTD_ScaleMult", sm)
+	end
+
+	local speciesId = part:GetAttribute("OceanTD_SpeciesId")
+	if speciesId == "Sponge" then
+		if fromCinematic then
+			RelocateController.swapSelectedPart(part)
+		else
+			local pid = part:GetAttribute("OceanTD_PlaceId")
+			if typeof(pid) == "string" and RelocateController.getSelectedPart() ~= part then
+				RelocateController.begin(part)
+			end
+		end
+		RelocateController.refreshSelectRing()
+		refreshSizeColors()
+		return
+	end
+
 	if unlock then
 		task.spawn(function()
 			runUnlockCinematic(part, d)
@@ -429,6 +528,137 @@ local function applyServerSize(result: any, unlock: boolean)
 	end
 end
 
+local function armImmediateSpongeShrink(placeId: string): () -> ()
+	local root = workspace:FindFirstChild("OceanTD_Placed")
+	if not root then
+		return function() end
+	end
+	local conn = root.DescendantAdded:Connect(function(desc: Instance)
+		if not desc:IsA("BasePart") then
+			return
+		end
+		if desc:GetAttribute("OceanTD_PlaceId") ~= placeId then
+			return
+		end
+		if desc:GetAttribute("OceanTD_CineShrunk") == true then
+			return
+		end
+		local full = desc.Size
+		desc:SetAttribute("OceanTD_CineShrunk", true)
+		desc:SetAttribute("OceanTD_CineFullX", full.X)
+		desc:SetAttribute("OceanTD_CineFullY", full.Y)
+		desc:SetAttribute("OceanTD_CineFullZ", full.Z)
+		desc.Transparency = 1
+		desc.Size = full * 0.05
+		local anchor = CoralVisual.readGridAnchor(desc)
+		if anchor then
+			CoralVisual.alignSpongeToSurface(desc, anchor)
+		end
+	end)
+	return function()
+		conn:Disconnect()
+	end
+end
+
+local function runSpongeSizeCinematic(oldPart: BasePart, placeId: string, targetClass: number, unlockNext: boolean)
+	cineToken += 1
+	local token = cineToken
+	local fullSize = oldPart.Size
+	local anchor = CoralVisual.readGridAnchor(oldPart)
+	local saved = if unlockNext then RelocateController.getSavedCameraCFrame() else nil
+	local startCf = saved or (workspace.CurrentCamera and workspace.CurrentCamera.CFrame)
+
+	if unlockNext and startCf and workspace.CurrentCamera then
+		local cam = workspace.CurrentCamera
+		local zoomCf = zoomToward(oldPart, startCf, true)
+		RelocateController.setCinematicHold(true)
+		local camTw = TweenService:Create(
+			cam,
+			TweenInfo.new(0.5, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+			{ CFrame = zoomCf }
+		)
+		camTw:Play()
+		camTw.Completed:Wait()
+	end
+
+	if anchor then
+		tweenSpongeScale(oldPart, fullSize, anchor, 1, 0.05, 0.5)
+	else
+		tweenMeshScale(oldPart, fullSize, 1, 0.05, 0.5)
+	end
+	if token ~= cineToken or not oldPart.Parent then
+		if unlockNext then
+			RelocateController.setCinematicHold(false)
+		end
+		return
+	end
+
+	local disarmShrink = armImmediateSpongeShrink(placeId)
+	local ok, result = pcall(function()
+		return sizeRf:InvokeServer(placeId, targetClass, unlockNext)
+	end)
+	if not ok or typeof(result) ~= "table" or result.ok ~= true then
+		disarmShrink()
+		if unlockNext then
+			RelocateController.setCinematicHold(false)
+		end
+		return
+	end
+
+	local newPart = waitForPlacedByPlaceId(placeId, 2)
+	disarmShrink()
+	if not newPart then
+		applyServerSize(result, unlockNext, nil, true)
+		if unlockNext then
+			RelocateController.setCinematicHold(false)
+		end
+		return
+	end
+
+	local fx = tonumber(newPart:GetAttribute("OceanTD_CineFullX"))
+	local fy = tonumber(newPart:GetAttribute("OceanTD_CineFullY"))
+	local fz = tonumber(newPart:GetAttribute("OceanTD_CineFullZ"))
+	local newFull = if typeof(fx) == "number" and typeof(fy) == "number" and typeof(fz) == "number"
+		then Vector3.new(fx, fy, fz)
+		else newPart.Size
+	newPart:SetAttribute("OceanTD_CineShrunk", nil)
+	newPart:SetAttribute("OceanTD_CineFullX", nil)
+	newPart:SetAttribute("OceanTD_CineFullY", nil)
+	newPart:SetAttribute("OceanTD_CineFullZ", nil)
+	local growAnchor = anchor or CoralVisual.readGridAnchor(newPart)
+	newPart.Size = newFull * 0.05
+	if growAnchor then
+		CoralVisual.alignSpongeToSurface(newPart, growAnchor)
+	end
+
+	newPart.Transparency = 0
+	playGrowSound()
+	if growAnchor then
+		tweenSpongeScale(newPart, newFull, growAnchor, 0.05, 1, 0.9)
+	else
+		tweenMeshScale(newPart, newFull, 0.05, 1, 0.9)
+	end
+
+	if unlockNext and startCf and workspace.CurrentCamera then
+		local backCam = workspace.CurrentCamera
+		if backCam then
+			local backTw = TweenService:Create(
+				backCam,
+				TweenInfo.new(0.45, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+				{ CFrame = startCf }
+			)
+			backTw:Play()
+			backTw.Completed:Wait()
+		end
+	end
+	RelocateController.setCinematicHold(false)
+	if saved then
+		RelocateController.setLiveCameraCFrame(saved)
+	end
+
+	applyServerSize(result, unlockNext, newPart, true)
+end
+
 local function invokeSize(targetClass: number, unlockNext: boolean)
 	local part = selectedPart()
 	if not part then
@@ -439,6 +669,13 @@ local function invokeSize(targetClass: number, unlockNext: boolean)
 		return
 	end
 	UiHaptics.pulseShort()
+	local speciesId = part:GetAttribute("OceanTD_SpeciesId")
+	if speciesId == "Sponge" then
+		task.spawn(function()
+			runSpongeSizeCinematic(part, placeId, targetClass, unlockNext)
+		end)
+		return
+	end
 	local ok, result = pcall(function()
 		return sizeRf:InvokeServer(placeId, targetClass, unlockNext)
 	end)

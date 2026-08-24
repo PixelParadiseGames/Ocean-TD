@@ -38,7 +38,7 @@ local function ringBasis(ri: number, spin: number): CFrame
 end
 
 local function poseRangeRings(part: BasePart, folder: Folder, range: number, spin: number, grow: number)
-	local pos = part.Position
+	local pos = CoralSize.visualCenter(part)
 	local s = math.clamp(grow, 0, 1)
 	s = 1 - (1 - s) * (1 - s)
 	local r = range * s
@@ -65,7 +65,9 @@ end
 
 local function defaultRange(part: BasePart): number
 	local _d, cls = CoralSize.readFromPart(part)
-	return CoralSize.statsFor(cls).range
+	local speciesId = part:GetAttribute("OceanTD_SpeciesId")
+	local sid = if typeof(speciesId) == "string" then speciesId else nil
+	return CoralSize.statsFor(cls, sid).range
 end
 
 function CoralRangeRings.hide()
