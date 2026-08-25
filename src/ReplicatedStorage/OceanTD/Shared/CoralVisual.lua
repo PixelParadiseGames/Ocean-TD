@@ -19,7 +19,8 @@ export type VisualOptions = {
 	scaleMult: number?, -- random size jitter for mesh species
 	scaleWidth: number?, -- SeaFan independent XZ jitter
 	scaleHeight: number?, -- SeaFan independent Y jitter
-	facingYaw: number?, -- SeaFan Y-up yaw (radians); flat face along LookVector
+	facingYaw: number?, -- SeaFan Y yaw in **plot-local** radians (survives plot reassignment)
+	plotCFrame: CFrame?, -- plot bounds CF; required for SeaFan yaw to be plot-relative
 }
 
 local BRAIN_DIAMETER_MIN = 1.5
@@ -145,6 +146,8 @@ function CoralVisual.yawFromLookVector(look: Vector3): number
 end
 
 function CoralVisual.readFacingYaw(part: BasePart): number
+	-- Attribute is the only source of truth (set on place / rotate / hydrate).
+	-- Do not re-derive from LookVector — mesh imports often disagree with Angles(0,yaw,0).
 	local yaw = part:GetAttribute("OceanTD_FacingYaw")
 	if typeof(yaw) == "number" and yaw == yaw then
 		return yaw
@@ -464,8 +467,9 @@ function CoralVisual.clearSeaFanClientHide(stem: BasePart)
 end
 
 -- Plant Size-box bottom on surfacePos (world). One PivotTo — no additive CFrame math.
+-- facingYaw is plot-local (relative to plotCFrame's Y). Same save works on any plot slot.
 -- rotationOverride: keep exact world rotation (SeaFan upgrade — no yaw spin).
-alignMeshToSurface = function(part: BasePart, surfacePos: Vector3, facingYaw: number?, rotationOverride: CFrame?)
+alignMeshToSurface = function(part: BasePart, surfacePos: Vector3, facingYaw: number?, rotationOverride: CFrame?, plotCFrame: CFrame?)
 	pcall(function()
 		(part :: any).PivotOffset = CFrame.new()
 	end)
@@ -473,16 +477,22 @@ alignMeshToSurface = function(part: BasePart, surfacePos: Vector3, facingYaw: nu
 	local target = Vector3.new(surfacePos.X, surfacePos.Y - embed + part.Size.Y * 0.5, surfacePos.Z)
 	if rotationOverride then
 		part:PivotTo(CFrame.new(target) * (rotationOverride - rotationOverride.Position))
-		part:SetAttribute("OceanTD_FacingYaw", CoralVisual.yawFromLookVector(rotationOverride.LookVector))
+		-- Keep stamped plot-local yaw; do not re-derive from LookVector.
+		if typeof(part:GetAttribute("OceanTD_FacingYaw")) ~= "number" then
+			part:SetAttribute("OceanTD_FacingYaw", facingYaw or 0)
+		end
 	else
-		-- Apply yaw whenever provided (createSeaFan aligns before SpeciesId is stamped).
 		local yaw = facingYaw
 		local isFan = CoralVisual.isSeaFan(part:GetAttribute("OceanTD_SpeciesId"))
 		if typeof(yaw) ~= "number" or yaw ~= yaw then
 			yaw = if isFan then CoralVisual.readFacingYaw(part) else nil
 		end
 		if typeof(yaw) == "number" and yaw == yaw then
-			part:PivotTo(CFrame.new(target) * CFrame.Angles(0, yaw, 0))
+			local yawCf = CFrame.Angles(0, yaw, 0)
+			if plotCFrame then
+				yawCf = (plotCFrame - plotCFrame.Position) * yawCf
+			end
+			part:PivotTo(CFrame.new(target) * yawCf)
 			part:SetAttribute("OceanTD_FacingYaw", yaw)
 		else
 			part:PivotTo(CFrame.new(target))
@@ -716,9 +726,9 @@ local function createSeaFan(def: any, worldPos: Vector3, opts: VisualOptions): B
 	if not webColor then
 		webColor = if web then web.Color else stemColor
 	end
-	-- Stamp SpeciesId before plant so yaw path is unambiguous; then plant with facingYaw.
+	-- Stamp SpeciesId before plant so yaw path is unambiguous; then plant with plot-local facingYaw.
 	finishSeaFanLook(stem, web, def, opts, stemColor, webColor)
-	alignMeshToSurface(stem, worldPos, facingYaw)
+	alignMeshToSurface(stem, worldPos, facingYaw, nil, opts.plotCFrame)
 
 	stem:SetAttribute("OceanTD_Diameter", stem.Size.Y)
 	stem:SetAttribute("OceanTD_SizeClass", sizeClass)
@@ -1041,8 +1051,8 @@ function CoralVisual.setRestColor(part: BasePart, color: Color3, webColor: Color
 	end
 end
 
-function CoralVisual.alignSpongeToSurface(part: BasePart, surfacePos: Vector3, facingYaw: number?, rotationOverride: CFrame?)
-	alignMeshToSurface(part, surfacePos, facingYaw, rotationOverride)
+function CoralVisual.alignSpongeToSurface(part: BasePart, surfacePos: Vector3, facingYaw: number?, rotationOverride: CFrame?, plotCFrame: CFrame?)
+	alignMeshToSurface(part, surfacePos, facingYaw, rotationOverride, plotCFrame)
 end
 
 CoralVisual.alignMeshToSurface = CoralVisual.alignSpongeToSurface

@@ -1287,32 +1287,22 @@ local function syncChrome()
 	cancelBtn.Visible = showCancel
 	local tipLetter = if gamepadRelocate then "B" else "X"
 	local showWord = (math.floor((os.clock() - gamepadChromeT0) / HOVER_HINT_PERIOD) % 2) == 1
+	-- Recycle confirm: ✓/X over the avatar waist (same as move cancel), not coral tip.
 	checkBtn.Visible = (hasMoved and validSpot) or hasRotated or recyclePending
 
+	-- Keep button size fixed — shrinking on rotate made the whole chrome jump.
+	layoutWaistChrome(BTN_SIZE, checkBtn.Visible)
 	if recyclePending then
-		hideWaistChrome()
-		cancelBtn.Size = UDim2.fromOffset(BTN_SIZE, BTN_SIZE)
-		checkBtn.Size = UDim2.fromOffset(BTN_SIZE, BTN_SIZE)
-		cancelBtn.AnchorPoint = Vector2.new(0, 1)
-		cancelBtn.Position = UDim2.fromOffset(cx + 6, cy)
-		checkBtn.AnchorPoint = Vector2.new(1, 1)
-		checkBtn.Position = UDim2.fromOffset(cx - 6, cy)
-		cancelBtn.Text = if showWord then "CANCEL" else tipLetter
-		cancelBtn.TextStrokeColor3 = if showWord then Color3.fromRGB(60, 15, 18) else Color3.new(1, 1, 1)
-		cancelBtn.TextStrokeTransparency = 0
 		if rotLeftBtn then
 			rotLeftBtn.Visible = false
 		end
 		if rotRightBtn then
 			rotRightBtn.Visible = false
 		end
-	else
-		local sz = if hasMoved or hasRotated then math.floor(BTN_SIZE * 0.8 + 0.5) else BTN_SIZE
-		layoutWaistChrome(sz, checkBtn.Visible)
-		cancelBtn.Text = if showWord then (if hasMoved or hasRotated then "CANCEL" else "CLOSE") else tipLetter
-		cancelBtn.TextStrokeColor3 = if showWord then Color3.fromRGB(60, 15, 18) else Color3.new(1, 1, 1)
-		cancelBtn.TextStrokeTransparency = 0
 	end
+	cancelBtn.Text = if showWord then (if hasMoved or hasRotated or recyclePending then "CANCEL" else "CLOSE") else tipLetter
+	cancelBtn.TextStrokeColor3 = if showWord then Color3.fromRGB(60, 15, 18) else Color3.new(1, 1, 1)
+	cancelBtn.TextStrokeTransparency = 0
 
 	if checkBtn.Visible then
 		local confirmWord = if isUsingGamepad() then "A" else "Enter"
@@ -1320,10 +1310,20 @@ local function syncChrome()
 		if UserInputService:GetLastInputType() == Enum.UserInputType.Touch then
 			confirmWord = "CONFIRM"
 		end
-		local label = if showWord then confirmWord else "✓"
-		checkBtn.Text = label
-		checkBtn.TextStrokeColor3 = if showWord then Color3.fromRGB(12, 55, 25) else Color3.new(1, 1, 1)
+		-- FredokaOne blanks ✓ — keep word labels (match place chrome).
+		checkBtn.Text = confirmWord
+		if confirmWord == "CONFIRM" then
+			checkBtn.TextScaled = false
+			checkBtn.TextSize = 11
+		else
+			checkBtn.TextScaled = true
+		end
+		checkBtn.TextTransparency = 0
+		checkBtn.TextStrokeColor3 = Color3.fromRGB(12, 55, 25)
 		checkBtn.TextStrokeTransparency = 0
+		-- Flash dark green ↔ bright green (same as place confirm).
+		local phase = (math.sin(os.clock() * 6) + 1) * 0.5
+		checkBtn.BackgroundColor3 = Color3.fromRGB(90, 255, 120):Lerp(Color3.fromRGB(35, 85, 45), phase)
 	end
 
 	if recycleBtn then
@@ -1337,15 +1337,25 @@ local function syncChrome()
 		if showRecycle then
 			recycleBtn.AnchorPoint = Vector2.new(0.5, 1)
 			recycleBtn.Size = UDim2.fromOffset(REC_BTN_SIZE, REC_BTN_SIZE)
-			-- Idle (not moved): recycle sits where X will appear. Recycle confirm: above ✓/X pair.
-			local aboveX = cx + 6 + BTN_SIZE * 0.5
-			local abovePair = cx
+			-- Park recycle above waist chrome (avatar), not coral tip.
+			local waistScreen = PlaceConfirmChrome.screenPos(waistAdornee)
+			local recCx = waistScreen.X
+			local recCy = waistScreen.Y - BTN_SIZE - REC_GAP_PX
+			-- Idle (not moved): sit near where X will appear. Recycle confirm: above ✓/X pair.
+			local aboveX = recCx + 6 + BTN_SIZE * 0.5
+			local abovePair = recCx
 			local idleRecX = aboveX
-			local idleRecY = cy
+			local idleRecY = waistScreen.Y
 			local movedRecX = aboveX + (abovePair - aboveX) * recycleSlideU
-			local movedRecY = cy - BTN_SIZE - REC_GAP_PX
+			local movedRecY = recCy
 			local recX = if recyclePending then movedRecX else idleRecX
 			local recY = if recyclePending then movedRecY else idleRecY
+			-- When idle with inspect hidden, tip-aligned recycle is owned by older path —
+			-- keep tip coords for idle non-inspect so existing feel stays; waist only for confirm.
+			if not recyclePending then
+				recX = cx + 6 + BTN_SIZE * 0.5
+				recY = cy
+			end
 			recycleBtn.Position = UDim2.fromOffset(recX, recY)
 
 			if recyclePending then
@@ -1404,7 +1414,8 @@ local function updateAt(worldPos: Vector3)
 		if typeof(relocateFacingYaw) ~= "number" then
 			relocateFacingYaw = CoralVisual.readFacingYaw(part)
 		end
-		CoralVisual.alignMeshToSurface(part, surfacePos, relocateFacingYaw)
+		local mir = ClientPlot.get()
+		CoralVisual.alignMeshToSurface(part, surfacePos, relocateFacingYaw, nil, if mir then mir.cframe else nil)
 		moveGridAnchor = surfacePos
 	elseif CoralVisual.isMeshSpecies(part:GetAttribute("OceanTD_SpeciesId")) then
 		CoralVisual.alignMeshToSurface(part, surfacePos)
@@ -1446,7 +1457,8 @@ local function rotateSelectedSeaFan(dir: number)
 	relocateFacingYaw = yaw
 	hasRotated = true
 	local anchor = moveGridAnchor or gridAnchorPos or CoralVisual.readGridAnchor(part) or part.Position
-	CoralVisual.alignMeshToSurface(part, anchor, yaw)
+	local mir = ClientPlot.get()
+	CoralVisual.alignMeshToSurface(part, anchor, yaw, nil, if mir then mir.cframe else nil)
 	UiHaptics.pulseShort()
 	syncChrome()
 end
@@ -1786,7 +1798,8 @@ function RelocateController.cancel(instant: boolean?)
 				if typeof(yaw) ~= "number" then
 					yaw = CoralVisual.readFacingYaw(p)
 				end
-				CoralVisual.alignMeshToSurface(p, gridAnchorPos, yaw)
+				local mir = ClientPlot.get()
+				CoralVisual.alignMeshToSurface(p, gridAnchorPos, yaw, nil, if mir then mir.cframe else nil)
 			elseif CoralVisual.isMeshSpecies(p:GetAttribute("OceanTD_SpeciesId")) and gridAnchorPos then
 				CoralVisual.alignMeshToSurface(p, gridAnchorPos)
 			elseif origin then
@@ -2044,7 +2057,8 @@ function RelocateController.commit()
 			local finalPos = if typeof(result.worldPos) == "Vector3" then result.worldPos else toPos
 			if CoralVisual.isSeaFan(part:GetAttribute("OceanTD_SpeciesId")) then
 				local finalYaw = if typeof(result.facingYaw) == "number" then result.facingYaw else yaw
-				CoralVisual.alignMeshToSurface(part, finalPos, finalYaw)
+				local mir = ClientPlot.get()
+				CoralVisual.alignMeshToSurface(part, finalPos, finalYaw, nil, if mir then mir.cframe else nil)
 			elseif CoralVisual.isMeshSpecies(part:GetAttribute("OceanTD_SpeciesId")) then
 				CoralVisual.alignMeshToSurface(part, finalPos)
 			else
@@ -2334,6 +2348,10 @@ table.insert(inputConns, UserInputService.InputBegan:Connect(function(input, _pr
 			if chromeTarget then
 				chromeBtnDown = true
 				chromePressTarget = chromeTarget
+				pendingCoralSwitch = nil
+				pendingCoralSwitchScreen = nil
+				fingerDown = false
+				dragging = false
 				return
 			end
 		end
@@ -2341,6 +2359,14 @@ table.insert(inputConns, UserInputService.InputBegan:Connect(function(input, _pr
 			return
 		end
 		if recyclePending then
+			return
+		end
+		-- Never world-pick through chrome (rotate Active + GuiObjects can lag a frame).
+		if isOverChrome(screenPos) then
+			chromeBtnDown = true
+			chromePressTarget = chromePressTarget or resolveRelocateChrome(screenPos) or "cancel"
+			pendingCoralSwitch = nil
+			pendingCoralSwitchScreen = nil
 			return
 		end
 		-- Switching coral must not steal the press used to drag the current one.
@@ -2483,7 +2509,7 @@ table.insert(inputConns, UserInputService.InputEnded:Connect(function(input, _pr
 			if rotLeftBtn then
 				PlaceConfirmChrome.playRotatePressFeedback(rotLeftBtn)
 			end
-			rotateSelectedSeaFan(-1)
+			rotateSelectedSeaFan(1)
 			return
 		elseif chromeTarget == "rotRight" then
 			local still = resolveRelocateChrome(screenPos)
@@ -2497,7 +2523,7 @@ table.insert(inputConns, UserInputService.InputEnded:Connect(function(input, _pr
 			if rotRightBtn then
 				PlaceConfirmChrome.playRotatePressFeedback(rotRightBtn)
 			end
-			rotateSelectedSeaFan(1)
+			rotateSelectedSeaFan(-1)
 			return
 		end
 	end

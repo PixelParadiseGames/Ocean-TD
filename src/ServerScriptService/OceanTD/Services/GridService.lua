@@ -352,6 +352,11 @@ function GridService.snapshot(plotId: PlotId): { LayoutObject }
 	local layout: { LayoutObject } = {}
 	for _, cell in pairs(cells) do
 		if cell.plotId == plotId then
+			local yaw = cell.facingYaw
+			-- SeaFan always persists an explicit yaw (never omit — load treats missing as 0).
+			if cell.id == "SeaFan" and (typeof(yaw) ~= "number" or yaw ~= yaw) then
+				yaw = 0
+			end
 			table.insert(layout, {
 				id = cell.id,
 				lx = cell.lx,
@@ -371,7 +376,7 @@ function GridService.snapshot(plotId: PlotId): { LayoutObject }
 				scaleMult = cell.scaleMult,
 				scaleWidth = cell.scaleWidth,
 				scaleHeight = cell.scaleHeight,
-				facingYaw = cell.facingYaw,
+				facingYaw = yaw,
 				webColorR = cell.webColorR,
 				webColorG = cell.webColorG,
 				webColorB = cell.webColorB,

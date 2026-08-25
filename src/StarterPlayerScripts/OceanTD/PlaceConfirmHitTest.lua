@@ -25,7 +25,7 @@ local function btnCenter(btn: GuiObject): (number, number, number)
 	return p.X + s.X * 0.5, p.Y + s.Y * 0.5, math.max(s.X, s.Y) * 0.5
 end
 
-local function discHit(btn: GuiObject?, screenPos: Vector2): boolean
+local function discHit(btn: GuiObject?, screenPos: Vector2, padPx: number?): boolean
 	if not btn or not btn.Visible then
 		return false
 	end
@@ -33,7 +33,9 @@ local function discHit(btn: GuiObject?, screenPos: Vector2): boolean
 	if s.X < 1 or s.Y < 1 then
 		return false
 	end
+	local pad = padPx or 0
 	local cx, cy, r = btnCenter(btn)
+	r = r + pad
 	local r2 = r * r
 	local function inside(x: number, y: number): boolean
 		local dx = x - cx
@@ -50,16 +52,16 @@ local function discHit(btn: GuiObject?, screenPos: Vector2): boolean
 	return false
 end
 
-local function twoRowMidY(checkBtn: GuiObject?, rotLeftBtn: GuiObject?): number?
-	if not checkBtn or not checkBtn.Visible or not rotLeftBtn or not rotLeftBtn.Visible then
+local function twoRowMidY(checkBtn: GuiObject?, bottomBtn: GuiObject?): number?
+	if not checkBtn or not checkBtn.Visible or not bottomBtn or not bottomBtn.Visible then
 		return nil
 	end
-	if checkBtn.AbsoluteSize.Y < 1 or rotLeftBtn.AbsoluteSize.Y < 1 then
+	if checkBtn.AbsoluteSize.Y < 1 or bottomBtn.AbsoluteSize.Y < 1 then
 		return nil
 	end
 	local _, checkCy = btnCenter(checkBtn)
-	local _, rotCy = btnCenter(rotLeftBtn)
-	return (checkCy + rotCy) * 0.5
+	local _, botCy = btnCenter(bottomBtn)
+	return (checkCy + botCy) * 0.5
 end
 
 function PlaceConfirmHitTest.resolveTarget(
@@ -74,42 +76,39 @@ function PlaceConfirmHitTest.resolveTarget(
 	local inset = GuiService:GetGuiInset()
 	local yAlt = y - inset.Y
 
-	-- Two-row chrome: hard split by Y so rot never steals Confirm/Cancel.
-	local midY = twoRowMidY(checkBtn, rotLeftBtn)
+	-- Confirm stacks above Close; Close + rot share the bottom row.
+	local bottomRef = if rotLeftBtn and rotLeftBtn.Visible then rotLeftBtn else cancelBtn
+	local midY = twoRowMidY(checkBtn, bottomRef)
+	local rotPad = 14 -- generous so rot never misses and falls through to coral picks
 	if midY then
 		local onTop = y < midY or yAlt < midY
 		if onTop then
 			if discHit(checkBtn, screenPos) then
 				return "check"
 			end
-			if discHit(cancelBtn, screenPos) then
-				return "cancel"
-			end
-			-- Pointer in top band but outside discs: still not rot.
-			return nil
-		end
-		-- Bottom band: only rotate.
-		if discHit(rotLeftBtn, screenPos) then
+			-- Stay in top band: do not claim rot/cancel, but still try GuiObjects for Confirm.
+		elseif discHit(cancelBtn, screenPos) then
+			return "cancel"
+		elseif discHit(rotLeftBtn, screenPos, rotPad) then
 			return "rotLeft"
-		end
-		if discHit(rotRightBtn, screenPos) then
+		elseif discHit(rotRightBtn, screenPos, rotPad) then
 			return "rotRight"
 		end
-		return nil
-	end
-
-	-- Single row (or Close-only + rot sides).
-	if discHit(checkBtn, screenPos) then
-		return "check"
-	end
-	if discHit(cancelBtn, screenPos) then
-		return "cancel"
-	end
-	if discHit(rotLeftBtn, screenPos) then
-		return "rotLeft"
-	end
-	if discHit(rotRightBtn, screenPos) then
-		return "rotRight"
+		-- Fall through to GetGuiObjectsAtPosition (Active buttons / Billboard coords).
+	else
+		-- Single row (or Close-only + rot sides).
+		if discHit(checkBtn, screenPos) then
+			return "check"
+		end
+		if discHit(cancelBtn, screenPos) then
+			return "cancel"
+		end
+		if discHit(rotLeftBtn, screenPos, rotPad) then
+			return "rotLeft"
+		end
+		if discHit(rotRightBtn, screenPos, rotPad) then
+			return "rotRight"
+		end
 	end
 
 	local function underChrome(x: number, yPos: number): string?

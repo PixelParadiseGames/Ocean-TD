@@ -42,7 +42,7 @@ export type LayoutObject = {
 	-- SeaFan: independent width/height jitter (±15%) and yaw (radians, Y-up).
 	scaleWidth: number?,
 	scaleHeight: number?,
-	facingYaw: number?,
+	facingYaw: number?, -- SeaFan: plot-local Y yaw (radians)
 	-- SeaFan web paint (0–1). Stem uses colorR/G/B.
 	webColorR: number?,
 	webColorG: number?,

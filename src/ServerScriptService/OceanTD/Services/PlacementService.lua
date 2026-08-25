@@ -147,41 +147,6 @@ function PlacementService.clearPlotVisuals(plotId: string)
 	end
 end
 
--- Snapshot grid and backfill SeaFan facingYaw from live visuals (source of truth).
-function PlacementService.snapshotLayout(plotId: string): { any }
-	local layout = GridService.snapshot(plotId)
-	local folder = getPlotFolder(plotId)
-	local yawByKey: { [string]: number } = {}
-	for _, inst in ipairs(folder:GetChildren()) do
-		if inst:IsA("BasePart") and CoralVisual.isSeaFan(inst:GetAttribute("OceanTD_SpeciesId")) then
-			local yaw = CoralVisual.readFacingYaw(inst)
-			local anchor = CoralVisual.readGridAnchor(inst) or inst.Position
-			local slot = PlotService.getSlot(plotId)
-			if slot then
-				local lp = GridMath.worldToPlotLocal(anchor, slot.cframe)
-				local gx, gy, gz = GridMath.worldToGrid(lp, Vector3.zero)
-				yawByKey[GridMath.key(gx, gy, gz)] = yaw
-				-- Keep cell in sync so later snapshots / same-session hydrate stay correct.
-				GridService.setSeaFanExtras(plotId, gx, gy, gz, nil, nil, yaw, nil, nil, nil)
-			end
-		end
-	end
-	for _, entry in ipairs(layout) do
-		if entry.id == "SeaFan" then
-			local key = if typeof(entry.gx) == "number" and typeof(entry.gy) == "number" and typeof(entry.gz) == "number"
-				then GridMath.key(entry.gx, entry.gy, entry.gz)
-				else nil
-			local yaw = if key then yawByKey[key] else nil
-			if typeof(yaw) == "number" then
-				entry.facingYaw = yaw
-			elseif typeof(entry.facingYaw) ~= "number" then
-				entry.facingYaw = 0
-			end
-		end
-	end
-	return layout
-end
-
 local function worldToPlotLocal(plotId: string, worldPos: Vector3): Vector3?
 	local slot = PlotService.getSlot(plotId)
 	if not slot then
@@ -228,6 +193,7 @@ function PlacementService.spawnVisual(
 	facingYaw: number?,
 	webColor: Color3?
 ): BasePart?
+	local slot = PlotService.getSlot(plotId)
 	local part = CoralVisual.create(speciesId, worldPos, {
 		ghost = false,
 		color = color,
@@ -239,6 +205,7 @@ function PlacementService.spawnVisual(
 		scaleWidth = scaleWidth,
 		scaleHeight = scaleHeight,
 		facingYaw = facingYaw,
+		plotCFrame = if slot then slot.cframe else nil,
 	})
 	if not part then
 		return nil
@@ -278,6 +245,12 @@ local function findVisualAtGrid(plotId: string, worldPos: Vector3): BasePart?
 		end
 	end
 	return nil
+end
+
+-- Snapshot live grid. SeaFan facingYaw lives on the cell (set at place/move) — do not
+-- re-derive from mesh LookVector (that corrupted saves; FBX fronts ≠ Angles yaw).
+function PlacementService.snapshotLayout(plotId: string): { any }
+	return GridService.snapshot(plotId)
 end
 
 function PlacementService.hydrateVisuals(plotId: string, boundsCFrame: CFrame)
@@ -329,16 +302,16 @@ function PlacementService.hydrateVisuals(plotId: string, boundsCFrame: CFrame)
 			if typeof(cell.scaleHeight) == "number" then
 				visual:SetAttribute("OceanTD_ScaleHeight", cell.scaleHeight)
 			end
-			-- Always re-apply SeaFan yaw from save (defaults to 0) so load matches plant.
+			-- Always re-apply SeaFan yaw from save (plot-local) so load matches plant on any plot.
 			if CoralVisual.isSeaFan(species.speciesId) then
 				local yaw = if typeof(cell.facingYaw) == "number" and cell.facingYaw == cell.facingYaw
 					then cell.facingYaw
 					else 0
 				visual:SetAttribute("OceanTD_FacingYaw", yaw)
-				CoralVisual.alignMeshToSurface(visual, world, yaw)
+				CoralVisual.alignMeshToSurface(visual, world, yaw, nil, boundsCFrame)
 			elseif typeof(cell.facingYaw) == "number" then
 				visual:SetAttribute("OceanTD_FacingYaw", cell.facingYaw)
-				CoralVisual.alignMeshToSurface(visual, world, cell.facingYaw)
+				CoralVisual.alignMeshToSurface(visual, world, cell.facingYaw, nil, boundsCFrame)
 			end
 			if typeof(cell.colorIndex) == "number" then
 				local idx = PlotOutlineColors.clampCoralIndex(cell.colorIndex)
@@ -507,7 +480,7 @@ function PlacementService.placeFromSave(
 		)
 		if typeof(facingYaw) == "number" then
 			visual:SetAttribute("OceanTD_FacingYaw", facingYaw)
-			CoralVisual.alignMeshToSurface(visual, worldPos, facingYaw)
+			CoralVisual.alignMeshToSurface(visual, worldPos, facingYaw, nil, slot.cframe)
 		end
 		if paintColor and webColor then
 			CoralVisual.setRestColor(visual, paintColor, webColor)
@@ -524,6 +497,11 @@ function PlacementService.placeFromSave(
 	end
 	local tier = CoralSize.clampTier(sizeTier or class)
 	CoralSize.applyToPart(visual, diameter or visual.Size.Y, class, tier)
+	-- Re-apply SeaFan yaw after attrs/size so load matches the saved facing.
+	if CoralVisual.isSeaFan(species.speciesId) and typeof(facingYaw) == "number" then
+		visual:SetAttribute("OceanTD_FacingYaw", facingYaw)
+		CoralVisual.alignMeshToSurface(visual, worldPos, facingYaw, nil, slot.cframe)
+	end
 
 	return {
 		ok = true,
@@ -678,9 +656,11 @@ function PlacementService.place(
 		end
 		if CoralVisual.isSeaFan(species.speciesId) then
 			GridService.setSeaFanExtras(plotId, gx, gy, gz, scaleWidth, scaleHeight, facingYaw, nil, nil, nil)
+			local slotCf = PlotService.getSlot(plotId)
+			local pcf = if slotCf then slotCf.cframe else nil
 			if typeof(facingYaw) == "number" then
 				visual:SetAttribute("OceanTD_FacingYaw", facingYaw)
-				CoralVisual.alignMeshToSurface(visual, worldPos, facingYaw)
+				CoralVisual.alignMeshToSurface(visual, worldPos, facingYaw, nil, pcf)
 			end
 		end
 	end
@@ -691,6 +671,11 @@ function PlacementService.place(
 	visual:SetAttribute("OceanTD_ItemId", itemId)
 	visual:SetAttribute("OceanTD_SpeciesId", species.speciesId)
 	CoralSize.applyToPart(visual, diameter or visual.Size.X, sizeClass, 1)
+	if CoralVisual.isSeaFan(species.speciesId) and typeof(facingYaw) == "number" then
+		local slotCf = PlotService.getSlot(plotId)
+		visual:SetAttribute("OceanTD_FacingYaw", facingYaw)
+		CoralVisual.alignMeshToSurface(visual, worldPos, facingYaw, nil, if slotCf then slotCf.cframe else nil)
+	end
 
 	if not suppressUndoRecord then
 		UndoService.push(player, {
@@ -701,7 +686,11 @@ function PlacementService.place(
 		})
 	end
 
-	log("Placed", itemId, "for", player.Name, "at", worldPos, "consume=", shouldConsume)
+	log("Placed", itemId, "for", player.Name, "at", worldPos, "consume=", shouldConsume, "yaw=", facingYaw)
+	-- Persist SeaFan yaw immediately — don't wait for autosave / leave.
+	if CoralVisual.isSeaFan(species.speciesId) then
+		PersistenceService.save(player, PlacementService.snapshotLayout(plotId))
+	end
 	return {
 		ok = true,
 		worldPos = worldPos,
@@ -810,7 +799,8 @@ function PlacementService.move(
 			yaw = if typeof(attr) == "number" then attr else nil
 		end
 		if CoralVisual.isMeshSpecies(fromCell.id) or CoralVisual.isMeshSpecies(visual:GetAttribute("OceanTD_SpeciesId")) then
-			CoralVisual.alignMeshToSurface(visual, toWorldPos, yaw)
+			local slotCf = PlotService.getSlot(plotId)
+			CoralVisual.alignMeshToSurface(visual, toWorldPos, yaw, nil, if slotCf then slotCf.cframe else nil)
 		else
 			visual.CFrame = CFrame.new(toWorldPos)
 		end
@@ -820,6 +810,10 @@ function PlacementService.move(
 			returnedYaw = if typeof(attr) == "number" then attr else nil
 		end
 		scheduleCoralColorSave(player, plotId)
+		if CoralVisual.isSeaFan(visual:GetAttribute("OceanTD_SpeciesId")) or CoralVisual.isSeaFan(fromCell.id) then
+			PersistenceService.save(player, PlacementService.snapshotLayout(plotId))
+		end
+		log("Moved (same cell) yaw=", returnedYaw, "for", player.Name)
 		return {
 			ok = true,
 			worldPos = toWorldPos,
@@ -900,7 +894,8 @@ function PlacementService.move(
 		yaw = if typeof(attr) == "number" then attr else nil
 	end
 	if species and CoralVisual.isMeshSpecies(species.speciesId) then
-		CoralVisual.alignMeshToSurface(visual, toWorldPos, yaw)
+		local slotCf = PlotService.getSlot(plotId)
+		CoralVisual.alignMeshToSurface(visual, toWorldPos, yaw, nil, if slotCf then slotCf.cframe else nil)
 	else
 		visual.CFrame = CFrame.new(toWorldPos)
 	end
@@ -915,7 +910,10 @@ function PlacementService.move(
 		})
 	end
 
-	log("Moved", cell.id, "for", player.Name, "→", toWorldPos)
+	log("Moved", cell.id, "for", player.Name, "→", toWorldPos, "yaw=", yaw)
+	if CoralVisual.isSeaFan(if species then species.speciesId else nil) or CoralVisual.isSeaFan(cell.id) then
+		PersistenceService.save(player, PlacementService.snapshotLayout(plotId))
+	end
 	return {
 		ok = true,
 		worldPos = toWorldPos,

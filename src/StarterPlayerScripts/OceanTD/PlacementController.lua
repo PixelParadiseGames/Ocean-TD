@@ -520,32 +520,33 @@ local function notePlacePointerInput(input: InputObject)
 	end
 end
 
-local function setCheckGlyphText(text: string)
+local function setCheckLabel(text: string)
 	if not checkBtn then
 		return
 	end
+	-- Glyph child sat under/behind Billboard chrome and FredokaOne blanked ✓.
+	-- Match RelocateController: paint TextButton.Text directly.
 	local glyph = checkBtn:FindFirstChild("Glyph")
+	if glyph then
+		glyph:Destroy()
+	end
 	local isWord = text == "CONFIRM" or text == "Enter" or text == "A" or text == "OK"
 	local strokeColor = if isWord
 		then Color3.fromRGB(12, 55, 25)
 		else Color3.new(1, 1, 1)
-	if glyph and glyph:IsA("TextLabel") then
-		glyph.Text = text
-		glyph.TextTransparency = 0
-		glyph.TextColor3 = Color3.new(1, 1, 1)
-		glyph.TextStrokeColor3 = strokeColor
-		glyph.TextStrokeTransparency = 0
-		local glyphStroke = glyph:FindFirstChild("GlyphStroke")
-		if glyphStroke and glyphStroke:IsA("UIStroke") then
-			glyphStroke.Color = strokeColor
-			glyphStroke.Transparency = 0
-		end
-	end
-	-- Always keep button Text in sync (backup if Glyph missing).
 	checkBtn.Text = text
-	checkBtn.TextTransparency = if glyph and glyph:IsA("TextLabel") then 1 else 0
+	checkBtn.TextTransparency = 0
+	checkBtn.TextColor3 = Color3.new(1, 1, 1)
 	checkBtn.TextStrokeColor3 = strokeColor
 	checkBtn.TextStrokeTransparency = 0
+	checkBtn.ZIndex = 20
+	-- CONFIRM needs fixed size; TextScaled crushes long words in the circle.
+	if text == "CONFIRM" then
+		checkBtn.TextScaled = false
+		checkBtn.TextSize = 11
+	else
+		checkBtn.TextScaled = true
+	end
 end
 
 local function applyGamepadButtonLabels()
@@ -810,6 +811,10 @@ local function updateGhostAt(anchorPos: Vector3)
 			scaleWidth = ghostPlaceScaleWidth,
 			scaleHeight = ghostPlaceScaleHeight,
 			facingYaw = ghostPlaceFacingYaw,
+			plotCFrame = (function()
+				local mir = ClientPlot.get()
+				return if mir then mir.cframe else nil
+			end)(),
 		})
 		if ghost then
 			ghost.Parent = Workspace
@@ -839,7 +844,8 @@ local function updateGhostAt(anchorPos: Vector3)
 			if typeof(ghostPlaceFacingYaw) ~= "number" then
 				ghostPlaceFacingYaw = 0
 			end
-			CoralVisual.alignMeshToSurface(ghost, anchorPos, ghostPlaceFacingYaw)
+			local mir = ClientPlot.get()
+			CoralVisual.alignMeshToSurface(ghost, anchorPos, ghostPlaceFacingYaw, nil, if mir then mir.cframe else nil)
 		elseif CoralVisual.isMeshSpecies(speciesId) then
 			CoralVisual.alignMeshToSurface(ghost, anchorPos)
 		else
@@ -934,7 +940,7 @@ local function syncConfirmButtonsImpl()
 	cancelBtn.TextStrokeColor3 = if showWord then Color3.fromRGB(60, 15, 18) else Color3.new(1, 1, 1)
 	cancelBtn.TextStrokeTransparency = 0
 	if checkBtn.Visible then
-		-- FredokaOne has no ✓ glyph (showed blank). Keep readable CONFIRM / A.
+		-- FredokaOne has no ✓ — always a readable word (same as Relocate Enter/A).
 		local confirmWord = "CONFIRM"
 		local last = UserInputService:GetLastInputType()
 		if last == Enum.UserInputType.Gamepad1
@@ -944,15 +950,13 @@ local function syncConfirmButtonsImpl()
 			or gamepadPlacement
 		then
 			confirmWord = "A"
+		elseif last == Enum.UserInputType.Keyboard or last == Enum.UserInputType.MouseButton1
+			or last == Enum.UserInputType.MouseMovement
+		then
+			confirmWord = "Enter"
 		end
 		checkBtn.Size = UDim2.fromOffset(BTN_SIZE, BTN_SIZE)
-		setCheckGlyphText(confirmWord)
-		-- Fixed size so CONFIRM stays readable in the circle (TextScaled crushed it to blank).
-		local glyph = checkBtn:FindFirstChild("Glyph")
-		if glyph and glyph:IsA("TextLabel") then
-			glyph.TextScaled = confirmWord ~= "CONFIRM"
-			glyph.TextSize = if confirmWord == "CONFIRM" then 11 else 22
-		end
+		setCheckLabel(confirmWord)
 	end
 end
 syncConfirmButtons = syncConfirmButtonsImpl
@@ -973,7 +977,8 @@ local function rotateSeaFanGhost(dir: number)
 	end
 	yaw += dir * SEA_FAN_ROT_STEP
 	ghostPlaceFacingYaw = yaw
-	CoralVisual.alignMeshToSurface(ghost, placeAnchor, yaw)
+	local mir = ClientPlot.get()
+	CoralVisual.alignMeshToSurface(ghost, placeAnchor, yaw, nil, if mir then mir.cframe else nil)
 	UiHaptics.pulseShort()
 end
 
@@ -1008,7 +1013,7 @@ local function makeConfirmUiImpl()
 	move.Parent = gui
 	moveHintImage = move
 
-	local function roundBtn(text: string, color: Color3, strokeLabel: boolean): TextButton
+	local function roundBtn(text: string, color: Color3): TextButton
 		local b = Instance.new("TextButton")
 		b.Size = UDim2.fromOffset(BTN_SIZE, BTN_SIZE)
 		b.BackgroundColor3 = color
@@ -1016,9 +1021,11 @@ local function makeConfirmUiImpl()
 		b.Font = UiTheme.Font
 		b.Text = text
 		b.TextColor3 = Color3.new(1, 1, 1)
+		b.TextTransparency = 0
 		b.TextScaled = true
+		b.TextStrokeTransparency = 0
 		b.AutoButtonColor = true
-		b.ZIndex = 5
+		b.ZIndex = 20
 		b.Parent = gui
 		UiCircles.ensure(b)
 		local pad = Instance.new("UIPadding")
@@ -1035,34 +1042,13 @@ local function makeConfirmUiImpl()
 		edge.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
 		edge.Parent = b
 
-		if strokeLabel then
-			local label = Instance.new("TextLabel")
-			label.Name = "Glyph"
-			label.BackgroundTransparency = 1
-			label.Size = UDim2.fromScale(1, 1)
-			label.Font = UiTheme.Font
-			label.Text = text
-			label.TextColor3 = Color3.new(1, 1, 1)
-			label.TextScaled = true
-			label.Active = false
-			label.ZIndex = b.ZIndex + 1
-			label.Parent = b
-			b.TextTransparency = 1
-			local glyphStroke = Instance.new("UIStroke")
-			glyphStroke.Name = "GlyphStroke"
-			glyphStroke.Color = Color3.new(1, 1, 1)
-			glyphStroke.Thickness = 1.5
-			glyphStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Contextual
-			glyphStroke.Parent = label
-		end
-
 		return b
 	end
 
-	checkBtn = roundBtn("✓", Color3.fromRGB(40, 180, 80), true)
-	cancelBtn = roundBtn("X", Color3.fromRGB(200, 50, 50), false)
-	checkBtn.ZIndex = 10
-	cancelBtn.ZIndex = 10
+	checkBtn = roundBtn("Enter", Color3.fromRGB(40, 180, 80))
+	cancelBtn = roundBtn("X", Color3.fromRGB(200, 50, 50))
+	checkBtn.ZIndex = 20
+	cancelBtn.ZIndex = 20
 	rotLeftBtn = PlaceConfirmChrome.createRotateButton(gui, PlaceConfirmChrome.ROT_LEFT_ICON, "RotLeft")
 	rotRightBtn = PlaceConfirmChrome.createRotateButton(gui, PlaceConfirmChrome.ROT_RIGHT_ICON, "RotRight")
 	rotLeftBtn.ZIndex = 5
@@ -2130,12 +2116,12 @@ table.insert(inputConns, UserInputService.InputEnded:Connect(function(input, _pr
 			if rotLeftBtn then
 				PlaceConfirmChrome.playRotatePressFeedback(rotLeftBtn)
 			end
-			rotateSeaFanGhost(-1)
+			rotateSeaFanGhost(1)
 		elseif target == "rotRight" then
 			if rotRightBtn then
 				PlaceConfirmChrome.playRotatePressFeedback(rotRightBtn)
 			end
-			rotateSeaFanGhost(1)
+			rotateSeaFanGhost(-1)
 		end
 		return
 	end
