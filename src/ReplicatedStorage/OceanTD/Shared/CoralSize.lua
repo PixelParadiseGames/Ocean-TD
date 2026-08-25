@@ -124,6 +124,12 @@ CoralSize.STATS_BY_SPECIES = {
 	BrainCoral = CoralSize.STATS,
 	-- Same as Brain for now (will be tuned later).
 	SeaGrass = CoralSize.STATS,
+	-- Brain-like range/reload/defense; food matches Food orb counts (1 / 3 / 4).
+	SeaFan = {
+		[1] = { range = 30, reload = 6, food = 1, defense = 2 },
+		[2] = { range = 60, reload = 4, food = 3, defense = 3 },
+		[3] = { range = 80, reload = 2, food = 4, defense = 4 },
+	},
 	Sponge = {
 		[1] = { range = 40, reload = 6, food = 1, defense = 1 },
 		[2] = { range = 70, reload = 4, food = 2, defense = 2 },
@@ -163,15 +169,42 @@ end
 
 -- Local offsets from coral center (Y up).
 -- Sponge: wide top spread. SeaGrass: stacked along height by size tier.
+-- SeaFan: Food1..N children (stem-local); synthesized from Large when missing on Small/Medium.
 function CoralSize.ammoLocalOffsets(
 	foodCount: number,
 	coralRadius: number,
 	ammoRadius: number,
 	speciesId: string?,
-	partSize: Vector3?
+	partSize: Vector3?,
+	part: BasePart?
 ): { Vector3 }
 	local y = coralRadius + ammoRadius
 	local n = math.clamp(math.floor(foodCount), 1, 4)
+
+	if speciesId == "SeaFan" and part then
+		local offs: { Vector3 } = {}
+		for i = 1, n do
+			local food = part:FindFirstChild("Food" .. tostring(i))
+			if food and food:IsA("BasePart") then
+				table.insert(offs, part.CFrame:PointToObjectSpace(food.Position))
+			end
+		end
+		if #offs >= 1 then
+			return offs
+		end
+		-- Fallback if Food markers missing: top-center stack.
+		local topY = coralRadius + ammoRadius * 0.5
+		if n <= 1 then
+			return { Vector3.new(0, topY, 0) }
+		end
+		local spread = math.max(ammoRadius * 1.8, 0.6)
+		local out: { Vector3 } = {}
+		for i = 1, n do
+			local ang = (i - 1) * (math.pi * 2 / n)
+			table.insert(out, Vector3.new(math.cos(ang) * spread, topY, math.sin(ang) * spread))
+		end
+		return out
+	end
 
 	if speciesId == "SeaGrass" then
 		local h = if partSize then partSize.Y else coralRadius * 2

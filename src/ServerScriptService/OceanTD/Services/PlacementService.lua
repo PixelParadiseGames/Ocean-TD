@@ -43,6 +43,12 @@ type LayoutObject = {
 	colorB: number?,
 	variantIndex: number?,
 	scaleMult: number?,
+	scaleWidth: number?,
+	scaleHeight: number?,
+	facingYaw: number?,
+	webColorR: number?,
+	webColorG: number?,
+	webColorB: number?,
 }
 
 export type PlaceOpts = {
@@ -50,6 +56,9 @@ export type PlaceOpts = {
 	variantIndex: number?,
 	scaleMult: number?,
 	sizeClass: number?,
+	scaleWidth: number?,
+	scaleHeight: number?,
+	facingYaw: number?,
 }
 
 export type PlaceResult = {
@@ -63,6 +72,7 @@ export type PlaceResult = {
 	variantIndex: number?,
 	scaleMult: number?,
 	sizeClass: number?,
+	facingYaw: number?,
 }
 
 local PlacementService = {}
@@ -90,7 +100,7 @@ local function scheduleCoralColorSave(player: Player, plotId: string)
 			return
 		end
 		-- Fresh snapshot so later place/move/size ops aren't overwritten by a stale layout.
-		PersistenceService.save(player, GridService.snapshot(plotId))
+		PersistenceService.save(player, PlacementService.snapshotLayout(plotId))
 		log("Color save (debounced)", player.Name)
 	end)
 end
@@ -137,6 +147,41 @@ function PlacementService.clearPlotVisuals(plotId: string)
 	end
 end
 
+-- Snapshot grid and backfill SeaFan facingYaw from live visuals (source of truth).
+function PlacementService.snapshotLayout(plotId: string): { any }
+	local layout = GridService.snapshot(plotId)
+	local folder = getPlotFolder(plotId)
+	local yawByKey: { [string]: number } = {}
+	for _, inst in ipairs(folder:GetChildren()) do
+		if inst:IsA("BasePart") and CoralVisual.isSeaFan(inst:GetAttribute("OceanTD_SpeciesId")) then
+			local yaw = CoralVisual.readFacingYaw(inst)
+			local anchor = CoralVisual.readGridAnchor(inst) or inst.Position
+			local slot = PlotService.getSlot(plotId)
+			if slot then
+				local lp = GridMath.worldToPlotLocal(anchor, slot.cframe)
+				local gx, gy, gz = GridMath.worldToGrid(lp, Vector3.zero)
+				yawByKey[GridMath.key(gx, gy, gz)] = yaw
+				-- Keep cell in sync so later snapshots / same-session hydrate stay correct.
+				GridService.setSeaFanExtras(plotId, gx, gy, gz, nil, nil, yaw, nil, nil, nil)
+			end
+		end
+	end
+	for _, entry in ipairs(layout) do
+		if entry.id == "SeaFan" then
+			local key = if typeof(entry.gx) == "number" and typeof(entry.gy) == "number" and typeof(entry.gz) == "number"
+				then GridMath.key(entry.gx, entry.gy, entry.gz)
+				else nil
+			local yaw = if key then yawByKey[key] else nil
+			if typeof(yaw) == "number" then
+				entry.facingYaw = yaw
+			elseif typeof(entry.facingYaw) ~= "number" then
+				entry.facingYaw = 0
+			end
+		end
+	end
+	return layout
+end
+
 local function worldToPlotLocal(plotId: string, worldPos: Vector3): Vector3?
 	local slot = PlotService.getSlot(plotId)
 	if not slot then
@@ -177,15 +222,23 @@ function PlacementService.spawnVisual(
 	diameter: number?,
 	sizeClass: number?,
 	variantIndex: number?,
-	scaleMult: number?
+	scaleMult: number?,
+	scaleWidth: number?,
+	scaleHeight: number?,
+	facingYaw: number?,
+	webColor: Color3?
 ): BasePart?
 	local part = CoralVisual.create(speciesId, worldPos, {
 		ghost = false,
 		color = color,
+		webColor = webColor,
 		diameter = diameter,
 		sizeClass = sizeClass,
 		variantIndex = variantIndex,
 		scaleMult = scaleMult,
+		scaleWidth = scaleWidth,
+		scaleHeight = scaleHeight,
+		facingYaw = facingYaw,
 	})
 	if not part then
 		return nil
@@ -215,7 +268,9 @@ local function findVisualAtGrid(plotId: string, worldPos: Vector3): BasePart?
 	local folder = getPlotFolder(plotId)
 	for _, inst in ipairs(folder:GetChildren()) do
 		if inst:IsA("BasePart") then
-			local lp = GridMath.worldToPlotLocal(inst.Position, slot.cframe)
+			-- Mesh species (SeaGrass/SeaFan) sit above the plant point — use grid anchor.
+			local sample = CoralVisual.readGridAnchor(inst) or inst.Position
+			local lp = GridMath.worldToPlotLocal(sample, slot.cframe)
 			local ax, ay, az = GridMath.worldToGrid(lp, Vector3.zero)
 			if ax == gx and ay == gy and az == gz then
 				return inst
@@ -234,15 +289,27 @@ function PlacementService.hydrateVisuals(plotId: string, boundsCFrame: CFrame)
 		end
 		-- Same anchor as save — PointToWorldSpace(VisualPos). Never re-raycast / grid-center.
 		local world = GridMath.plotLocalToWorld(Vector3.new(cell.lx, cell.ly, cell.lz), boundsCFrame)
+		local webColor: Color3? = nil
+		if typeof(cell.webColorR) == "number" and typeof(cell.webColorG) == "number" and typeof(cell.webColorB) == "number" then
+			webColor = Color3.new(cell.webColorR, cell.webColorG, cell.webColorB)
+		end
+		local paint: Color3? = nil
+		if typeof(cell.colorIndex) == "number" then
+			paint = PlotOutlineColors.resolveCoralPaint(cell.colorIndex, cell.colorR, cell.colorG, cell.colorB)
+		end
 		local visual = PlacementService.spawnVisual(
 			plotId,
 			species.speciesId,
 			world,
-			nil,
+			paint,
 			cell.diameter,
 			cell.sizeClass,
 			cell.variantIndex,
-			cell.scaleMult
+			cell.scaleMult,
+			cell.scaleWidth,
+			cell.scaleHeight,
+			cell.facingYaw,
+			webColor
 		)
 		if visual then
 			visual:SetAttribute("OceanTD_ItemId", cell.id)
@@ -256,10 +323,28 @@ function PlacementService.hydrateVisuals(plotId: string, boundsCFrame: CFrame)
 			if typeof(cell.scaleMult) == "number" then
 				visual:SetAttribute("OceanTD_ScaleMult", cell.scaleMult)
 			end
+			if typeof(cell.scaleWidth) == "number" then
+				visual:SetAttribute("OceanTD_ScaleWidth", cell.scaleWidth)
+			end
+			if typeof(cell.scaleHeight) == "number" then
+				visual:SetAttribute("OceanTD_ScaleHeight", cell.scaleHeight)
+			end
+			-- Always re-apply SeaFan yaw from save (defaults to 0) so load matches plant.
+			if CoralVisual.isSeaFan(species.speciesId) then
+				local yaw = if typeof(cell.facingYaw) == "number" and cell.facingYaw == cell.facingYaw
+					then cell.facingYaw
+					else 0
+				visual:SetAttribute("OceanTD_FacingYaw", yaw)
+				CoralVisual.alignMeshToSurface(visual, world, yaw)
+			elseif typeof(cell.facingYaw) == "number" then
+				visual:SetAttribute("OceanTD_FacingYaw", cell.facingYaw)
+				CoralVisual.alignMeshToSurface(visual, world, cell.facingYaw)
+			end
 			if typeof(cell.colorIndex) == "number" then
 				local idx = PlotOutlineColors.clampCoralIndex(cell.colorIndex)
 				visual:SetAttribute("OceanTD_ColorIndex", idx)
-				CoralVisual.setRestColor(visual, PlotOutlineColors.resolveCoralPaint(idx, cell.colorR, cell.colorG, cell.colorB))
+				local stemPaint = paint or PlotOutlineColors.resolveCoralPaint(idx, cell.colorR, cell.colorG, cell.colorB)
+				CoralVisual.setRestColor(visual, stemPaint, webColor)
 			end
 		end
 	end)
@@ -285,7 +370,15 @@ function PlacementService.placeFromSave(
 	colorG: number?,
 	colorB: number?,
 	variantIndex: number?,
-	scaleMult: number?
+	scaleMult: number?,
+	seaFanExtras: {
+		scaleWidth: number?,
+		scaleHeight: number?,
+		facingYaw: number?,
+		webColorR: number?,
+		webColorG: number?,
+		webColorB: number?,
+	}?
 ): PlaceResult
 	local shouldConsume = consumeSeed == true
 	local item = ItemCatalog.get(itemId)
@@ -321,13 +414,27 @@ function PlacementService.placeFromSave(
 	local paintColor = if paintIdx
 		then PlotOutlineColors.resolveCoralPaint(paintIdx, colorR, colorG, colorB)
 		else nil
+	local extras = seaFanExtras or {}
 	local class = CoralSize.clampTier(sizeClass or 1)
 	local variant = if CoralVisual.isMeshSpecies(species.speciesId)
-		then CoralVisual.clampMeshVariant(variantIndex)
+		then CoralVisual.clampMeshVariant(variantIndex, species.speciesId)
 		else nil
-	local scale = if CoralVisual.isMeshSpecies(species.speciesId)
-		then CoralVisual.sanitizeMeshScale(scaleMult)
-		else nil
+	local scale: number? = nil
+	local scaleWidth: number? = nil
+	local scaleHeight: number? = nil
+	local facingYaw: number? = nil
+	local webColor: Color3? = nil
+	if CoralVisual.isSeaFan(species.speciesId) then
+		scale = CoralVisual.sanitizeSeaFanAxis(scaleMult)
+		scaleWidth = CoralVisual.sanitizeSeaFanAxis(extras.scaleWidth)
+		scaleHeight = CoralVisual.sanitizeSeaFanAxis(extras.scaleHeight)
+		facingYaw = if typeof(extras.facingYaw) == "number" then extras.facingYaw else 0
+		if typeof(extras.webColorR) == "number" and typeof(extras.webColorG) == "number" and typeof(extras.webColorB) == "number" then
+			webColor = Color3.new(extras.webColorR, extras.webColorG, extras.webColorB)
+		end
+	elseif CoralVisual.isMeshSpecies(species.speciesId) then
+		scale = CoralVisual.sanitizeMeshScale(scaleMult)
+	end
 	local occupied, occupyErr = GridService.tryOccupy(
 		plotId,
 		player.UserId,
@@ -363,7 +470,11 @@ function PlacementService.placeFromSave(
 		diameter,
 		class,
 		variant,
-		scale
+		scale,
+		scaleWidth,
+		scaleHeight,
+		facingYaw,
+		webColor
 	)
 	if not visual then
 		GridService.vacate(plotId, visualLocal.X, visualLocal.Y, visualLocal.Z, gx, gy, gz)
@@ -371,6 +482,36 @@ function PlacementService.placeFromSave(
 			PersistenceService.creditItem(player, itemId, 1)
 		end
 		return { ok = false, errorCode = "VisualFail" }
+	end
+
+	if CoralVisual.isSeaFan(species.speciesId) then
+		local rx: number
+		local ry: number
+		local rz: number
+		if typeof(gx) == "number" and typeof(gy) == "number" and typeof(gz) == "number" then
+			rx, ry, rz = math.round(gx), math.round(gy), math.round(gz)
+		else
+			rx, ry, rz = GridMath.worldToGrid(visualLocal, Vector3.zero)
+		end
+		GridService.setSeaFanExtras(
+			plotId,
+			rx,
+			ry,
+			rz,
+			scaleWidth,
+			scaleHeight,
+			facingYaw,
+			if webColor then webColor.R else nil,
+			if webColor then webColor.G else nil,
+			if webColor then webColor.B else nil
+		)
+		if typeof(facingYaw) == "number" then
+			visual:SetAttribute("OceanTD_FacingYaw", facingYaw)
+			CoralVisual.alignMeshToSurface(visual, worldPos, facingYaw)
+		end
+		if paintColor and webColor then
+			CoralVisual.setRestColor(visual, paintColor, webColor)
+		end
 	end
 
 	local placeIdAttr = visual:GetAttribute("OceanTD_PlaceId")
@@ -403,13 +544,16 @@ local function parsePlaceOpts(raw: any): PlaceOpts
 			variantIndex = tonumber(raw.variantIndex),
 			scaleMult = tonumber(raw.scaleMult),
 			sizeClass = tonumber(raw.sizeClass),
+			scaleWidth = tonumber(raw.scaleWidth),
+			scaleHeight = tonumber(raw.scaleHeight),
+			facingYaw = tonumber(raw.facingYaw),
 		}
 	end
 	return {}
 end
 
 -- consumeSeed: player places debit inventory. Internal hydrate/load can pass false.
--- placeOpts: legacy number diameter, or { diameter, variantIndex, scaleMult, sizeClass }.
+-- placeOpts: legacy number diameter, or { diameter, variantIndex, scaleMult, sizeClass, ... }.
 function PlacementService.place(
 	player: Player,
 	itemId: string,
@@ -456,13 +600,23 @@ function PlacementService.place(
 	local sizeClass = 1
 	local variant: number? = nil
 	local scale: number? = nil
+	local scaleWidth: number? = nil
+	local scaleHeight: number? = nil
+	local facingYaw: number? = nil
 	if species.speciesId == "BrainCoral" or itemId == "BrainCoral" then
 		-- Prefer client ghost size so preview matches the placed coral.
 		diameter = CoralVisual.sanitizeBrainDiameter(opts.diameter)
 	elseif CoralVisual.isMeshSpecies(species.speciesId) then
 		sizeClass = CoralSize.clampTier(opts.sizeClass or 1)
-		variant = CoralVisual.clampMeshVariant(opts.variantIndex)
-		scale = CoralVisual.sanitizeMeshScale(opts.scaleMult)
+		variant = CoralVisual.clampMeshVariant(opts.variantIndex, species.speciesId)
+		if CoralVisual.isSeaFan(species.speciesId) then
+			scale = CoralVisual.sanitizeSeaFanAxis(opts.scaleMult)
+			scaleWidth = CoralVisual.sanitizeSeaFanAxis(opts.scaleWidth)
+			scaleHeight = CoralVisual.sanitizeSeaFanAxis(opts.scaleHeight)
+			facingYaw = if typeof(opts.facingYaw) == "number" and opts.facingYaw == opts.facingYaw then opts.facingYaw else 0
+		else
+			scale = CoralVisual.sanitizeMeshScale(opts.scaleMult)
+		end
 	end
 	local gx, gy, gz = GridMath.worldToGrid(localPos, Vector3.zero)
 	local occupied, occupyErr = GridService.tryOccupy(
@@ -500,7 +654,11 @@ function PlacementService.place(
 		diameter,
 		sizeClass,
 		variant,
-		scale
+		scale,
+		scaleWidth,
+		scaleHeight,
+		facingYaw,
+		nil
 	)
 	if not visual then
 		warnPlace("Visual spawn failed after occupy — rolling back cell")
@@ -517,6 +675,13 @@ function PlacementService.place(
 		local cell = GridService.getCellAtGrid(plotId, gx, gy, gz)
 		if cell then
 			cell.diameter = diameter
+		end
+		if CoralVisual.isSeaFan(species.speciesId) then
+			GridService.setSeaFanExtras(plotId, gx, gy, gz, scaleWidth, scaleHeight, facingYaw, nil, nil, nil)
+			if typeof(facingYaw) == "number" then
+				visual:SetAttribute("OceanTD_FacingYaw", facingYaw)
+				CoralVisual.alignMeshToSurface(visual, worldPos, facingYaw)
+			end
 		end
 	end
 
@@ -547,6 +712,7 @@ function PlacementService.place(
 		variantIndex = variant,
 		scaleMult = scale,
 		sizeClass = sizeClass,
+		facingYaw = facingYaw,
 	}
 end
 
@@ -557,6 +723,7 @@ export type MoveResult = {
 	speciesId: string?,
 	itemId: string?,
 	placeId: string?,
+	facingYaw: number?,
 }
 
 -- Move an existing placed coral from one plot cell to another.
@@ -564,7 +731,8 @@ function PlacementService.move(
 	player: Player,
 	placeId: string,
 	fromWorldPos: Vector3,
-	toWorldPos: Vector3
+	toWorldPos: Vector3,
+	facingYaw: number?
 ): MoveResult
 	if typeof(placeId) ~= "string" or placeId == "" then
 		return { ok = false, errorCode = "BadRequest" }
@@ -617,19 +785,47 @@ function PlacementService.move(
 	end
 	visual:SetAttribute("OceanTD_PlaceId", resolvedPlaceId)
 
+	local yawToApply: number? = nil
+	if typeof(facingYaw) == "number" and facingYaw == facingYaw then
+		yawToApply = facingYaw
+	end
+
+	local function applyFacing(cellGx: number, cellGy: number, cellGz: number)
+		if yawToApply == nil then
+			return
+		end
+		if CoralVisual.isSeaFan(visual:GetAttribute("OceanTD_SpeciesId")) or CoralVisual.isSeaFan(fromCell.id) then
+			visual:SetAttribute("OceanTD_FacingYaw", yawToApply)
+			GridService.setSeaFanExtras(plotId, cellGx, cellGy, cellGz, nil, nil, yawToApply, nil, nil, nil)
+		end
+	end
+
 	local fgx, fgy, fgz = GridMath.worldToGrid(fromLocal, Vector3.zero)
 	local tgx, tgy, tgz = GridMath.worldToGrid(toLocal, Vector3.zero)
 	if fgx == tgx and fgy == tgy and fgz == tgz then
+		applyFacing(fgx, fgy, fgz)
+		local yaw = yawToApply
+		if typeof(yaw) ~= "number" then
+			local attr = visual:GetAttribute("OceanTD_FacingYaw")
+			yaw = if typeof(attr) == "number" then attr else nil
+		end
 		if CoralVisual.isMeshSpecies(fromCell.id) or CoralVisual.isMeshSpecies(visual:GetAttribute("OceanTD_SpeciesId")) then
-			CoralVisual.alignMeshToSurface(visual, toWorldPos)
+			CoralVisual.alignMeshToSurface(visual, toWorldPos, yaw)
 		else
 			visual.CFrame = CFrame.new(toWorldPos)
 		end
+		local returnedYaw = yawToApply
+		if typeof(returnedYaw) ~= "number" then
+			local attr = visual:GetAttribute("OceanTD_FacingYaw")
+			returnedYaw = if typeof(attr) == "number" then attr else nil
+		end
+		scheduleCoralColorSave(player, plotId)
 		return {
 			ok = true,
 			worldPos = toWorldPos,
 			itemId = fromCell.id,
 			placeId = resolvedPlaceId,
+			facingYaw = returnedYaw,
 		}
 	end
 
@@ -684,12 +880,27 @@ function PlacementService.move(
 			cell.variantIndex,
 			cell.scaleMult
 		)
+		local rolled = GridService.getCellAtGrid(plotId, fgx, fgy, fgz)
+		if rolled then
+			GridService.copySeaFanExtras(cell, rolled)
+		end
 		return { ok = false, errorCode = occupyErr or "SpotTaken" }
 	end
 
+	local newCell = GridService.getCellAtGrid(plotId, tgx, tgy, tgz)
+	if newCell then
+		GridService.copySeaFanExtras(cell, newCell)
+	end
+	applyFacing(tgx, tgy, tgz)
+
 	local species = SpeciesCatalog.getByItemId(cell.id)
+	local yaw = yawToApply
+	if typeof(yaw) ~= "number" then
+		local attr = visual:GetAttribute("OceanTD_FacingYaw")
+		yaw = if typeof(attr) == "number" then attr else nil
+	end
 	if species and CoralVisual.isMeshSpecies(species.speciesId) then
-		CoralVisual.alignMeshToSurface(visual, toWorldPos)
+		CoralVisual.alignMeshToSurface(visual, toWorldPos, yaw)
 	else
 		visual.CFrame = CFrame.new(toWorldPos)
 	end
@@ -711,6 +922,7 @@ function PlacementService.move(
 		speciesId = if species then species.speciesId else nil,
 		itemId = cell.id,
 		placeId = resolvedPlaceId,
+		facingYaw = yaw,
 	}
 end
 
@@ -850,6 +1062,8 @@ function PlacementService.clearPlot(player: Player, allowEmpty: boolean?, record
 	end)
 
 	if #pending == 0 then
+		-- Orphan mesh visuals (SeaGrass/SeaFan) can remain if grid was already empty.
+		PlacementService.clearPlotVisuals(plotId)
 		if allowEmpty then
 			PersistenceService.allowIntentionalClear(player.UserId)
 			return { ok = true, count = 0, entries = {}, credits = {} }
@@ -905,6 +1119,9 @@ function PlacementService.clearPlot(player: Player, allowEmpty: boolean?, record
 			entries = entries,
 		})
 	end
+
+	-- Mesh species can miss per-cell visual lookup (center ≠ plant grid); wipe leftovers.
+	PlacementService.clearPlotVisuals(plotId)
 
 	log("Cleared plot", plotId, "for", player.Name, "count=", #entries)
 	return {
@@ -963,7 +1180,15 @@ function PlacementService.applyLayout(player: Player, layout: { LayoutObject }):
 			obj.colorG,
 			obj.colorB,
 			obj.variantIndex,
-			obj.scaleMult
+			obj.scaleMult,
+			{
+				scaleWidth = obj.scaleWidth,
+				scaleHeight = obj.scaleHeight,
+				facingYaw = obj.facingYaw,
+				webColorR = obj.webColorR,
+				webColorG = obj.webColorG,
+				webColorB = obj.webColorB,
+			}
 		)
 		if result.ok then
 			placed += 1
@@ -1153,9 +1378,23 @@ function PlacementService.setCoralSize(
 
 	if CoralVisual.isMeshSpecies(speciesId) then
 		-- New random mesh + scale jitter each size change / unlock.
-		variant = CoralVisual.randomMeshVariant()
-		scale = CoralVisual.randomMeshScale()
-		local newPart, height, vOut, sOut = CoralVisual.restyleMesh(visual, want, variant, scale, savedAnchor)
+		variant = CoralVisual.randomMeshVariant(if typeof(speciesId) == "string" then speciesId else nil)
+		local scaleWidth: number? = nil
+		local scaleHeight: number? = nil
+		if CoralVisual.isSeaFan(speciesId) then
+			scale, scaleWidth, scaleHeight = CoralVisual.randomSeaFanScales()
+		else
+			scale = CoralVisual.randomMeshScale()
+		end
+		local newPart, height, vOut, sOut = CoralVisual.restyleMesh(
+			visual,
+			want,
+			variant,
+			scale,
+			savedAnchor,
+			scaleWidth,
+			scaleHeight
+		)
 		if newPart then
 			visual = newPart
 			newDiam = height or newPart.Size.Y
@@ -1165,13 +1404,22 @@ function PlacementService.setCoralSize(
 			newDiam = visual.Size.Y
 		end
 		visual:SetAttribute("OceanTD_SizeTier", newTier)
+		if typeof(scaleWidth) == "number" then
+			visual:SetAttribute("OceanTD_ScaleWidth", scaleWidth)
+		end
+		if typeof(scaleHeight) == "number" then
+			visual:SetAttribute("OceanTD_ScaleHeight", scaleHeight)
+		end
+		if not GridService.setSizeAtGrid(plotId, gx, gy, gz, newDiam, newTier, want, variant, scale, scaleWidth, scaleHeight) then
+			return { ok = false, errorCode = "Missing" }
+		end
 	else
 		newDiam = CoralSize.randomDiameter(want)
+		if not GridService.setSizeAtGrid(plotId, gx, gy, gz, newDiam, newTier, want, variant, scale) then
+			return { ok = false, errorCode = "Missing" }
+		end
 	end
 
-	if not GridService.setSizeAtGrid(plotId, gx, gy, gz, newDiam, newTier, want, variant, scale) then
-		return { ok = false, errorCode = "Missing" }
-	end
 	-- Keep saved VisualPos on the cell matching the plant anchor (restyle must not relocate the cell).
 	local cell = GridService.getCellAtGrid(plotId, gx, gy, gz)
 	if cell then
@@ -1189,7 +1437,7 @@ function PlacementService.setCoralSize(
 	if typeof(scale) == "number" then
 		visual:SetAttribute("OceanTD_ScaleMult", scale)
 	end
-	PersistenceService.save(player, GridService.snapshot(plotId))
+	PersistenceService.save(player, PlacementService.snapshotLayout(plotId))
 	log("Size", placeId, "class", want, "tier", newTier, "d", newDiam)
 	return {
 		ok = true,
@@ -1207,8 +1455,23 @@ function PlacementService.setCoralColor(
 	colorIndex: number,
 	colorR: number?,
 	colorG: number?,
-	colorB: number?
-): { ok: boolean, errorCode: string?, colorIndex: number?, colorR: number?, colorG: number?, colorB: number? }
+	colorB: number?,
+	webColorIndex: number?,
+	webColorR: number?,
+	webColorG: number?,
+	webColorB: number?
+): {
+	ok: boolean,
+	errorCode: string?,
+	colorIndex: number?,
+	colorR: number?,
+	colorG: number?,
+	colorB: number?,
+	webColorIndex: number?,
+	webColorR: number?,
+	webColorG: number?,
+	webColorB: number?,
+}
 	if typeof(placeId) ~= "string" or placeId == "" then
 		return { ok = false, errorCode = "BadRequest" }
 	end
@@ -1235,11 +1498,50 @@ function PlacementService.setCoralColor(
 		return { ok = false, errorCode = "Missing" }
 	end
 	visual:SetAttribute("OceanTD_ColorIndex", idx)
-	CoralVisual.setRestColor(visual, paint)
+	local webPaint: Color3? = nil
+	local webIdx: number? = nil
+	if CoralVisual.isSeaFan(visual:GetAttribute("OceanTD_SpeciesId")) then
+		-- Web always shares the stem swatch hue; shade may differ.
+		webIdx = idx
+		local base = PlotOutlineColors.coralColor(idx)
+		webPaint = PlotOutlineColors.randomHueVariant(webIdx)
+		if typeof(webColorR) == "number" and typeof(webColorG) == "number" and typeof(webColorB) == "number" then
+			local candidate = Color3.new(
+				math.clamp(webColorR, 0, 1),
+				math.clamp(webColorG, 0, 1),
+				math.clamp(webColorB, 0, 1)
+			)
+			local h1, s1 = candidate:ToHSV()
+			local h2, s2 = base:ToHSV()
+			local dh = math.abs(h1 - h2)
+			if dh > 0.5 then
+				dh = 1 - dh
+			end
+			-- Accept client shade only when it's still in the selected swatch family.
+			local sameFamily = (s2 < 0.12 and s1 < 0.22) or dh <= 0.08
+			if sameFamily then
+				webPaint = candidate
+			end
+		end
+		CoralVisual.setRestColor(visual, paint, webPaint, webIdx)
+		GridService.setSeaFanExtras(plotId, gx, gy, gz, nil, nil, nil, webPaint.R, webPaint.G, webPaint.B)
+	else
+		CoralVisual.setRestColor(visual, paint)
+	end
 	-- Live grid/visual now; DataStore after 5s idle so rapid dice rolls don't thrash saves.
 	scheduleCoralColorSave(player, plotId)
 	log("Color", placeId, "index", idx)
-	return { ok = true, colorIndex = idx, colorR = paint.R, colorG = paint.G, colorB = paint.B }
+	return {
+		ok = true,
+		colorIndex = idx,
+		colorR = paint.R,
+		colorG = paint.G,
+		colorB = paint.B,
+		webColorIndex = webIdx,
+		webColorR = if webPaint then webPaint.R else nil,
+		webColorG = if webPaint then webPaint.G else nil,
+		webColorB = if webPaint then webPaint.B else nil,
+	}
 end
 
 function PlacementService.init()

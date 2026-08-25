@@ -39,6 +39,14 @@ export type LayoutObject = {
 	variantIndex: number?,
 	-- Mesh species: random size jitter applied to template Size. Missing → 1 / re-roll.
 	scaleMult: number?,
+	-- SeaFan: independent width/height jitter (±15%) and yaw (radians, Y-up).
+	scaleWidth: number?,
+	scaleHeight: number?,
+	facingYaw: number?,
+	-- SeaFan web paint (0–1). Stem uses colorR/G/B.
+	webColorR: number?,
+	webColorG: number?,
+	webColorB: number?,
 }
 
 export type PlotSaveSlot = {
@@ -114,6 +122,7 @@ function PlotTypes.defaultProfile(): PlayerProfile
 			BrainCoral = Constants.STARTING_BRAIN_CORAL_SEEDS,
 			Sponge = Constants.STARTING_SPONGE_SEEDS,
 			SeaGrass = Constants.STARTING_SEA_GRASS_SEEDS,
+			SeaFan = Constants.STARTING_SEA_FAN_SEEDS,
 		},
 		skillTree = {},
 		layout = {},

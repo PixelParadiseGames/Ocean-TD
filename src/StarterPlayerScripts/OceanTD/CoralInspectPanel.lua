@@ -327,15 +327,24 @@ local function tweenSpongeScale(
 	toMult: number,
 	sec: number
 )
-	part.Size = fullSize * fromMult
-	CoralVisual.alignMeshToSurface(part, surfaceAnchor)
+	local isSeaFan = CoralVisual.isSeaFan(part:GetAttribute("OceanTD_SpeciesId"))
+	if isSeaFan then
+		CoralVisual.applySeaFanScaleMult(part, fullSize, fromMult, surfaceAnchor)
+	else
+		part.Size = fullSize * fromMult
+		CoralVisual.alignMeshToSurface(part, surfaceAnchor)
+	end
 	local t0 = os.clock()
 	while true do
 		local u = math.clamp((os.clock() - t0) / sec, 0, 1)
 		local ease = 1 - (1 - u) * (1 - u)
 		local mult = fromMult + (toMult - fromMult) * ease
-		part.Size = fullSize * mult
-		CoralVisual.alignMeshToSurface(part, surfaceAnchor)
+		if isSeaFan then
+			CoralVisual.applySeaFanScaleMult(part, fullSize, mult, surfaceAnchor)
+		else
+			part.Size = fullSize * mult
+			CoralVisual.alignMeshToSurface(part, surfaceAnchor)
+		end
 		if u >= 1 then
 			break
 		end
@@ -510,8 +519,21 @@ applyServerSize = function(result: any, unlock: boolean, partOverride: BasePart?
 
 	local speciesId = part:GetAttribute("OceanTD_SpeciesId")
 	if CoralVisual.isMeshSpecies(speciesId) then
-		part.Transparency = 0
-		part.LocalTransparencyModifier = 0
+		if CoralVisual.isSeaFan(speciesId) then
+			CoralVisual.clearSeaFanClientHide(part)
+			local stemT = part:GetAttribute("OceanTD_RestTransparency")
+			if typeof(stemT) == "number" then
+				part.Transparency = stemT
+			end
+			local web = part:FindFirstChild("Web")
+			local webT = part:GetAttribute("OceanTD_WebRestTransparency")
+			if web and web:IsA("BasePart") and typeof(webT) == "number" then
+				web.Transparency = webT
+			end
+		else
+			part.Transparency = 0
+			part.LocalTransparencyModifier = 0
+		end
 		if fromCinematic then
 			RelocateController.swapSelectedPart(part)
 		else
@@ -542,7 +564,7 @@ applyServerSize = function(result: any, unlock: boolean, partOverride: BasePart?
 end
 
 local function armHideReplacement(placeId: string): () -> ()
-	-- SeaGrass clone replicates at full size for a frame; hide+shrink the instant it appears.
+	-- SeaGrass/SeaFan clone replicates at full size for a frame; hide+shrink the instant it appears.
 	local root = workspace:FindFirstChild("OceanTD_Placed")
 	if not root then
 		return function() end
@@ -563,7 +585,21 @@ local function armHideReplacement(placeId: string): () -> ()
 		desc:SetAttribute("OceanTD_CineFullY", full.Y)
 		desc:SetAttribute("OceanTD_CineFullZ", full.Z)
 		desc.LocalTransparencyModifier = 1
-		desc.Size = full * 0.05
+		if CoralVisual.isSeaFan(desc:GetAttribute("OceanTD_SpeciesId")) then
+			CoralVisual.applySeaFanScaleMult(desc, full, 0.05, CoralVisual.readGridAnchor(desc))
+			for _, ch in ipairs(desc:GetChildren()) do
+				if ch:IsA("BasePart") then
+					ch.LocalTransparencyModifier = 1
+				end
+			end
+		else
+			desc.Size = full * 0.05
+			for _, ch in ipairs(desc:GetChildren()) do
+				if ch:IsA("BasePart") and (ch.Name == "Web" or string.sub(ch.Name, 1, 4) == "Food") then
+					ch.LocalTransparencyModifier = 1
+				end
+			end
+		end
 	end)
 	return function()
 		conn:Disconnect()
@@ -610,6 +646,13 @@ local function runSpongeSizeCinematic(oldPart: BasePart, placeId: string, target
 	end
 
 	oldPart.LocalTransparencyModifier = 1
+	if CoralVisual.isSeaFan(oldPart:GetAttribute("OceanTD_SpeciesId")) then
+		for _, ch in ipairs(oldPart:GetChildren()) do
+			if ch:IsA("BasePart") then
+				ch.LocalTransparencyModifier = 1
+			end
+		end
+	end
 	local disarmHide = armHideReplacement(placeId)
 
 	local ok, result = pcall(function()
@@ -619,6 +662,9 @@ local function runSpongeSizeCinematic(oldPart: BasePart, placeId: string, target
 		disarmHide()
 		if oldPart.Parent then
 			oldPart.LocalTransparencyModifier = 0
+			if CoralVisual.isSeaFan(oldPart:GetAttribute("OceanTD_SpeciesId")) then
+				CoralVisual.clearSeaFanClientHide(oldPart)
+			end
 		end
 		if unlockNext then
 			RelocateController.setCinematicHold(false)
@@ -648,19 +694,27 @@ local function runSpongeSizeCinematic(oldPart: BasePart, placeId: string, target
 	part:SetAttribute("OceanTD_CineFullZ", nil)
 
 	local growAnchor = anchor or CoralVisual.readGridAnchor(part)
-	part.LocalTransparencyModifier = 1
-	part.Size = newFull * 0.05
-	if growAnchor then
-		CoralVisual.alignMeshToSurface(part, growAnchor)
+	if CoralVisual.isSeaFan(part:GetAttribute("OceanTD_SpeciesId")) then
+		CoralVisual.applySeaFanScaleMult(part, newFull, 0.05, growAnchor)
+		CoralVisual.clearSeaFanClientHide(part)
+	else
+		part.LocalTransparencyModifier = 1
+		part.Size = newFull * 0.05
+		if growAnchor then
+			CoralVisual.alignMeshToSurface(part, growAnchor)
+		end
+		part.Transparency = 0
+		part.LocalTransparencyModifier = 0
 	end
-	part.Transparency = 0
-	part.LocalTransparencyModifier = 0
 
 	playGrowSound()
 	if growAnchor then
 		tweenSpongeScale(part, newFull, growAnchor, 0.05, 1, 0.9)
 	else
 		tweenMeshScale(part, newFull, 0.05, 1, 0.9)
+	end
+	if CoralVisual.isSeaFan(part:GetAttribute("OceanTD_SpeciesId")) then
+		CoralVisual.clearSeaFanClientHide(part)
 	end
 
 	if unlockNext and startCf and workspace.CurrentCamera then
@@ -995,8 +1049,15 @@ end
 local function applyCoralPaint(part: BasePart, idx: number, paint: Color3, placeId: string)
 	activeColorIndex = idx
 	focusColorIndex = idx
+	local webPaint: Color3? = nil
+	local webIdx: number? = nil
+	if CoralVisual.isSeaFan(part:GetAttribute("OceanTD_SpeciesId")) then
+		-- Same palette index as the selected swatch; independent shade only.
+		webIdx = idx
+		webPaint = PlotOutlineColors.randomHueVariant(idx)
+	end
 	part:SetAttribute("OceanTD_ColorIndex", idx)
-	CoralVisual.setRestColor(part, paint)
+	CoralVisual.setRestColor(part, paint, webPaint, webIdx)
 	RelocateController.syncSelectedRestColor()
 	refreshColorSwatches()
 	UiHaptics.pulseShort()
@@ -1004,7 +1065,17 @@ local function applyCoralPaint(part: BasePart, idx: number, paint: Color3, place
 	local myToken = colorSendToken
 	task.spawn(function()
 		local ok, result = pcall(function()
-			return colorRf:InvokeServer(placeId, idx, paint.R, paint.G, paint.B)
+			return colorRf:InvokeServer(
+				placeId,
+				idx,
+				paint.R,
+				paint.G,
+				paint.B,
+				webIdx,
+				if webPaint then webPaint.R else nil,
+				if webPaint then webPaint.G else nil,
+				if webPaint then webPaint.B else nil
+			)
 		end)
 		if myToken ~= colorSendToken then
 			return
@@ -1021,7 +1092,15 @@ local function applyCoralPaint(part: BasePart, idx: number, paint: Color3, place
 		activeColorIndex = confirmed
 		part:SetAttribute("OceanTD_ColorIndex", confirmed)
 		local confirmedPaint = PlotOutlineColors.resolveCoralPaint(confirmed, result.colorR, result.colorG, result.colorB)
-		CoralVisual.setRestColor(part, confirmedPaint)
+		local confirmedWeb: Color3? = nil
+		local confirmedWebIdx: number? = nil
+		if typeof(result.webColorR) == "number" and typeof(result.webColorG) == "number" and typeof(result.webColorB) == "number" then
+			confirmedWeb = Color3.new(result.webColorR, result.webColorG, result.webColorB)
+		end
+		if typeof(result.webColorIndex) == "number" then
+			confirmedWebIdx = result.webColorIndex
+		end
+		CoralVisual.setRestColor(part, confirmedPaint, confirmedWeb, confirmedWebIdx)
 		RelocateController.syncSelectedRestColor()
 		refreshColorSwatches()
 	end)
@@ -1237,17 +1316,18 @@ function CoralInspectPanel.bind(panel: GuiObject, catalogFrame: GuiObject)
 	edge.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
 	edge.Parent = recycle
 
-	local icon = Instance.new("ImageLabel")
-	icon.Name = "Icon"
-	icon.BackgroundTransparency = 1
-	icon.AnchorPoint = Vector2.new(0.5, 0.5)
-	icon.Position = UDim2.fromScale(0.5, 0.5)
-	icon.Size = UDim2.fromScale(0.62, 0.62)
-	icon.Image = RECYCLE_ICON_IMAGE
-	icon.ScaleType = Enum.ScaleType.Fit
-	icon.ZIndex = 2
-	icon.Active = false
-	icon.Parent = recycle
+	local recycleIcon = Instance.new("ImageLabel")
+	recycleIcon.Name = "Icon"
+	recycleIcon.BackgroundTransparency = 1
+	recycleIcon.AnchorPoint = Vector2.new(0.5, 0.5)
+	recycleIcon.Position = UDim2.fromScale(0.5, 0.5)
+	-- ~20% smaller than prior 0.62 so the logo sits inside the green circle.
+	recycleIcon.Size = UDim2.fromScale(0.5, 0.5)
+	recycleIcon.Image = RECYCLE_ICON_IMAGE
+	recycleIcon.ScaleType = Enum.ScaleType.Fit
+	recycleIcon.ZIndex = 2
+	recycleIcon.Active = false
+	recycleIcon.Parent = recycle
 
 	recycleBtn = recycle
 	recycle.Activated:Connect(onDeletePressed)
@@ -1257,9 +1337,11 @@ function CoralInspectPanel.bind(panel: GuiObject, catalogFrame: GuiObject)
 		if h < 8 then
 			return
 		end
-		-- 20% smaller than old 90%-height icon => 72% of row height.
+		-- Match coral photo and recycle button size.
 		local side = math.max(28, math.floor(h * 0.72 + 0.5))
-		icon.Size = UDim2.fromOffset(side, side)
+		if iconLbl then
+			iconLbl.Size = UDim2.fromOffset(side, side)
+		end
 		if recycleBtn then
 			recycleBtn.Size = UDim2.fromOffset(side, side)
 		end
@@ -1475,7 +1557,8 @@ function CoralInspectPanel.bind(panel: GuiObject, catalogFrame: GuiObject)
 
 	local row3 = Instance.new("Frame")
 	row3.BackgroundTransparency = 1
-	row3.Size = UDim2.new(1, 0, 0.48, 0)
+	-- Height is set from content in refreshSizeRow (was 0.48 scale → huge gap above UPGRADE).
+	row3.Size = UDim2.new(1, 0, 0, 140)
 	row3.LayoutOrder = 4
 	row3.Parent = frame
 	local sizeGrid = Instance.new("UIGridLayout")
@@ -1484,6 +1567,7 @@ function CoralInspectPanel.bind(panel: GuiObject, catalogFrame: GuiObject)
 	sizeGrid.FillDirectionMaxCells = 3
 	sizeGrid.SortOrder = Enum.SortOrder.LayoutOrder
 	sizeGrid.HorizontalAlignment = Enum.HorizontalAlignment.Center
+	sizeGrid.VerticalAlignment = Enum.VerticalAlignment.Top
 	sizeGrid.CellPadding = UDim2.fromOffset(6, 0)
 	sizeGrid.Parent = row3
 
@@ -1742,6 +1826,7 @@ function CoralInspectPanel.bind(panel: GuiObject, catalogFrame: GuiObject)
 		local statH = statLine * 4
 		local cellH = 2 + circle + 4 + wordH + 2 + statH + 4
 		sizeGrid.CellSize = UDim2.fromOffset(math.max(1, cellW), cellH)
+		row3.Size = UDim2.new(1, 0, 0, cellH)
 		for i = 1, 3 do
 			local letter = h1s[i]
 			local word = h2s[i]

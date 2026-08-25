@@ -67,7 +67,14 @@ local function assignGrid(plotId: string, bucket: PlotBucket, part: BasePart)
 	if not plot or plot.plotId ~= plotId then
 		return
 	end
-	local lp = GridMath.worldToPlotLocal(part.Position, plot.cframe)
+	-- SeaGrass/SeaFan sit above the plant cell — prefer authored grid anchor.
+	local ax = part:GetAttribute("OceanTD_GridAnchorX")
+	local ay = part:GetAttribute("OceanTD_GridAnchorY")
+	local az = part:GetAttribute("OceanTD_GridAnchorZ")
+	local sample = if typeof(ax) == "number" and typeof(ay) == "number" and typeof(az) == "number"
+		then Vector3.new(ax, ay, az)
+		else part.Position
+	local lp = GridMath.worldToPlotLocal(sample, plot.cframe)
 	local gx, gy, gz = GridMath.worldToGrid(lp, Vector3.zero)
 	local key = GridMath.key(gx, gy, gz)
 	bucket.byKey[key] = part

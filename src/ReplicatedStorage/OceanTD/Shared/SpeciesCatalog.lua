@@ -61,11 +61,28 @@ local BY_ID: { [string]: SpeciesDef } = {
 		colorMin = Color3.fromRGB(40, 140, 55),
 		colorMax = Color3.fromRGB(70, 180, 80),
 		castShadow = false,
-		canCollide = true,
+		-- Mesh itself is non-collidable; OceanTD_Climb TrussPart is the only collider.
+		canCollide = false,
 		reloadSec = 6, -- same as BrainCoral for now
 		foodFill = 1,
 		meshFolder = "Seagrass",
 		defaultColorIndex = 11, -- green
+	},
+	SeaFan = {
+		speciesId = "SeaFan",
+		itemId = "SeaFan",
+		displayName = "Sea Fan",
+		diameter = 4,
+		material = Enum.Material.Pebble,
+		-- Fallback only; first place keeps imported Stem/Web colors.
+		colorMin = Color3.fromRGB(200, 90, 60),
+		colorMax = Color3.fromRGB(255, 140, 90),
+		castShadow = false,
+		canCollide = true,
+		reloadSec = 6,
+		foodFill = 1,
+		meshFolder = "Seafan",
+		defaultColorIndex = 7, -- pumpkin
 	},
 }
 

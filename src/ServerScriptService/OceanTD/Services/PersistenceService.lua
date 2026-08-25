@@ -134,6 +134,26 @@ local function sanitizeLayout(raw: any): { LayoutObject }
 			if scaleMult and scaleMult > 0 then
 				entry.scaleMult = math.clamp(scaleMult, 0.7, 1.35)
 			end
+			local scaleWidth = tonumber(obj.scaleWidth)
+			if scaleWidth and scaleWidth > 0 then
+				entry.scaleWidth = math.clamp(scaleWidth, 0.7, 1.35)
+			end
+			local scaleHeight = tonumber(obj.scaleHeight)
+			if scaleHeight and scaleHeight > 0 then
+				entry.scaleHeight = math.clamp(scaleHeight, 0.7, 1.35)
+			end
+			local facingYaw = tonumber(obj.facingYaw)
+			if typeof(facingYaw) == "number" and facingYaw == facingYaw then
+				entry.facingYaw = facingYaw
+			end
+			local webColorR = tonumber(obj.webColorR)
+			local webColorG = tonumber(obj.webColorG)
+			local webColorB = tonumber(obj.webColorB)
+			if webColorR and webColorG and webColorB then
+				entry.webColorR = math.clamp(webColorR, 0, 1)
+				entry.webColorG = math.clamp(webColorG, 0, 1)
+				entry.webColorB = math.clamp(webColorB, 0, 1)
+			end
 			table.insert(layout, entry)
 		end
 	end
@@ -160,6 +180,12 @@ local function cloneLayout(layout: { LayoutObject }): { LayoutObject }
 			colorB = obj.colorB,
 			variantIndex = obj.variantIndex,
 			scaleMult = obj.scaleMult,
+			scaleWidth = obj.scaleWidth,
+			scaleHeight = obj.scaleHeight,
+			facingYaw = obj.facingYaw,
+			webColorR = obj.webColorR,
+			webColorG = obj.webColorG,
+			webColorB = obj.webColorB,
 		})
 	end
 	return out
@@ -285,6 +311,7 @@ local function sanitizeInventory(raw: any, isNewProfile: boolean): { [string]: a
 				BrainCoral = Constants.STARTING_BRAIN_CORAL_SEEDS,
 				Sponge = Constants.STARTING_SPONGE_SEEDS,
 				SeaGrass = Constants.STARTING_SEA_GRASS_SEEDS,
+				SeaFan = Constants.STARTING_SEA_FAN_SEEDS,
 			}
 		end
 		return {}
@@ -813,18 +840,37 @@ function PersistenceService.renameSlot(player: Player, index: number, name: stri
 	return true
 end
 
+local function isUnlimitedSeedItem(itemId: string): boolean
+	return Constants.SEA_FAN_UNLIMITED_SEEDS == true and itemId == "SeaFan"
+end
+
+local function ensureUnlimitedStock(inv: { [string]: any }, itemId: string): number
+	local stock = Constants.STARTING_SEA_FAN_SEEDS
+	local cur = tonumber(inv[itemId]) or 0
+	if cur < stock then
+		inv[itemId] = stock
+		return stock
+	end
+	return cur
+end
+
 -- Credit seed count in profile.inventory[itemId] (number). Used by recycle / clear / load swap.
 function PersistenceService.creditItem(player: Player, itemId: string, amount: number?): number
 	local profile = profiles[player]
 	if not profile or typeof(itemId) ~= "string" or itemId == "" then
 		return 0
 	end
-	local add = math.max(1, math.floor(tonumber(amount) or 1))
 	local inv = profile.inventory
 	if typeof(inv) ~= "table" then
 		inv = {}
 		profile.inventory = inv
 	end
+	if isUnlimitedSeedItem(itemId) then
+		local nextCount = ensureUnlimitedStock(inv, itemId)
+		log("Credit skipped (unlimited)", itemId, "→", nextCount, "for", player.Name)
+		return nextCount
+	end
+	local add = math.max(1, math.floor(tonumber(amount) or 1))
 	local cur = tonumber(inv[itemId]) or 0
 	local nextCount = cur + add
 	inv[itemId] = nextCount
@@ -838,12 +884,17 @@ function PersistenceService.debitItem(player: Player, itemId: string, amount: nu
 	if not profile or typeof(itemId) ~= "string" or itemId == "" then
 		return 0
 	end
-	local sub = math.max(1, math.floor(tonumber(amount) or 1))
 	local inv = profile.inventory
 	if typeof(inv) ~= "table" then
 		inv = {}
 		profile.inventory = inv
 	end
+	if isUnlimitedSeedItem(itemId) then
+		local nextCount = ensureUnlimitedStock(inv, itemId)
+		log("Debit skipped (unlimited)", itemId, "→", nextCount, "for", player.Name)
+		return nextCount
+	end
+	local sub = math.max(1, math.floor(tonumber(amount) or 1))
 	local cur = tonumber(inv[itemId]) or 0
 	local nextCount = math.max(0, cur - sub)
 	inv[itemId] = nextCount
@@ -857,12 +908,17 @@ function PersistenceService.tryDebitItem(player: Player, itemId: string, amount:
 	if not profile or typeof(itemId) ~= "string" or itemId == "" then
 		return false, 0
 	end
-	local sub = math.max(1, math.floor(tonumber(amount) or 1))
 	local inv = profile.inventory
 	if typeof(inv) ~= "table" then
 		inv = {}
 		profile.inventory = inv
 	end
+	if isUnlimitedSeedItem(itemId) then
+		local nextCount = ensureUnlimitedStock(inv, itemId)
+		log("TryDebit skipped (unlimited)", itemId, "→", nextCount, "for", player.Name)
+		return true, nextCount
+	end
+	local sub = math.max(1, math.floor(tonumber(amount) or 1))
 	local cur = tonumber(inv[itemId]) or 0
 	if cur < sub then
 		return false, cur
@@ -940,6 +996,10 @@ function PersistenceService.load(player: Player): PlayerProfile
 			inv.SeaGrass = Constants.STARTING_SEA_GRASS_SEEDS
 			log("Starter SeaGrass grant userId=", userId, "x", Constants.STARTING_SEA_GRASS_SEEDS)
 		end
+		if inv.SeaFan == nil then
+			inv.SeaFan = Constants.STARTING_SEA_FAN_SEEDS
+			log("Starter SeaFan grant userId=", userId, "x", Constants.STARTING_SEA_FAN_SEEDS)
+		end
 	end
 	profiles[player] = profile
 	log(
@@ -996,7 +1056,7 @@ function PersistenceService.save(player: Player, layoutOverride: { LayoutObject 
 		processedReceipts = cloneReceipts(profile.processedReceipts),
 		inventory = profile.inventory,
 		skillTree = profile.skillTree,
-		layout = profile.layout,
+		layout = cloneLayout(profile.layout),
 		plotSaves = {
 			activeIndex = profile.plotSaves.activeIndex,
 			slots = slotsOut,

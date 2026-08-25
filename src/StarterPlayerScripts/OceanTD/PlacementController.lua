@@ -53,6 +53,9 @@ local ghost: BasePart? = nil
 local ghostPlaceDiameter: number? = nil
 local ghostPlaceVariant: number? = nil
 local ghostPlaceScale: number? = nil
+local ghostPlaceScaleWidth: number? = nil
+local ghostPlaceScaleHeight: number? = nil
+local ghostPlaceFacingYaw: number? = nil
 local warnLabel: TextLabel? = nil
 local moveHintImage: ImageLabel? = nil
 local moveHintBillboard: BillboardGui? = nil
@@ -61,6 +64,8 @@ local chromeBillboard: BillboardGui? = nil
 local chromeAdorneePart: BasePart? = nil
 local checkBtn: TextButton? = nil
 local cancelBtn: TextButton? = nil
+local rotLeftBtn: ImageButton? = nil
+local rotRightBtn: ImageButton? = nil
 local confirmPos: Vector3? = nil -- ground anchor under finger (actual place pos)
 local placeAnchor: Vector3? = nil
 local validSpot = false
@@ -277,6 +282,9 @@ local function unfreeze()
 		end
 		if camera then
 			camera.CameraType = camType
+			if camType == Enum.CameraType.Custom and hum then
+				camera.CameraSubject = hum
+			end
 		end
 	else
 		if hum and hum.WalkSpeed <= 0 then
@@ -286,6 +294,9 @@ local function unfreeze()
 		end
 		if camera and camera.CameraType == Enum.CameraType.Scriptable then
 			camera.CameraType = Enum.CameraType.Custom
+			if hum then
+				camera.CameraSubject = hum
+			end
 		end
 	end
 
@@ -294,6 +305,10 @@ local function unfreeze()
 end
 
 local function freeze()
+	-- FreeCam/FishCam own Scriptable cam; release them first so place freeze/restore is Custom.
+	if not frozen then
+		playerGui:SetAttribute("OceanTD_ForceCloseFreeCam", os.clock())
+	end
 	-- Lock walk + camera look while armed / placing.
 	if frozen then
 		if camera and savedCameraCFrame then
@@ -401,6 +416,9 @@ local function clearGhost()
 	ghostPlaceDiameter = nil
 	ghostPlaceVariant = nil
 	ghostPlaceScale = nil
+	ghostPlaceScaleWidth = nil
+	ghostPlaceScaleHeight = nil
+	ghostPlaceFacingYaw = nil
 	SelectRing.destroy(placeSelectRing)
 	CoralRangeRings.hide()
 	-- Keep move icon alive (billboard may be Adorned to this ghost).
@@ -436,6 +454,8 @@ local function destroyConfirmUi()
 	end
 	checkBtn = nil
 	cancelBtn = nil
+	rotLeftBtn = nil
+	rotRightBtn = nil
 	moveHintImage = nil
 	moveHintScale = nil
 	chromePressTarget = nil
@@ -505,33 +525,35 @@ local function setCheckGlyphText(text: string)
 		return
 	end
 	local glyph = checkBtn:FindFirstChild("Glyph")
-	local isWord = text == "CONFIRM" or text == "Enter" or text == "A"
+	local isWord = text == "CONFIRM" or text == "Enter" or text == "A" or text == "OK"
 	local strokeColor = if isWord
 		then Color3.fromRGB(12, 55, 25)
 		else Color3.new(1, 1, 1)
 	if glyph and glyph:IsA("TextLabel") then
 		glyph.Text = text
+		glyph.TextTransparency = 0
+		glyph.TextColor3 = Color3.new(1, 1, 1)
 		glyph.TextStrokeColor3 = strokeColor
 		glyph.TextStrokeTransparency = 0
 		local glyphStroke = glyph:FindFirstChild("GlyphStroke")
 		if glyphStroke and glyphStroke:IsA("UIStroke") then
 			glyphStroke.Color = strokeColor
+			glyphStroke.Transparency = 0
 		end
-	else
-		checkBtn.Text = text
-		checkBtn.TextTransparency = 0
-		checkBtn.TextStrokeColor3 = strokeColor
-		checkBtn.TextStrokeTransparency = 0
 	end
+	-- Always keep button Text in sync (backup if Glyph missing).
+	checkBtn.Text = text
+	checkBtn.TextTransparency = if glyph and glyph:IsA("TextLabel") then 1 else 0
+	checkBtn.TextStrokeColor3 = strokeColor
+	checkBtn.TextStrokeTransparency = 0
 end
 
 local function applyGamepadButtonLabels()
 	if not checkBtn or not cancelBtn then
 		return
 	end
-	-- Label cycling (✓/CONFIRM, X/CANCEL) is owned by syncConfirmButtons.
+	-- Label cycling is owned by syncConfirmButtons (never force blank ✓ — FredokaOne has no checkmark).
 	stopCheckPrompt()
-	setCheckGlyphText("✓")
 end
 
 local function fireGamepadReturnToList()
@@ -733,11 +755,7 @@ local function updateGhostPulse()
 	local phase = (math.sin(os.clock() * GHOST_PULSE_SPEED) + 1) * 0.5
 	ghost.Material = if phase >= 0.5 then Enum.Material.Neon else baseMat
 	ghost.Transparency = 0.4
-	if validSpot then
-		ghost.Color = ghostBaseColor or ghost.Color
-	else
-		ghost.Color = GHOST_INVALID_COLOR
-	end
+	CoralVisual.setGhostValidColors(ghost, validSpot, ghostBaseColor, GHOST_INVALID_COLOR)
 	-- Match ✓ background to the ghost neon flash (bright ↔ hunter green).
 	if checkBtn and checkBtn.Visible then
 		checkBtn.BackgroundColor3 = CHECK_BRIGHT_GREEN:Lerp(CHECK_HUNTER_GREEN, phase)
@@ -763,12 +781,21 @@ local function updateGhostAt(anchorPos: Vector3)
 		local ghostDiameter: number? = nil
 		ghostPlaceVariant = nil
 		ghostPlaceScale = nil
+		ghostPlaceScaleWidth = nil
+		ghostPlaceScaleHeight = nil
+		ghostPlaceFacingYaw = nil
 		if speciesId == "BrainCoral" then
 			ghostDiameter = CoralVisual.randomBrainDiameter()
 			ghostPlaceDiameter = ghostDiameter
+		elseif CoralVisual.isSeaFan(speciesId) then
+			ghostPlaceDiameter = nil
+			ghostPlaceVariant = 1
+			ghostPlaceScale, ghostPlaceScaleWidth, ghostPlaceScaleHeight = CoralVisual.randomSeaFanScales()
+			-- Default upright; player rotates with chrome. Do not auto-face the character.
+			ghostPlaceFacingYaw = 0
 		elseif CoralVisual.isMeshSpecies(speciesId) then
 			ghostPlaceDiameter = nil
-			ghostPlaceVariant = CoralVisual.randomMeshVariant()
+			ghostPlaceVariant = CoralVisual.randomMeshVariant(speciesId)
 			ghostPlaceScale = CoralVisual.randomMeshScale()
 		else
 			ghostPlaceDiameter = nil
@@ -780,6 +807,9 @@ local function updateGhostAt(anchorPos: Vector3)
 			sizeClass = 1,
 			variantIndex = ghostPlaceVariant,
 			scaleMult = ghostPlaceScale,
+			scaleWidth = ghostPlaceScaleWidth,
+			scaleHeight = ghostPlaceScaleHeight,
+			facingYaw = ghostPlaceFacingYaw,
 		})
 		if ghost then
 			ghost.Parent = Workspace
@@ -804,16 +834,18 @@ local function updateGhostAt(anchorPos: Vector3)
 			end)
 		end
 	else
-		if CoralVisual.isMeshSpecies(speciesId) then
+		if CoralVisual.isSeaFan(speciesId) then
+			-- Keep player-adjusted yaw; seed 0 only when unset.
+			if typeof(ghostPlaceFacingYaw) ~= "number" then
+				ghostPlaceFacingYaw = 0
+			end
+			CoralVisual.alignMeshToSurface(ghost, anchorPos, ghostPlaceFacingYaw)
+		elseif CoralVisual.isMeshSpecies(speciesId) then
 			CoralVisual.alignMeshToSurface(ghost, anchorPos)
 		else
 			ghost.CFrame = CFrame.new(anchorPos)
 		end
-		if validSpot then
-			ghost.Color = ghostBaseColor or ghost.Color
-		else
-			ghost.Color = GHOST_INVALID_COLOR
-		end
+		CoralVisual.setGhostValidColors(ghost, validSpot, ghostBaseColor, GHOST_INVALID_COLOR)
 	end
 	updateGhostPulse()
 	syncBlockFlashForAim(anchorPos)
@@ -844,6 +876,15 @@ local function syncConfirmButtonsImpl()
 		return
 	end
 
+	-- Hot-reload / partial UI: rebuild so SeaFan rotate controls exist.
+	local rotAlive = rotLeftBtn ~= nil and rotLeftBtn.Parent ~= nil and rotRightBtn ~= nil and rotRightBtn.Parent ~= nil
+	if not rotAlive then
+		makeConfirmUi()
+		if not confirmGui or not checkBtn or not cancelBtn or not ghost then
+			return
+		end
+	end
+
 	-- Move icon tracks the ghost: live while aiming/dragging, frozen when parked in Confirm.
 	local aiming = mode == MODE_AIM or confirmDragging or aimFingerDown or backpackDrag or aimPinnedToHand
 	if aiming or not chromeScreenPos then
@@ -872,6 +913,8 @@ local function syncConfirmButtonsImpl()
 	-- Visibility first so torso layout can center X-only vs ✓+X pair.
 	checkBtn.Visible = validSpot and (mode == MODE_CONFIRM or gamepadPlacement)
 	cancelBtn.Visible = true
+	local showRot = armedItemId == "SeaFan"
+		or CoralVisual.isSeaFan(if armedItemId then getSpeciesIdForItem(armedItemId) else nil)
 	local bb, adornee = PlaceConfirmChrome.layoutOnTorso(
 		BTN_SIZE,
 		playerGui,
@@ -879,7 +922,10 @@ local function syncConfirmButtonsImpl()
 		chromeBillboard,
 		chromeAdorneePart,
 		checkBtn,
-		cancelBtn
+		cancelBtn,
+		rotLeftBtn,
+		rotRightBtn,
+		showRot
 	)
 	chromeBillboard = bb
 	chromeAdorneePart = adornee
@@ -888,6 +934,7 @@ local function syncConfirmButtonsImpl()
 	cancelBtn.TextStrokeColor3 = if showWord then Color3.fromRGB(60, 15, 18) else Color3.new(1, 1, 1)
 	cancelBtn.TextStrokeTransparency = 0
 	if checkBtn.Visible then
+		-- FredokaOne has no ✓ glyph (showed blank). Keep readable CONFIRM / A.
 		local confirmWord = "CONFIRM"
 		local last = UserInputService:GetLastInputType()
 		if last == Enum.UserInputType.Gamepad1
@@ -897,16 +944,43 @@ local function syncConfirmButtonsImpl()
 			or gamepadPlacement
 		then
 			confirmWord = "A"
-		elseif last ~= Enum.UserInputType.Touch then
-			confirmWord = "Enter"
 		end
-		setCheckGlyphText(if showWord then confirmWord else "✓")
+		checkBtn.Size = UDim2.fromOffset(BTN_SIZE, BTN_SIZE)
+		setCheckGlyphText(confirmWord)
+		-- Fixed size so CONFIRM stays readable in the circle (TextScaled crushed it to blank).
+		local glyph = checkBtn:FindFirstChild("Glyph")
+		if glyph and glyph:IsA("TextLabel") then
+			glyph.TextScaled = confirmWord ~= "CONFIRM"
+			glyph.TextSize = if confirmWord == "CONFIRM" then 11 else 22
+		end
 	end
 end
 syncConfirmButtons = syncConfirmButtonsImpl
 
+local SEA_FAN_ROT_STEP = math.rad(10)
+
+local function rotateSeaFanGhost(dir: number)
+	if not ghost or not placeAnchor then
+		return
+	end
+	local sid = armedItemId and getSpeciesIdForItem(armedItemId)
+	if not CoralVisual.isSeaFan(sid) then
+		return
+	end
+	local yaw = ghostPlaceFacingYaw
+	if typeof(yaw) ~= "number" then
+		yaw = CoralVisual.readFacingYaw(ghost)
+	end
+	yaw += dir * SEA_FAN_ROT_STEP
+	ghostPlaceFacingYaw = yaw
+	CoralVisual.alignMeshToSurface(ghost, placeAnchor, yaw)
+	UiHaptics.pulseShort()
+end
+
 local function makeConfirmUiImpl()
-	if confirmGui and checkBtn and cancelBtn and moveHintImage then
+	if confirmGui and checkBtn and cancelBtn and moveHintImage and rotLeftBtn and rotRightBtn
+		and rotLeftBtn.Parent and rotRightBtn.Parent
+	then
 		applyGamepadButtonLabels()
 		return
 	end
@@ -987,16 +1061,34 @@ local function makeConfirmUiImpl()
 
 	checkBtn = roundBtn("✓", Color3.fromRGB(40, 180, 80), true)
 	cancelBtn = roundBtn("X", Color3.fromRGB(200, 50, 50), false)
+	checkBtn.ZIndex = 10
+	cancelBtn.ZIndex = 10
+	rotLeftBtn = PlaceConfirmChrome.createRotateButton(gui, PlaceConfirmChrome.ROT_LEFT_ICON, "RotLeft")
+	rotRightBtn = PlaceConfirmChrome.createRotateButton(gui, PlaceConfirmChrome.ROT_RIGHT_ICON, "RotRight")
+	rotLeftBtn.ZIndex = 5
+	rotRightBtn.ZIndex = 5
 	applyGamepadButtonLabels()
 
-	local function markChromePointerDown(target: string)
-		-- Only a press that *starts* on ✓/X counts. Sliding onto the button mid-drag
+	local function markChromePointerDown(claimed: string)
+		-- Only a press that *starts* on chrome counts. Sliding onto the button mid-drag
 		-- (common on phone when releasing over Cancel) must not steal the gesture.
 		if aimFingerDown or backpackDrag or confirmDragging or confirmPressOrigin ~= nil then
 			return
 		end
 		local screenPos = UserInputService:GetMouseLocation()
-		if PlaceConfirmHitTest.resolveTarget(screenPos, checkBtn, cancelBtn, playerGui) ~= target then
+		local resolved = PlaceConfirmHitTest.resolveTarget(screenPos, checkBtn, cancelBtn, playerGui, rotLeftBtn, rotRightBtn)
+		-- If ✓/X received the press (AutoButtonColor), trust that over disc overlap with rot below.
+		local target: string?
+		if claimed == "check" or claimed == "cancel" then
+			target = claimed
+		elseif resolved == "check" or resolved == "cancel" then
+			-- Rot Gui got the event but pointer is on Confirm/Cancel — promote.
+			target = resolved
+		elseif resolved then
+			target = resolved
+		elseif claimed == "rotLeft" or claimed == "rotRight" then
+			target = claimed
+		else
 			return
 		end
 		chromePressTarget = target
@@ -1013,6 +1105,12 @@ local function makeConfirmUiImpl()
 	cancelBtn.MouseButton1Down:Connect(function()
 		markChromePointerDown("cancel")
 	end)
+	rotLeftBtn.MouseButton1Down:Connect(function()
+		markChromePointerDown("rotLeft")
+	end)
+	rotRightBtn.MouseButton1Down:Connect(function()
+		markChromePointerDown("rotRight")
+	end)
 	checkBtn.InputBegan:Connect(function(input)
 		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
 			markChromePointerDown("check")
@@ -1021,6 +1119,16 @@ local function makeConfirmUiImpl()
 	cancelBtn.InputBegan:Connect(function(input)
 		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
 			markChromePointerDown("cancel")
+		end
+	end)
+	rotLeftBtn.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			markChromePointerDown("rotLeft")
+		end
+	end)
+	rotRightBtn.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			markChromePointerDown("rotRight")
 		end
 	end)
 	-- Clicks are committed in UserInputService.InputEnded (BillboardGui Click is flaky).
@@ -1097,6 +1205,12 @@ local animEnv: PlaceArmDisarmAnim.Env = {
 	end,
 	getCancelBtn = function()
 		return cancelBtn
+	end,
+	getRotLeftBtn = function()
+		return rotLeftBtn
+	end,
+	getRotRightBtn = function()
+		return rotRightBtn
 	end,
 	getMoveHintImage = function()
 		return moveHintImage
@@ -1402,11 +1516,21 @@ local function commitPlace()
 	local rf = Remotes.getFunction("RequestPlace")
 	local placePayload: any = ghostPlaceDiameter
 	if CoralVisual.isMeshSpecies(armedItemId) or ghostPlaceVariant ~= nil then
+		local yaw = ghostPlaceFacingYaw
+		if typeof(yaw) ~= "number" and ghost then
+			yaw = CoralVisual.readFacingYaw(ghost)
+		end
+		if typeof(yaw) ~= "number" then
+			yaw = 0
+		end
 		placePayload = {
 			diameter = ghostPlaceDiameter,
 			variantIndex = ghostPlaceVariant,
 			scaleMult = ghostPlaceScale,
 			sizeClass = 1,
+			scaleWidth = ghostPlaceScaleWidth,
+			scaleHeight = ghostPlaceScaleHeight,
+			facingYaw = yaw,
 		}
 	end
 	local result = rf:InvokeServer(armedItemId, placePos, placePayload)
@@ -1827,7 +1951,7 @@ table.insert(inputConns, UserInputService.InputBegan:Connect(function(input, _pr
 		local isTouch = input.UserInputType == Enum.UserInputType.Touch
 		if isMouse or isTouch then
 			local screenPos = PlaceConfirmHitTest.pointerScreenPos(input)
-			local target = PlaceConfirmHitTest.resolveTarget(screenPos, checkBtn, cancelBtn, playerGui)
+			local target = PlaceConfirmHitTest.resolveTarget(screenPos, checkBtn, cancelBtn, playerGui, rotLeftBtn, rotRightBtn)
 			if target then
 				chromePressTarget = target
 				chromeBtnPointerDown = true
@@ -1885,7 +2009,7 @@ table.insert(inputConns, UserInputService.InputBegan:Connect(function(input, _pr
 
 	-- ✓ / X own the press: never start a ghost drag.
 	-- BillboardGui often skips MouseButton1Click — commit happens on InputEnded.
-	local chromeTarget = PlaceConfirmHitTest.resolveTarget(screenPos, checkBtn, cancelBtn, playerGui)
+	local chromeTarget = PlaceConfirmHitTest.resolveTarget(screenPos, checkBtn, cancelBtn, playerGui, rotLeftBtn, rotRightBtn)
 	if chromeTarget then
 		confirmPressOrigin = nil
 		confirmDragging = false
@@ -2002,6 +2126,16 @@ table.insert(inputConns, UserInputService.InputEnded:Connect(function(input, _pr
 			onCheck()
 		elseif target == "cancel" then
 			onCancel()
+		elseif target == "rotLeft" then
+			if rotLeftBtn then
+				PlaceConfirmChrome.playRotatePressFeedback(rotLeftBtn)
+			end
+			rotateSeaFanGhost(-1)
+		elseif target == "rotRight" then
+			if rotRightBtn then
+				PlaceConfirmChrome.playRotatePressFeedback(rotRightBtn)
+			end
+			rotateSeaFanGhost(1)
 		end
 		return
 	end

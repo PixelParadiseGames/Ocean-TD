@@ -34,10 +34,18 @@ local BY_ID: { [string]: ItemDef } = {
 	SeaGrass = {
 		id = "SeaGrass",
 		displayName = "Sea Grass",
-		icon = SPONGE_ICON, -- placeholder until a Sea Grass icon exists
+		icon = "rbxassetid://112749189598621",
 		category = "Seagrass",
 		sortOrder = 30,
 		speciesId = "SeaGrass",
+	},
+	SeaFan = {
+		id = "SeaFan",
+		displayName = "Sea Fan",
+		icon = "rbxassetid://105276585485138",
+		category = "Coral",
+		sortOrder = 40,
+		speciesId = "SeaFan",
 	},
 }
 

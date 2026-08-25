@@ -106,6 +106,8 @@ local blockBaseColor: Color3? = nil
 local gui: ScreenGui? = nil
 local checkBtn: TextButton? = nil
 local cancelBtn: TextButton? = nil
+local rotLeftBtn: ImageButton? = nil
+local rotRightBtn: ImageButton? = nil
 local recycleBtn: TextButton? = nil
 local recycleIcon: ImageLabel? = nil
 local recyclePlus: TextLabel? = nil
@@ -114,11 +116,15 @@ local moveIcon: ImageLabel? = nil
 local waistBb: BillboardGui? = nil
 local waistAdornee: BasePart? = nil
 local chromeBtnDown = false
-local chromePressTarget: string? = nil -- "check" | "cancel" | "recycle"
+local chromePressTarget: string? = nil -- "check" | "cancel" | "recycle" | "rotLeft" | "rotRight"
 local fingerDown = false
 local pressOrigin: Vector2? = nil
 local dragging = false
 local grabFromMoveIcon = false
+local relocateFacingYaw: number? = nil
+local originFacingYaw: number? = nil
+local hasRotated = false
+local SEA_FAN_ROT_STEP = math.rad(10)
 
 local frozen = false
 local savedWalkSpeed = 16
@@ -472,62 +478,42 @@ local function hideWaistChrome()
 		if cancelBtn then
 			cancelBtn.Parent = gui
 		end
+		if rotLeftBtn then
+			rotLeftBtn.Parent = gui
+			rotLeftBtn.Visible = false
+		end
+		if rotRightBtn then
+			rotRightBtn.Parent = gui
+			rotRightBtn.Visible = false
+		end
 	end
 end
 
+local function isSelectedSeaFan(): boolean
+	return part ~= nil and CoralVisual.isSeaFan(part:GetAttribute("OceanTD_SpeciesId"))
+end
+
 local function layoutWaistChrome(btnPx: number, showCheck: boolean): boolean
-	local adornee = PlaceConfirmChrome.ensureAdornee(waistAdornee)
-	waistAdornee = adornee
-	if not adornee or not checkBtn or not cancelBtn then
+	if not checkBtn or not cancelBtn or not gui then
 		hideWaistChrome()
 		return false
 	end
-	local bb = waistBb
-	if not bb or not bb.Parent then
-		bb = Instance.new("BillboardGui")
-		bb.Name = "OceanTD_RelocateWaistChrome"
-		bb.AlwaysOnTop = true
-		bb.LightInfluence = 0
-		bb.MaxDistance = 1000
-		bb.Active = true
-		bb.ResetOnSpawn = false
-		bb.Parent = playerGui
-		pcall(function()
-			(bb :: any).DistanceUpperLimit = WAIST_BB_DIST
-		end)
-		waistBb = bb
-	end
-	bb.Adornee = adornee
-	bb.Enabled = true
-	bb.StudsOffsetWorldSpace = Vector3.zero
-	bb.StudsOffset = Vector3.zero
-	bb.ExtentsOffsetWorldSpace = Vector3.zero
-	local gap = 10
-	if showCheck then
-		bb.Size = UDim2.fromOffset(btnPx * 2 + gap * 2 + 8, btnPx + 8)
-	else
-		bb.Size = UDim2.fromOffset(btnPx + 8, btnPx + 8)
-	end
-	if checkBtn.Parent ~= bb then
-		checkBtn.Parent = bb
-	end
-	if cancelBtn.Parent ~= bb then
-		cancelBtn.Parent = bb
-	end
-	checkBtn.Size = UDim2.fromOffset(btnPx, btnPx)
-	cancelBtn.Size = UDim2.fromOffset(btnPx, btnPx)
-	if showCheck then
-		checkBtn.AnchorPoint = Vector2.new(1, 0.5)
-		checkBtn.Position = UDim2.new(0.5, -gap * 0.5, 0.5, 0)
-		cancelBtn.AnchorPoint = Vector2.new(0, 0.5)
-		cancelBtn.Position = UDim2.new(0.5, gap * 0.5, 0.5, 0)
-	else
-		cancelBtn.AnchorPoint = Vector2.new(0.5, 0.5)
-		cancelBtn.Position = UDim2.fromScale(0.5, 0.5)
-		checkBtn.AnchorPoint = Vector2.new(0.5, 0.5)
-		checkBtn.Position = UDim2.fromScale(0.5, 0.5)
-	end
-	return true
+	local showRot = isSelectedSeaFan() and not recyclePending
+	local bb, adornee = PlaceConfirmChrome.layoutOnTorso(
+		btnPx,
+		playerGui,
+		gui,
+		waistBb,
+		waistAdornee,
+		checkBtn,
+		cancelBtn,
+		rotLeftBtn,
+		rotRightBtn,
+		showRot
+	)
+	waistBb = bb
+	waistAdornee = adornee
+	return bb ~= nil and adornee ~= nil
 end
 
 local function destroyUi()
@@ -551,6 +537,8 @@ local function destroyUi()
 	end
 	checkBtn = nil
 	cancelBtn = nil
+	rotLeftBtn = nil
+	rotRightBtn = nil
 	recycleBtn = nil
 	recycleIcon = nil
 	recyclePlus = nil
@@ -600,6 +588,12 @@ local function makeUi()
 
 	checkBtn = roundBtn("✓", Color3.fromRGB(40, 180, 80), BTN_SIZE)
 	cancelBtn = roundBtn("X", Color3.fromRGB(200, 50, 50), BTN_SIZE)
+	checkBtn.ZIndex = 10
+	cancelBtn.ZIndex = 10
+	rotLeftBtn = PlaceConfirmChrome.createRotateButton(g, PlaceConfirmChrome.ROT_LEFT_ICON, "RotLeft")
+	rotRightBtn = PlaceConfirmChrome.createRotateButton(g, PlaceConfirmChrome.ROT_RIGHT_ICON, "RotRight")
+	rotLeftBtn.ZIndex = 5
+	rotRightBtn.ZIndex = 5
 
 	recycleBtn = roundBtn("", REC_GREEN, REC_BTN_SIZE)
 	recycleBtn.Name = "Recycle"
@@ -633,7 +627,22 @@ local function makeUi()
 	plus.Parent = recycleBtn
 	recyclePlus = plus
 
-	local function markDown(target: string?)
+	local function markDown(claimed: string?)
+		local screenPos = UserInputService:GetMouseLocation()
+		local resolved = PlaceConfirmHitTest.resolveTarget(screenPos, checkBtn, cancelBtn, playerGui, rotLeftBtn, rotRightBtn)
+		local target: string? = nil
+		-- Trust ✓/X when they received the press; rot below often shares AbsolutePosition discs.
+		if claimed == "check" or claimed == "cancel" or claimed == "recycle" then
+			target = claimed
+		elseif resolved == "check" or resolved == "cancel" then
+			target = resolved
+		elseif resolved then
+			target = resolved
+		elseif claimed == "rotLeft" or claimed == "rotRight" then
+			target = claimed
+		else
+			return
+		end
 		chromeBtnDown = true
 		chromePressTarget = target
 		fingerDown = false
@@ -647,6 +656,12 @@ local function makeUi()
 	cancelBtn.MouseButton1Down:Connect(function()
 		markDown("cancel")
 	end)
+	rotLeftBtn.MouseButton1Down:Connect(function()
+		markDown("rotLeft")
+	end)
+	rotRightBtn.MouseButton1Down:Connect(function()
+		markDown("rotRight")
+	end)
 	recycleBtn.MouseButton1Down:Connect(function()
 		markDown("recycle")
 	end)
@@ -658,6 +673,16 @@ local function makeUi()
 	cancelBtn.InputBegan:Connect(function(input)
 		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
 			markDown("cancel")
+		end
+	end)
+	rotLeftBtn.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			markDown("rotLeft")
+		end
+	end)
+	rotRightBtn.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			markDown("rotRight")
 		end
 	end)
 	recycleBtn.InputBegan:Connect(function(input)
@@ -1257,12 +1282,12 @@ local function syncChrome()
 	-- Idle close (exit tool): keyboard/mouse instantly; gamepad after 3s.
 	-- After a move / recycle confirm: always show cancel for that action.
 	local idleCloseReady = (not gamepadRelocate) or ((os.clock() - relocateShownAt) >= IDLE_CLOSE_DELAY_SEC)
-	local showIdleClose = (not hasMoved) and (not recyclePending) and idleCloseReady
+	local showIdleClose = (not hasMoved) and (not hasRotated) and (not recyclePending) and idleCloseReady
 	local showCancel = hasMoved or recyclePending or showIdleClose
 	cancelBtn.Visible = showCancel
 	local tipLetter = if gamepadRelocate then "B" else "X"
 	local showWord = (math.floor((os.clock() - gamepadChromeT0) / HOVER_HINT_PERIOD) % 2) == 1
-	checkBtn.Visible = (hasMoved and validSpot) or recyclePending
+	checkBtn.Visible = (hasMoved and validSpot) or hasRotated or recyclePending
 
 	if recyclePending then
 		hideWaistChrome()
@@ -1275,10 +1300,16 @@ local function syncChrome()
 		cancelBtn.Text = if showWord then "CANCEL" else tipLetter
 		cancelBtn.TextStrokeColor3 = if showWord then Color3.fromRGB(60, 15, 18) else Color3.new(1, 1, 1)
 		cancelBtn.TextStrokeTransparency = 0
+		if rotLeftBtn then
+			rotLeftBtn.Visible = false
+		end
+		if rotRightBtn then
+			rotRightBtn.Visible = false
+		end
 	else
-		local sz = if hasMoved then math.floor(BTN_SIZE * 0.8 + 0.5) else BTN_SIZE
+		local sz = if hasMoved or hasRotated then math.floor(BTN_SIZE * 0.8 + 0.5) else BTN_SIZE
 		layoutWaistChrome(sz, checkBtn.Visible)
-		cancelBtn.Text = if showWord then (if hasMoved then "CANCEL" else "CLOSE") else tipLetter
+		cancelBtn.Text = if showWord then (if hasMoved or hasRotated then "CANCEL" else "CLOSE") else tipLetter
 		cancelBtn.TextStrokeColor3 = if showWord then Color3.fromRGB(60, 15, 18) else Color3.new(1, 1, 1)
 		cancelBtn.TextStrokeTransparency = 0
 	end
@@ -1296,8 +1327,8 @@ local function syncChrome()
 	end
 
 	if recycleBtn then
-		-- Hide recycle while dragging a move; show again after confirm, or during recycle confirm.
-		local showRecycle = (not hasMoved) or recyclePending
+		-- Hide recycle while dragging a move / rotating; show again after confirm, or during recycle confirm.
+		local showRecycle = (not hasMoved and not hasRotated) or recyclePending
 		-- Coral inspect UI owns the recycle affordance; hide the in-world one while idle.
 		if inspectPanelVisible and not recyclePending then
 			showRecycle = false
@@ -1369,7 +1400,13 @@ local function updateAt(worldPos: Vector3)
 		return
 	end
 	local surfacePos = worldPos
-	if CoralVisual.isMeshSpecies(part:GetAttribute("OceanTD_SpeciesId")) then
+	if CoralVisual.isSeaFan(part:GetAttribute("OceanTD_SpeciesId")) then
+		if typeof(relocateFacingYaw) ~= "number" then
+			relocateFacingYaw = CoralVisual.readFacingYaw(part)
+		end
+		CoralVisual.alignMeshToSurface(part, surfacePos, relocateFacingYaw)
+		moveGridAnchor = surfacePos
+	elseif CoralVisual.isMeshSpecies(part:GetAttribute("OceanTD_SpeciesId")) then
 		CoralVisual.alignMeshToSurface(part, surfacePos)
 		moveGridAnchor = surfacePos
 	else
@@ -1391,6 +1428,26 @@ local function updateAt(worldPos: Vector3)
 	end
 	ClientPlot.setOutOfPlotFlash(rejectReason == "Out Of Plot")
 	syncWarnLabel()
+	syncChrome()
+end
+
+local function rotateSelectedSeaFan(dir: number)
+	if recyclePending or not part or not part.Parent then
+		return
+	end
+	if not CoralVisual.isSeaFan(part:GetAttribute("OceanTD_SpeciesId")) then
+		return
+	end
+	local yaw = relocateFacingYaw
+	if typeof(yaw) ~= "number" then
+		yaw = CoralVisual.readFacingYaw(part)
+	end
+	yaw += dir * SEA_FAN_ROT_STEP
+	relocateFacingYaw = yaw
+	hasRotated = true
+	local anchor = moveGridAnchor or gridAnchorPos or CoralVisual.readGridAnchor(part) or part.Position
+	CoralVisual.alignMeshToSurface(part, anchor, yaw)
+	UiHaptics.pulseShort()
 	syncChrome()
 end
 
@@ -1579,6 +1636,9 @@ local function clearState()
 	baseMaterial = nil
 	showPaintSolid = false
 	hasMoved = false
+	hasRotated = false
+	relocateFacingYaw = nil
+	originFacingYaw = nil
 	validSpot = true
 	rejectReason = nil
 	recyclePending = false
@@ -1658,7 +1718,7 @@ function RelocateController.syncSelectedRestColor()
 end
 
 function RelocateController.isMoveConfirmUp(): boolean
-	return active == true and (hasMoved == true or recyclePending == true)
+	return active == true and (hasMoved == true or hasRotated == true or recyclePending == true)
 end
 
 function RelocateController.getSavedCameraCFrame(): CFrame?
@@ -1716,11 +1776,18 @@ function RelocateController.cancel(instant: boolean?)
 	local p = part
 	local origin = originPos
 	local moved = hasMoved
+	local rotated = hasRotated
 	local color = baseColor
 
 	local function snapHome()
 		if p and p.Parent then
-			if CoralVisual.isMeshSpecies(p:GetAttribute("OceanTD_SpeciesId")) and gridAnchorPos then
+			if CoralVisual.isSeaFan(p:GetAttribute("OceanTD_SpeciesId")) and gridAnchorPos then
+				local yaw = originFacingYaw
+				if typeof(yaw) ~= "number" then
+					yaw = CoralVisual.readFacingYaw(p)
+				end
+				CoralVisual.alignMeshToSurface(p, gridAnchorPos, yaw)
+			elseif CoralVisual.isMeshSpecies(p:GetAttribute("OceanTD_SpeciesId")) and gridAnchorPos then
 				CoralVisual.alignMeshToSurface(p, gridAnchorPos)
 			elseif origin then
 				p.CFrame = CFrame.new(origin)
@@ -1729,7 +1796,7 @@ function RelocateController.cancel(instant: boolean?)
 		clearState()
 	end
 
-	if moved and p and origin and p.Parent and not instant then
+	if (moved or rotated) and p and origin and p.Parent and not instant then
 		if CoralVisual.isMeshSpecies(p:GetAttribute("OceanTD_SpeciesId")) and gridAnchorPos then
 			snapHome()
 			log("Cancelled — reverted")
@@ -1957,7 +2024,7 @@ function RelocateController.commit()
 		commitRecycle()
 		return
 	end
-	if not hasMoved or not validSpot then
+	if (not hasMoved and not hasRotated) or not validSpot then
 		return
 	end
 	if not part or not originPos or not itemId then
@@ -1966,15 +2033,19 @@ function RelocateController.commit()
 	local toPos = moveGridAnchor or CoralVisual.readGridAnchor(part) or part.Position
 	local fromPos = gridAnchorPos or originPos
 	local id = placeId
+	local yaw = relocateFacingYaw
 	busy = true
 	PlaceVfx.playSound(toPos)
 	local rf = Remotes.getFunction("RequestMove")
-	local result = rf:InvokeServer(id, fromPos, toPos)
+	local result = rf:InvokeServer(id, fromPos, toPos, yaw)
 	if typeof(result) == "table" and result.ok then
 		UiHaptics.pulseShort()
 		if part and part.Parent then
 			local finalPos = if typeof(result.worldPos) == "Vector3" then result.worldPos else toPos
-			if CoralVisual.isMeshSpecies(part:GetAttribute("OceanTD_SpeciesId")) then
+			if CoralVisual.isSeaFan(part:GetAttribute("OceanTD_SpeciesId")) then
+				local finalYaw = if typeof(result.facingYaw) == "number" then result.facingYaw else yaw
+				CoralVisual.alignMeshToSurface(part, finalPos, finalYaw)
+			elseif CoralVisual.isMeshSpecies(part:GetAttribute("OceanTD_SpeciesId")) then
 				CoralVisual.alignMeshToSurface(part, finalPos)
 			else
 				part.CFrame = CFrame.new(finalPos)
@@ -2060,6 +2131,9 @@ function RelocateController.begin(target: BasePart)
 	baseMaterial = restMat
 	showPaintSolid = false
 	hasMoved = false
+	hasRotated = false
+	originFacingYaw = CoralVisual.readFacingYaw(target)
+	relocateFacingYaw = originFacingYaw
 	validSpot = true
 	rejectReason = nil
 	recyclePending = false
@@ -2188,14 +2262,14 @@ local function isOverChrome(screenPos: Vector2): boolean
 	if chromeBtnDown then
 		return true
 	end
-	if PlaceConfirmHitTest.resolveTarget(screenPos, checkBtn, cancelBtn, playerGui) ~= nil then
+	if PlaceConfirmHitTest.resolveTarget(screenPos, checkBtn, cancelBtn, playerGui, rotLeftBtn, rotRightBtn) ~= nil then
 		return true
 	end
 	return guiObjectHit(recycleBtn, screenPos, 12)
 end
 
 local function resolveRelocateChrome(screenPos: Vector2): string?
-	local t = PlaceConfirmHitTest.resolveTarget(screenPos, checkBtn, cancelBtn, playerGui)
+	local t = PlaceConfirmHitTest.resolveTarget(screenPos, checkBtn, cancelBtn, playerGui, rotLeftBtn, rotRightBtn)
 	if t then
 		return t
 	end
@@ -2385,27 +2459,45 @@ table.insert(inputConns, UserInputService.InputEnded:Connect(function(input, _pr
 	pendingCoralSwitch = nil
 	pendingCoralSwitchScreen = nil
 
-	-- BillboardGui Click is flaky — fire chrome actions on release if still over the button.
+	-- BillboardGui Click is flaky — fire chrome actions on release from the press target.
 	if active and wasChrome and chromeTarget then
-		local still = resolveRelocateChrome(screenPos)
-		if still == chromeTarget or (chromeTarget == "check" and still == "check") then
-			if chromeTarget == "check" then
-				RelocateController.commit()
-				return
-			elseif chromeTarget == "cancel" then
-				RelocateController.cancel()
-				return
-			elseif chromeTarget == "recycle" then
-				RelocateController.beginRecycleConfirm()
-				return
-			end
-		elseif chromeTarget == "cancel" and still == nil then
-			-- Release slightly off cancel still cancels (same as before Click).
+		if chromeTarget == "check" then
+			RelocateController.commit()
+			return
+		elseif chromeTarget == "cancel" then
 			RelocateController.cancel()
 			return
-		elseif chromeTarget == "check" then
-			-- Soft accept: if we pressed check, commit even if release drifts a bit.
-			RelocateController.commit()
+		elseif chromeTarget == "recycle" then
+			RelocateController.beginRecycleConfirm()
+			return
+		elseif chromeTarget == "rotLeft" then
+			-- Ignore rot if release is clearly on Confirm/Cancel.
+			local still = resolveRelocateChrome(screenPos)
+			if still == "check" then
+				RelocateController.commit()
+				return
+			elseif still == "cancel" then
+				RelocateController.cancel()
+				return
+			end
+			if rotLeftBtn then
+				PlaceConfirmChrome.playRotatePressFeedback(rotLeftBtn)
+			end
+			rotateSelectedSeaFan(-1)
+			return
+		elseif chromeTarget == "rotRight" then
+			local still = resolveRelocateChrome(screenPos)
+			if still == "check" then
+				RelocateController.commit()
+				return
+			elseif still == "cancel" then
+				RelocateController.cancel()
+				return
+			end
+			if rotRightBtn then
+				PlaceConfirmChrome.playRotatePressFeedback(rotRightBtn)
+			end
+			rotateSelectedSeaFan(1)
 			return
 		end
 	end

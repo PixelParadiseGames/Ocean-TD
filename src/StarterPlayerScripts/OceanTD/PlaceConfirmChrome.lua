@@ -1,12 +1,17 @@
 --!strict
 --[[
-	Torso-locked ✓/X layout helpers for PlacementController.
+	Torso-locked ✓/X (+ optional SeaFan rotate) layout helpers for PlacementController.
 	Extracted so PlacementController stays under Luau's 200-local limit.
 ]]
 
 local Players = game:GetService("Players")
 local GuiService = game:GetService("GuiService")
+local TweenService = game:GetService("TweenService")
+local SoundService = game:GetService("SoundService")
 local Workspace = game:GetService("Workspace")
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local UiCircles = require(ReplicatedStorage:WaitForChild("OceanTD"):WaitForChild("Shared"):WaitForChild("UiCircles"))
 
 local player = Players.LocalPlayer
 
@@ -19,6 +24,11 @@ local BELT_OFFSET = CFrame.new(0, -0.35, 0)
 local MIN_BTN_PX = 52
 -- Beyond this distance, pin to screen space so Offset billboards can't go unreadably small.
 local SCREEN_LAYOUT_DIST = 28
+
+local ROT_BG = Color3.fromRGB(0, 162, 237) -- #00a2ed
+local ROT_SOUND_ID = "rbxassetid://139911414972673"
+local ROT_LEFT_ICON = "rbxassetid://96091927054382"
+local ROT_RIGHT_ICON = "rbxassetid://98172417849326"
 
 function PlaceConfirmChrome.ensureAdornee(existing: BasePart?): BasePart?
 	local char = player.Character
@@ -88,13 +98,166 @@ function PlaceConfirmChrome.screenPos(adornee: BasePart?): Vector2
 	return Vector2.new(sp.X, sp.Y)
 end
 
+-- Cyan circle + provided rotate icons (left 96091927054382 / right 98172417849326).
+function PlaceConfirmChrome.createRotateButton(parent: Instance, imageId: string, name: string): ImageButton
+	local b = Instance.new("ImageButton")
+	b.Name = name
+	b.Size = UDim2.fromOffset(MIN_BTN_PX, MIN_BTN_PX)
+	b.BackgroundColor3 = ROT_BG
+	b.BackgroundTransparency = 0
+	b.Image = imageId
+	b.ImageColor3 = Color3.new(1, 1, 1)
+	b.ScaleType = Enum.ScaleType.Fit
+	b.AutoButtonColor = true
+	b.Visible = false
+	-- Not Active: Gui must not steal presses from Confirm/Cancel above.
+	-- Rotate is driven only via PlaceConfirmHitTest + UserInputService.
+	b.Active = false
+	b.ZIndex = 5
+	b.Parent = parent
+	UiCircles.ensure(b)
+	local pad = Instance.new("UIPadding")
+	pad.PaddingTop = UDim.new(0.18, 0)
+	pad.PaddingBottom = UDim.new(0.18, 0)
+	pad.PaddingLeft = UDim.new(0.18, 0)
+	pad.PaddingRight = UDim.new(0.18, 0)
+	pad.Parent = b
+	local edge = Instance.new("UIStroke")
+	edge.Name = "EdgeStroke"
+	edge.Color = Color3.new(1, 1, 1)
+	edge.Thickness = 2.5
+	edge.Transparency = 1
+	edge.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+	edge.Parent = b
+	local scale = Instance.new("UIScale")
+	scale.Name = "PressScale"
+	scale.Scale = 1
+	scale.Parent = b
+	return b
+end
+
+function PlaceConfirmChrome.playRotatePressFeedback(btn: GuiObject)
+	local edge = btn:FindFirstChild("EdgeStroke")
+	local scale = btn:FindFirstChild("PressScale")
+	if edge and edge:IsA("UIStroke") then
+		edge.Transparency = 0
+		task.delay(0.5, function()
+			if edge.Parent then
+				TweenService:Create(edge, TweenInfo.new(0.15), { Transparency = 1 }):Play()
+			end
+		end)
+	end
+	if scale and scale:IsA("UIScale") then
+		scale.Scale = 1
+		local up = TweenService:Create(scale, TweenInfo.new(0.12, Enum.EasingStyle.Back, Enum.EasingDirection.Out), { Scale = 1.18 })
+		up:Play()
+		up.Completed:Connect(function()
+			if scale.Parent then
+				TweenService:Create(scale, TweenInfo.new(0.16, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { Scale = 1 }):Play()
+			end
+		end)
+	end
+	local s = Instance.new("Sound")
+	s.SoundId = ROT_SOUND_ID
+	s.Volume = 0.85
+	s.Parent = SoundService
+	s:Play()
+	s.Ended:Connect(function()
+		s:Destroy()
+	end)
+	task.delay(3, function()
+		if s.Parent then
+			s:Destroy()
+		end
+	end)
+end
+
+local function placeChrome(
+	origin: Vector2,
+	s: number,
+	gap: number,
+	showCheck: boolean,
+	showRot: boolean,
+	checkBtn: GuiObject?,
+	rotLeftBtn: GuiObject?,
+	cancelBtn: GuiObject?,
+	rotRightBtn: GuiObject?,
+	useScale: boolean -- BillboardGui uses scale-centered coords
+)
+	--[[
+		Close only + rot:  [rotL] [X] [rotR]  (one row)
+		Confirm + Close + rot: top [✓] [X], bottom [rotL] [rotR]
+	]]
+	local function setPos(btn: GuiObject, x: number, y: number)
+		btn.Visible = true
+		btn.AnchorPoint = Vector2.new(0.5, 0.5)
+		btn.Size = UDim2.fromOffset(s, s)
+		if useScale then
+			btn.Position = UDim2.new(0.5, x, 0.5, y)
+		else
+			btn.Position = UDim2.fromOffset(origin.X + x, origin.Y + y)
+		end
+	end
+
+	if checkBtn and not showCheck then
+		checkBtn.Visible = false
+	end
+	if not showRot then
+		if rotLeftBtn then
+			rotLeftBtn.Visible = false
+		end
+		if rotRightBtn then
+			rotRightBtn.Visible = false
+		end
+	end
+
+	if showCheck and showRot and checkBtn and cancelBtn and rotLeftBtn and rotRightBtn then
+		-- Two rows: confirm/close on top, rotate below (screen space — see layoutOnTorso).
+		local rowGap = math.max(math.floor(s * 0.55 + 0.5), 28)
+		local topY = -(s + rowGap) * 0.5
+		local botY = (s + rowGap) * 0.5
+		setPos(checkBtn, -(s + gap) * 0.5, topY)
+		setPos(cancelBtn, (s + gap) * 0.5, topY)
+		setPos(rotLeftBtn, -(s + gap) * 0.5, botY)
+		setPos(rotRightBtn, (s + gap) * 0.5, botY)
+		return
+	end
+
+	-- Single row: [✓?][X] or [rotL][X][rotR]
+	local items: { GuiObject } = {}
+	if showCheck and checkBtn then
+		table.insert(items, checkBtn)
+	end
+	if showRot and not showCheck and rotLeftBtn then
+		table.insert(items, rotLeftBtn)
+	end
+	if cancelBtn then
+		table.insert(items, cancelBtn)
+	end
+	if showRot and not showCheck and rotRightBtn then
+		table.insert(items, rotRightBtn)
+	end
+	local n = #items
+	if n == 0 then
+		return
+	end
+	local totalW = n * s + (n - 1) * gap
+	local x0 = -totalW * 0.5 + s * 0.5
+	for i, btn in ipairs(items) do
+		setPos(btn, x0 + (i - 1) * (s + gap), 0)
+	end
+end
+
 function PlaceConfirmChrome.layoutAt(
 	chrome: Vector2,
 	btnSize: number,
 	confirmGui: ScreenGui?,
 	chromeBillboard: BillboardGui?,
 	checkBtn: TextButton?,
-	cancelBtn: TextButton?
+	cancelBtn: TextButton?,
+	rotLeftBtn: GuiObject?,
+	rotRightBtn: GuiObject?,
+	showRot: boolean?
 )
 	local s = btnSize
 	local gap = 6
@@ -105,30 +268,17 @@ function PlaceConfirmChrome.layoutAt(
 		chromeBillboard.Enabled = false
 	end
 	local showCheck = checkBtn ~= nil and checkBtn.Visible
-	if checkBtn then
-		if checkBtn.Parent ~= confirmGui then
-			checkBtn.Parent = confirmGui
-		end
-		checkBtn.AnchorPoint = Vector2.new(0.5, 0.5)
-		checkBtn.Size = UDim2.fromOffset(s, s)
-		if showCheck then
-			checkBtn.Position = UDim2.fromOffset(chrome.X - (s * 0.5 + gap), chrome.Y)
-		else
-			checkBtn.Position = UDim2.fromOffset(chrome.X, chrome.Y)
+	local doRot = showRot == true and rotLeftBtn ~= nil and rotRightBtn ~= nil
+	local function parentToGui(btn: GuiObject?)
+		if btn and btn.Parent ~= confirmGui then
+			btn.Parent = confirmGui
 		end
 	end
-	if cancelBtn then
-		if cancelBtn.Parent ~= confirmGui then
-			cancelBtn.Parent = confirmGui
-		end
-		cancelBtn.AnchorPoint = Vector2.new(0.5, 0.5)
-		cancelBtn.Size = UDim2.fromOffset(s, s)
-		if showCheck then
-			cancelBtn.Position = UDim2.fromOffset(chrome.X + (s * 0.5 + gap), chrome.Y)
-		else
-			cancelBtn.Position = UDim2.fromOffset(chrome.X, chrome.Y)
-		end
-	end
+	parentToGui(checkBtn)
+	parentToGui(cancelBtn)
+	parentToGui(rotLeftBtn)
+	parentToGui(rotRightBtn)
+	placeChrome(chrome, s, gap, showCheck, doRot, checkBtn, rotLeftBtn, cancelBtn, rotRightBtn, false)
 end
 
 function PlaceConfirmChrome.layoutOnTorso(
@@ -138,11 +288,36 @@ function PlaceConfirmChrome.layoutOnTorso(
 	chromeBillboard: BillboardGui?,
 	chromeAdornee: BasePart?,
 	checkBtn: TextButton?,
-	cancelBtn: TextButton?
+	cancelBtn: TextButton?,
+	rotLeftBtn: GuiObject?,
+	rotRightBtn: GuiObject?,
+	showRot: boolean?
 ): (BillboardGui?, BasePart?)
 	local s = math.max(btnSize, MIN_BTN_PX)
 	local gap = 6
+	local doRot = showRot == true and rotLeftBtn ~= nil and rotRightBtn ~= nil
 	local adornee = PlaceConfirmChrome.ensureAdornee(chromeAdornee)
+	local showCheck = checkBtn ~= nil and checkBtn.Visible
+
+	-- Confirm+rot must stay screen-space: BillboardGui foreshortening stacks rot under ✓/X.
+	if showCheck and doRot then
+		if chromeBillboard then
+			chromeBillboard.Enabled = false
+		end
+		PlaceConfirmChrome.layoutAt(
+			PlaceConfirmChrome.screenPos(adornee),
+			s,
+			confirmGui,
+			chromeBillboard,
+			checkBtn,
+			cancelBtn,
+			rotLeftBtn,
+			rotRightBtn,
+			true
+		)
+		return chromeBillboard, adornee
+	end
+
 	if not adornee or not checkBtn or not cancelBtn or not confirmGui then
 		PlaceConfirmChrome.layoutAt(
 			PlaceConfirmChrome.screenPos(adornee),
@@ -150,7 +325,10 @@ function PlaceConfirmChrome.layoutOnTorso(
 			confirmGui,
 			chromeBillboard,
 			checkBtn,
-			cancelBtn
+			cancelBtn,
+			rotLeftBtn,
+			rotRightBtn,
+			doRot
 		)
 		return chromeBillboard, adornee
 	end
@@ -171,7 +349,10 @@ function PlaceConfirmChrome.layoutOnTorso(
 			confirmGui,
 			chromeBillboard,
 			checkBtn,
-			cancelBtn
+			cancelBtn,
+			rotLeftBtn,
+			rotRightBtn,
+			doRot
 		)
 		return chromeBillboard, adornee
 	end
@@ -192,37 +373,49 @@ function PlaceConfirmChrome.layoutOnTorso(
 	bb.StudsOffsetWorldSpace = Vector3.zero
 	bb.StudsOffset = Vector3.zero
 	bb.ExtentsOffsetWorldSpace = Vector3.zero
-	-- Floor how small distance-scaled billboards can get (ignored when < 0).
 	pcall(function()
 		(bb :: any).DistanceUpperLimit = SCREEN_LAYOUT_DIST
 	end)
-	local showCheck = checkBtn.Visible
-	-- Offset = constant on-screen pixels (not studs).
+	local rows = 1
+	local cols = 1
+	local rowGap = gap
 	if showCheck then
-		bb.Size = UDim2.fromOffset(s * 2 + gap * 2 + 8, s + 8)
-	else
-		bb.Size = UDim2.fromOffset(s + 8, s + 8)
+		cols = 2
+	elseif doRot then
+		cols = 3
 	end
-	if checkBtn.Parent ~= bb then
-		checkBtn.Parent = bb
+	bb.Size = UDim2.fromOffset(cols * s + (cols - 1) * gap + 8, rows * s + (rows - 1) * rowGap + 8)
+
+	local function parentToBb(btn: GuiObject?)
+		if btn and btn.Parent ~= bb then
+			btn.Parent = bb
+		end
 	end
-	if cancelBtn.Parent ~= bb then
-		cancelBtn.Parent = bb
+	parentToBb(checkBtn)
+	parentToBb(cancelBtn)
+	if doRot then
+		parentToBb(rotLeftBtn)
+		parentToBb(rotRightBtn)
+	elseif confirmGui then
+		if rotLeftBtn and rotLeftBtn.Parent ~= confirmGui then
+			rotLeftBtn.Parent = confirmGui
+		end
+		if rotRightBtn and rotRightBtn.Parent ~= confirmGui then
+			rotRightBtn.Parent = confirmGui
+		end
+		if rotLeftBtn then
+			rotLeftBtn.Visible = false
+		end
+		if rotRightBtn then
+			rotRightBtn.Visible = false
+		end
 	end
-	checkBtn.Size = UDim2.fromOffset(s, s)
-	cancelBtn.Size = UDim2.fromOffset(s, s)
-	if showCheck then
-		checkBtn.AnchorPoint = Vector2.new(1, 0.5)
-		checkBtn.Position = UDim2.new(0.5, -gap, 0.5, 0)
-		cancelBtn.AnchorPoint = Vector2.new(0, 0.5)
-		cancelBtn.Position = UDim2.new(0.5, gap, 0.5, 0)
-	else
-		cancelBtn.AnchorPoint = Vector2.new(0.5, 0.5)
-		cancelBtn.Position = UDim2.fromScale(0.5, 0.5)
-		checkBtn.AnchorPoint = Vector2.new(0.5, 0.5)
-		checkBtn.Position = UDim2.fromScale(0.5, 0.5)
-	end
+
+	placeChrome(Vector2.zero, s, gap, showCheck, doRot, checkBtn, rotLeftBtn, cancelBtn, rotRightBtn, true)
 	return bb, adornee
 end
+
+PlaceConfirmChrome.ROT_LEFT_ICON = ROT_LEFT_ICON
+PlaceConfirmChrome.ROT_RIGHT_ICON = ROT_RIGHT_ICON
 
 return PlaceConfirmChrome

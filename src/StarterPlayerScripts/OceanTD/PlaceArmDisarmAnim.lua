@@ -53,6 +53,8 @@ export type Env = {
 	setChromeAdorneePart: (BasePart?) -> (),
 	getCheckBtn: () -> TextButton?,
 	getCancelBtn: () -> TextButton?,
+	getRotLeftBtn: (() -> ImageButton?)?,
+	getRotRightBtn: (() -> ImageButton?)?,
 	getMoveHintImage: () -> ImageLabel?,
 	getPendingDisarmSlotScreen: () -> Vector2?,
 	setPendingDisarmSlotScreen: (Vector2?) -> (),
@@ -80,6 +82,33 @@ export type Env = {
 	startAimLoop: () -> (),
 	setPendingGhostScaleIn: (boolean) -> (),
 }
+
+local function layoutChrome(env: Env, checkBtn: TextButton?, cancelBtn: TextButton?)
+	local rotL = if env.getRotLeftBtn then env.getRotLeftBtn() else nil
+	local rotR = if env.getRotRightBtn then env.getRotRightBtn() else nil
+	local armed = env.getArmedItemId()
+	local showRot = armed == "SeaFan"
+	if rotL then
+		rotL.Visible = showRot
+	end
+	if rotR then
+		rotR.Visible = showRot
+	end
+	local bb, adornee = PlaceConfirmChrome.layoutOnTorso(
+		BTN_SIZE,
+		env.playerGui,
+		env.getConfirmGui(),
+		env.getChromeBillboard(),
+		env.getChromeAdorneePart(),
+		checkBtn,
+		cancelBtn,
+		rotL,
+		rotR,
+		showRot
+	)
+	env.setChromeBillboard(bb)
+	env.setChromeAdorneePart(adornee)
+end
 
 function PlaceArmDisarmAnim.isDisarmAnimating(): boolean
 	return disarmAnimating
@@ -195,17 +224,7 @@ function PlaceArmDisarmAnim.detachGhostForSwitch(env: Env): (BasePart?, ImageLab
 		checkBtn.Active = true
 	end
 	do
-		local bb, adornee = PlaceConfirmChrome.layoutOnTorso(
-			BTN_SIZE,
-			env.playerGui,
-			env.getConfirmGui(),
-			env.getChromeBillboard(),
-			env.getChromeAdorneePart(),
-			checkBtn,
-			cancelBtn
-		)
-		env.setChromeBillboard(bb)
-		env.setChromeAdorneePart(adornee)
+		layoutChrome(env, checkBtn, cancelBtn)
 	end
 
 	return g, outMove, outGui
@@ -417,17 +436,7 @@ function PlaceArmDisarmAnim.abortArmIntroToAim(env: Env, screenPos: Vector2)
 		cancelBtn.Visible = true
 	end
 	do
-		local bb, adornee = PlaceConfirmChrome.layoutOnTorso(
-			BTN_SIZE,
-			env.playerGui,
-			env.getConfirmGui(),
-			env.getChromeBillboard(),
-			env.getChromeAdorneePart(),
-			checkBtn,
-			cancelBtn
-		)
-		env.setChromeBillboard(bb)
-		env.setChromeAdorneePart(adornee)
+		layoutChrome(env, checkBtn, cancelBtn)
 	end
 	local color = env.getGhostBaseColor()
 	if color then
@@ -497,31 +506,30 @@ function PlaceArmDisarmAnim.playArmIntroFromSlot(
 	local checkBtn = env.getCheckBtn()
 	local cancelBtn = env.getCancelBtn()
 	local moveHintImage = env.getMoveHintImage()
-	if keepChromePinned then
-		if cancelBtn then
-			cancelBtn.Visible = true
-			cancelBtn.BackgroundColor3 = Color3.fromRGB(200, 50, 50)
-			cancelBtn.AutoButtonColor = true
-			cancelBtn.Active = true
-			cancelBtn.BackgroundTransparency = 0
+	-- SeaFan: show yaw controls as soon as chrome exists (not only after fly-in ends).
+	do
+		local showRot = itemId == "SeaFan"
+		local rotL = if env.getRotLeftBtn then env.getRotLeftBtn() else nil
+		local rotR = if env.getRotRightBtn then env.getRotRightBtn() else nil
+		if rotL then
+			rotL.Visible = showRot
 		end
-		if checkBtn then
-			checkBtn.Visible = false
-		end
-		do
-			local bb, adornee = PlaceConfirmChrome.layoutOnTorso(
-				BTN_SIZE,
-				env.playerGui,
-				env.getConfirmGui(),
-				env.getChromeBillboard(),
-				env.getChromeAdorneePart(),
-				checkBtn,
-				cancelBtn
-			)
-			env.setChromeBillboard(bb)
-			env.setChromeAdorneePart(adornee)
+		if rotR then
+			rotR.Visible = showRot
 		end
 	end
+	if cancelBtn then
+		cancelBtn.Visible = true
+		cancelBtn.BackgroundColor3 = Color3.fromRGB(200, 50, 50)
+		cancelBtn.AutoButtonColor = true
+		cancelBtn.Active = true
+		cancelBtn.BackgroundTransparency = 0
+	end
+	if checkBtn then
+		checkBtn.Visible = false
+	end
+	-- Always lay out once so rot circles sit beside Close immediately (not only when pinned).
+	layoutChrome(env, checkBtn, cancelBtn)
 
 	local t0 = os.clock()
 	armIntroConn = RunService.RenderStepped:Connect(function()
@@ -581,22 +589,31 @@ function PlaceArmDisarmAnim.playArmIntroFromSlot(
 				checkBtn.Visible = false
 			end
 			do
-				local bb, adornee = PlaceConfirmChrome.layoutOnTorso(
-					BTN_SIZE,
-					env.playerGui,
-					env.getConfirmGui(),
-					env.getChromeBillboard(),
-					env.getChromeAdorneePart(),
-					checkBtn,
-					cancelBtn
-				)
-				env.setChromeBillboard(bb)
-				env.setChromeAdorneePart(adornee)
+				layoutChrome(env, checkBtn, cancelBtn)
 			end
 		else
 			local btnTravel = slotScreen:Lerp(chromePos, a)
 			local bsize = BTN_SIZE * math.max(scale, 0.35)
-			PlaceConfirmChrome.layoutAt(btnTravel, bsize, env.getConfirmGui(), env.getChromeBillboard(), checkBtn, cancelBtn)
+			local rotL = if env.getRotLeftBtn then env.getRotLeftBtn() else nil
+			local rotR = if env.getRotRightBtn then env.getRotRightBtn() else nil
+			local showRot = env.getArmedItemId() == "SeaFan"
+			if rotL then
+				rotL.Visible = showRot
+			end
+			if rotR then
+				rotR.Visible = showRot
+			end
+			PlaceConfirmChrome.layoutAt(
+				btnTravel,
+				bsize,
+				env.getConfirmGui(),
+				env.getChromeBillboard(),
+				checkBtn,
+				cancelBtn,
+				rotL,
+				rotR,
+				showRot
+			)
 			if cancelBtn and cancelBtn.Parent then
 				cancelBtn.Visible = true
 			end
@@ -621,17 +638,7 @@ function PlaceArmDisarmAnim.playArmIntroFromSlot(
 				cancelBtn.Visible = true
 			end
 			do
-				local bb, adornee = PlaceConfirmChrome.layoutOnTorso(
-					BTN_SIZE,
-					env.playerGui,
-					env.getConfirmGui(),
-					env.getChromeBillboard(),
-					env.getChromeAdorneePart(),
-					checkBtn,
-					cancelBtn
-				)
-				env.setChromeBillboard(bb)
-				env.setChromeAdorneePart(adornee)
+				layoutChrome(env, checkBtn, cancelBtn)
 			end
 			local color = ghostBaseColor or seedColor
 			HandOrb.arm(color)

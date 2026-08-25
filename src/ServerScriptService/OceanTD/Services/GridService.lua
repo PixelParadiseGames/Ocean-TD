@@ -27,6 +27,12 @@ export type CellData = {
 	colorB: number?,
 	variantIndex: number?,
 	scaleMult: number?,
+	scaleWidth: number?,
+	scaleHeight: number?,
+	facingYaw: number?,
+	webColorR: number?,
+	webColorG: number?,
+	webColorB: number?,
 }
 
 local GridService = {}
@@ -146,6 +152,48 @@ function GridService.tryOccupy(
 	return true, nil
 end
 
+function GridService.copySeaFanExtras(from: CellData, to: CellData)
+	to.scaleWidth = from.scaleWidth
+	to.scaleHeight = from.scaleHeight
+	to.facingYaw = from.facingYaw
+	to.webColorR = from.webColorR
+	to.webColorG = from.webColorG
+	to.webColorB = from.webColorB
+end
+
+function GridService.setSeaFanExtras(
+	plotId: PlotId,
+	gx: number,
+	gy: number,
+	gz: number,
+	scaleWidth: number?,
+	scaleHeight: number?,
+	facingYaw: number?,
+	webColorR: number?,
+	webColorG: number?,
+	webColorB: number?
+): boolean
+	local cell = GridService.getCellAtGrid(plotId, gx, gy, gz)
+	if not cell then
+		return false
+	end
+	if typeof(scaleWidth) == "number" and scaleWidth > 0 then
+		cell.scaleWidth = math.clamp(scaleWidth, 0.7, 1.35)
+	end
+	if typeof(scaleHeight) == "number" and scaleHeight > 0 then
+		cell.scaleHeight = math.clamp(scaleHeight, 0.7, 1.35)
+	end
+	if typeof(facingYaw) == "number" and facingYaw == facingYaw then
+		cell.facingYaw = facingYaw
+	end
+	if typeof(webColorR) == "number" and typeof(webColorG) == "number" and typeof(webColorB) == "number" then
+		cell.webColorR = math.clamp(webColorR, 0, 1)
+		cell.webColorG = math.clamp(webColorG, 0, 1)
+		cell.webColorB = math.clamp(webColorB, 0, 1)
+	end
+	return true
+end
+
 function GridService.setSizeAtGrid(
 	plotId: PlotId,
 	gx: number,
@@ -155,7 +203,9 @@ function GridService.setSizeAtGrid(
 	sizeTier: number,
 	sizeClass: number,
 	variantIndex: number?,
-	scaleMult: number?
+	scaleMult: number?,
+	scaleWidth: number?,
+	scaleHeight: number?
 ): boolean
 	local cell = GridService.getCellAtGrid(plotId, gx, gy, gz)
 	if not cell then
@@ -169,6 +219,12 @@ function GridService.setSizeAtGrid(
 	end
 	if typeof(scaleMult) == "number" and scaleMult > 0 then
 		cell.scaleMult = math.clamp(scaleMult, 0.7, 1.35)
+	end
+	if typeof(scaleWidth) == "number" and scaleWidth > 0 then
+		cell.scaleWidth = math.clamp(scaleWidth, 0.7, 1.35)
+	end
+	if typeof(scaleHeight) == "number" and scaleHeight > 0 then
+		cell.scaleHeight = math.clamp(scaleHeight, 0.7, 1.35)
 	end
 	return true
 end
@@ -262,6 +318,21 @@ function GridService.hydrate(plotId: PlotId, ownerUserId: number, layout: { Layo
 			)
 			if ok then
 				count += 1
+				local cell = GridService.getCell(plotId, lx, ly, lz)
+				if cell then
+					GridService.setSeaFanExtras(
+						plotId,
+						cell.gx,
+						cell.gy,
+						cell.gz,
+						tonumber(obj.scaleWidth),
+						tonumber(obj.scaleHeight),
+						tonumber(obj.facingYaw),
+						tonumber(obj.webColorR),
+						tonumber(obj.webColorG),
+						tonumber(obj.webColorB)
+					)
+				end
 			end
 		end
 	end
@@ -298,6 +369,12 @@ function GridService.snapshot(plotId: PlotId): { LayoutObject }
 				colorB = cell.colorB,
 				variantIndex = cell.variantIndex,
 				scaleMult = cell.scaleMult,
+				scaleWidth = cell.scaleWidth,
+				scaleHeight = cell.scaleHeight,
+				facingYaw = cell.facingYaw,
+				webColorR = cell.webColorR,
+				webColorG = cell.webColorG,
+				webColorB = cell.webColorB,
 			})
 		end
 	end
@@ -344,6 +421,10 @@ function GridService.reframe(plotId: PlotId, oldCf: CFrame, newCf: CFrame): numb
 			cell.variantIndex,
 			cell.scaleMult
 		)
+		local newCell = GridService.getCell(plotId, lx, ly, lz)
+		if newCell then
+			GridService.copySeaFanExtras(cell, newCell)
+		end
 		moved += 1
 	end
 	log("Reframe", plotId, "objects=", moved)

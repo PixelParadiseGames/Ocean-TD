@@ -1285,9 +1285,9 @@ local function ammoWorldPos(coral: CoralAgent, slot: number?): Vector3
 	end
 	local speciesId = coral.part:GetAttribute("OceanTD_SpeciesId")
 	local sid = if typeof(speciesId) == "string" then speciesId else nil
-	local offs = CoralSize.ammoLocalOffsets(nVis, r, ammoR, sid, coral.part.Size)
+	local offs = CoralSize.ammoLocalOffsets(nVis, r, ammoR, sid, coral.part.Size, coral.part)
 	local i = math.clamp(slot or 1, 1, #offs)
-	return coral.part.Position + offs[i]
+	return coral.part.CFrame:PointToWorldSpace(offs[i])
 end
 
 local function parkAmmo(coral: CoralAgent)

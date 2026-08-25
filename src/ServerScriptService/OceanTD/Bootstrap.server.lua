@@ -67,7 +67,7 @@ local function savePlayer(player: Player, reason: string)
 	end
 
 	PlayerSession.setSaving(player, true)
-	local layout = GridService.snapshot(plotId)
+	local layout = PlacementService.snapshotLayout(plotId)
 	local ok = PersistenceService.save(player, layout)
 	PlayerSession.setSaving(player, false)
 	print("[PERSIST] Save complete (" .. reason .. ") ok=", ok, "player=", player.Name)
@@ -192,11 +192,11 @@ requestPlace.OnServerInvoke = function(player: Player, itemId: any, worldPos: an
 end
 
 local requestMove = Remotes.getFunction("RequestMove")
-requestMove.OnServerInvoke = function(player: Player, placeId: any, fromWorldPos: any, toWorldPos: any)
+requestMove.OnServerInvoke = function(player: Player, placeId: any, fromWorldPos: any, toWorldPos: any, facingYaw: any)
 	if typeof(placeId) ~= "string" or typeof(fromWorldPos) ~= "Vector3" or typeof(toWorldPos) ~= "Vector3" then
 		return { ok = false, errorCode = "BadRequest" }
 	end
-	return PlacementService.move(player, placeId, fromWorldPos, toWorldPos)
+	return PlacementService.move(player, placeId, fromWorldPos, toWorldPos, tonumber(facingYaw))
 end
 
 local requestRecycle = Remotes.getFunction("RequestRecycle")
@@ -403,7 +403,18 @@ requestCoralSize.OnServerInvoke = function(player: Player, placeId: any, targetC
 end
 
 local requestCoralColor = Remotes.getFunction("RequestCoralColor")
-requestCoralColor.OnServerInvoke = function(player: Player, placeId: any, colorIndex: any, colorR: any, colorG: any, colorB: any)
+requestCoralColor.OnServerInvoke = function(
+	player: Player,
+	placeId: any,
+	colorIndex: any,
+	colorR: any,
+	colorG: any,
+	colorB: any,
+	webColorIndex: any,
+	webColorR: any,
+	webColorG: any,
+	webColorB: any
+)
 	if typeof(placeId) ~= "string" then
 		return { ok = false, errorCode = "BadRequest" }
 	end
@@ -411,5 +422,16 @@ requestCoralColor.OnServerInvoke = function(player: Player, placeId: any, colorI
 	if typeof(idx) ~= "number" then
 		return { ok = false, errorCode = "BadRequest" }
 	end
-	return PlacementService.setCoralColor(player, placeId, idx, tonumber(colorR), tonumber(colorG), tonumber(colorB))
+	return PlacementService.setCoralColor(
+		player,
+		placeId,
+		idx,
+		tonumber(colorR),
+		tonumber(colorG),
+		tonumber(colorB),
+		tonumber(webColorIndex),
+		tonumber(webColorR),
+		tonumber(webColorG),
+		tonumber(webColorB)
+	)
 end

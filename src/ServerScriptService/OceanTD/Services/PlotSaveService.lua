@@ -83,7 +83,7 @@ local function persistNow(player: Player, reason: string): boolean
 		return false
 	end
 	PlayerSession.setSaving(player, true)
-	local layout = GridService.snapshot(plotId)
+	local layout = PlacementService.snapshotLayout(plotId)
 	local ok = PersistenceService.save(player, layout)
 	PlayerSession.setSaving(player, false)
 	log("Persist", reason, "ok=", ok, player.Name)
@@ -135,7 +135,7 @@ function PlotSaveService.saveSlot(player: Player, slotIndex: number): any
 		return { ok = false, errorCode = "NoPlot" }
 	end
 
-	local layout = GridService.snapshot(plotId)
+	local layout = PlacementService.snapshotLayout(plotId)
 	-- Empty saves are allowed; mark intentional so anti-wipe won't block later persist of empty active.
 	if #layout == 0 then
 		PersistenceService.allowIntentionalClear(player.UserId)
@@ -149,7 +149,7 @@ function PlotSaveService.saveSlot(player: Player, slotIndex: number): any
 	else
 		-- Persist other slots without changing live layout snapshot ownership.
 		PlayerSession.setSaving(player, true)
-		local activeLayout = GridService.snapshot(plotId)
+		local activeLayout = PlacementService.snapshotLayout(plotId)
 		local ok = PersistenceService.save(player, activeLayout)
 		PlayerSession.setSaving(player, false)
 		if not ok then
@@ -239,7 +239,7 @@ function PlotSaveService.renameSlot(player: Player, slotIndex: number, name: str
 	local plotId = PlotService.getOwnerPlotId(player)
 	if plotId then
 		PlayerSession.setSaving(player, true)
-		PersistenceService.save(player, GridService.snapshot(plotId))
+		PersistenceService.save(player, PlacementService.snapshotLayout(plotId))
 		PlayerSession.setSaving(player, false)
 	end
 	return PlotSaveService.getClientState(player)
