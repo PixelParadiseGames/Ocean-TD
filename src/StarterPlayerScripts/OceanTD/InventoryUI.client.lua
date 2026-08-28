@@ -37,6 +37,7 @@ local HandOrb = require(script.Parent:WaitForChild("HandOrb"))
 local ClearPlotSlot = require(script.Parent:WaitForChild("ClearPlotSlot"))
 local UndoSlot = require(script.Parent:WaitForChild("UndoSlot"))
 local SavePlotSlot = require(script.Parent:WaitForChild("SavePlotSlot"))
+local SettingsUI = require(script.Parent:WaitForChild("SettingsUI"))
 local WaveSlot = require(script.Parent:WaitForChild("WaveSlot"))
 local SkipWaveSlot = require(script.Parent:WaitForChild("SkipWaveSlot"))
 local WaveSpeedSlot = require(script.Parent:WaitForChild("WaveSpeedSlot"))
@@ -1998,6 +1999,16 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
 			return
 		end
 	end
+	-- Settings: B / Backspace / Esc closes.
+	if SettingsUI.isOpen() then
+		if input.KeyCode == Enum.KeyCode.ButtonB
+			or input.KeyCode == Enum.KeyCode.Escape
+			or input.KeyCode == Enum.KeyCode.Backspace
+		then
+			SettingsUI.handleCancelInput()
+			return
+		end
+	end
 	-- Save plots: A/Enter confirm overwrite; B/Esc close overwrite or main UI.
 	if SavePlotSlot.isOpen() then
 		if input.KeyCode == Enum.KeyCode.ButtonA or input.KeyCode == Enum.KeyCode.Return then
@@ -2128,6 +2139,7 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
 		end
 		if InventoryState.isOpen()
 			or WaveSlot.isSummaryOpen()
+			or SettingsUI.isOpen()
 			or SavePlotSlot.isOpen()
 			or ClearPlotSlot.isConfirmActive()
 			or SkipWaveSlot.isConfirmActive()
@@ -2148,6 +2160,10 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
 			SavePlotSlot.hide()
 			return
 		end
+		if SettingsUI.isOpen() then
+			SettingsUI.close()
+			return
+		end
 		if InventoryState.isOpen() and (gamepadSelectActive or openWithGamepadPending) then
 			toggleFromUser(true)
 			return
@@ -2160,6 +2176,7 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
 		and not RelocateController.isActive()
 		and not InventoryState.isBuildModalBlocking()
 		and not SavePlotSlot.isOpen()
+		and not SettingsUI.isOpen()
 	then
 		if input.KeyCode == Enum.KeyCode.DPadLeft then
 			setGamepadFocus(gamepadFocusIndex - 1)

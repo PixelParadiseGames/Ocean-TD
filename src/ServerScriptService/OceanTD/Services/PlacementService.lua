@@ -410,7 +410,7 @@ function PlacementService.placeFromSave(
 		if CoralVisual.needsFacingYaw(species.speciesId) then
 			facingYaw = if typeof(extras.facingYaw) == "number" then extras.facingYaw else CoralVisual.randomFacingYaw()
 		end
-		if CoralVisual.isZoas(species.speciesId)
+		if CoralVisual.isMainAccentMesh(species.speciesId)
 			and typeof(extras.webColorR) == "number"
 			and typeof(extras.webColorG) == "number"
 			and typeof(extras.webColorB) == "number"
@@ -495,7 +495,7 @@ function PlacementService.placeFromSave(
 		if paintColor and webColor then
 			CoralVisual.setRestColor(visual, paintColor, webColor)
 		end
-	elseif CoralVisual.isZoas(species.speciesId) then
+	elseif CoralVisual.isMainAccentMesh(species.speciesId) then
 		local rx: number
 		local ry: number
 		local rz: number
@@ -1554,7 +1554,9 @@ function PlacementService.setCoralColor(
 	if not slot then
 		return { ok = false, errorCode = "BadPlot" }
 	end
-	local localPos = GridMath.worldToPlotLocal(visual.Position, slot.cframe)
+	-- Mesh species sit above the planted anchor; grid cells are keyed by anchor, not mesh center.
+	local anchorPos = CoralVisual.readGridAnchor(visual) or visual.Position
+	local localPos = GridMath.worldToPlotLocal(anchorPos, slot.cframe)
 	local gx, gy, gz = GridMath.worldToGrid(localPos, Vector3.zero)
 	if not GridService.setColorAtGrid(plotId, gx, gy, gz, idx, paint.R, paint.G, paint.B) then
 		return { ok = false, errorCode = "Missing" }
@@ -1587,7 +1589,7 @@ function PlacementService.setCoralColor(
 		end
 		CoralVisual.setRestColor(visual, paint, webPaint, webIdx)
 		GridService.setSeaFanExtras(plotId, gx, gy, gz, nil, nil, nil, webPaint.R, webPaint.G, webPaint.B)
-	elseif CoralVisual.isZoas(visual:GetAttribute("OceanTD_SpeciesId")) then
+	elseif CoralVisual.isMainAccentMesh(visual:GetAttribute("OceanTD_SpeciesId")) then
 		webPaint = PlotOutlineColors.randomBrightAccent()
 		if typeof(webColorR) == "number" and typeof(webColorG) == "number" and typeof(webColorB) == "number" then
 			local candidate = Color3.new(

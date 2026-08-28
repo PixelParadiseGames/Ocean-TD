@@ -42,7 +42,7 @@ local BY_ID: { [string]: ItemDef } = {
 	FireCoral = {
 		id = "FireCoral",
 		displayName = "Fire Coral",
-		icon = "rbxassetid://119869570909704",
+		icon = "rbxassetid://131053731672950",
 		category = "Coral",
 		sortOrder = 35, -- before Sea Fan
 		speciesId = "FireCoral",
@@ -54,6 +54,22 @@ local BY_ID: { [string]: ItemDef } = {
 		category = "Coral",
 		sortOrder = 36,
 		speciesId = "Zoas",
+	},
+	TreeCoral = {
+		id = "TreeCoral",
+		displayName = "Tree Coral",
+		icon = "rbxassetid://114115102333521",
+		category = "Coral",
+		sortOrder = 37,
+		speciesId = "TreeCoral",
+	},
+	LeatherCoral = {
+		id = "LeatherCoral",
+		displayName = "Leather Coral",
+		icon = "rbxassetid://136151370827546",
+		category = "Coral",
+		sortOrder = 38,
+		speciesId = "LeatherCoral",
 	},
 	SeaFan = {
 		id = "SeaFan",

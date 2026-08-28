@@ -99,6 +99,36 @@ local BY_ID: { [string]: SpeciesDef } = {
 		meshFolder = "Zoas", -- ReplicatedStorage.Coral.Zoas
 		defaultColorIndex = 1,
 	},
+	TreeCoral = {
+		speciesId = "TreeCoral",
+		itemId = "TreeCoral",
+		displayName = "Tree Coral",
+		diameter = 4,
+		material = Enum.Material.Pebble,
+		colorMin = Color3.fromRGB(60, 120, 70),
+		colorMax = Color3.fromRGB(100, 180, 90),
+		castShadow = false,
+		canCollide = true,
+		reloadSec = 6,
+		foodFill = 1,
+		meshFolder = "TreeCoral", -- ReplicatedStorage.Coral.TreeCoral
+		defaultColorIndex = 11, -- green stem; accent from template / paint
+	},
+	LeatherCoral = {
+		speciesId = "LeatherCoral",
+		itemId = "LeatherCoral",
+		displayName = "Leather Coral",
+		diameter = 4,
+		material = Enum.Material.Pebble,
+		colorMin = Color3.fromRGB(130, 85, 55),
+		colorMax = Color3.fromRGB(195, 140, 95),
+		castShadow = false,
+		canCollide = true,
+		reloadSec = 6,
+		foodFill = 1,
+		meshFolder = "Leather", -- ReplicatedStorage.Coral.Leather
+		defaultColorIndex = 1,
+	},
 	SeaFan = {
 		speciesId = "SeaFan",
 		itemId = "SeaFan",

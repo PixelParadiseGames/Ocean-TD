@@ -146,6 +146,16 @@ CoralSize.STATS_BY_SPECIES = {
 		[2] = { range = 70, reload = 4, food = 2, defense = 2 },
 		[3] = { range = 90, reload = 2, food = 4, defense = 3 },
 	},
+	TreeCoral = {
+		[1] = { range = 40, reload = 6, food = 1, defense = 1 },
+		[2] = { range = 70, reload = 4, food = 2, defense = 2 },
+		[3] = { range = 90, reload = 2, food = 4, defense = 3 },
+	},
+	LeatherCoral = {
+		[1] = { range = 40, reload = 6, food = 1, defense = 1 },
+		[2] = { range = 70, reload = 4, food = 2, defense = 2 },
+		[3] = { range = 90, reload = 2, food = 4, defense = 3 },
+	},
 }
 
 function CoralSize.statsFor(class: number, speciesId: string?): SizeStats
@@ -192,7 +202,7 @@ function CoralSize.ammoLocalOffsets(
 	local y = coralRadius + ammoRadius
 	local n = math.clamp(math.floor(foodCount), 1, 4)
 
-	if speciesId == "SeaFan" and part then
+	if (speciesId == "SeaFan" or speciesId == "TreeCoral" or speciesId == "LeatherCoral") and part then
 		local offs: { Vector3 } = {}
 		for i = 1, n do
 			local food = part:FindFirstChild("Food" .. tostring(i), true)
@@ -240,7 +250,7 @@ function CoralSize.ammoLocalOffsets(
 		}
 	end
 
-	if speciesId == "Sponge" or speciesId == "FireCoral" or speciesId == "Zoas" then
+	if speciesId == "Sponge" or speciesId == "FireCoral" or speciesId == "Zoas" or speciesId == "TreeCoral" or speciesId == "LeatherCoral" then
 		local size = partSize or Vector3.new(coralRadius * 2, coralRadius * 2, coralRadius * 2)
 		local topY = coralRadius + ammoRadius * 0.9
 		local spread = math.max(ammoRadius * 2.4, math.min(size.X, size.Z) * 0.24)

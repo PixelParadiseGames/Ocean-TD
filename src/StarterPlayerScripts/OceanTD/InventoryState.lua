@@ -104,6 +104,7 @@ local clearPlotConfirming = false
 local clearPlotBusy = false
 local savePlotsOpen = false
 local savePlotsBusy = false
+local settingsOpen = false
 
 function InventoryState.setClearPlotConfirming(value: boolean)
 	clearPlotConfirming = value == true
@@ -145,9 +146,17 @@ function InventoryState.isSavePlotsBlocking(): boolean
 	return savePlotsOpen or savePlotsBusy
 end
 
--- Clear-plot or save-plots modal — blocks place / relocate / gamepad arm.
+function InventoryState.setSettingsOpen(value: boolean)
+	settingsOpen = value == true
+end
+
+function InventoryState.isSettingsOpen(): boolean
+	return settingsOpen
+end
+
+-- Clear-plot, save-plots, or settings modal — blocks place / relocate / gamepad arm.
 function InventoryState.isBuildModalBlocking(): boolean
-	return InventoryState.isClearPlotBlocking() or InventoryState.isSavePlotsBlocking()
+	return InventoryState.isClearPlotBlocking() or InventoryState.isSavePlotsBlocking() or settingsOpen
 end
 
 -- True when the pointer is over the open backpack panel (scroll list / chrome).

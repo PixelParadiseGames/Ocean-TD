@@ -1058,7 +1058,7 @@ local function applyCoralPaint(part: BasePart, idx: number, paint: Color3, place
 		-- Same palette index as the selected swatch; independent shade only.
 		webIdx = idx
 		webPaint = PlotOutlineColors.randomHueVariant(idx)
-	elseif CoralVisual.isZoas(part:GetAttribute("OceanTD_SpeciesId")) then
+	elseif CoralVisual.isMainAccentMesh(part:GetAttribute("OceanTD_SpeciesId")) then
 		webPaint = PlotOutlineColors.randomBrightAccent()
 	end
 	part:SetAttribute("OceanTD_ColorIndex", idx)
