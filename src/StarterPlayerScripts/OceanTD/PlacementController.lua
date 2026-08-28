@@ -797,7 +797,11 @@ local function updateGhostAt(anchorPos: Vector3)
 		elseif CoralVisual.isMeshSpecies(speciesId) then
 			ghostPlaceDiameter = nil
 			ghostPlaceVariant = CoralVisual.randomMeshVariant(speciesId)
-			ghostPlaceScale = CoralVisual.randomMeshScale()
+			ghostPlaceScale = CoralVisual.randomMeshScale(speciesId)
+			-- FireCoral (and any other yaw mesh): random facing; no rotate chrome.
+			if CoralVisual.needsFacingYaw(speciesId) then
+				ghostPlaceFacingYaw = CoralVisual.randomFacingYaw()
+			end
 		else
 			ghostPlaceDiameter = nil
 		end
@@ -843,6 +847,12 @@ local function updateGhostAt(anchorPos: Vector3)
 			-- Keep player-adjusted yaw; seed 0 only when unset.
 			if typeof(ghostPlaceFacingYaw) ~= "number" then
 				ghostPlaceFacingYaw = 0
+			end
+			local mir = ClientPlot.get()
+			CoralVisual.alignMeshToSurface(ghost, anchorPos, ghostPlaceFacingYaw, nil, if mir then mir.cframe else nil)
+		elseif CoralVisual.needsFacingYaw(speciesId) then
+			if typeof(ghostPlaceFacingYaw) ~= "number" then
+				ghostPlaceFacingYaw = CoralVisual.randomFacingYaw()
 			end
 			local mir = ClientPlot.get()
 			CoralVisual.alignMeshToSurface(ghost, anchorPos, ghostPlaceFacingYaw, nil, if mir then mir.cframe else nil)

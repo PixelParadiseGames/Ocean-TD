@@ -302,11 +302,11 @@ function PlacementService.hydrateVisuals(plotId: string, boundsCFrame: CFrame)
 			if typeof(cell.scaleHeight) == "number" then
 				visual:SetAttribute("OceanTD_ScaleHeight", cell.scaleHeight)
 			end
-			-- Always re-apply SeaFan yaw from save (plot-local) so load matches plant on any plot.
-			if CoralVisual.isSeaFan(species.speciesId) then
+			-- Always re-apply saved yaw (plot-local) so load matches plant on any plot.
+			if CoralVisual.needsFacingYaw(species.speciesId) then
 				local yaw = if typeof(cell.facingYaw) == "number" and cell.facingYaw == cell.facingYaw
 					then cell.facingYaw
-					else 0
+					else CoralVisual.readFacingYaw(visual)
 				visual:SetAttribute("OceanTD_FacingYaw", yaw)
 				CoralVisual.alignMeshToSurface(visual, world, yaw, nil, boundsCFrame)
 			elseif typeof(cell.facingYaw) == "number" then
@@ -401,12 +401,22 @@ function PlacementService.placeFromSave(
 		scale = CoralVisual.sanitizeSeaFanAxis(scaleMult)
 		scaleWidth = CoralVisual.sanitizeSeaFanAxis(extras.scaleWidth)
 		scaleHeight = CoralVisual.sanitizeSeaFanAxis(extras.scaleHeight)
-		facingYaw = if typeof(extras.facingYaw) == "number" then extras.facingYaw else 0
+		facingYaw = if typeof(extras.facingYaw) == "number" then extras.facingYaw else CoralVisual.randomFacingYaw()
 		if typeof(extras.webColorR) == "number" and typeof(extras.webColorG) == "number" and typeof(extras.webColorB) == "number" then
 			webColor = Color3.new(extras.webColorR, extras.webColorG, extras.webColorB)
 		end
 	elseif CoralVisual.isMeshSpecies(species.speciesId) then
-		scale = CoralVisual.sanitizeMeshScale(scaleMult)
+		scale = CoralVisual.sanitizeMeshScale(scaleMult, species.speciesId)
+		if CoralVisual.needsFacingYaw(species.speciesId) then
+			facingYaw = if typeof(extras.facingYaw) == "number" then extras.facingYaw else CoralVisual.randomFacingYaw()
+		end
+		if CoralVisual.isZoas(species.speciesId)
+			and typeof(extras.webColorR) == "number"
+			and typeof(extras.webColorG) == "number"
+			and typeof(extras.webColorB) == "number"
+		then
+			webColor = Color3.new(extras.webColorR, extras.webColorG, extras.webColorB)
+		end
 	end
 	local occupied, occupyErr = GridService.tryOccupy(
 		plotId,
@@ -485,6 +495,46 @@ function PlacementService.placeFromSave(
 		if paintColor and webColor then
 			CoralVisual.setRestColor(visual, paintColor, webColor)
 		end
+	elseif CoralVisual.isZoas(species.speciesId) then
+		local rx: number
+		local ry: number
+		local rz: number
+		if typeof(gx) == "number" and typeof(gy) == "number" and typeof(gz) == "number" then
+			rx, ry, rz = math.round(gx), math.round(gy), math.round(gz)
+		else
+			rx, ry, rz = GridMath.worldToGrid(visualLocal, Vector3.zero)
+		end
+		GridService.setSeaFanExtras(
+			plotId,
+			rx,
+			ry,
+			rz,
+			nil,
+			nil,
+			facingYaw,
+			if webColor then webColor.R else nil,
+			if webColor then webColor.G else nil,
+			if webColor then webColor.B else nil
+		)
+		if typeof(facingYaw) == "number" then
+			visual:SetAttribute("OceanTD_FacingYaw", facingYaw)
+			CoralVisual.alignMeshToSurface(visual, worldPos, facingYaw, nil, slot.cframe)
+		end
+		if paintColor then
+			CoralVisual.setRestColor(visual, paintColor, webColor)
+		end
+	elseif CoralVisual.needsFacingYaw(species.speciesId) and typeof(facingYaw) == "number" then
+		local rx: number
+		local ry: number
+		local rz: number
+		if typeof(gx) == "number" and typeof(gy) == "number" and typeof(gz) == "number" then
+			rx, ry, rz = math.round(gx), math.round(gy), math.round(gz)
+		else
+			rx, ry, rz = GridMath.worldToGrid(visualLocal, Vector3.zero)
+		end
+		GridService.setSeaFanExtras(plotId, rx, ry, rz, nil, nil, facingYaw, nil, nil, nil)
+		visual:SetAttribute("OceanTD_FacingYaw", facingYaw)
+		CoralVisual.alignMeshToSurface(visual, worldPos, facingYaw, nil, slot.cframe)
 	end
 
 	local placeIdAttr = visual:GetAttribute("OceanTD_PlaceId")
@@ -497,8 +547,8 @@ function PlacementService.placeFromSave(
 	end
 	local tier = CoralSize.clampTier(sizeTier or class)
 	CoralSize.applyToPart(visual, diameter or visual.Size.Y, class, tier)
-	-- Re-apply SeaFan yaw after attrs/size so load matches the saved facing.
-	if CoralVisual.isSeaFan(species.speciesId) and typeof(facingYaw) == "number" then
+	-- Re-apply yaw after attrs/size so load matches the saved facing.
+	if CoralVisual.needsFacingYaw(species.speciesId) and typeof(facingYaw) == "number" then
 		visual:SetAttribute("OceanTD_FacingYaw", facingYaw)
 		CoralVisual.alignMeshToSurface(visual, worldPos, facingYaw, nil, slot.cframe)
 	end
@@ -591,9 +641,16 @@ function PlacementService.place(
 			scale = CoralVisual.sanitizeSeaFanAxis(opts.scaleMult)
 			scaleWidth = CoralVisual.sanitizeSeaFanAxis(opts.scaleWidth)
 			scaleHeight = CoralVisual.sanitizeSeaFanAxis(opts.scaleHeight)
-			facingYaw = if typeof(opts.facingYaw) == "number" and opts.facingYaw == opts.facingYaw then opts.facingYaw else 0
+			facingYaw = if typeof(opts.facingYaw) == "number" and opts.facingYaw == opts.facingYaw
+				then opts.facingYaw
+				else CoralVisual.randomFacingYaw()
 		else
-			scale = CoralVisual.sanitizeMeshScale(opts.scaleMult)
+			scale = CoralVisual.sanitizeMeshScale(opts.scaleMult, species.speciesId)
+			if CoralVisual.needsFacingYaw(species.speciesId) then
+				facingYaw = if typeof(opts.facingYaw) == "number" and opts.facingYaw == opts.facingYaw
+					then opts.facingYaw
+					else CoralVisual.randomFacingYaw()
+			end
 		end
 	end
 	local gx, gy, gz = GridMath.worldToGrid(localPos, Vector3.zero)
@@ -662,6 +719,12 @@ function PlacementService.place(
 				visual:SetAttribute("OceanTD_FacingYaw", facingYaw)
 				CoralVisual.alignMeshToSurface(visual, worldPos, facingYaw, nil, pcf)
 			end
+		elseif CoralVisual.needsFacingYaw(species.speciesId) and typeof(facingYaw) == "number" then
+			GridService.setSeaFanExtras(plotId, gx, gy, gz, nil, nil, facingYaw, nil, nil, nil)
+			local slotCf = PlotService.getSlot(plotId)
+			local pcf = if slotCf then slotCf.cframe else nil
+			visual:SetAttribute("OceanTD_FacingYaw", facingYaw)
+			CoralVisual.alignMeshToSurface(visual, worldPos, facingYaw, nil, pcf)
 		end
 	end
 
@@ -671,7 +734,7 @@ function PlacementService.place(
 	visual:SetAttribute("OceanTD_ItemId", itemId)
 	visual:SetAttribute("OceanTD_SpeciesId", species.speciesId)
 	CoralSize.applyToPart(visual, diameter or visual.Size.X, sizeClass, 1)
-	if CoralVisual.isSeaFan(species.speciesId) and typeof(facingYaw) == "number" then
+	if CoralVisual.needsFacingYaw(species.speciesId) and typeof(facingYaw) == "number" then
 		local slotCf = PlotService.getSlot(plotId)
 		visual:SetAttribute("OceanTD_FacingYaw", facingYaw)
 		CoralVisual.alignMeshToSurface(visual, worldPos, facingYaw, nil, if slotCf then slotCf.cframe else nil)
@@ -687,8 +750,8 @@ function PlacementService.place(
 	end
 
 	log("Placed", itemId, "for", player.Name, "at", worldPos, "consume=", shouldConsume, "yaw=", facingYaw)
-	-- Persist SeaFan yaw immediately — don't wait for autosave / leave.
-	if CoralVisual.isSeaFan(species.speciesId) then
+	-- Persist facing yaw immediately — don't wait for autosave / leave.
+	if CoralVisual.needsFacingYaw(species.speciesId) then
 		PersistenceService.save(player, PlacementService.snapshotLayout(plotId))
 	end
 	return {
@@ -783,7 +846,8 @@ function PlacementService.move(
 		if yawToApply == nil then
 			return
 		end
-		if CoralVisual.isSeaFan(visual:GetAttribute("OceanTD_SpeciesId")) or CoralVisual.isSeaFan(fromCell.id) then
+		local sid = visual:GetAttribute("OceanTD_SpeciesId")
+		if CoralVisual.needsFacingYaw(sid) or CoralVisual.needsFacingYaw(fromCell.id) then
 			visual:SetAttribute("OceanTD_FacingYaw", yawToApply)
 			GridService.setSeaFanExtras(plotId, cellGx, cellGy, cellGz, nil, nil, yawToApply, nil, nil, nil)
 		end
@@ -810,7 +874,7 @@ function PlacementService.move(
 			returnedYaw = if typeof(attr) == "number" then attr else nil
 		end
 		scheduleCoralColorSave(player, plotId)
-		if CoralVisual.isSeaFan(visual:GetAttribute("OceanTD_SpeciesId")) or CoralVisual.isSeaFan(fromCell.id) then
+		if CoralVisual.needsFacingYaw(visual:GetAttribute("OceanTD_SpeciesId")) or CoralVisual.needsFacingYaw(fromCell.id) then
 			PersistenceService.save(player, PlacementService.snapshotLayout(plotId))
 		end
 		log("Moved (same cell) yaw=", returnedYaw, "for", player.Name)
@@ -911,7 +975,7 @@ function PlacementService.move(
 	end
 
 	log("Moved", cell.id, "for", player.Name, "→", toWorldPos, "yaw=", yaw)
-	if CoralVisual.isSeaFan(if species then species.speciesId else nil) or CoralVisual.isSeaFan(cell.id) then
+	if CoralVisual.needsFacingYaw(if species then species.speciesId else nil) or CoralVisual.needsFacingYaw(cell.id) then
 		PersistenceService.save(player, PlacementService.snapshotLayout(plotId))
 	end
 	return {
@@ -1382,7 +1446,7 @@ function PlacementService.setCoralSize(
 		if CoralVisual.isSeaFan(speciesId) then
 			scale, scaleWidth, scaleHeight = CoralVisual.randomSeaFanScales()
 		else
-			scale = CoralVisual.randomMeshScale()
+			scale = CoralVisual.randomMeshScale(if typeof(speciesId) == "string" then speciesId else nil)
 		end
 		local newPart, height, vOut, sOut = CoralVisual.restyleMesh(
 			visual,
@@ -1522,6 +1586,21 @@ function PlacementService.setCoralColor(
 			end
 		end
 		CoralVisual.setRestColor(visual, paint, webPaint, webIdx)
+		GridService.setSeaFanExtras(plotId, gx, gy, gz, nil, nil, nil, webPaint.R, webPaint.G, webPaint.B)
+	elseif CoralVisual.isZoas(visual:GetAttribute("OceanTD_SpeciesId")) then
+		webPaint = PlotOutlineColors.randomBrightAccent()
+		if typeof(webColorR) == "number" and typeof(webColorG) == "number" and typeof(webColorB) == "number" then
+			local candidate = Color3.new(
+				math.clamp(webColorR, 0, 1),
+				math.clamp(webColorG, 0, 1),
+				math.clamp(webColorB, 0, 1)
+			)
+			local _, s, v = candidate:ToHSV()
+			if s >= 0.45 and v >= 0.5 then
+				webPaint = candidate
+			end
+		end
+		CoralVisual.setRestColor(visual, paint, webPaint, nil)
 		GridService.setSeaFanExtras(plotId, gx, gy, gz, nil, nil, nil, webPaint.R, webPaint.G, webPaint.B)
 	else
 		CoralVisual.setRestColor(visual, paint)

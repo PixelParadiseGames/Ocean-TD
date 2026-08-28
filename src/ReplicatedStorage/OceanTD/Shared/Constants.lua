@@ -52,6 +52,10 @@ local Constants = {
 	STARTING_SPONGE_SEEDS = 50,
 	-- Sea Grass seeds for new / empty-plot soft grant.
 	STARTING_SEA_GRASS_SEEDS = 50,
+	-- Fire Coral seeds for new / empty-plot soft grant.
+	STARTING_FIRE_CORAL_SEEDS = 50,
+	-- Zoas seeds for new / empty-plot soft grant.
+	STARTING_ZOAS_SEEDS = 50,
 	-- Sea Fan: soft-grant a large stock; debit/credit are no-ops while unlimited.
 	STARTING_SEA_FAN_SEEDS = 999999,
 	SEA_FAN_UNLIMITED_SEEDS = true,

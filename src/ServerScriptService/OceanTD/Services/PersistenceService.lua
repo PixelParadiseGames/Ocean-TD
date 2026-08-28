@@ -311,6 +311,8 @@ local function sanitizeInventory(raw: any, isNewProfile: boolean): { [string]: a
 				BrainCoral = Constants.STARTING_BRAIN_CORAL_SEEDS,
 				Sponge = Constants.STARTING_SPONGE_SEEDS,
 				SeaGrass = Constants.STARTING_SEA_GRASS_SEEDS,
+				FireCoral = Constants.STARTING_FIRE_CORAL_SEEDS,
+				Zoas = Constants.STARTING_ZOAS_SEEDS,
 				SeaFan = Constants.STARTING_SEA_FAN_SEEDS,
 			}
 		end
@@ -995,6 +997,14 @@ function PersistenceService.load(player: Player): PlayerProfile
 		if inv.SeaGrass == nil then
 			inv.SeaGrass = Constants.STARTING_SEA_GRASS_SEEDS
 			log("Starter SeaGrass grant userId=", userId, "x", Constants.STARTING_SEA_GRASS_SEEDS)
+		end
+		if inv.FireCoral == nil then
+			inv.FireCoral = Constants.STARTING_FIRE_CORAL_SEEDS
+			log("Starter FireCoral grant userId=", userId, "x", Constants.STARTING_FIRE_CORAL_SEEDS)
+		end
+		if inv.Zoas == nil then
+			inv.Zoas = Constants.STARTING_ZOAS_SEEDS
+			log("Starter Zoas grant userId=", userId, "x", Constants.STARTING_ZOAS_SEEDS)
 		end
 		if inv.SeaFan == nil then
 			inv.SeaFan = Constants.STARTING_SEA_FAN_SEEDS

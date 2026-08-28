@@ -74,6 +74,7 @@ local h3s: { Frame } = {}
 local h3Labels: { { TextLabel } } = {}
 local h3Hits: { TextButton } = {}
 local confirmGui: ScreenGui? = nil
+local confirmUnlockTarget: number? = nil
 local pulseConn: RBXScriptConnection? = nil
 local hintConn: RBXScriptConnection? = nil
 local confirmStrokeConn: RBXScriptConnection? = nil
@@ -134,6 +135,7 @@ end
 
 local function hideConfirm()
 	RelocateController.setInspectModal(false)
+	confirmUnlockTarget = nil
 	if confirmStrokeConn then
 		confirmStrokeConn:Disconnect()
 		confirmStrokeConn = nil
@@ -327,8 +329,8 @@ local function tweenSpongeScale(
 	toMult: number,
 	sec: number
 )
-	local isSeaFan = CoralVisual.isSeaFan(part:GetAttribute("OceanTD_SpeciesId"))
-	if isSeaFan then
+	local isDualPart = CoralVisual.isDualColorMesh(part:GetAttribute("OceanTD_SpeciesId"))
+	if isDualPart then
 		CoralVisual.applySeaFanScaleMult(part, fullSize, fromMult, surfaceAnchor)
 	else
 		part.Size = fullSize * fromMult
@@ -339,7 +341,7 @@ local function tweenSpongeScale(
 		local u = math.clamp((os.clock() - t0) / sec, 0, 1)
 		local ease = 1 - (1 - u) * (1 - u)
 		local mult = fromMult + (toMult - fromMult) * ease
-		if isSeaFan then
+		if isDualPart then
 			CoralVisual.applySeaFanScaleMult(part, fullSize, mult, surfaceAnchor)
 		else
 			part.Size = fullSize * mult
@@ -519,16 +521,16 @@ applyServerSize = function(result: any, unlock: boolean, partOverride: BasePart?
 
 	local speciesId = part:GetAttribute("OceanTD_SpeciesId")
 	if CoralVisual.isMeshSpecies(speciesId) then
-		if CoralVisual.isSeaFan(speciesId) then
+		if CoralVisual.isDualColorMesh(speciesId) then
 			CoralVisual.clearSeaFanClientHide(part)
 			local stemT = part:GetAttribute("OceanTD_RestTransparency")
 			if typeof(stemT) == "number" then
 				part.Transparency = stemT
 			end
-			local web = part:FindFirstChild("Web")
-			local webT = part:GetAttribute("OceanTD_WebRestTransparency")
-			if web and web:IsA("BasePart") and typeof(webT) == "number" then
-				web.Transparency = webT
+			local accent = part:FindFirstChild("Accent") or part:FindFirstChild("Web")
+			local accentT = part:GetAttribute("OceanTD_WebRestTransparency")
+			if accent and accent:IsA("BasePart") and typeof(accentT) == "number" then
+				accent.Transparency = accentT
 			end
 		else
 			part.Transparency = 0
@@ -585,7 +587,7 @@ local function armHideReplacement(placeId: string): () -> ()
 		desc:SetAttribute("OceanTD_CineFullY", full.Y)
 		desc:SetAttribute("OceanTD_CineFullZ", full.Z)
 		desc.LocalTransparencyModifier = 1
-		if CoralVisual.isSeaFan(desc:GetAttribute("OceanTD_SpeciesId")) then
+		if CoralVisual.isDualColorMesh(desc:GetAttribute("OceanTD_SpeciesId")) then
 			CoralVisual.applySeaFanScaleMult(desc, full, 0.05, CoralVisual.readGridAnchor(desc))
 			for _, ch in ipairs(desc:GetChildren()) do
 				if ch:IsA("BasePart") then
@@ -646,7 +648,7 @@ local function runSpongeSizeCinematic(oldPart: BasePart, placeId: string, target
 	end
 
 	oldPart.LocalTransparencyModifier = 1
-	if CoralVisual.isSeaFan(oldPart:GetAttribute("OceanTD_SpeciesId")) then
+	if CoralVisual.isDualColorMesh(oldPart:GetAttribute("OceanTD_SpeciesId")) then
 		for _, ch in ipairs(oldPart:GetChildren()) do
 			if ch:IsA("BasePart") then
 				ch.LocalTransparencyModifier = 1
@@ -662,7 +664,7 @@ local function runSpongeSizeCinematic(oldPart: BasePart, placeId: string, target
 		disarmHide()
 		if oldPart.Parent then
 			oldPart.LocalTransparencyModifier = 0
-			if CoralVisual.isSeaFan(oldPart:GetAttribute("OceanTD_SpeciesId")) then
+			if CoralVisual.isDualColorMesh(oldPart:GetAttribute("OceanTD_SpeciesId")) then
 				CoralVisual.clearSeaFanClientHide(oldPart)
 			end
 		end
@@ -694,7 +696,7 @@ local function runSpongeSizeCinematic(oldPart: BasePart, placeId: string, target
 	part:SetAttribute("OceanTD_CineFullZ", nil)
 
 	local growAnchor = anchor or CoralVisual.readGridAnchor(part)
-	if CoralVisual.isSeaFan(part:GetAttribute("OceanTD_SpeciesId")) then
+	if CoralVisual.isDualColorMesh(part:GetAttribute("OceanTD_SpeciesId")) then
 		CoralVisual.applySeaFanScaleMult(part, newFull, 0.05, growAnchor)
 		CoralVisual.clearSeaFanClientHide(part)
 	else
@@ -713,7 +715,7 @@ local function runSpongeSizeCinematic(oldPart: BasePart, placeId: string, target
 	else
 		tweenMeshScale(part, newFull, 0.05, 1, 0.9)
 	end
-	if CoralVisual.isSeaFan(part:GetAttribute("OceanTD_SpeciesId")) then
+	if CoralVisual.isDualColorMesh(part:GetAttribute("OceanTD_SpeciesId")) then
 		CoralVisual.clearSeaFanClientHide(part)
 	end
 
@@ -775,6 +777,7 @@ local function showConfirmUnlock()
 	end
 	hideConfirm()
 	RelocateController.setInspectModal(true)
+	confirmUnlockTarget = nxt
 	local sg = Instance.new("ScreenGui")
 	sg.Name = "OceanTD_CoralSizeConfirm"
 	sg.ResetOnSpawn = false
@@ -1055,6 +1058,8 @@ local function applyCoralPaint(part: BasePart, idx: number, paint: Color3, place
 		-- Same palette index as the selected swatch; independent shade only.
 		webIdx = idx
 		webPaint = PlotOutlineColors.randomHueVariant(idx)
+	elseif CoralVisual.isZoas(part:GetAttribute("OceanTD_SpeciesId")) then
+		webPaint = PlotOutlineColors.randomBrightAccent()
 	end
 	part:SetAttribute("OceanTD_ColorIndex", idx)
 	CoralVisual.setRestColor(part, paint, webPaint, webIdx)
@@ -1886,9 +1891,29 @@ function CoralInspectPanel.bind(panel: GuiObject, catalogFrame: GuiObject)
 		return selectCoralColor(focusColorIndex)
 	end)
 
-	UserInputService.InputBegan:Connect(function(input)
+	-- Keyboard: Enter = Unlock, Backspace = Cancel (size confirm). Esc / B also cancel.
+	UserInputService.InputBegan:Connect(function(input, gameProcessed)
 		if confirmGui then
-			if input.KeyCode == Enum.KeyCode.ButtonB or input.KeyCode == Enum.KeyCode.Escape then
+			if input.KeyCode == Enum.KeyCode.ButtonB then
+				hideConfirm()
+				return
+			end
+			if input.UserInputType ~= Enum.UserInputType.Keyboard then
+				return
+			end
+			if gameProcessed then
+				return
+			end
+			local key = input.KeyCode
+			if key == Enum.KeyCode.Return or key == Enum.KeyCode.KeypadEnter then
+				local n = confirmUnlockTarget
+				if n then
+					hideConfirm()
+					invokeSize(n, true)
+				end
+				return
+			end
+			if key == Enum.KeyCode.Backspace or key == Enum.KeyCode.Escape then
 				hideConfirm()
 			end
 			return

@@ -423,6 +423,10 @@ task.spawn(function()
 		warn("[Skills] MobileLeftUI.dPad missing")
 		return
 	end
+	if dPad:IsA("GuiObject") then
+		-- Active=false only — Interactable=false would disable all child buttons.
+		dPad.Active = false
+	end
 	local skillsBtn = dPad:WaitForChild("Skills", 30)
 	if not skillsBtn or not skillsBtn:IsA("GuiObject") then
 		warn("[Skills] MobileLeftUI.dPad.Skills missing")

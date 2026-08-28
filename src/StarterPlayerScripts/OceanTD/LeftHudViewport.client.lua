@@ -172,6 +172,12 @@ local function applyLeftHud()
 		return
 	end
 
+	-- Studio often authors dPad as Active=true. That Frame is ~400×270 and sits in the
+	-- top-left — it eats world clicks/pinches and shows the hand cursor. Children
+	-- (Skills / FreeCam / $D) stay interactive on their own Active buttons.
+	-- Do NOT set Interactable=false here — that disables the entire subtree.
+	dPad.Active = false
+
 	local is720 = UiViewportTags.is720p()
 	UiPopupScale.attachHud(dPad)
 

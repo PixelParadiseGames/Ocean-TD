@@ -39,6 +39,22 @@ local BY_ID: { [string]: ItemDef } = {
 		sortOrder = 30,
 		speciesId = "SeaGrass",
 	},
+	FireCoral = {
+		id = "FireCoral",
+		displayName = "Fire Coral",
+		icon = "rbxassetid://119869570909704",
+		category = "Coral",
+		sortOrder = 35, -- before Sea Fan
+		speciesId = "FireCoral",
+	},
+	Zoas = {
+		id = "Zoas",
+		displayName = "Zoas",
+		icon = "rbxassetid://109884804548206",
+		category = "Coral",
+		sortOrder = 36,
+		speciesId = "Zoas",
+	},
 	SeaFan = {
 		id = "SeaFan",
 		displayName = "Sea Fan",

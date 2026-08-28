@@ -124,6 +124,16 @@ function PlotOutlineColors.randomHueVariant(index: number): Color3
 	return Color3.fromHSV(h, newS, newV)
 end
 
+--[[
+	Bright saturated accent for dual-part corals (Zoas). Any hue; always vivid.
+]]
+function PlotOutlineColors.randomBrightAccent(): Color3
+	local h = math.random()
+	local s = 0.62 + math.random() * 0.38
+	local v = 0.72 + math.random() * 0.28
+	return Color3.fromHSV(h, s, v)
+end
+
 -- Tint Neon edge parts in a folder. Index 15 → Transparency 1 (hidden).
 function PlotOutlineColors.applyToFolder(folder: Instance, index: number, visibleTransparency: number?)
 	local sw = PlotOutlineColors.get(index)

@@ -28,6 +28,9 @@ local BRAIN_DIAMETER_MAX = 9
 local MESH_VARIANT_COUNT = 5
 local MESH_SCALE_MIN = 0.88
 local MESH_SCALE_MAX = 1.12
+-- Fire Coral: wider per-place / per-size-upgrade jitter (±15%).
+local FIRE_CORAL_SCALE_MIN = 0.85
+local FIRE_CORAL_SCALE_MAX = 1.15
 local SEA_FAN_AXIS_MIN = 0.85
 local SEA_FAN_AXIS_MAX = 1.15
 -- SeaGrass authored meshes need a large in-game scale boost.
@@ -56,6 +59,23 @@ function CoralVisual.isSeaFan(speciesId: any): boolean
 	return speciesId == "SeaFan"
 end
 
+function CoralVisual.isZoas(speciesId: any): boolean
+	return speciesId == "Zoas"
+end
+
+function CoralVisual.isDualColorMesh(speciesId: any): boolean
+	return CoralVisual.isSeaFan(speciesId) or CoralVisual.isZoas(speciesId)
+end
+
+-- Species that plant with a Y facing (plot-local). SeaFan is player-rotated; FireCoral/Zoas roll random.
+function CoralVisual.needsFacingYaw(speciesId: any): boolean
+	return speciesId == "SeaFan" or speciesId == "FireCoral" or speciesId == "Zoas"
+end
+
+function CoralVisual.randomFacingYaw(): number
+	return math.random() * math.pi * 2
+end
+
 function CoralVisual.randomBrainDiameter(): number
 	return 1.5 + math.random() * (4 - 1.5)
 end
@@ -69,7 +89,7 @@ function CoralVisual.sanitizeBrainDiameter(raw: any): number
 end
 
 function CoralVisual.meshVariantCount(speciesId: string?): number
-	if speciesId == "SeaFan" then
+	if speciesId == "SeaFan" or speciesId == "FireCoral" or speciesId == "Zoas" then
 		return 1
 	end
 	return MESH_VARIANT_COUNT
@@ -99,6 +119,21 @@ function CoralVisual.sanitizeSpongeScale(raw: any): number
 	return math.clamp(n, 0.7, 1.35)
 end
 
+function CoralVisual.randomMeshScale(speciesId: string?): number
+	if speciesId == "FireCoral" or speciesId == "Zoas" then
+		return FIRE_CORAL_SCALE_MIN + math.random() * (FIRE_CORAL_SCALE_MAX - FIRE_CORAL_SCALE_MIN)
+	end
+	return CoralVisual.randomSpongeScale()
+end
+
+function CoralVisual.sanitizeMeshScale(raw: any, speciesId: string?): number
+	local n = tonumber(raw)
+	if typeof(n) ~= "number" or n ~= n then
+		return CoralVisual.randomMeshScale(speciesId)
+	end
+	return math.clamp(n, 0.7, 1.35)
+end
+
 function CoralVisual.randomMeshVariant(speciesId: string?): number
 	local maxV = CoralVisual.meshVariantCount(speciesId)
 	if maxV <= 1 then
@@ -115,9 +150,6 @@ function CoralVisual.clampMeshVariant(raw: any, speciesId: string?): number
 	end
 	return n
 end
-
-CoralVisual.randomMeshScale = CoralVisual.randomSpongeScale
-CoralVisual.sanitizeMeshScale = CoralVisual.sanitizeSpongeScale
 
 function CoralVisual.randomSeaFanAxis(): number
 	return SEA_FAN_AXIS_MIN + math.random() * (SEA_FAN_AXIS_MAX - SEA_FAN_AXIS_MIN)
@@ -155,13 +187,27 @@ function CoralVisual.readFacingYaw(part: BasePart): number
 	return 0
 end
 
-local function applyPartFlags(part: BasePart, castShadow: boolean, canCollide: boolean)
+local function applyPartFlags(part: BasePart, castShadow: boolean, canCollide: boolean, speciesId: string?)
 	part.Anchored = true
 	part.Massless = true
 	part.CanCollide = canCollide
 	part.CanTouch = false
 	part.CanQuery = true
 	part.CastShadow = castShadow
+	-- Fire Coral: walkable but no trampoline bounce.
+	local id = speciesId or part:GetAttribute("OceanTD_SpeciesId")
+	if canCollide and (id == "FireCoral" or id == "Zoas") then
+		local density = 0.7
+		local friction = 0.5
+		local frictionWeight = 1
+		pcall(function()
+			local props = part.CurrentPhysicalProperties
+			density = props.Density
+			friction = props.Friction
+			frictionWeight = props.FrictionWeight
+		end)
+		part.CustomPhysicalProperties = PhysicalProperties.new(density, friction, 0, frictionWeight, 100)
+	end
 end
 
 local function findMeshFolder(folderName: string): Instance?
@@ -172,10 +218,103 @@ local function findMeshFolder(folderName: string): Instance?
 	return coralRoot:FindFirstChild(folderName)
 end
 
+-- Studio Fire Coral layout (authored):
+--   ReplicatedStorage.Coral["Fire Coral"].FireCoral_Small.Small1
+--   …FireCoral_Medium.Med1
+--   …FireCoral_Large.Large1
+local FIRE_CORAL_WRAPPER = {
+	[1] = "FireCoral_Small",
+	[2] = "FireCoral_Medium",
+	[3] = "FireCoral_Large",
+}
+local FIRE_CORAL_MESH_NAMES = {
+	[1] = { "Small1" },
+	[2] = { "Med1", "Medium1" },
+	[3] = { "Large1" },
+}
+
+-- Studio Zoas layout (one Model per size — import combined FBX from Models/Zoas/):
+--   ReplicatedStorage.Coral.Zoas.ZoaSmall  → MeshParts Main, Accent (aligned in one FBX)
+--   …ZoaMed, ZoaLarge
+local ZOAS_MODEL_NAMES = {
+	[1] = "ZoaSmall",
+	[2] = "ZoaMed",
+	[3] = "ZoaLarge",
+}
+
+local function matchZoasPartName(name: string, kind: "main" | "accent"): boolean
+	local lower = string.lower(name)
+	if kind == "accent" then
+		return lower == "accent" or string.find(lower, "accent", 1, true) ~= nil
+	end
+	return lower == "main" or string.find(lower, "main", 1, true) ~= nil
+end
+
+local function findZoasModel(sizeClass: number): Model?
+	local folder = findMeshFolder("Zoas")
+	if not folder then
+		return nil
+	end
+	local tier = CoralSize.clampTier(sizeClass)
+	local modelName = ZOAS_MODEL_NAMES[tier]
+	if not modelName then
+		return nil
+	end
+	local model = folder:FindFirstChild(modelName)
+	if model and model:IsA("Model") then
+		return model
+	end
+	return nil
+end
+
+local function findZoasTemplatePart(model: Model, kind: "main" | "accent"): MeshPart?
+	local preferred = if kind == "main" then { "Main" } else { "Accent" }
+	for _, name in ipairs(preferred) do
+		local child = model:FindFirstChild(name)
+		if child and child:IsA("MeshPart") then
+			return child
+		end
+	end
+	for _, child in ipairs(model:GetChildren()) do
+		if child:IsA("MeshPart") and matchZoasPartName(child.Name, kind) then
+			return child
+		end
+	end
+	if kind == "main" then
+		return model:FindFirstChildWhichIsA("MeshPart", true)
+	end
+	return nil
+end
+
+local function findFireCoralTemplate(folder: Instance, sizeClass: number): MeshPart?
+	local tier = CoralSize.clampTier(sizeClass)
+	local wrapper = folder:FindFirstChild(FIRE_CORAL_WRAPPER[tier])
+	if not wrapper then
+		return nil
+	end
+	local names = FIRE_CORAL_MESH_NAMES[tier]
+	if names then
+		for _, name in ipairs(names) do
+			local child = wrapper:FindFirstChild(name)
+			if child and child:IsA("MeshPart") then
+				return child
+			end
+		end
+	end
+	local any = wrapper:FindFirstChildWhichIsA("MeshPart", true)
+	if any and any:IsA("MeshPart") then
+		return any
+	end
+	return nil
+end
+
 local function findMeshTemplate(folderName: string, sizeClass: number, variantIndex: number): MeshPart?
 	local folder = findMeshFolder(folderName)
 	if not folder then
 		return nil
+	end
+	if folderName == "Fire Coral" then
+		return findFireCoralTemplate(folder, sizeClass)
 	end
 	local prefix = SIZE_PREFIX[CoralSize.clampTier(sizeClass)] or "Small"
 	local modelName = prefix .. tostring(variantIndex)
@@ -357,6 +496,16 @@ local function getSeaFanWeb(stem: BasePart): BasePart?
 	return nil
 end
 
+local function getAccentPart(stem: BasePart): BasePart?
+	if CoralVisual.isZoas(stem:GetAttribute("OceanTD_SpeciesId")) then
+		local accent = stem:FindFirstChild("Accent")
+		if accent and accent:IsA("BasePart") then
+			return accent
+		end
+	end
+	return getSeaFanWeb(stem)
+end
+
 local function readWebRestColor(stem: BasePart): Color3?
 	local r = stem:GetAttribute("OceanTD_WebRestR")
 	local g = stem:GetAttribute("OceanTD_WebRestG")
@@ -364,11 +513,18 @@ local function readWebRestColor(stem: BasePart): Color3?
 	if typeof(r) == "number" and typeof(g) == "number" and typeof(b) == "number" then
 		return Color3.new(r, g, b)
 	end
-	local web = getSeaFanWeb(stem)
+	local web = getAccentPart(stem)
 	if web then
 		return web.Color
 	end
 	return nil
+end
+
+function CoralVisual.randomizeAccentPaint(stem: BasePart, stemColorIndex: number): (Color3, number?)
+	if CoralVisual.isZoas(stem:GetAttribute("OceanTD_SpeciesId")) then
+		return PlotOutlineColors.randomBrightAccent(), nil
+	end
+	return CoralVisual.randomizeWebInHue(stem, stemColorIndex)
 end
 
 function CoralVisual.readWebColorIndex(stem: BasePart): number?
@@ -402,7 +558,7 @@ function CoralVisual.setWebRestColor(stem: BasePart, color: Color3, webColorInde
 	if typeof(webColorIndex) == "number" then
 		stem:SetAttribute("OceanTD_WebColorIndex", PlotOutlineColors.clampCoralIndex(webColorIndex))
 	end
-	local web = getSeaFanWeb(stem)
+	local web = getAccentPart(stem)
 	if not web then
 		return
 	end
@@ -483,9 +639,9 @@ alignMeshToSurface = function(part: BasePart, surfacePos: Vector3, facingYaw: nu
 		end
 	else
 		local yaw = facingYaw
-		local isFan = CoralVisual.isSeaFan(part:GetAttribute("OceanTD_SpeciesId"))
+		local needsYaw = CoralVisual.needsFacingYaw(part:GetAttribute("OceanTD_SpeciesId"))
 		if typeof(yaw) ~= "number" or yaw ~= yaw then
-			yaw = if isFan then CoralVisual.readFacingYaw(part) else nil
+			yaw = if needsYaw then CoralVisual.readFacingYaw(part) else nil
 		end
 		if typeof(yaw) == "number" and yaw == yaw then
 			local yawCf = CFrame.Angles(0, yaw, 0)
@@ -521,7 +677,7 @@ local function finishLook(part: BasePart, def: any, opts: VisualOptions, color: 
 		part.Color = if valid then color else Color3.fromRGB(220, 70, 70)
 		part.Transparency = 0.45
 		part.Material = Enum.Material.ForceField
-		applyPartFlags(part, false, false)
+		applyPartFlags(part, false, false, def.speciesId)
 		part:SetAttribute("OceanTD_GhostBaseR", color.R)
 		part:SetAttribute("OceanTD_GhostBaseG", color.G)
 		part:SetAttribute("OceanTD_GhostBaseB", color.B)
@@ -538,7 +694,7 @@ local function finishLook(part: BasePart, def: any, opts: VisualOptions, color: 
 		if not def.meshFolder then
 			part.Material = def.material
 		end
-		applyPartFlags(part, def.castShadow, def.canCollide)
+		applyPartFlags(part, def.castShadow, def.canCollide, def.speciesId)
 		part:SetAttribute("OceanTD_RestR", color.R)
 		part:SetAttribute("OceanTD_RestG", color.G)
 		part:SetAttribute("OceanTD_RestB", color.B)
@@ -647,11 +803,25 @@ local function assembleSeaFanFromTemplate(
 		weldChildToStem(stem, web, rel)
 	end
 
-	-- Food markers (ammo anchors). Prefer template Foods; synthesize from Large if missing.
-	local function attachFoodFrom(srcModel: Model, stemRef: BasePart, count: number)
+	-- Food markers (ammo anchors): Food1..N on each size model (model root or under Stem).
+	-- Large layout is only a fallback if this size's markers are missing.
+	local function findFoodMarker(host: Instance, index: number): BasePart?
+		local name = "Food" .. tostring(index)
+		local direct = host:FindFirstChild(name)
+		if direct and direct:IsA("BasePart") then
+			return direct
+		end
+		local deep = host:FindFirstChild(name, true)
+		if deep and deep:IsA("BasePart") then
+			return deep
+		end
+		return nil
+	end
+
+	local function attachFoodFrom(srcHost: Instance, stemRef: BasePart, count: number)
 		for i = 1, count do
-			local src = srcModel:FindFirstChild("Food" .. tostring(i))
-			if src and src:IsA("BasePart") then
+			local src = findFoodMarker(srcHost, i)
+			if src then
 				local food = src:Clone()
 				food.Name = "Food" .. tostring(i)
 				food:ClearAllChildren()
@@ -676,7 +846,7 @@ local function assembleSeaFanFromTemplate(
 	local wantFood = if sizeClass >= 3 then 4 elseif sizeClass == 2 then 3 else 1
 	local hadFood = false
 	for i = 1, wantFood do
-		if templateModel:FindFirstChild("Food" .. tostring(i)) then
+		if findFoodMarker(templateModel, i) then
 			hadFood = true
 			break
 		end
@@ -687,7 +857,6 @@ local function assembleSeaFanFromTemplate(
 		local large = findSeaFanModel(3, 1)
 		local largeStem = large and findSeaFanTemplatePart(large, "stem")
 		if large and largeStem and largeStem:IsA("BasePart") then
-			-- Map Large Food layout onto this size: take first N of Large's Foods.
 			attachFoodFrom(large, largeStem, wantFood)
 		end
 	end
@@ -741,9 +910,94 @@ local function createSeaFan(def: any, worldPos: Vector3, opts: VisualOptions): B
 	return stem
 end
 
+local function assembleZoasFromTemplate(templateModel: Model, scaleMult: number): (MeshPart?, BasePart?)
+	local tMain = findZoasTemplatePart(templateModel, "main")
+	local tAccent = findZoasTemplatePart(templateModel, "accent")
+	if not tMain or not tMain:IsA("MeshPart") then
+		return nil, nil
+	end
+	if not tAccent or not tAccent:IsA("BasePart") then
+		tAccent = nil
+	end
+
+	local stem = tMain:Clone()
+	stem.Name = "Zoas"
+	stem:ClearAllChildren()
+	pcall(function()
+		stem.PivotOffset = CFrame.new()
+	end)
+	stem.Size = tMain.Size * scaleMult
+	stem.CFrame = CFrame.new()
+	stem.Transparency = tMain.Transparency
+	stem:SetAttribute("OceanTD_RestTransparency", tMain.Transparency)
+
+	local accent: BasePart? = nil
+	if tAccent and tAccent:IsA("BasePart") then
+		local accentTransparency = tAccent.Transparency
+		accent = tAccent:Clone()
+		accent.Name = "Accent"
+		accent:ClearAllChildren()
+		if accent:IsA("MeshPart") then
+			pcall(function()
+				(accent :: MeshPart).TextureID = ""
+			end)
+		end
+		accent.Size = tAccent.Size * scaleMult
+		accent.Transparency = accentTransparency
+		stem:SetAttribute("OceanTD_WebRestTransparency", accentTransparency)
+		-- Same-model CFrame offset survives Roblox import (unlike split FBX files).
+		local rel = tMain.CFrame:ToObjectSpace(tAccent.CFrame)
+		rel = scaleCFrameTranslation(rel, scaleMult, scaleMult, scaleMult)
+		accent.CFrame = stem.CFrame * rel
+		accent.Parent = stem
+		weldChildToStem(stem, accent, rel)
+	end
+
+	return stem, accent
+end
+
+local function createZoas(def: any, worldPos: Vector3, opts: VisualOptions): BasePart?
+	local sizeClass = CoralSize.clampTier(opts.sizeClass or 1)
+	local variantIndex = CoralVisual.clampMeshVariant(opts.variantIndex, "Zoas")
+	local scaleMult = CoralVisual.sanitizeMeshScale(opts.scaleMult, "Zoas")
+	local template = findZoasModel(sizeClass)
+	if not template then
+		warn("[CoralVisual] Missing Zoas model", SIZE_PREFIX[sizeClass])
+		return nil
+	end
+
+	local facingYaw = opts.facingYaw
+	if typeof(facingYaw) ~= "number" or facingYaw ~= facingYaw then
+		facingYaw = CoralVisual.randomFacingYaw()
+	end
+
+	local tMain = findZoasTemplatePart(template, "main")
+	local tAccent = findZoasTemplatePart(template, "accent")
+	local stem, accent = assembleZoasFromTemplate(template, scaleMult)
+	if not stem then
+		return nil
+	end
+
+	local stemColor = opts.color or (if tMain then tMain.Color else Color3.new(1, 1, 1))
+	local accentColor = opts.webColor or (if tAccent and tAccent:IsA("BasePart") then tAccent.Color else stemColor)
+	finishSeaFanLook(stem, accent, def, opts, stemColor, accentColor)
+	alignMeshToSurface(stem, worldPos, facingYaw, nil, opts.plotCFrame)
+
+	stem:SetAttribute("OceanTD_Diameter", stem.Size.Y)
+	stem:SetAttribute("OceanTD_SizeClass", sizeClass)
+	stem:SetAttribute("OceanTD_SizeTier", sizeClass)
+	stem:SetAttribute("OceanTD_VariantIndex", variantIndex)
+	stem:SetAttribute("OceanTD_ScaleMult", scaleMult)
+	stem:SetAttribute("OceanTD_FacingYaw", facingYaw)
+	return stem
+end
+
 local function createMeshSpecies(def: any, worldPos: Vector3, opts: VisualOptions): BasePart?
 	if def.speciesId == "SeaFan" then
 		return createSeaFan(def, worldPos, opts)
+	end
+	if def.speciesId == "Zoas" then
+		return createZoas(def, worldPos, opts)
 	end
 	local folderName = def.meshFolder
 	if typeof(folderName) ~= "string" or folderName == "" then
@@ -751,7 +1005,7 @@ local function createMeshSpecies(def: any, worldPos: Vector3, opts: VisualOption
 	end
 	local sizeClass = CoralSize.clampTier(opts.sizeClass or 1)
 	local variantIndex = CoralVisual.clampMeshVariant(opts.variantIndex, def.speciesId)
-	local scaleMult = CoralVisual.sanitizeMeshScale(opts.scaleMult)
+	local scaleMult = CoralVisual.sanitizeMeshScale(opts.scaleMult, def.speciesId)
 	local template = findMeshTemplate(folderName, sizeClass, variantIndex)
 	if not template then
 		warn("[CoralVisual] Missing mesh", folderName, SIZE_PREFIX[sizeClass], variantIndex)
@@ -759,12 +1013,21 @@ local function createMeshSpecies(def: any, worldPos: Vector3, opts: VisualOption
 	end
 	local baseScale = if def.speciesId == "SeaGrass" then SEA_GRASS_BASE_SCALE else 1
 	local part = prepareMeshClone(template, def.speciesId, template.Size * scaleMult * baseScale)
-	alignMeshToSurface(part, worldPos)
+	-- Stamp SpeciesId before plant so yaw path is unambiguous.
+	part:SetAttribute("OceanTD_SpeciesId", def.speciesId)
+	local facingYaw: number? = nil
+	if CoralVisual.needsFacingYaw(def.speciesId) then
+		facingYaw = opts.facingYaw
+		if typeof(facingYaw) ~= "number" or facingYaw ~= facingYaw then
+			facingYaw = CoralVisual.randomFacingYaw()
+		end
+	end
+	alignMeshToSurface(part, worldPos, facingYaw, nil, opts.plotCFrame)
 
-	-- SeaGrass: keep imported mesh green as starting color unless paint/ghost overrides.
+	-- SeaGrass / FireCoral: keep imported mesh Color as starting color unless paint/ghost overrides.
 	local color = opts.color
 	if not color then
-		if def.speciesId == "SeaGrass" then
+		if def.speciesId == "SeaGrass" or def.speciesId == "FireCoral" or def.speciesId == "Zoas" then
 			color = template.Color
 		else
 			color = SpeciesCatalog.randomColor(def)
@@ -777,6 +1040,9 @@ local function createMeshSpecies(def: any, worldPos: Vector3, opts: VisualOption
 	part:SetAttribute("OceanTD_SizeTier", sizeClass)
 	part:SetAttribute("OceanTD_VariantIndex", variantIndex)
 	part:SetAttribute("OceanTD_ScaleMult", scaleMult)
+	if typeof(facingYaw) == "number" then
+		part:SetAttribute("OceanTD_FacingYaw", facingYaw)
+	end
 	syncSeaGrassClimb(part)
 	return part
 end
@@ -829,7 +1095,7 @@ function CoralVisual.restyleSponge(
 	local variant = CoralVisual.clampMeshVariant(variantIndex, if typeof(speciesId) == "string" then speciesId else nil)
 	local scale = if speciesId == "SeaFan"
 		then CoralVisual.sanitizeSeaFanAxis(scaleMult)
-		else CoralVisual.sanitizeMeshScale(scaleMult)
+		else CoralVisual.sanitizeMeshScale(scaleMult, if typeof(speciesId) == "string" then speciesId else nil)
 	local surfacePos = surfacePosOpt or CoralVisual.readGridAnchor(part) or meshSurfacePos(part)
 	local _, color = CoralVisual.readRestLook(part)
 
@@ -883,6 +1149,51 @@ function CoralVisual.restyleSponge(
 		return newStem, newStem.Size.Y, variant, scale
 	end
 
+	-- Zoas: rebuild Main+Accent (preserves yaw + dual colors).
+	if speciesId == "Zoas" then
+		local keepRotation = part.CFrame
+		local accentColor = readWebRestColor(part) or color
+		local parent = part.Parent
+		local keep: { [string]: any } = {}
+		for name, value in part:GetAttributes() do
+			keep[name] = value
+		end
+		part:Destroy()
+
+		local template = findZoasModel(class)
+		if not template then
+			warn("[CoralVisual] Missing Zoas for restyle", SIZE_PREFIX[class])
+			return nil
+		end
+		local newStem, newAccent = assembleZoasFromTemplate(template, scale)
+		if not newStem then
+			return nil
+		end
+		for name, value in keep do
+			newStem:SetAttribute(name, value)
+		end
+		newStem:SetAttribute("OceanTD_Diameter", newStem.Size.Y)
+		newStem:SetAttribute("OceanTD_SizeClass", class)
+		newStem:SetAttribute("OceanTD_VariantIndex", variant)
+		newStem:SetAttribute("OceanTD_ScaleMult", scale)
+		newStem:SetAttribute("OceanTD_CineShrunk", nil)
+		newStem:SetAttribute("OceanTD_CineFullX", nil)
+		newStem:SetAttribute("OceanTD_CineFullY", nil)
+		newStem:SetAttribute("OceanTD_CineFullZ", nil)
+		newStem:SetAttribute("OceanTD_CinePrep", nil)
+		finishSeaFanLook(
+			newStem,
+			newAccent,
+			def or { speciesId = "Zoas", itemId = "Zoas", castShadow = false, canCollide = true },
+			{ ghost = false },
+			color,
+			accentColor
+		)
+		alignMeshToSurface(newStem, surfacePos, nil, keepRotation)
+		newStem.Parent = parent
+		return newStem, newStem.Size.Y, variant, scale
+	end
+
 	local template = findMeshTemplate(folderName, class, variant)
 	if not template then
 		warn("[CoralVisual] Missing mesh for restyle", folderName, SIZE_PREFIX[class], variant)
@@ -908,7 +1219,7 @@ function CoralVisual.restyleSponge(
 		target.Material = template.Material
 		target.Color = color
 		target.Transparency = 0
-		applyPartFlags(target, castShadow, canCollide)
+		applyPartFlags(target, castShadow, canCollide, if typeof(speciesId) == "string" then speciesId else nil)
 	end
 
 	-- SeaGrass: same as first place — plant unparented, then parent (avoids origin-scale jump).
@@ -956,7 +1267,11 @@ function CoralVisual.restyleSponge(
 	end)
 	part.Size = newSize
 	finishAttrs(part)
-	alignMeshToSurface(part, surfacePos)
+	local keepYaw: number? = nil
+	if CoralVisual.needsFacingYaw(speciesId) then
+		keepYaw = CoralVisual.readFacingYaw(part)
+	end
+	alignMeshToSurface(part, surfacePos, keepYaw)
 	return part, newSize.Y, variant, scale
 end
 
@@ -1009,15 +1324,15 @@ function CoralVisual.applyRestLook(part: BasePart)
 	end
 	if part:GetAttribute("OceanTD_CrabStunned") == true then
 		part.Color = Color3.new(1, 1, 1)
-		local web = getSeaFanWeb(part)
+		local web = getAccentPart(part)
 		if web then
 			web.Color = Color3.new(1, 1, 1)
 		end
 		return
 	end
 	part.Color = color
-	if CoralVisual.isSeaFan(speciesId) then
-		local web = getSeaFanWeb(part)
+	if CoralVisual.isDualColorMesh(speciesId) then
+		local web = getAccentPart(part)
 		local webColor = readWebRestColor(part)
 		if web and webColor then
 			web.Color = webColor
@@ -1036,13 +1351,14 @@ function CoralVisual.setRestColor(part: BasePart, color: Color3, webColor: Color
 		return
 	end
 	part.Color = color
-	if CoralVisual.isSeaFan(part:GetAttribute("OceanTD_SpeciesId")) then
+	local speciesId = part:GetAttribute("OceanTD_SpeciesId")
+	if CoralVisual.isDualColorMesh(speciesId) then
 		local paintWeb = webColor
 		local webIdx = webColorIndex
 		if not paintWeb then
 			local idx = part:GetAttribute("OceanTD_ColorIndex")
 			if typeof(idx) == "number" then
-				paintWeb, webIdx = CoralVisual.randomizeWebInHue(part, idx)
+				paintWeb, webIdx = CoralVisual.randomizeAccentPaint(part, idx)
 			else
 				paintWeb = readWebRestColor(part) or color
 			end
@@ -1065,10 +1381,10 @@ function CoralVisual.setGhostValidColors(part: BasePart, valid: boolean, baseCol
 	else
 		part.Color = invalidColor
 	end
-	if not CoralVisual.isSeaFan(part:GetAttribute("OceanTD_SpeciesId")) then
+	if not CoralVisual.isDualColorMesh(part:GetAttribute("OceanTD_SpeciesId")) then
 		return
 	end
-	local web = getSeaFanWeb(part)
+	local web = getAccentPart(part)
 	if not web then
 		return
 	end

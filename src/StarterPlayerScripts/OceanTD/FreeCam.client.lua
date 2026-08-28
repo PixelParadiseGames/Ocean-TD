@@ -1583,6 +1583,11 @@ task.spawn(function()
 		return
 	end
 	wireCamCarousel(dPad)
+	if dPad:IsA("GuiObject") then
+		-- Container must not block the world; cam/skills buttons keep their own hits.
+		-- Active=false only — Interactable=false would disable all child buttons.
+		dPad.Active = false
+	end
 
 	local icon = dPad:FindFirstChild("dPadIcon")
 	if icon and icon:IsA("GuiObject") then

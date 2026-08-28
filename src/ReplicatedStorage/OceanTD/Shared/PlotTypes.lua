@@ -122,6 +122,8 @@ function PlotTypes.defaultProfile(): PlayerProfile
 			BrainCoral = Constants.STARTING_BRAIN_CORAL_SEEDS,
 			Sponge = Constants.STARTING_SPONGE_SEEDS,
 			SeaGrass = Constants.STARTING_SEA_GRASS_SEEDS,
+			FireCoral = Constants.STARTING_FIRE_CORAL_SEEDS,
+			Zoas = Constants.STARTING_ZOAS_SEEDS,
 			SeaFan = Constants.STARTING_SEA_FAN_SEEDS,
 		},
 		skillTree = {},

@@ -1410,7 +1410,7 @@ local function updateAt(worldPos: Vector3)
 		return
 	end
 	local surfacePos = worldPos
-	if CoralVisual.isSeaFan(part:GetAttribute("OceanTD_SpeciesId")) then
+	if CoralVisual.needsFacingYaw(part:GetAttribute("OceanTD_SpeciesId")) then
 		if typeof(relocateFacingYaw) ~= "number" then
 			relocateFacingYaw = CoralVisual.readFacingYaw(part)
 		end
@@ -1793,7 +1793,7 @@ function RelocateController.cancel(instant: boolean?)
 
 	local function snapHome()
 		if p and p.Parent then
-			if CoralVisual.isSeaFan(p:GetAttribute("OceanTD_SpeciesId")) and gridAnchorPos then
+			if CoralVisual.needsFacingYaw(p:GetAttribute("OceanTD_SpeciesId")) and gridAnchorPos then
 				local yaw = originFacingYaw
 				if typeof(yaw) ~= "number" then
 					yaw = CoralVisual.readFacingYaw(p)
@@ -2055,7 +2055,7 @@ function RelocateController.commit()
 		UiHaptics.pulseShort()
 		if part and part.Parent then
 			local finalPos = if typeof(result.worldPos) == "Vector3" then result.worldPos else toPos
-			if CoralVisual.isSeaFan(part:GetAttribute("OceanTD_SpeciesId")) then
+			if CoralVisual.needsFacingYaw(part:GetAttribute("OceanTD_SpeciesId")) then
 				local finalYaw = if typeof(result.facingYaw) == "number" then result.facingYaw else yaw
 				local mir = ClientPlot.get()
 				CoralVisual.alignMeshToSurface(part, finalPos, finalYaw, nil, if mir then mir.cframe else nil)

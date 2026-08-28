@@ -32,8 +32,8 @@ Update this file in the **same change** when you add or rename a system. If inde
 | WaveWatch | Live | WaveWatchHost/Visitor + WaveGhostSim + WaveWatchHud + WaveWatchService | WaveSim, PlotRoster, WaveWatchPush | Spectate host plot; own center HUD + slots; host strip bottom-right with name |
 | WaveSign | Live | `src/StarterPlayerScripts/OceanTD/WaveSign.lua` | WaveSim, ClientPlot, Persistence highestWave | Plot “Current Wave Sign”: live Wave N / idle all-time high |
 | InventoryState | Live | `src/StarterPlayerScripts/OceanTD/InventoryState.lua` | ItemCatalog | Open + selected; clear-plot + save-plots modal gates |
-| ItemCatalog | Live | `src/ReplicatedStorage/OceanTD/Shared/ItemCatalog.lua` | SpeciesCatalog via `speciesId` | BrainCoral + Sponge; register new items here |
-| SpeciesCatalog | Live | `src/ReplicatedStorage/OceanTD/Shared/SpeciesCatalog.lua` | — | Visual/place rules; meshFolder for Sponge |
+| ItemCatalog | Live | `src/ReplicatedStorage/OceanTD/Shared/ItemCatalog.lua` | SpeciesCatalog via `speciesId` | BrainCoral, Sponge, SeaGrass, FireCoral, SeaFan |
+| SpeciesCatalog | Live | `src/ReplicatedStorage/OceanTD/Shared/SpeciesCatalog.lua` | — | Visual/place rules; meshFolder for Sponge / Seagrass / Fire Coral / Seafan |
 | CoralVisual | Live | `src/ReplicatedStorage/OceanTD/Shared/CoralVisual.lua` | SpeciesCatalog, CoralSize | Ball + mesh clone factory; ghost ForceField |
 | CoralSize | Live | `src/ReplicatedStorage/OceanTD/Shared/CoralSize.lua` | — | Size bands + per-species combat stats |
 | PlacementService | Live | `.../Services/PlacementService.lua` | GridService, PlotService, CoralVisual, UndoService | Server place (debit) / move / recycle / clearPlot / applyLayout; hydrate; undoLast |

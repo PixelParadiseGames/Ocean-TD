@@ -135,6 +135,17 @@ CoralSize.STATS_BY_SPECIES = {
 		[2] = { range = 70, reload = 4, food = 2, defense = 2 },
 		[3] = { range = 90, reload = 2, food = 4, defense = 3 },
 	},
+	-- Same as Sponge for now.
+	FireCoral = {
+		[1] = { range = 40, reload = 6, food = 1, defense = 1 },
+		[2] = { range = 70, reload = 4, food = 2, defense = 2 },
+		[3] = { range = 90, reload = 2, food = 4, defense = 3 },
+	},
+	Zoas = {
+		[1] = { range = 40, reload = 6, food = 1, defense = 1 },
+		[2] = { range = 70, reload = 4, food = 2, defense = 2 },
+		[3] = { range = 90, reload = 2, food = 4, defense = 3 },
+	},
 }
 
 function CoralSize.statsFor(class: number, speciesId: string?): SizeStats
@@ -169,7 +180,7 @@ end
 
 -- Local offsets from coral center (Y up).
 -- Sponge: wide top spread. SeaGrass: stacked along height by size tier.
--- SeaFan: Food1..N children (stem-local); synthesized from Large when missing on Small/Medium.
+-- SeaFan: Food1..N children (stem-local; authored per size model).
 function CoralSize.ammoLocalOffsets(
 	foodCount: number,
 	coralRadius: number,
@@ -184,7 +195,7 @@ function CoralSize.ammoLocalOffsets(
 	if speciesId == "SeaFan" and part then
 		local offs: { Vector3 } = {}
 		for i = 1, n do
-			local food = part:FindFirstChild("Food" .. tostring(i))
+			local food = part:FindFirstChild("Food" .. tostring(i), true)
 			if food and food:IsA("BasePart") then
 				table.insert(offs, part.CFrame:PointToObjectSpace(food.Position))
 			end
@@ -229,7 +240,7 @@ function CoralSize.ammoLocalOffsets(
 		}
 	end
 
-	if speciesId == "Sponge" then
+	if speciesId == "Sponge" or speciesId == "FireCoral" or speciesId == "Zoas" then
 		local size = partSize or Vector3.new(coralRadius * 2, coralRadius * 2, coralRadius * 2)
 		local topY = coralRadius + ammoRadius * 0.9
 		local spread = math.max(ammoRadius * 2.4, math.min(size.X, size.Z) * 0.24)

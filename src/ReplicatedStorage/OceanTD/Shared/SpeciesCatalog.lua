@@ -68,6 +68,37 @@ local BY_ID: { [string]: SpeciesDef } = {
 		meshFolder = "Seagrass",
 		defaultColorIndex = 11, -- green
 	},
+	FireCoral = {
+		speciesId = "FireCoral",
+		itemId = "FireCoral",
+		displayName = "Fire Coral",
+		diameter = 4,
+		material = Enum.Material.Pebble, -- unused for mesh; Studio Material kept
+		-- Fallback only; first place keeps imported mesh Color/Material.
+		colorMin = Color3.fromRGB(200, 60, 30),
+		colorMax = Color3.fromRGB(255, 110, 40),
+		castShadow = false,
+		canCollide = true, -- walkable; Elasticity forced to 0 in CoralVisual
+		reloadSec = 6,
+		foodFill = 1,
+		meshFolder = "Fire Coral", -- Studio: ReplicatedStorage.Coral["Fire Coral"]
+		defaultColorIndex = 1, -- warm; paint later — spawn uses template color
+	},
+	Zoas = {
+		speciesId = "Zoas",
+		itemId = "Zoas",
+		displayName = "Zoas",
+		diameter = 4,
+		material = Enum.Material.Pebble,
+		colorMin = Color3.fromRGB(180, 50, 80),
+		colorMax = Color3.fromRGB(255, 120, 160),
+		castShadow = false,
+		canCollide = true,
+		reloadSec = 6,
+		foodFill = 1,
+		meshFolder = "Zoas", -- ReplicatedStorage.Coral.Zoas
+		defaultColorIndex = 1,
+	},
 	SeaFan = {
 		speciesId = "SeaFan",
 		itemId = "SeaFan",
