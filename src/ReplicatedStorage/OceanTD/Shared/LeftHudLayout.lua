@@ -81,4 +81,36 @@ function LeftHudLayout.isDCount(gui: Instance): boolean
 	return gui.Name == LeftHudLayout.COUNT_NAME
 end
 
+-- Prevent Character respawn from wiping runtime wiring (SkillsHit, cam UIScales, etc.).
+function LeftHudLayout.hardenScreenGui(gui: Instance?)
+	if gui and gui:IsA("ScreenGui") then
+		(gui :: ScreenGui).ResetOnSpawn = false
+	end
+end
+
+-- Call `onBind` for the current MobileLeftUI and again whenever it is replaced.
+function LeftHudLayout.watchMobileLeftUi(playerGui: PlayerGui, onBind: (Instance) -> ())
+	local bound: Instance? = nil
+	local function tryBind(left: Instance?)
+		local gui = left or playerGui:FindFirstChild("MobileLeftUI")
+		if not gui then
+			return
+		end
+		LeftHudLayout.hardenScreenGui(gui)
+		if gui == bound then
+			return
+		end
+		bound = gui
+		onBind(gui)
+	end
+	tryBind(playerGui:FindFirstChild("MobileLeftUI"))
+	playerGui.ChildAdded:Connect(function(ch)
+		if ch.Name == "MobileLeftUI" then
+			task.defer(function()
+				tryBind(ch)
+			end)
+		end
+	end)
+end
+
 return LeftHudLayout

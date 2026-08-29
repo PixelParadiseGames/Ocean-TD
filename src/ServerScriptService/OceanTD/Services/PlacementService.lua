@@ -17,6 +17,7 @@ local CoralSize = require(oceanShared:WaitForChild("CoralSize"))
 local ItemCatalog = require(oceanShared:WaitForChild("ItemCatalog"))
 local SkillStages = require(oceanShared:WaitForChild("SkillStages"))
 local PlotOutlineColors = require(oceanShared:WaitForChild("PlotOutlineColors"))
+local BrainStack = require(oceanShared:WaitForChild("BrainStack"))
 
 local PlotService = require(script.Parent:WaitForChild("PlotService"))
 local GridService = require(script.Parent:WaitForChild("GridService"))
@@ -155,7 +156,7 @@ local function worldToPlotLocal(plotId: string, worldPos: Vector3): Vector3?
 	return GridMath.worldToPlotLocal(worldPos, slot.cframe)
 end
 
-function PlacementService.validateWorldPos(player: Player, worldPos: Vector3): (boolean, string?, string?)
+function PlacementService.validateWorldPos(player: Player, worldPos: Vector3, allowBrainStack: boolean?): (boolean, string?, string?)
 	if typeof(worldPos) ~= "Vector3" then
 		return false, "BadPosition", nil
 	end
@@ -174,9 +175,38 @@ function PlacementService.validateWorldPos(player: Player, worldPos: Vector3): (
 		return false, "BadPlot", plotId
 	end
 	if GridService.isOccupied(plotId, localPos.X, localPos.Y, localPos.Z) then
+		if allowBrainStack then
+			local gx, _, gz = GridMath.worldToGrid(localPos, Vector3.zero)
+			local top = GridService.findTopBrainInColumn(plotId, gx, gz)
+			if top then
+				-- Occupied by a Brain column — place() will restack onto it.
+				return true, nil, plotId
+			end
+		end
 		return false, "SpotTaken", plotId
 	end
 	return true, nil, plotId
+end
+
+-- Server-authoritative Brain stack: snap onto tallest Brain in XZ column with sink overlap.
+local function resolveBrainStackLocal(
+	plotId: string,
+	localPos: Vector3,
+	newDiam: number,
+	ignoreGx: number?,
+	ignoreGy: number?,
+	ignoreGz: number?
+): (Vector3, number, number, number)
+	local gx, gy, gz = GridMath.worldToGrid(localPos, Vector3.zero)
+	local top = GridService.findTopBrainInColumn(plotId, gx, gz)
+	if top and not (ignoreGx == top.gx and ignoreGy == top.gy and ignoreGz == top.gz) then
+		local d0 = if typeof(top.diameter) == "number" and top.diameter > 0 then top.diameter else 4
+		local newY = BrainStack.stackCenterY(top.ly, d0, newDiam)
+		local stacked = Vector3.new(top.lx, newY, top.lz)
+		local freeGy = GridService.nextFreeGyInColumn(plotId, top.gx, top.gz, top.gy + 1)
+		return stacked, top.gx, freeGy, top.gz
+	end
+	return localPos, gx, gy, gz
 end
 
 function PlacementService.spawnVisual(
@@ -600,7 +630,8 @@ function PlacementService.place(
 		return { ok = false, errorCode = "UnknownSpecies" }
 	end
 
-	local ok, err, plotId = PlacementService.validateWorldPos(player, worldPos)
+	local isBrain = BrainStack.isBrainId(species.speciesId) or BrainStack.isBrainId(itemId)
+	local ok, err, plotId = PlacementService.validateWorldPos(player, worldPos, isBrain)
 	if not ok or not plotId then
 		return { ok = false, errorCode = err or "Reject" }
 	end
@@ -631,9 +662,26 @@ function PlacementService.place(
 	local scaleWidth: number? = nil
 	local scaleHeight: number? = nil
 	local facingYaw: number? = nil
-	if species.speciesId == "BrainCoral" or itemId == "BrainCoral" then
+	local gx: number
+	local gy: number
+	local gz: number
+	if isBrain then
 		-- Prefer client ghost size so preview matches the placed coral.
 		diameter = CoralVisual.sanitizeBrainDiameter(opts.diameter)
+		local stackedLocal
+		stackedLocal, gx, gy, gz = resolveBrainStackLocal(plotId, localPos, diameter)
+		localPos = stackedLocal
+		local slot = PlotService.getSlot(plotId)
+		if slot then
+			worldPos = GridMath.plotLocalToWorld(localPos, slot.cframe)
+		end
+		-- Empty ground: still reject if a non-brain (or conflicting) cell sits here.
+		if GridService.getCellAtGrid(plotId, gx, gy, gz) then
+			if shouldConsume then
+				PersistenceService.creditItem(player, itemId, 1)
+			end
+			return { ok = false, errorCode = "SpotTaken" }
+		end
 	elseif CoralVisual.isMeshSpecies(species.speciesId) then
 		sizeClass = CoralSize.clampTier(opts.sizeClass or 1)
 		variant = CoralVisual.clampMeshVariant(opts.variantIndex, species.speciesId)
@@ -652,8 +700,10 @@ function PlacementService.place(
 					else CoralVisual.randomFacingYaw()
 			end
 		end
+		gx, gy, gz = GridMath.worldToGrid(localPos, Vector3.zero)
+	else
+		gx, gy, gz = GridMath.worldToGrid(localPos, Vector3.zero)
 	end
-	local gx, gy, gz = GridMath.worldToGrid(localPos, Vector3.zero)
 	local occupied, occupyErr = GridService.tryOccupy(
 		plotId,
 		player.UserId,
@@ -887,7 +937,25 @@ function PlacementService.move(
 		}
 	end
 
-	if GridService.isOccupied(plotId, toLocal.X, toLocal.Y, toLocal.Z) then
+	-- Brain → Brain stack when relocating onto another Brain column.
+	if BrainStack.isBrainId(fromCell.id) then
+		local diam = if typeof(fromCell.diameter) == "number" and fromCell.diameter > 0
+			then fromCell.diameter
+			else CoralVisual.sanitizeBrainDiameter(nil)
+		local stackedLocal, sgx, sgy, sgz = resolveBrainStackLocal(plotId, toLocal, diam, fgx, fgy, fgz)
+		-- Only treat as stack when the column has another brain (not our vacated self).
+		local top = GridService.findTopBrainInColumn(plotId, sgx, sgz)
+		if top and not (top.gx == fgx and top.gy == fgy and top.gz == fgz) then
+			toLocal = stackedLocal
+			tgx, tgy, tgz = sgx, sgy, sgz
+			local slot = PlotService.getSlot(plotId)
+			if slot then
+				toWorldPos = GridMath.plotLocalToWorld(toLocal, slot.cframe)
+			end
+		end
+	end
+
+	if GridService.getCellAtGrid(plotId, tgx, tgy, tgz) then
 		return { ok = false, errorCode = "SpotTaken" }
 	end
 
@@ -1412,15 +1480,21 @@ function PlacementService.setCoralSize(
 	local _curD, _curClass, tier = CoralSize.readFromPart(visual)
 	local want = CoralSize.clampTier(targetClass)
 	local newTier = tier
+	local unlockCost = 0
 	if unlockNext then
 		local nxt = CoralSize.nextUnlock(tier)
 		if not nxt then
 			return { ok = false, errorCode = "Maxed" }
 		end
-		if want ~= nxt then
+		-- Allow skipping Medium → Large in one unlock (client shows "Medium + Large").
+		if want < nxt then
 			want = nxt
 		end
-		newTier = nxt
+		unlockCost = CoralSize.unlockCostRange(tier, want)
+		if unlockCost > PersistenceService.getSandDollars(player) then
+			return { ok = false, errorCode = "CantAfford" }
+		end
+		newTier = want
 	elseif want > tier then
 		return { ok = false, errorCode = "Locked" }
 	end
@@ -1446,7 +1520,7 @@ function PlacementService.setCoralSize(
 		if CoralVisual.isSeaFan(speciesId) then
 			scale, scaleWidth, scaleHeight = CoralVisual.randomSeaFanScales()
 		else
-			scale = CoralVisual.randomMeshScale(if typeof(speciesId) == "string" then speciesId else nil)
+			scale = CoralVisual.randomMeshScale(if typeof(speciesId) == "string" then speciesId else nil, want)
 		end
 		local newPart, height, vOut, sOut = CoralVisual.restyleMesh(
 			visual,
@@ -1498,6 +1572,12 @@ function PlacementService.setCoralSize(
 	end
 	if typeof(scale) == "number" then
 		visual:SetAttribute("OceanTD_ScaleMult", scale)
+	end
+	if unlockCost > 0 then
+		local spent, _balance, spendErr = PersistenceService.trySpendSandDollars(player, unlockCost)
+		if not spent then
+			return { ok = false, errorCode = spendErr or "CantAfford" }
+		end
 	end
 	PersistenceService.save(player, PlacementService.snapshotLayout(plotId))
 	log("Size", placeId, "class", want, "tier", newTier, "d", newDiam)

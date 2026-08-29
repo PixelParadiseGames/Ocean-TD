@@ -106,6 +106,32 @@ function CoralSize.labelFor(tier: number): string
 	return "Small"
 end
 
+-- $D cost to unlock a single size tier (Medium / Large). Small is free (starting).
+function CoralSize.unlockCost(tier: number): number
+	local t = CoralSize.clampTier(tier)
+	if t == CoralSize.MEDIUM then
+		return 5
+	end
+	if t == CoralSize.LARGE then
+		return 10
+	end
+	return 0
+end
+
+-- Total $D to unlock every size from after `fromTier` through `toTier` (inclusive).
+function CoralSize.unlockCostRange(fromTier: number, toTier: number): number
+	local from = CoralSize.clampTier(fromTier)
+	local to = CoralSize.clampTier(toTier)
+	if to <= from then
+		return 0
+	end
+	local sum = 0
+	for t = from + 1, to do
+		sum += CoralSize.unlockCost(t)
+	end
+	return sum
+end
+
 export type SizeStats = {
 	range: number,
 	reload: number,

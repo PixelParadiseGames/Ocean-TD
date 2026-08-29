@@ -2,6 +2,7 @@
 -- Client inventory / backpack selection state. Placement systems subscribe later.
 
 local ItemCatalog = require(game:GetService("ReplicatedStorage"):WaitForChild("OceanTD"):WaitForChild("Shared"):WaitForChild("ItemCatalog"))
+local Remotes = require(game:GetService("ReplicatedStorage"):WaitForChild("OceanTD"):WaitForChild("Remotes"))
 
 local InventoryState = {}
 
@@ -9,7 +10,9 @@ local open = false
 local selectedId: string? = nil
 local openChanged: BindableEvent = Instance.new("BindableEvent")
 local selectionChanged: BindableEvent = Instance.new("BindableEvent")
+local countsChanged: BindableEvent = Instance.new("BindableEvent")
 local itemSlotScreenPosProvider: ((string) -> Vector2?)? = nil
+local seedCounts: { [string]: number } = {}
 
 function InventoryState.isOpen(): boolean
 	return open
@@ -24,6 +27,46 @@ function InventoryState.getSelectedDef()
 		return nil
 	end
 	return ItemCatalog.get(selectedId)
+end
+
+function InventoryState.getSeedCount(itemId: string): number
+	if typeof(itemId) ~= "string" or itemId == "" then
+		return 0
+	end
+	return math.max(0, math.floor(tonumber(seedCounts[itemId]) or 0))
+end
+
+function InventoryState.formatSeedCount(itemId: string): string
+	local n = InventoryState.getSeedCount(itemId)
+	if n >= 1000000 then
+		local s = string.format("%.1fM", n / 1000000)
+		return (string.gsub(s, "%.0M", "M"))
+	end
+	if n >= 10000 then
+		local s = string.format("%.1fk", n / 1000)
+		return (string.gsub(s, "%.0k", "k"))
+	end
+	return tostring(n)
+end
+
+function InventoryState.setSeedCounts(raw: any)
+	local nextCounts: { [string]: number } = {}
+	if typeof(raw) == "table" then
+		for itemId, v in pairs(raw) do
+			if typeof(itemId) == "string" then
+				local n = tonumber(v)
+				if typeof(n) == "number" and n == n then
+					nextCounts[itemId] = math.max(0, math.floor(n))
+				end
+			end
+		end
+	end
+	seedCounts = nextCounts
+	countsChanged:Fire()
+end
+
+function InventoryState.onCountsChanged(cb: () -> ()): RBXScriptConnection
+	return countsChanged.Event:Connect(cb)
 end
 
 function InventoryState.setOpen(value: boolean)
@@ -95,6 +138,20 @@ end
 function InventoryState.getScrollCenter(): Vector2?
 	if scrollCenterProvider then
 		return scrollCenterProvider()
+	end
+	return nil
+end
+
+-- Quickbar Slot4 (closed backpack button) — seed-wheel fly target.
+local backpackButtonScreenPosProvider: (() -> Vector2?)? = nil
+
+function InventoryState.setBackpackButtonScreenPosProvider(provider: () -> Vector2?)
+	backpackButtonScreenPosProvider = provider
+end
+
+function InventoryState.getBackpackButtonScreenCenter(): Vector2?
+	if backpackButtonScreenPosProvider then
+		return backpackButtonScreenPosProvider()
 	end
 	return nil
 end
@@ -172,5 +229,12 @@ function InventoryState.isPointerOverBackpack(screenPos: Vector2): boolean
 	end
 	return backpackHitTest(screenPos)
 end
+
+task.spawn(function()
+	local sync = Remotes.get("InventorySync")
+	sync.OnClientEvent:Connect(function(payload)
+		InventoryState.setSeedCounts(payload)
+	end)
+end)
 
 return InventoryState

@@ -294,13 +294,21 @@ task.spawn(function()
 		warn("[ECONOMY] PlayerGui.MobileLeftUI missing")
 		return
 	end
+	LeftHudLayout.hardenScreenGui(left)
 
 	player:GetAttributeChangedSignal(ATTR):Connect(function()
 		applyText(readBalance())
 	end)
 
-	if not tryBindHost() then
-		discoverConn = left.DescendantAdded:Connect(function()
+	local function bindOrDiscover(leftGui: Instance)
+		LeftHudLayout.hardenScreenGui(leftGui)
+		host = nil
+		if tryBindHost() then
+			stopDiscover()
+			return
+		end
+		stopDiscover()
+		discoverConn = leftGui.DescendantAdded:Connect(function()
 			if tryBindHost() then
 				stopDiscover()
 			end
@@ -312,9 +320,9 @@ task.spawn(function()
 				warn("[ECONOMY] MobileLeftUI $DCount missing")
 			end
 		end)
-	else
-		stopDiscover()
 	end
+
+	LeftHudLayout.watchMobileLeftUi(playerGui, bindOrDiscover)
 
 	print("[ECONOMY] $DCount ready — balance", readBalance())
 end)

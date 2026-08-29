@@ -302,4 +302,33 @@ function PlacedCoralIndex.getAtWorld(plotId: string, worldPos: Vector3, plotCf: 
 	return PlacedCoralIndex.getAtGrid(plotId, gx, gy, gz, ignore)
 end
 
+-- Highest BrainCoral in the XZ column under worldPos (any Y).
+function PlacedCoralIndex.getTopBrainInColumn(
+	plotId: string,
+	worldPos: Vector3,
+	plotCf: CFrame,
+	ignore: BasePart?
+): BasePart?
+	PlacedCoralIndex.ensure()
+	local bucket = buckets[plotId]
+	if not bucket then
+		return nil
+	end
+	local localPos = GridMath.worldToPlotLocal(worldPos, plotCf)
+	local gx, _, gz = GridMath.worldToGrid(localPos, Vector3.zero)
+	local best: BasePart? = nil
+	local bestY = -math.huge
+	for _, part in ipairs(bucket.parts) do
+		if part ~= ignore and part.Parent and part:GetAttribute("OceanTD_SpeciesId") == "BrainCoral" then
+			local pl = GridMath.worldToPlotLocal(part.Position, plotCf)
+			local px, _, pz = GridMath.worldToGrid(pl, Vector3.zero)
+			if px == gx and pz == gz and part.Position.Y >= bestY then
+				best = part
+				bestY = part.Position.Y
+			end
+		end
+	end
+	return best
+end
+
 return PlacedCoralIndex

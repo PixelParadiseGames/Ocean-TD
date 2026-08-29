@@ -10,6 +10,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local oceanRoot = ReplicatedStorage:WaitForChild("OceanTD")
 local SkillStages = require(oceanRoot:WaitForChild("Shared"):WaitForChild("SkillStages"))
+local BrainStack = require(oceanRoot:WaitForChild("Shared"):WaitForChild("BrainStack"))
 
 local ClientPlot = require(script.Parent:WaitForChild("ClientPlot"))
 local PlacedCoralIndex = require(script.Parent:WaitForChild("PlacedCoralIndex"))
@@ -44,7 +45,22 @@ function PlaceRaycast.isSpotTaken(worldPos: Vector3): boolean
 	return PlaceRaycast.findBlockingCoral(worldPos) ~= nil
 end
 
-function PlaceRaycast.evaluatePos(worldPos: Vector3): (boolean, string?)
+-- Snap Brain aim onto the tallest Brain in this XZ column (slight sink overlap).
+function PlaceRaycast.resolveBrainStackPos(hitPos: Vector3, newDiameter: number, ignore: BasePart?): Vector3
+	local plot = ClientPlot.get()
+	if not plot then
+		return hitPos
+	end
+	local top = PlacedCoralIndex.getTopBrainInColumn(plot.plotId, hitPos, plot.cframe, ignore)
+	if not top then
+		return hitPos
+	end
+	local d0 = BrainStack.diameterOfPart(top)
+	local y = BrainStack.stackCenterY(top.Position.Y, d0, newDiameter)
+	return Vector3.new(top.Position.X, y, top.Position.Z)
+end
+
+function PlaceRaycast.evaluatePos(worldPos: Vector3, itemId: string?): (boolean, string?)
 	local placeMax = SkillStages.placeMoreMaxAtStage(SkillPowerUpUI.getStage("PlaceMore"))
 	if PlacedCoralIndex.countLocal() >= placeMax then
 		return false, "Max Placed"
@@ -52,7 +68,14 @@ function PlaceRaycast.evaluatePos(worldPos: Vector3): (boolean, string?)
 	if not ClientPlot.isInside(worldPos) then
 		return false, "Out Of Plot"
 	end
-	if PlaceRaycast.isSpotTaken(worldPos) then
+	local blocker = PlaceRaycast.findBlockingCoral(worldPos)
+	if blocker then
+		-- Brain-on-Brain stack: same XZ cell is OK when the new center sits above the lower ball.
+		if BrainStack.isBrainId(itemId) and BrainStack.isBrainId(blocker:GetAttribute("OceanTD_SpeciesId")) then
+			if worldPos.Y > blocker.Position.Y + 0.25 then
+				return true, nil
+			end
+		end
 		return false, "Spot Taken"
 	end
 	return true, nil

@@ -15,12 +15,14 @@ local playerGui = player:WaitForChild("PlayerGui")
 
 local oceanRoot = ReplicatedStorage:WaitForChild("OceanTD")
 local Remotes = require(oceanRoot:WaitForChild("Remotes"))
+local Constants = require(oceanRoot:WaitForChild("Shared"):WaitForChild("Constants"))
 local ItemCatalog = require(oceanRoot:WaitForChild("Shared"):WaitForChild("ItemCatalog"))
 local CoralSize = require(oceanRoot:WaitForChild("Shared"):WaitForChild("CoralSize"))
 local PlotOutlineColors = require(oceanRoot:WaitForChild("Shared"):WaitForChild("PlotOutlineColors"))
 local UiCircles = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiCircles"))
 local UiTheme = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiTheme"))
 local UiHaptics = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiHaptics"))
+local UiViewportTags = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiViewportTags"))
 
 local RelocateController = require(script.Parent:WaitForChild("RelocateController"))
 local CoralRangeRings = require(script.Parent:WaitForChild("CoralRangeRings"))
@@ -75,6 +77,7 @@ local h3Labels: { { TextLabel } } = {}
 local h3Hits: { TextButton } = {}
 local confirmGui: ScreenGui? = nil
 local confirmUnlockTarget: number? = nil
+local toastGui: ScreenGui? = nil
 local pulseConn: RBXScriptConnection? = nil
 local hintConn: RBXScriptConnection? = nil
 local confirmStrokeConn: RBXScriptConnection? = nil
@@ -145,6 +148,58 @@ local function hideConfirm()
 		confirmGui = nil
 	end
 	GuiService.SelectedObject = nil
+end
+
+local function showToast(msg: string)
+	if toastGui then
+		toastGui:Destroy()
+	end
+	local sg = Instance.new("ScreenGui")
+	sg.Name = "OceanTD_CoralSizeToast"
+	sg.ResetOnSpawn = false
+	sg.IgnoreGuiInset = true
+	sg.DisplayOrder = 25020
+	sg.Parent = playerGui
+	toastGui = sg
+	local lbl = Instance.new("TextLabel")
+	lbl.AnchorPoint = Vector2.new(0.5, 1)
+	lbl.Position = UDim2.new(0.5, 0, 1, -48)
+	lbl.Size = UDim2.fromOffset(360, 44)
+	lbl.BackgroundColor3 = PANEL_BG
+	lbl.BackgroundTransparency = 0.1
+	lbl.BorderSizePixel = 0
+	lbl.Font = UiTheme.Font
+	lbl.TextSize = 20
+	lbl.TextColor3 = Color3.fromRGB(255, 230, 200)
+	lbl.Text = msg
+	lbl.Parent = sg
+	local c = Instance.new("UICorner")
+	c.CornerRadius = UDim.new(0, 10)
+	c.Parent = lbl
+	task.delay(2.2, function()
+		if toastGui == sg then
+			sg:Destroy()
+			toastGui = nil
+		end
+	end)
+end
+
+local function handleSizeResult(result: any, unlockNext: boolean): boolean
+	if typeof(result) ~= "table" then
+		return false
+	end
+	if result.ok == true then
+		return true
+	end
+	if unlockNext then
+		local code = result.errorCode
+		if code == "CantAfford" then
+			showToast("Collect More $D")
+		elseif code == "Maxed" then
+			showToast("Max size")
+		end
+	end
+	return false
 end
 
 local function stopSizeFlash()
@@ -334,7 +389,7 @@ local function tweenSpongeScale(
 		CoralVisual.applySeaFanScaleMult(part, fullSize, fromMult, surfaceAnchor)
 	else
 		part.Size = fullSize * fromMult
-		CoralVisual.alignMeshToSurface(part, surfaceAnchor)
+		CoralVisual.alignMeshToSurface(part, surfaceAnchor, nil, part.CFrame)
 	end
 	local t0 = os.clock()
 	while true do
@@ -345,7 +400,7 @@ local function tweenSpongeScale(
 			CoralVisual.applySeaFanScaleMult(part, fullSize, mult, surfaceAnchor)
 		else
 			part.Size = fullSize * mult
-			CoralVisual.alignMeshToSurface(part, surfaceAnchor)
+			CoralVisual.alignMeshToSurface(part, surfaceAnchor, nil, part.CFrame)
 		end
 		if u >= 1 then
 			break
@@ -671,6 +726,7 @@ local function runSpongeSizeCinematic(oldPart: BasePart, placeId: string, target
 		if unlockNext then
 			RelocateController.setCinematicHold(false)
 		end
+		handleSizeResult(result, unlockNext)
 		return
 	end
 
@@ -703,7 +759,7 @@ local function runSpongeSizeCinematic(oldPart: BasePart, placeId: string, target
 		part.LocalTransparencyModifier = 1
 		part.Size = newFull * 0.05
 		if growAnchor then
-			CoralVisual.alignMeshToSurface(part, growAnchor)
+			CoralVisual.alignMeshToSurface(part, growAnchor, nil, part.CFrame)
 		end
 		part.Transparency = 0
 		part.LocalTransparencyModifier = 0
@@ -759,13 +815,13 @@ local function invokeSize(targetClass: number, unlockNext: boolean)
 	local ok, result = pcall(function()
 		return sizeRf:InvokeServer(placeId, targetClass, unlockNext)
 	end)
-	if ok then
+	if ok and handleSizeResult(result, unlockNext) then
 		applyServerSize(result, unlockNext)
 	end
 	refreshSizeColors()
 end
 
-local function showConfirmUnlock()
+local function showConfirmUnlock(targetClass: number?)
 	local part = selectedPart()
 	if not part then
 		return
@@ -775,9 +831,17 @@ local function showConfirmUnlock()
 	if not nxt then
 		return
 	end
+	local unlockTo = nxt
+	if typeof(targetClass) == "number" then
+		local want = CoralSize.clampTier(targetClass)
+		if want > tier then
+			unlockTo = want
+		end
+	end
+	local cost = CoralSize.unlockCostRange(tier, unlockTo)
 	hideConfirm()
 	RelocateController.setInspectModal(true)
-	confirmUnlockTarget = nxt
+	confirmUnlockTarget = unlockTo
 	local sg = Instance.new("ScreenGui")
 	sg.Name = "OceanTD_CoralSizeConfirm"
 	sg.ResetOnSpawn = false
@@ -801,7 +865,7 @@ local function showConfirmUnlock()
 	local panel = Instance.new("Frame")
 	panel.AnchorPoint = Vector2.new(0.5, 0.5)
 	panel.Position = UDim2.fromScale(0.5, 0.5)
-	panel.Size = UDim2.fromOffset(320, 220)
+	panel.Size = UDim2.fromOffset(320, 240)
 	panel.BackgroundColor3 = PANEL_BG
 	panel.BorderSizePixel = 0
 	panel.ZIndex = 2
@@ -818,16 +882,31 @@ local function showConfirmUnlock()
 	panelStroke.Color = STROKE_DARK
 	panelStroke.Parent = panel
 
+	local unlockNames: { string } = {}
+	for t = tier + 1, unlockTo do
+		table.insert(unlockNames, CoralSize.labelFor(t))
+	end
 	local title = Instance.new("TextLabel")
 	title.BackgroundTransparency = 1
-	title.Size = UDim2.new(1, -24, 0, 56)
-	title.Position = UDim2.fromOffset(12, 20)
+	title.Size = UDim2.new(1, -24, 0, 44)
+	title.Position = UDim2.fromOffset(12, 16)
 	title.Font = UiTheme.Font
-	title.TextSize = 26
+	title.TextSize = if #unlockNames > 1 then 24 else 26
 	title.TextColor3 = Color3.fromRGB(240, 248, 255)
-	title.Text = "Unlock " .. CoralSize.labelFor(nxt)
+	title.Text = "Unlock " .. table.concat(unlockNames, " + ")
 	title.ZIndex = 3
 	title.Parent = panel
+
+	local costLbl = Instance.new("TextLabel")
+	costLbl.BackgroundTransparency = 1
+	costLbl.Size = UDim2.new(1, -24, 0, 28)
+	costLbl.Position = UDim2.fromOffset(12, 58)
+	costLbl.Font = UiTheme.Font
+	costLbl.TextSize = 22
+	costLbl.TextColor3 = Color3.fromRGB(255, 220, 120)
+	costLbl.Text = tostring(cost) .. " $D"
+	costLbl.ZIndex = 3
+	costLbl.Parent = panel
 
 	local unlock = Instance.new("TextButton")
 	unlock.Name = "UNLOCK"
@@ -839,7 +918,7 @@ local function showConfirmUnlock()
 	unlock.BorderSizePixel = 0
 	unlock.Size = UDim2.fromOffset(200, 48)
 	unlock.AnchorPoint = Vector2.new(0.5, 0)
-	unlock.Position = UDim2.new(0.5, 0, 0, 96)
+	unlock.Position = UDim2.new(0.5, 0, 0, 100)
 	unlock.ZIndex = 3
 	unlock.Parent = panel
 	local uc = Instance.new("UICorner")
@@ -865,7 +944,12 @@ local function showConfirmUnlock()
 		panelStroke.Thickness = 3 + u * 2
 	end)
 	unlock.Activated:Connect(function()
-		local n = nxt
+		local cash = tonumber(player:GetAttribute(Constants.SAND_DOLLARS_ATTR)) or 0
+		if cash < cost then
+			showToast("Collect More $D")
+			return
+		end
+		local n = unlockTo
 		hideConfirm()
 		invokeSize(n, true)
 	end)
@@ -880,7 +964,7 @@ local function showConfirmUnlock()
 	cancel.BorderSizePixel = 0
 	cancel.Size = UDim2.fromOffset(200, 44)
 	cancel.AnchorPoint = Vector2.new(0.5, 0)
-	cancel.Position = UDim2.new(0.5, 0, 0, 156)
+	cancel.Position = UDim2.new(0.5, 0, 0, 160)
 	cancel.ZIndex = 3
 	cancel.Parent = panel
 	local cc = Instance.new("UICorner")
@@ -910,7 +994,7 @@ local function onLetter(i: number)
 		invokeSize(i, false)
 		return
 	end
-	showConfirmUnlock()
+	showConfirmUnlock(i)
 end
 
 local function startUpgradeFx()
@@ -1431,7 +1515,13 @@ function CoralInspectPanel.bind(panel: GuiObject, catalogFrame: GuiObject)
 
 	local COLOR_SWATCH_GAP = 6
 	local COLOR_SWATCH_PAD = 4
-	local COLOR_VISIBLE = 6.5 -- sixth full + half of next until scroll
+	-- Desktop: 6 full + peek. Mobile: 4 full + peek so each circle is larger / easier to tap.
+	local function colorVisibleSlots(): number
+		if UiViewportTags.isMobile() then
+			return 4.5
+		end
+		return 6.5
+	end
 
 	local scrollLay = Instance.new("UIListLayout")
 	scrollLay.FillDirection = Enum.FillDirection.Horizontal
@@ -1533,10 +1623,11 @@ function CoralInspectPanel.bind(panel: GuiObject, catalogFrame: GuiObject)
 		if viewW < 8 or viewH < 8 then
 			return
 		end
-		-- Fit 6.5 circles (+ gaps between them) into the visible width.
-		local gaps = math.floor(COLOR_VISIBLE) -- 6 gaps among 6.5 slots
+		local visible = colorVisibleSlots()
+		-- Gaps between visible slots (floor so 4.5 → 4 gaps among the first 4 full circles).
+		local gaps = math.floor(visible)
 		local inner = viewW - COLOR_SWATCH_PAD * 2 - gaps * COLOR_SWATCH_GAP
-		local diam = math.floor(inner / COLOR_VISIBLE)
+		local diam = math.floor(inner / visible)
 		diam = math.clamp(diam, 22, math.max(22, math.floor(viewH * 0.92)))
 		for _, btn in pairs(colorSwatchBtns) do
 			btn.Size = UDim2.fromOffset(diam, diam)

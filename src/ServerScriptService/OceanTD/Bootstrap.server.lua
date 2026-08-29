@@ -3,6 +3,14 @@
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local StarterPlayer = game:GetService("StarterPlayer")
+local Workspace = game:GetService("Workspace")
+
+-- Roblox-native jump: JumpHeight (not JumpPower). Default 7.2 → +50% = 10.8.
+StarterPlayer.CharacterUseJumpPower = false
+StarterPlayer.CharacterJumpHeight = 10.8
+-- Fall ~20% slower (default Gravity 196.2).
+Workspace.Gravity = 196.2 * 0.8
 
 local oceanRoot = ReplicatedStorage:WaitForChild("OceanTD")
 local Remotes = require(oceanRoot:WaitForChild("Remotes"))
@@ -18,6 +26,7 @@ local PlacementService = require(Services:WaitForChild("PlacementService"))
 local UndoService = require(Services:WaitForChild("UndoService"))
 local PlotSaveService = require(Services:WaitForChild("PlotSaveService"))
 local WaveWatchService = require(Services:WaitForChild("WaveWatchService"))
+local UrchinStingService = require(Services:WaitForChild("UrchinStingService"))
 
 local Constants = require(oceanRoot:WaitForChild("Shared"):WaitForChild("Constants"))
 
@@ -28,6 +37,7 @@ PlotService.init()
 PlacementService.init()
 PlotSaveService.init()
 WaveWatchService.init()
+UrchinStingService.init()
 
 do
 	local poses = {}
@@ -102,10 +112,17 @@ local function onPlayerAdded(player: Player)
 	PersistenceService.syncWaveRecordAttributes(player)
 	PersistenceService.syncPlotOutlineColorAttribute(player)
 	PersistenceService.syncSandDollarsAttribute(player)
+	PersistenceService.syncInventoryToClient(player)
 
 	plotAssignedRemote:FireClient(player, payload)
 	sessionReadyRemote:FireClient(player)
 	Remotes.get("SkillStagesSync"):FireClient(player, PersistenceService.getSkillStagesPayload(player))
+	-- Continuous random seed wheel (re-arms after each claim).
+	task.defer(function()
+		if player.Parent then
+			PersistenceService.beginSeedWheelGrant(player, 1)
+		end
+	end)
 	-- Joiner first (race-safe), then everyone.
 	WaveWatchService.broadcastRoster(player)
 	WaveWatchService.broadcastRoster(nil)

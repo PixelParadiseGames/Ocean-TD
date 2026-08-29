@@ -87,6 +87,11 @@ local C = {
 	ARROW_PATH_SPACING = 16, -- studs along path between arrow sets (full route)
 	ARROW_LABEL_EVERY = 4, -- "Wave N" on every Nth arrow set
 	ARROW_SPIN_RAD_PER_SEC = 2.2, -- slow corkscrew roll
+	-- Crab GroundA preview: red arrows; fixed short train.
+	CRAB_ARROW_COUNT = 8,
+	CRAB_ARROW_PATH_SPACING = 32, -- studs between crab arrow sets
+	CRAB_ARROW_COLOR = Color3.fromRGB(230, 45, 55),
+	CRAB_ARROW_Y_LIFT = 1.35, -- keep red arrows readable above the seafloor
 	-- Flat carpet was backwards; yaw 180 fixes facing. Roll 90 stands it up like a fence
 	-- (pitch ±90 was tipping the tips straight down).
 	ARROW_YAW = math.rad(180),
@@ -166,6 +171,23 @@ local C = {
 	URCHIN_STAGGER_MAX = 2.8,
 	URCHIN_FIRST_DELAY_MIN = 0.08,
 	URCHIN_FIRST_DELAY_MAX = 0.65,
+	-- Player sting: knockback + red flash + $D steal/orbs.
+	URCHIN_STING_COOLDOWN_SEC = 3,
+	URCHIN_STING_STEAL_MAX = 30,
+	URCHIN_STING_HIT_RADIUS = 5.5, -- flat XZ + sphere stand-on radius
+	URCHIN_STING_HIT_Y = 8,
+	URCHIN_STING_REPORT_RADIUS = 120,
+	URCHIN_STING_VICTIM_RADIUS = 22,
+	URCHIN_STING_KB_SPEED = 58, -- horizontal impulse (~10–30 studs travel)
+	URCHIN_STING_KB_UP = 32,
+	URCHIN_STING_SOUND_STAB = "rbxassetid://2900321088",
+	URCHIN_STING_SOUND_OOF = "rbxasset://sounds/uuhhh.mp3",
+	URCHIN_ORB_LIFETIME_SEC = 20,
+	URCHIN_ORB_SETTLE_SEC = 1.1, -- half as fast as prior 0.55s settle
+	URCHIN_ORB_SPREAD_MIN = 3.3, -- 50% further than 2.2
+	URCHIN_ORB_SPREAD_SPAN = 5.1, -- 50% further than 3.4
+	URCHIN_ORB_COLOR = Color3.fromRGB(40, 255, 90),
+	URCHIN_ORB_PICKUP_SOUND = "rbxassetid://139487580236703", -- reuse feed ping (valid Sound)
 	TURN_RATE = 14, -- legacy; fish facing uses PATH_TANG_SMOOTH_RATE
 	-- Smooth path heading so school lateral offsets don't snap at waypoint joins.
 	PATH_TANG_SMOOTH_RATE = 11,

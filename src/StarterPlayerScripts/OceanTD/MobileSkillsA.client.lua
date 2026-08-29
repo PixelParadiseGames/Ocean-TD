@@ -762,12 +762,77 @@ task.spawn(function()
 	end)
 
 	local hit = ensureHitOverlay(skillsBtn)
-	hit.Activated:Connect(toggle)
+	if hit:GetAttribute("_OceanTD_SkillsToggleBound") ~= true then
+		hit:SetAttribute("_OceanTD_SkillsToggleBound", true)
+		hit.Activated:Connect(toggle)
+	end
+
+	local function rebindSkillsChrome()
+		local leftNow = playerGui:FindFirstChild("MobileLeftUI")
+		if not leftNow then
+			return
+		end
+		LeftHudLayout.hardenScreenGui(leftNow)
+		local dPadNow = leftNow:FindFirstChild("dPad")
+		if not dPadNow then
+			return
+		end
+		if dPadNow:IsA("GuiObject") then
+			dPadNow.Active = false
+		end
+		local newSkills = dPadNow:FindFirstChild("Skills")
+		if not newSkills or not newSkills:IsA("GuiObject") then
+			return
+		end
+		local existingHit = newSkills:FindFirstChild("_OceanTD_SkillsHit")
+		if newSkills == skillsBtn and existingHit and existingHit:GetAttribute("_OceanTD_SkillsToggleBound") == true then
+			return
+		end
+		skillsBtn = newSkills
+		local newHit = ensureHitOverlay(skillsBtn)
+		if newHit:GetAttribute("_OceanTD_SkillsToggleBound") ~= true then
+			newHit:SetAttribute("_OceanTD_SkillsToggleBound", true)
+			newHit.Activated:Connect(toggle)
+		end
+		-- Right d-pad optional
+		local newRight = dPadNow:FindFirstChild("Right")
+			or dPadNow:FindFirstChild("right")
+			or dPadNow:FindFirstChild("dPadRight")
+		if newRight and newRight:IsA("GuiObject") then
+			local rightHit = ensureHitOverlay(newRight)
+			rightHit.Name = "_OceanTD_SkillsRightHit"
+			if rightHit:GetAttribute("_OceanTD_SkillsToggleBound") ~= true then
+				rightHit:SetAttribute("_OceanTD_SkillsToggleBound", true)
+				rightHit.Activated:Connect(openFromDPadRight)
+			end
+		end
+		print("[Skills] Re-bound Skills button after left HUD reset")
+	end
+
+	LeftHudLayout.hardenScreenGui(left)
+	LeftHudLayout.hardenScreenGui(panel)
+	LeftHudLayout.watchMobileLeftUi(playerGui, function()
+		rebindSkillsChrome()
+	end)
+	task.spawn(function()
+		while true do
+			task.wait(2)
+			local hitOk = skillsBtn
+				and skillsBtn.Parent
+				and skillsBtn:FindFirstChild("_OceanTD_SkillsHit")
+			if not hitOk then
+				rebindSkillsChrome()
+			end
+		end
+	end)
 
 	if rightBtn and rightBtn:IsA("GuiObject") then
 		local rightHit = ensureHitOverlay(rightBtn)
 		rightHit.Name = "_OceanTD_SkillsRightHit"
-		rightHit.Activated:Connect(openFromDPadRight)
+		if rightHit:GetAttribute("_OceanTD_SkillsToggleBound") ~= true then
+			rightHit:SetAttribute("_OceanTD_SkillsToggleBound", true)
+			rightHit.Activated:Connect(openFromDPadRight)
+		end
 	end
 	-- No warn if missing: Skills button + gamepad DPadRight still work.
 

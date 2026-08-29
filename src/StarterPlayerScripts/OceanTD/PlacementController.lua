@@ -144,8 +144,8 @@ local startAimLoop: () -> ()
 local beginAim: (string, boolean?, boolean?) -> ()
 
 local savedWalkSpeed = 16
-local savedJumpPower = 50
-local savedJumpHeight = 7.2
+local savedJumpPower = 75
+local savedJumpHeight = 10.8
 local savedCameraType: Enum.CameraType? = nil
 local savedCameraCFrame: CFrame? = nil
 local aimConn: RBXScriptConnection? = nil
@@ -156,8 +156,8 @@ local savedTouchGuiEnabled: boolean? = nil
 
 local FREEZE_ACTION = "OceanTD_PlacementFreeze"
 local DEFAULT_WALK_SPEED = 16
-local DEFAULT_JUMP_POWER = 50
-local DEFAULT_JUMP_HEIGHT = 7.2
+local DEFAULT_JUMP_POWER = 75
+local DEFAULT_JUMP_HEIGHT = 10.8 -- StarterPlayer default 7.2 × 1.5
 local CONFIRM_DRAG_PX = 28 -- ignore tiny finger jitter before moving parked ghost
 local BTN_SIZE = 52 -- min tappable chrome; PlaceConfirmChrome also floors at 52px
 
@@ -564,7 +564,7 @@ local function fireGamepadReturnToList()
 end
 
 local function evaluatePos(worldPos: Vector3): (boolean, string?)
-	return PlaceRaycast.evaluatePos(worldPos)
+	return PlaceRaycast.evaluatePos(worldPos, armedItemId)
 end
 
 local function syncBlockFlashForAim(worldPos: Vector3?)
@@ -575,6 +575,18 @@ local function syncBlockFlashForAim(worldPos: Vector3?)
 		rejectReason,
 		if worldPos then PlaceRaycast.findBlockingCoral(worldPos) else nil
 	)
+end
+
+local function resolvePlaceAnchor(rawPos: Vector3): Vector3
+	if armedItemId == "BrainCoral" then
+		local diam = ghostPlaceDiameter
+		if typeof(diam) ~= "number" then
+			diam = CoralVisual.randomBrainDiameter()
+			ghostPlaceDiameter = diam
+		end
+		return PlaceRaycast.resolveBrainStackPos(rawPos, diam :: number, nil)
+	end
+	return rawPos
 end
 
 local function ensureWarnBillboard(parent: BasePart)
@@ -770,6 +782,7 @@ local function updateGhostAt(anchorPos: Vector3)
 	if not speciesId then
 		return
 	end
+	anchorPos = resolvePlaceAnchor(anchorPos)
 	placeAnchor = anchorPos
 	if aimPinnedToHand then
 		-- Still in-hand: don't treat floating hold as an invalid plant spot.
@@ -786,7 +799,7 @@ local function updateGhostAt(anchorPos: Vector3)
 		ghostPlaceScaleHeight = nil
 		ghostPlaceFacingYaw = nil
 		if speciesId == "BrainCoral" then
-			ghostDiameter = CoralVisual.randomBrainDiameter()
+			ghostDiameter = ghostPlaceDiameter or CoralVisual.randomBrainDiameter()
 			ghostPlaceDiameter = ghostDiameter
 		elseif CoralVisual.isSeaFan(speciesId) then
 			ghostPlaceDiameter = nil

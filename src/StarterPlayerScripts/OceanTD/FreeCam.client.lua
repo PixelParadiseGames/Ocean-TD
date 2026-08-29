@@ -19,6 +19,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local oceanRoot = ReplicatedStorage:WaitForChild("OceanTD")
 local Constants = require(oceanRoot:WaitForChild("Shared"):WaitForChild("Constants"))
+local LeftHudLayout = require(oceanRoot:WaitForChild("Shared"):WaitForChild("LeftHudLayout"))
 
 local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
@@ -65,8 +66,8 @@ local lookYaw = 0
 local lookPitch = 0
 local savedCameraType: Enum.CameraType? = nil
 local savedWalkSpeed = 16
-local savedJumpPower = 50
-local savedJumpHeight = 7.2
+local savedJumpPower = 75
+local savedJumpHeight = 10.8
 local renderConn: RBXScriptConnection? = nil
 local btnStroke: UIStroke? = nil -- legacy; strokes live on each mode icon
 local freeCamButton: GuiButton? = nil -- any-hit fallback; prefer camIcons
@@ -1571,13 +1572,32 @@ end
 
 publishMode()
 
-task.spawn(function()
-	local left = playerGui:WaitForChild("MobileLeftUI", 60)
-	if not left then
-		warn("[FreeCam] PlayerGui.MobileLeftUI missing")
+local leftHudListenersBound = false
+local boundLeftUi: Instance? = nil
+
+local function camIconsStillLive(): boolean
+	if not carouselReady or #camIcons == 0 then
+		return false
+	end
+	for _, icon in ipairs(camIcons) do
+		if not icon.root.Parent or not icon.root:IsDescendantOf(playerGui) then
+			return false
+		end
+		if not icon.root:FindFirstChildOfClass("UIScale") then
+			return false
+		end
+	end
+	return true
+end
+
+local function bindMobileLeftUi(left: Instance)
+	LeftHudLayout.hardenScreenGui(left)
+	if left == boundLeftUi and camIconsStillLive() then
 		return
 	end
-	local dPad = left:WaitForChild("dPad", 30)
+	boundLeftUi = left
+
+	local dPad = left:FindFirstChild("dPad") or left:WaitForChild("dPad", 30)
 	if not dPad then
 		warn("[FreeCam] MobileLeftUI.dPad missing")
 		return
@@ -1596,23 +1616,49 @@ task.spawn(function()
 		warn("[FreeCam] MobileLeftUI.dPad.dPadIcon missing")
 	end
 
-	InventoryState.onOpenChanged(function()
-		syncDPadIcon()
-		syncCamModeIconsForHud()
-	end)
-	UserInputService.LastInputTypeChanged:Connect(function()
-		syncDPadIcon()
-	end)
-	playerGui:GetAttributeChangedSignal("OceanTD_SkillsBubblesOpen"):Connect(function()
-		syncDPadIcon()
-		syncCamModeIconsForHud()
-	end)
+	if not leftHudListenersBound then
+		leftHudListenersBound = true
+		InventoryState.onOpenChanged(function()
+			syncDPadIcon()
+			syncCamModeIconsForHud()
+		end)
+		UserInputService.LastInputTypeChanged:Connect(function()
+			syncDPadIcon()
+		end)
+		playerGui:GetAttributeChangedSignal("OceanTD_SkillsBubblesOpen"):Connect(function()
+			syncDPadIcon()
+			syncCamModeIconsForHud()
+		end)
 
-	playerGui:GetAttributeChangedSignal("OceanTD_ForceCloseFreeCam"):Connect(function()
-		if mode ~= "off" then
-			setMode("off")
+		playerGui:GetAttributeChangedSignal("OceanTD_ForceCloseFreeCam"):Connect(function()
+			if mode ~= "off" then
+				setMode("off")
+			end
+		end)
+	end
+
+	syncDPadIcon()
+	syncCamModeIconsForHud()
+	print("[FreeCam] Bound MobileLeftUI — cycle FreeCam → FishCam → Off")
+end
+
+task.spawn(function()
+	local left = playerGui:WaitForChild("MobileLeftUI", 60)
+	if not left then
+		warn("[FreeCam] PlayerGui.MobileLeftUI missing")
+		return
+	end
+	LeftHudLayout.watchMobileLeftUi(playerGui, bindMobileLeftUi)
+
+	-- Recover if ResetOnSpawn / wipe destroyed wiring without a clean ScreenGui replace.
+	task.spawn(function()
+		while true do
+			task.wait(2)
+			local cur = playerGui:FindFirstChild("MobileLeftUI")
+			if cur and not camIconsStillLive() then
+				boundLeftUi = nil
+				bindMobileLeftUi(cur)
+			end
 		end
 	end)
-
-	print("[FreeCam] Ready — cycle FreeCam → FishCam → Off (DPadDown + triangle icons)")
 end)

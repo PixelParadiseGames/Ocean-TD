@@ -24,45 +24,23 @@ local UiCircles = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiCircl
 local UiTheme = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiTheme"))
 local CoralVisual = require(oceanRoot:WaitForChild("Shared"):WaitForChild("CoralVisual"))
 local UiHaptics = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiHaptics"))
+local BrainStack = require(oceanRoot:WaitForChild("Shared"):WaitForChild("BrainStack"))
 
 local InventoryState = require(script.Parent:WaitForChild("InventoryState"))
 local ClientPlot = require(script.Parent:WaitForChild("ClientPlot"))
 local PlacedCoralIndex = require(script.Parent:WaitForChild("PlacedCoralIndex"))
+local PlaceRaycast = require(script.Parent:WaitForChild("PlaceRaycast"))
 local PlaceVfx = require(script.Parent:WaitForChild("PlaceVfx"))
 local PlacementController = require(script.Parent:WaitForChild("PlacementController"))
 local SelectRing = require(script.Parent:WaitForChild("SelectRing"))
 local PlaceConfirmChrome = require(script.Parent:WaitForChild("PlaceConfirmChrome"))
 local PlaceConfirmHitTest = require(script.Parent:WaitForChild("PlaceConfirmHitTest"))
+local RelocateConsts = require(script.Parent:WaitForChild("RelocateConsts"))
+local RelocateHitTest = require(script.Parent:WaitForChild("RelocateHitTest"))
 
 local RelocateController = {}
 
-local BTN_SIZE = 60
-local REC_BTN_SIZE = 40
-local REC_GAP_PX = 6
-local MOVE_ICON_SIZE = 48
-local MOVE_ICON_IMAGE = "rbxassetid://345081302"
-local RECYCLE_ICON_IMAGE = "rbxassetid://75091344292202"
-local GHOST_INVALID_COLOR = Color3.fromRGB(220, 70, 70)
--- Raycast above the cursor so the coral center (+ move icon) sits under the mouse.
--- (Terrain hit is below the ball center on screen; +Y offset made this worse.)
-local AIM_VISUAL_CENTER_OFFSET_Y = 56
--- Softer greens (less neon-bright).
-local REC_GREEN = Color3.fromRGB(48, 145, 70)
-local REC_GREEN_DIM = Color3.fromRGB(28, 88, 44)
-local REC_FLASH_HZ = 1.5 -- background color flips / sec (slower)
-local REC_LABEL_PERIOD = 1 -- seconds showing icon, then "+1"
-local REC_SLIDE_SEC = 0.3
-local REC_FLY_SEC = 0.55
-local INTRO_SEC = 0.35
-local REVERT_SEC = 0.4
-local IDLE_CLOSE_DELAY_SEC = 3 -- gamepad: delay before showing idle close (B)
-local DRAG_PX = 28
-local GHOST_SCREEN_OFFSET_Y = 105
-local FREEZE_ACTION = "OceanTD_RelocateFreeze"
-local HOVER_HINT_PERIOD = 1 -- R1 badge ↔ move icon
-local HOVER_HINT_SIZE = 32
-local GAMEPAD_STICK_DEADZONE = 0.22
-local GAMEPAD_AIM_SPEED = 343 -- px/sec at full deflection
+local C = RelocateConsts
 
 local cinematicHold = false
 local inspectModal = false
@@ -113,6 +91,7 @@ local recycleIcon: ImageLabel? = nil
 local recyclePlus: TextLabel? = nil
 local moveBillboard: BillboardGui? = nil
 local moveIcon: ImageLabel? = nil
+local moveAdorneePart: BasePart? = nil
 local waistBb: BillboardGui? = nil
 local waistAdornee: BasePart? = nil
 local chromeBtnDown = false
@@ -124,12 +103,11 @@ local grabFromMoveIcon = false
 local relocateFacingYaw: number? = nil
 local originFacingYaw: number? = nil
 local hasRotated = false
-local SEA_FAN_ROT_STEP = math.rad(10)
 
 local frozen = false
-local savedWalkSpeed = 16
-local savedJumpPower = 50
-local savedJumpHeight = 7.2
+local savedWalkSpeed = C.DEFAULT_WALK_SPEED
+local savedJumpPower = C.DEFAULT_JUMP_POWER
+local savedJumpHeight = C.DEFAULT_JUMP_HEIGHT
 local savedCameraType: Enum.CameraType? = nil
 local savedCameraCFrame: CFrame? = nil
 local savedTouchControlsEnabled: boolean? = nil
@@ -156,9 +134,20 @@ local pendingPickScreen: Vector2? = nil
 -- While relocating: tap another coral to switch (deferred to release so drag still works).
 local pendingCoralSwitch: BasePart? = nil
 local pendingCoralSwitchScreen: Vector2? = nil
-local PICK_TAP_PX = 48
--- Max screen-space distance from a coral's projected center to count as a tap/hover.
-local PICK_SCREEN_PX = 42
+
+local function chromeRefs(): RelocateHitTest.ChromeRefs
+	return {
+		playerGui = playerGui,
+		checkBtn = checkBtn,
+		cancelBtn = cancelBtn,
+		rotLeftBtn = rotLeftBtn,
+		rotRightBtn = rotRightBtn,
+		recycleBtn = recycleBtn,
+		moveIcon = moveIcon,
+		moveBillboard = moveBillboard,
+		chromeBtnDown = chromeBtnDown,
+	}
+end
 
 local function log(...: any)
 	print("[RELOCATE]", ...)
@@ -287,12 +276,12 @@ local function isConfirmJumpHeld(): boolean
 end
 
 local function applySavedJump(hum: Humanoid)
-	hum.JumpPower = if savedJumpPower > 0 then savedJumpPower else 50
-	hum.JumpHeight = if savedJumpHeight > 0 then savedJumpHeight else 7.2
+	hum.JumpPower = if savedJumpPower > 0 then savedJumpPower else 75
+	hum.JumpHeight = if savedJumpHeight > 0 then savedJumpHeight else 10.8
 end
 
 local function unfreeze()
-	ContextActionService:UnbindAction(FREEZE_ACTION)
+	ContextActionService:UnbindAction(C.FREEZE_ACTION)
 	setTouchControlsEnabled(true)
 	local controls = getPlayerControls()
 	if controls then
@@ -342,7 +331,7 @@ local function unfreeze()
 end
 
 local function bindFreezeAction()
-	ContextActionService:UnbindAction(FREEZE_ACTION)
+	ContextActionService:UnbindAction(C.FREEZE_ACTION)
 	local sinkKeys: { Enum.KeyCode } = {
 		Enum.KeyCode.W,
 		Enum.KeyCode.A,
@@ -356,7 +345,7 @@ local function bindFreezeAction()
 	if gamepadRelocate then
 		table.insert(sinkKeys, Enum.KeyCode.Thumbstick1)
 	end
-	ContextActionService:BindActionAtPriority(FREEZE_ACTION, function()
+	ContextActionService:BindActionAtPriority(C.FREEZE_ACTION, function()
 		return Enum.ContextActionResult.Sink
 	end, false, Enum.ContextActionPriority.High.Value, table.unpack(sinkKeys))
 end
@@ -424,14 +413,14 @@ end
 local function aimScreenPos(): Vector2
 	local finger = pointerScreenPos()
 	if gamepadRelocate and gamepadCursor then
-		return Vector2.new(gamepadCursor.X, gamepadCursor.Y - AIM_VISUAL_CENTER_OFFSET_Y)
+		return Vector2.new(gamepadCursor.X, gamepadCursor.Y - C.AIM_VISUAL_CENTER_OFFSET_Y)
 	end
 	if UserInputService:GetLastInputType() == Enum.UserInputType.Touch then
 		-- Raise aim so the coral / move icon sit above the thumb (thumb below).
-		return Vector2.new(finger.X, finger.Y - GHOST_SCREEN_OFFSET_Y)
+		return Vector2.new(finger.X, finger.Y - C.GHOST_SCREEN_OFFSET_Y)
 	end
 	-- Mouse: aim above the cursor so the ball center lands on it.
-	return Vector2.new(finger.X, finger.Y - AIM_VISUAL_CENTER_OFFSET_Y)
+	return Vector2.new(finger.X, finger.Y - C.AIM_VISUAL_CENTER_OFFSET_Y)
 end
 
 local function worldToScreen(world: Vector3): Vector2?
@@ -523,6 +512,10 @@ local function destroyUi()
 		moveBillboard = nil
 	end
 	moveIcon = nil
+	if moveAdorneePart then
+		moveAdorneePart:Destroy()
+		moveAdorneePart = nil
+	end
 	if waistBb then
 		waistBb:Destroy()
 		waistBb = nil
@@ -586,8 +579,8 @@ local function makeUi()
 		return b
 	end
 
-	checkBtn = roundBtn("✓", Color3.fromRGB(40, 180, 80), BTN_SIZE)
-	cancelBtn = roundBtn("X", Color3.fromRGB(200, 50, 50), BTN_SIZE)
+	checkBtn = roundBtn("✓", Color3.fromRGB(40, 180, 80), C.BTN_SIZE)
+	cancelBtn = roundBtn("X", Color3.fromRGB(200, 50, 50), C.BTN_SIZE)
 	checkBtn.ZIndex = 10
 	cancelBtn.ZIndex = 10
 	rotLeftBtn = PlaceConfirmChrome.createRotateButton(g, PlaceConfirmChrome.ROT_LEFT_ICON, "RotLeft")
@@ -595,7 +588,7 @@ local function makeUi()
 	rotLeftBtn.ZIndex = 5
 	rotRightBtn.ZIndex = 5
 
-	recycleBtn = roundBtn("", REC_GREEN, REC_BTN_SIZE)
+	recycleBtn = roundBtn("", C.REC_GREEN, C.REC_BTN_SIZE)
 	recycleBtn.Name = "Recycle"
 	recycleBtn.AutoButtonColor = false
 	local recIcon = Instance.new("ImageLabel")
@@ -604,7 +597,7 @@ local function makeUi()
 	recIcon.AnchorPoint = Vector2.new(0.5, 0.5)
 	recIcon.Position = UDim2.fromScale(0.5, 0.5)
 	recIcon.Size = UDim2.fromScale(0.62, 0.62)
-	recIcon.Image = RECYCLE_ICON_IMAGE
+	recIcon.Image = C.RECYCLE_ICON_IMAGE
 	recIcon.ScaleType = Enum.ScaleType.Fit
 	recIcon.ZIndex = 6
 	recIcon.Active = false
@@ -693,18 +686,38 @@ local function makeUi()
 	-- BillboardGui Click is flaky on phone — commit on InputEnded via chromePressTarget.
 end
 
+local MOVE_ICON_GROUND_LIFT = 0.9 -- studs above plant point so the handle isn't buried in sand
+
 local function syncMoveIconToGround()
 	if not moveBillboard or not part then
 		return
 	end
-	local anchor = moveGridAnchor or gridAnchorPos
-	if anchor and CoralVisual.isMeshSpecies(part:GetAttribute("OceanTD_SpeciesId")) then
-		-- Billboard is Adorned to the mesh; offset so the handle sits on the plant grid point.
-		moveBillboard.StudsOffsetWorldSpace = anchor - part.Position
+	local anchor = moveGridAnchor or gridAnchorPos or CoralVisual.readGridAnchor(part) or part.Position
+	local world = Vector3.new(anchor.X, anchor.Y + MOVE_ICON_GROUND_LIFT, anchor.Z)
+	local adornee = moveAdorneePart
+	if adornee and adornee.Parent then
+		adornee.CFrame = CFrame.new(world)
+		moveBillboard.Adornee = adornee
+		moveBillboard.StudsOffset = Vector3.zero
+		moveBillboard.StudsOffsetWorldSpace = Vector3.zero
+	elseif CoralVisual.isMeshSpecies(part:GetAttribute("OceanTD_SpeciesId")) then
+		-- Fallback: offset from mesh center to plant point.
+		moveBillboard.StudsOffsetWorldSpace = world - part.Position
 		moveBillboard.StudsOffset = Vector3.zero
 	else
 		moveBillboard.StudsOffsetWorldSpace = Vector3.zero
-		moveBillboard.StudsOffset = Vector3.zero
+		moveBillboard.StudsOffset = Vector3.new(0, MOVE_ICON_GROUND_LIFT, 0)
+	end
+	moveBillboard.Enabled = true
+	if moveIcon then
+		moveIcon.Visible = true
+		-- Recover if intro tween was interrupted while still tiny.
+		if not introAnimating then
+			local sc = moveIcon:FindFirstChild("IntroScale")
+			if sc and sc:IsA("UIScale") and sc.Scale < 0.5 then
+				sc.Scale = 1
+			end
+		end
 	end
 end
 
@@ -713,22 +726,42 @@ local function attachMoveIcon(adornee: BasePart)
 		moveBillboard:Destroy()
 		moveBillboard = nil
 	end
+	moveIcon = nil
+	if moveAdorneePart then
+		moveAdorneePart:Destroy()
+		moveAdorneePart = nil
+	end
+
+	local anchorPart = Instance.new("Part")
+	anchorPart.Name = "OceanTD_RelocateMoveAdornee"
+	anchorPart.Anchored = true
+	anchorPart.CanCollide = false
+	anchorPart.CanQuery = false
+	anchorPart.CanTouch = false
+	anchorPart.CastShadow = false
+	anchorPart.Transparency = 1
+	anchorPart.Size = Vector3.new(0.25, 0.25, 0.25)
+	anchorPart.Parent = adornee.Parent or Workspace
+	moveAdorneePart = anchorPart
+
 	local bb = Instance.new("BillboardGui")
 	bb.Name = "OceanTD_RelocateMove"
 	bb.AlwaysOnTop = true
 	-- Active so a press on the handle is a GUI hit; InputBegan still starts the drag.
 	bb.Active = true
+	bb.Enabled = true
 	bb.LightInfluence = 0
-	bb.Size = UDim2.fromOffset(MOVE_ICON_SIZE, MOVE_ICON_SIZE)
+	bb.Size = UDim2.fromOffset(C.MOVE_ICON_SIZE, C.MOVE_ICON_SIZE)
 	bb.MaxDistance = 2000
-	bb.Adornee = adornee
+	bb.Adornee = anchorPart
 	bb.Parent = playerGui
 	local img = Instance.new("ImageLabel")
 	img.BackgroundTransparency = 1
 	img.Size = UDim2.fromScale(1, 1)
-	img.Image = MOVE_ICON_IMAGE
+	img.Image = C.MOVE_ICON_IMAGE
 	img.ScaleType = Enum.ScaleType.Fit
 	img.Active = true
+	img.Visible = true
 	img.Parent = bb
 	local scale = Instance.new("UIScale")
 	scale.Name = "IntroScale"
@@ -759,6 +792,14 @@ local function sameGrid(a: Vector3, b: Vector3): boolean
 	return ax == bx and ay == by and az == bz
 end
 
+local function resolveRelocatePos(worldPos: Vector3): Vector3
+	if not part or not BrainStack.isBrainId(part:GetAttribute("OceanTD_SpeciesId")) then
+		return worldPos
+	end
+	local diam = BrainStack.diameterOfPart(part)
+	return PlaceRaycast.resolveBrainStackPos(worldPos, diam, part)
+end
+
 local function evaluate(worldPos: Vector3): (boolean, string?)
 	if not ClientPlot.isInside(worldPos) then
 		return false, "Out Of Plot"
@@ -766,7 +807,15 @@ local function evaluate(worldPos: Vector3): (boolean, string?)
 	if originPos and sameGrid(worldPos, originPos) then
 		return true, nil
 	end
-	if findBlockingCoral(worldPos, part) then
+	local blocker = findBlockingCoral(worldPos, part)
+	if blocker then
+		if part
+			and BrainStack.isBrainId(part:GetAttribute("OceanTD_SpeciesId"))
+			and BrainStack.isBrainId(blocker:GetAttribute("OceanTD_SpeciesId"))
+			and worldPos.Y > blocker.Position.Y + 0.25
+		then
+			return true, nil
+		end
 		return false, "Spot Taken"
 	end
 	return true, nil
@@ -987,7 +1036,7 @@ local function pickPlacedCoral(screenPos: Vector2): BasePart?
 		return losHit.Distance >= dist - 0.35
 	end
 
-	local radius = if isUsingGamepad() then math.max(PICK_SCREEN_PX, 72) else PICK_SCREEN_PX
+	local radius = if isUsingGamepad() then math.max(C.PICK_SCREEN_PX, 72) else C.PICK_SCREEN_PX
 	-- Top-3 nearest on screen, then LOS-test in order (at most 3 occlusion rays).
 	local c1: BasePart? = nil
 	local c2: BasePart? = nil
@@ -1058,7 +1107,7 @@ local function pointerHitsSelectedCoral(screenPos: Vector2): boolean
 	end
 	local sp = worldToViewport(cam, part.Position)
 	if sp then
-		local radius = if isUsingGamepad() then math.max(PICK_SCREEN_PX, 72) else PICK_SCREEN_PX
+		local radius = if isUsingGamepad() then math.max(C.PICK_SCREEN_PX, 72) else C.PICK_SCREEN_PX
 		if (sp - screenPos).Magnitude <= radius then
 			return true
 		end
@@ -1085,7 +1134,7 @@ local function ensureHoverHint(adornee: BasePart)
 	bb.AlwaysOnTop = true
 	bb.Active = false
 	bb.LightInfluence = 0
-	bb.Size = UDim2.fromOffset(HOVER_HINT_SIZE, HOVER_HINT_SIZE)
+	bb.Size = UDim2.fromOffset(C.HOVER_HINT_SIZE, C.HOVER_HINT_SIZE)
 	bb.StudsOffset = Vector3.new(0, 2.6, 0)
 	bb.MaxDistance = 2000
 	bb.Adornee = adornee
@@ -1122,7 +1171,7 @@ local function ensureHoverHint(adornee: BasePart)
 	move.AnchorPoint = Vector2.new(0.5, 0.5)
 	move.Position = UDim2.fromScale(0.5, 0.5)
 	move.Size = UDim2.fromScale(0.7, 0.7)
-	move.Image = MOVE_ICON_IMAGE
+	move.Image = C.MOVE_ICON_IMAGE
 	move.ScaleType = Enum.ScaleType.Fit
 	move.Parent = moveBg
 
@@ -1138,7 +1187,7 @@ local function updateHoverHint()
 		return
 	end
 	ensureHoverHint(hoverPart)
-	local showMove = (math.floor((os.clock() - hoverHintT0) / HOVER_HINT_PERIOD) % 2) == 1
+	local showMove = (math.floor((os.clock() - hoverHintT0) / C.HOVER_HINT_PERIOD) % 2) == 1
 	if hoverHintBadge then
 		hoverHintBadge.Visible = not showMove
 	end
@@ -1270,7 +1319,7 @@ local function syncChrome()
 	local cy = screen.Y - coralChromeScreenLift(part)
 
 	if recycleSlideActive then
-		local u = math.clamp((os.clock() - recycleSlideT0) / REC_SLIDE_SEC, 0, 1)
+		local u = math.clamp((os.clock() - recycleSlideT0) / C.REC_SLIDE_SEC, 0, 1)
 		local a = 1 - (1 - u) * (1 - u)
 		recycleSlideU = a
 		if u >= 1 then
@@ -1281,17 +1330,17 @@ local function syncChrome()
 
 	-- Idle close (exit tool): keyboard/mouse instantly; gamepad after 3s.
 	-- After a move / recycle confirm: always show cancel for that action.
-	local idleCloseReady = (not gamepadRelocate) or ((os.clock() - relocateShownAt) >= IDLE_CLOSE_DELAY_SEC)
+	local idleCloseReady = (not gamepadRelocate) or ((os.clock() - relocateShownAt) >= C.IDLE_CLOSE_DELAY_SEC)
 	local showIdleClose = (not hasMoved) and (not hasRotated) and (not recyclePending) and idleCloseReady
 	local showCancel = hasMoved or recyclePending or showIdleClose
 	cancelBtn.Visible = showCancel
 	local tipLetter = if gamepadRelocate then "B" else "X"
-	local showWord = (math.floor((os.clock() - gamepadChromeT0) / HOVER_HINT_PERIOD) % 2) == 1
+	local showWord = (math.floor((os.clock() - gamepadChromeT0) / C.HOVER_HINT_PERIOD) % 2) == 1
 	-- Recycle confirm: ✓/X over the avatar waist (same as move cancel), not coral tip.
 	checkBtn.Visible = (hasMoved and validSpot) or hasRotated or recyclePending
 
 	-- Keep button size fixed — shrinking on rotate made the whole chrome jump.
-	layoutWaistChrome(BTN_SIZE, checkBtn.Visible)
+	layoutWaistChrome(C.BTN_SIZE, checkBtn.Visible)
 	if recyclePending then
 		if rotLeftBtn then
 			rotLeftBtn.Visible = false
@@ -1336,13 +1385,13 @@ local function syncChrome()
 		recycleBtn.Visible = showRecycle
 		if showRecycle then
 			recycleBtn.AnchorPoint = Vector2.new(0.5, 1)
-			recycleBtn.Size = UDim2.fromOffset(REC_BTN_SIZE, REC_BTN_SIZE)
+			recycleBtn.Size = UDim2.fromOffset(C.REC_BTN_SIZE, C.REC_BTN_SIZE)
 			-- Park recycle above waist chrome (avatar), not coral tip.
 			local waistScreen = PlaceConfirmChrome.screenPos(waistAdornee)
 			local recCx = waistScreen.X
-			local recCy = waistScreen.Y - BTN_SIZE - REC_GAP_PX
+			local recCy = waistScreen.Y - C.BTN_SIZE - C.REC_GAP_PX
 			-- Idle (not moved): sit near where X will appear. Recycle confirm: above ✓/X pair.
-			local aboveX = recCx + 6 + BTN_SIZE * 0.5
+			local aboveX = recCx + 6 + C.BTN_SIZE * 0.5
 			local abovePair = recCx
 			local idleRecX = aboveX
 			local idleRecY = waistScreen.Y
@@ -1353,16 +1402,16 @@ local function syncChrome()
 			-- When idle with inspect hidden, tip-aligned recycle is owned by older path —
 			-- keep tip coords for idle non-inspect so existing feel stays; waist only for confirm.
 			if not recyclePending then
-				recX = cx + 6 + BTN_SIZE * 0.5
+				recX = cx + 6 + C.BTN_SIZE * 0.5
 				recY = cy
 			end
 			recycleBtn.Position = UDim2.fromOffset(recX, recY)
 
 			if recyclePending then
 				local age = os.clock() - recycleSlideT0
-				local pulse = (math.floor(age * REC_FLASH_HZ) % 2) == 0
-				recycleBtn.BackgroundColor3 = if pulse then REC_GREEN else REC_GREEN_DIM
-				local showPlus = (math.floor(age / REC_LABEL_PERIOD) % 2) == 1
+				local pulse = (math.floor(age * C.REC_FLASH_HZ) % 2) == 0
+				recycleBtn.BackgroundColor3 = if pulse then C.REC_GREEN else C.REC_GREEN_DIM
+				local showPlus = (math.floor(age / C.REC_LABEL_PERIOD) % 2) == 1
 				if recycleIcon then
 					recycleIcon.Visible = not showPlus
 				end
@@ -1371,11 +1420,11 @@ local function syncChrome()
 					recyclePlus.Visible = showPlus
 				end
 			else
-				recycleBtn.BackgroundColor3 = REC_GREEN
+				recycleBtn.BackgroundColor3 = C.REC_GREEN
 				-- Touch: icon ↔ COLLECT (no Del). Keyboard/gamepad: icon → Del/L1 → COLLECT.
 				local showShortcut = isUsingGamepad() or not UserInputService.TouchEnabled
 				local phaseCount = if showShortcut then 3 else 2
-				local phase = math.floor((os.clock() - gamepadChromeT0) / HOVER_HINT_PERIOD) % phaseCount
+				local phase = math.floor((os.clock() - gamepadChromeT0) / C.HOVER_HINT_PERIOD) % phaseCount
 				if recycleIcon then
 					recycleIcon.Visible = phase == 0
 				end
@@ -1409,7 +1458,7 @@ local function updateAt(worldPos: Vector3)
 	if not part or not originPos then
 		return
 	end
-	local surfacePos = worldPos
+	local surfacePos = resolveRelocatePos(worldPos)
 	if CoralVisual.needsFacingYaw(part:GetAttribute("OceanTD_SpeciesId")) then
 		if typeof(relocateFacingYaw) ~= "number" then
 			relocateFacingYaw = CoralVisual.readFacingYaw(part)
@@ -1435,7 +1484,7 @@ local function updateAt(worldPos: Vector3)
 	if validSpot or rejectReason ~= "Spot Taken" then
 		clearBlockHighlight()
 	else
-		setBlockHighlight(findBlockingCoral(worldPos, part))
+		setBlockHighlight(findBlockingCoral(surfacePos, part))
 	end
 	ClientPlot.setOutOfPlotFlash(rejectReason == "Out Of Plot")
 	syncWarnLabel()
@@ -1453,7 +1502,7 @@ local function rotateSelectedSeaFan(dir: number)
 	if typeof(yaw) ~= "number" then
 		yaw = CoralVisual.readFacingYaw(part)
 	end
-	yaw += dir * SEA_FAN_ROT_STEP
+	yaw += dir * C.SEA_FAN_ROT_STEP
 	relocateFacingYaw = yaw
 	hasRotated = true
 	local anchor = moveGridAnchor or gridAnchorPos or CoralVisual.readGridAnchor(part) or part.Position
@@ -1521,16 +1570,17 @@ local function startLoop()
 		end
 		keepCameraFrozen()
 		updateRelocateFlash()
+		syncMoveIconToGround()
 		if gamepadRelocate and not busy and not recyclePending and not introAnimating and not recycleFlying then
 			local stick = readThumbstick1()
 			local mag = stick.Magnitude
-			if mag > GAMEPAD_STICK_DEADZONE then
+			if mag > C.GAMEPAD_STICK_DEADZONE then
 				local screen = if part then worldToViewport(Workspace.CurrentCamera :: Camera, coralChromeWorldPos(part)) else nil
 				if not gamepadCursor then
 					gamepadCursor = screen or UserInputService:GetMouseLocation()
 				end
 				local dir = stick.Unit
-				local speed = GAMEPAD_AIM_SPEED * math.clamp((mag - GAMEPAD_STICK_DEADZONE) / (1 - GAMEPAD_STICK_DEADZONE), 0, 1)
+				local speed = C.GAMEPAD_AIM_SPEED * math.clamp((mag - C.GAMEPAD_STICK_DEADZONE) / (1 - C.GAMEPAD_STICK_DEADZONE), 0, 1)
 				gamepadCursor = clampGamepadCursor(gamepadCursor + dir * speed * dt)
 				local pos = raycastTerrain(aimScreenPos())
 				if pos then
@@ -1564,8 +1614,8 @@ local function playIntro(fromScreen: Vector2)
 	end
 	recycleBtn.AnchorPoint = Vector2.new(0.5, 0.5)
 	recycleBtn.Position = UDim2.fromOffset(fromScreen.X, fromScreen.Y)
-	recycleBtn.Size = UDim2.fromOffset(REC_BTN_SIZE, REC_BTN_SIZE)
-	recycleBtn.BackgroundColor3 = REC_GREEN
+	recycleBtn.Size = UDim2.fromOffset(C.REC_BTN_SIZE, C.REC_BTN_SIZE)
+	recycleBtn.BackgroundColor3 = C.REC_GREEN
 	recScale = Instance.new("UIScale")
 	recScale.Scale = 0.05
 	recScale.Parent = recycleBtn
@@ -1582,7 +1632,7 @@ local function playIntro(fromScreen: Vector2)
 		if inspectPanelVisible and recycleBtn then
 			recycleBtn.Visible = false
 		end
-		local u = math.clamp((os.clock() - t0) / INTRO_SEC, 0, 1)
+		local u = math.clamp((os.clock() - t0) / C.INTRO_SEC, 0, 1)
 		local a = 1 - (1 - u) * (1 - u)
 		if moveScale and moveScale.Parent then
 			moveScale.Scale = 0.05 + 0.95 * a
@@ -1599,7 +1649,7 @@ local function playIntro(fromScreen: Vector2)
 			local lift = if part then coralChromeScreenLift(part) else 52
 			local cy = screen.Y - lift
 			-- End: recycle where X will sit (right of coral).
-			local recEnd = Vector2.new(cx + 6 + BTN_SIZE * 0.5, cy - REC_BTN_SIZE * 0.5)
+			local recEnd = Vector2.new(cx + 6 + C.BTN_SIZE * 0.5, cy - C.REC_BTN_SIZE * 0.5)
 			local rpos = fromScreen:Lerp(recEnd, a)
 			recycleBtn.AnchorPoint = Vector2.new(0.5, 0.5)
 			recycleBtn.Position = UDim2.fromOffset(rpos.X, rpos.Y)
@@ -1822,7 +1872,7 @@ function RelocateController.cancel(instant: boolean?)
 		local conn: RBXScriptConnection
 		conn = RunService.RenderStepped:Connect(function()
 			keepCameraFrozen()
-			local u = math.clamp((os.clock() - t0) / REVERT_SEC, 0, 1)
+			local u = math.clamp((os.clock() - t0) / C.REVERT_SEC, 0, 1)
 			local a = 1 - (1 - u) * (1 - u)
 			if p.Parent then
 				p.CFrame = CFrame.new(start:Lerp(home, a))
@@ -1912,10 +1962,10 @@ local function flyRecycleToBackpack(creditedItemId: string, onDone: () -> ())
 	end
 	recycleBtn.AnchorPoint = Vector2.new(0.5, 0.5)
 	recycleBtn.Position = UDim2.fromOffset(startPos.X, startPos.Y)
-	recycleBtn.BackgroundColor3 = REC_GREEN
+	recycleBtn.BackgroundColor3 = C.REC_GREEN
 	recycleBtn.Active = false
 
-	local startSize = REC_BTN_SIZE
+	local startSize = C.REC_BTN_SIZE
 	local t0 = os.clock()
 	local conn: RBXScriptConnection
 	conn = RunService.RenderStepped:Connect(function()
@@ -1926,7 +1976,7 @@ local function flyRecycleToBackpack(creditedItemId: string, onDone: () -> ())
 			return
 		end
 		-- Player is already unfrozen — do not re-lock camera during the fly.
-		local u = math.clamp((os.clock() - t0) / REC_FLY_SEC, 0, 1)
+		local u = math.clamp((os.clock() - t0) / C.REC_FLY_SEC, 0, 1)
 		local a = 1 - (1 - u) * (1 - u)
 		local pos = startPos:Lerp(target, a)
 		local scale = math.max(1 - a, 0.12)
@@ -2213,84 +2263,16 @@ local function tryBeginFromPick(screenPos: Vector2): boolean
 	return true
 end
 
-local function guiObjectHit(obj: GuiObject?, screenPos: Vector2, pad: number): boolean
-	if not obj or not obj.Visible then
-		return false
-	end
-	local p = obj.AbsolutePosition
-	local s = obj.AbsoluteSize
-	if s.X < 1 or s.Y < 1 then
-		return false
-	end
-	local function inside(x: number, y: number): boolean
-		return x >= p.X - pad
-			and x <= p.X + s.X + pad
-			and y >= p.Y - pad
-			and y <= p.Y + s.Y + pad
-	end
-	if inside(screenPos.X, screenPos.Y) then
-		return true
-	end
-	local inset = GuiService:GetGuiInset()
-	if inset.X ~= 0 or inset.Y ~= 0 then
-		return inside(screenPos.X - inset.X, screenPos.Y - inset.Y)
-	end
-	return false
-end
-
 local function isOverMoveIcon(screenPos: Vector2): boolean
-	if moveBillboard and not moveBillboard.Enabled then
-		return false
-	end
-	if guiObjectHit(moveIcon, screenPos, 10) then
-		return true
-	end
-	local function probe(x: number, y: number): boolean
-		local ok, objs = pcall(function()
-			return playerGui:GetGuiObjectsAtPosition(x, y)
-		end)
-		if not ok or typeof(objs) ~= "table" then
-			return false
-		end
-		for _, obj in ipairs(objs) do
-			if obj == moveIcon then
-				return true
-			end
-			if moveBillboard and (obj == moveBillboard or obj:IsDescendantOf(moveBillboard)) then
-				return true
-			end
-		end
-		return false
-	end
-	if probe(screenPos.X, screenPos.Y) then
-		return true
-	end
-	local inset = GuiService:GetGuiInset()
-	if inset.X ~= 0 or inset.Y ~= 0 then
-		return probe(screenPos.X - inset.X, screenPos.Y - inset.Y)
-	end
-	return false
+	return RelocateHitTest.isOverMoveIcon(chromeRefs(), screenPos)
 end
 
 local function isOverChrome(screenPos: Vector2): boolean
-	if chromeBtnDown then
-		return true
-	end
-	if PlaceConfirmHitTest.resolveTarget(screenPos, checkBtn, cancelBtn, playerGui, rotLeftBtn, rotRightBtn) ~= nil then
-		return true
-	end
-	return guiObjectHit(recycleBtn, screenPos, 12)
+	return RelocateHitTest.isOverChrome(chromeRefs(), screenPos)
 end
 
 local function resolveRelocateChrome(screenPos: Vector2): string?
-	local t = PlaceConfirmHitTest.resolveTarget(screenPos, checkBtn, cancelBtn, playerGui, rotLeftBtn, rotRightBtn)
-	if t then
-		return t
-	end
-	if guiObjectHit(recycleBtn, screenPos, 12) then
-		return "recycle"
-	end
-	return nil
+	return RelocateHitTest.resolveChrome(chromeRefs(), screenPos)
 end
 
 table.insert(inputConns, UserInputService.InputBegan:Connect(function(input, _processed)
@@ -2436,7 +2418,7 @@ table.insert(inputConns, UserInputService.InputChanged:Connect(function(input, _
 	end
 	local now = pointerScreenPos()
 	if pressOrigin and not dragging then
-		if (now - pressOrigin).Magnitude < DRAG_PX then
+		if (now - pressOrigin).Magnitude < C.DRAG_PX then
 			return
 		end
 		dragging = true
@@ -2530,7 +2512,7 @@ table.insert(inputConns, UserInputService.InputEnded:Connect(function(input, _pr
 
 	-- Tap another coral while one is selected → switch (no drag happened).
 	if active and switchTarget and switchTarget.Parent and switchOrigin then
-		if (pickPos - switchOrigin).Magnitude <= PICK_TAP_PX then
+		if (pickPos - switchOrigin).Magnitude <= C.PICK_TAP_PX then
 			RelocateController.begin(switchTarget)
 			return
 		end
@@ -2538,7 +2520,7 @@ table.insert(inputConns, UserInputService.InputEnded:Connect(function(input, _pr
 
 	-- Tap fallback: if press didn't open the tool (processed/ray miss), try again on release.
 	if not active and not PlacementController.isActive() and pendingPick and pendingPickScreen then
-		if (pickPos - pendingPickScreen).Magnitude <= PICK_TAP_PX then
+		if (pickPos - pendingPickScreen).Magnitude <= C.PICK_TAP_PX then
 			if pendingPick.Parent then
 				RelocateController.begin(pendingPick)
 			else

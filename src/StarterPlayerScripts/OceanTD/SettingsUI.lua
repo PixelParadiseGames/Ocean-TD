@@ -15,6 +15,7 @@ local playerGui = player:WaitForChild("PlayerGui")
 
 local oceanRoot = game:GetService("ReplicatedStorage"):WaitForChild("OceanTD")
 local AudioSettings = require(oceanRoot:WaitForChild("Shared"):WaitForChild("AudioSettings"))
+local LeftHudLayout = require(oceanRoot:WaitForChild("Shared"):WaitForChild("LeftHudLayout"))
 local UiTheme = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiTheme"))
 local UiHaptics = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiHaptics"))
 local UiPopupScale = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiPopupScale"))
@@ -159,20 +160,25 @@ local function applyMusicGlyph(host: GuiObject)
 	note.Parent = host
 end
 
-local function wireStudioSettingsButton()
-	local left = playerGui:WaitForChild("MobileLeftUI", 60)
+local function wireStudioSettingsButton(leftOpt: Instance?)
+	local left = leftOpt or playerGui:FindFirstChild("MobileLeftUI") or playerGui:WaitForChild("MobileLeftUI", 60)
 	if not left then
 		warn("[SettingsUI] PlayerGui.MobileLeftUI missing")
 		return
 	end
-	local dPad = left:WaitForChild("dPad", 30)
+	LeftHudLayout.hardenScreenGui(left)
+	local dPad = left:FindFirstChild("dPad") or left:WaitForChild("dPad", 30)
 	if not dPad then
 		warn("[SettingsUI] MobileLeftUI.dPad missing")
 		return
 	end
-	local anchor = dPad:WaitForChild(STUDIO_SETTINGS_NAME, 30)
+	local anchor = dPad:FindFirstChild(STUDIO_SETTINGS_NAME) or dPad:WaitForChild(STUDIO_SETTINGS_NAME, 30)
 	if not anchor or not anchor:IsA("GuiObject") then
 		warn("[SettingsUI] MobileLeftUI.dPad.Settings missing — add anchor in Studio")
+		return
+	end
+	-- Already wired to this live anchor.
+	if settingsAnchor == anchor and settingsHitBtn and settingsHitBtn.Parent then
 		return
 	end
 	settingsAnchor = anchor
@@ -587,7 +593,26 @@ function SettingsUI.init()
 		legacy:Destroy()
 	end
 	ensureViewportWatch()
-	task.spawn(wireStudioSettingsButton)
+	task.spawn(function()
+		local left = playerGui:WaitForChild("MobileLeftUI", 60)
+		if not left then
+			warn("[SettingsUI] PlayerGui.MobileLeftUI missing")
+			return
+		end
+		LeftHudLayout.watchMobileLeftUi(playerGui, wireStudioSettingsButton)
+		task.spawn(function()
+			while true do
+				task.wait(2)
+				if not settingsHitBtn or not settingsHitBtn.Parent then
+					local cur = playerGui:FindFirstChild("MobileLeftUI")
+					if cur then
+						settingsAnchor = nil
+						wireStudioSettingsButton(cur)
+					end
+				end
+			end
+		end)
+	end)
 end
 
 UserInputService.LastInputTypeChanged:Connect(refreshCloseLabel)

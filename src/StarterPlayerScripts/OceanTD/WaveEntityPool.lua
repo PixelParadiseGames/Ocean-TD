@@ -7,7 +7,7 @@
 	Crabs: ReplicatedStorage.Fish.CrabTemplate. Same acquireFish/releaseFish API.
 	Urchins: ReplicatedStorage.Fish.Urchin.UrchinMesh (RootPart + ShellHitbox under UrchinMesh).
 
-	Also pools food orbs, green-arrow sets, ammo balls, and short SFX clones.
+	Also pools food orbs, green/red arrow sets, ammo balls, and short SFX clones.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -30,12 +30,24 @@ local HUNGRY_SIZE_MIN_SCALE = 0.75 -- smallest fish 25% below prior floor
 
 local ATTR_KIND = "OceanTD_PoolFishKind"
 local ATTR_BASE_SIZE = "OceanTD_FishBaseSize"
+local ATTR_ARROW_TINT = "OceanTD_ArrowTint"
+local ATTR_URCHIN_BASE_SX = "OceanTD_UrchinBaseSX"
+local ATTR_URCHIN_BASE_SY = "OceanTD_UrchinBaseSY"
+local ATTR_URCHIN_BASE_SZ = "OceanTD_UrchinBaseSZ"
+local ATTR_URCHIN_BASE_OX = "OceanTD_UrchinBaseOX"
+local ATTR_URCHIN_BASE_OY = "OceanTD_UrchinBaseOY"
+local ATTR_URCHIN_BASE_OZ = "OceanTD_UrchinBaseOZ"
+local ATTR_URCHIN_SCALE = "OceanTD_UrchinScale"
+-- Current authored size = 1×; random up to 2× (100% larger).
+local URCHIN_SCALE_MIN = 1
+local URCHIN_SCALE_MAX = 2
 
 local fishPools: { [string]: { Instance } } = {}
 -- Prevents double-release / double-acquire (shared WaveSim + WaveGhostSim pool).
 local fishInUse: { [Instance]: boolean } = {}
 local foodPool: { BasePart } = {}
 local arrowPool: { Instance } = {}
+local redArrowPool: { Instance } = {}
 local ammoPool: { BasePart } = {}
 local soundPools: { [string]: { Sound } } = {}
 local liveSounds: { [string]: Sound } = {}
@@ -96,6 +108,28 @@ local function resolveMovementRoot(inst: Instance): BasePart?
 	return findPrimary(inst)
 end
 
+-- Utility parts that must stay invisible (authored hitboxes / movement roots).
+local function isUtilityHitbox(p: BasePart): boolean
+	local n = p.Name
+	return n == "ShellHitbox" or n == "RootPart" or string.find(n, "Hitbox", 1, true) ~= nil
+end
+
+-- GhostSim fade tweens Transparency; restore mesh opacity but keep hitboxes invisible.
+local function resetPartVisibility(inst: Instance)
+	local function fix(p: BasePart)
+		p.LocalTransparencyModifier = 0
+		p.Transparency = if isUtilityHitbox(p) then 1 else 0
+	end
+	if inst:IsA("BasePart") then
+		fix(inst)
+	end
+	for _, d in ipairs(inst:GetDescendants()) do
+		if d:IsA("BasePart") then
+			fix(d)
+		end
+	end
+end
+
 -- Root stays anchored so Pivot/CFrame drives the assembly; welded legs stay
 -- unanchored so C0 walk-cycle offsets actually move them.
 local function prepareCrabInstance(inst: Instance): BasePart?
@@ -107,6 +141,9 @@ local function prepareCrabInstance(inst: Instance): BasePart?
 			d.CanTouch = false
 			d.CanQuery = false
 			d.CastShadow = false
+			if isUtilityHitbox(d) then
+				d.Transparency = 1
+			end
 			if d == root then
 				d.Anchored = true
 			else
@@ -122,13 +159,14 @@ local function prepareCrabInstance(inst: Instance): BasePart?
 	for _, d in ipairs(toDestroy) do
 		d:Destroy()
 	end
-	-- Container MeshPart (e.g. UrchinMesh) is not in GetDescendants — unanchor so
-	-- BodyToRoot / ShellHitboxToRoot can follow the movement RootPart.
 	if inst:IsA("BasePart") then
 		inst.CanCollide = false
 		inst.CanTouch = false
 		inst.CanQuery = false
 		inst.CastShadow = false
+		if isUtilityHitbox(inst) then
+			inst.Transparency = 1
+		end
 		if inst == root then
 			inst.Anchored = true
 		else
@@ -137,6 +175,97 @@ local function prepareCrabInstance(inst: Instance): BasePart?
 		end
 	end
 	return root
+end
+
+-- Urchins are CFrame-snapped every frame. Keep parts Anchored; hitboxes stay invisible.
+local function prepareUrchinInstance(inst: Instance): BasePart?
+	local root = resolveMovementRoot(inst)
+	local toDestroy: { Instance } = {}
+	for _, d in ipairs(inst:GetDescendants()) do
+		if d:IsA("BasePart") then
+			d.Anchored = true
+			d.CanCollide = false
+			d.CanTouch = false
+			d.CanQuery = false
+			d.CastShadow = false
+			d.Massless = true
+			d.LocalTransparencyModifier = 0
+			d.Transparency = if isUtilityHitbox(d) then 1 else 0
+		elseif d:IsA("Script") or d:IsA("LocalScript") then
+			d.Disabled = true
+		elseif d:IsA("Seat") or d:IsA("VehicleSeat") or d:IsA("Humanoid") then
+			table.insert(toDestroy, d)
+		end
+	end
+	for _, d in ipairs(toDestroy) do
+		d:Destroy()
+	end
+	if inst:IsA("BasePart") then
+		inst.Anchored = true
+		inst.CanCollide = false
+		inst.CanTouch = false
+		inst.CanQuery = false
+		inst.CastShadow = false
+		inst.Massless = true
+		inst.LocalTransparencyModifier = 0
+		-- UrchinMesh container is the visible shell mesh, not a utility hitbox.
+		inst.Transparency = if isUtilityHitbox(inst) then 1 else 0
+	end
+	return root
+end
+
+local function collectBaseParts(inst: Instance): { BasePart }
+	local parts: { BasePart } = {}
+	if inst:IsA("BasePart") then
+		table.insert(parts, inst)
+	end
+	for _, d in ipairs(inst:GetDescendants()) do
+		if d:IsA("BasePart") then
+			table.insert(parts, d)
+		end
+	end
+	return parts
+end
+
+local function ensureUrchinBaseSnapshot(inst: Instance, root: BasePart)
+	for _, p in ipairs(collectBaseParts(inst)) do
+		if typeof(p:GetAttribute(ATTR_URCHIN_BASE_SX)) ~= "number" then
+			p:SetAttribute(ATTR_URCHIN_BASE_SX, p.Size.X)
+			p:SetAttribute(ATTR_URCHIN_BASE_SY, p.Size.Y)
+			p:SetAttribute(ATTR_URCHIN_BASE_SZ, p.Size.Z)
+			if p ~= root then
+				local o = root.CFrame:ToObjectSpace(p.CFrame)
+				p:SetAttribute(ATTR_URCHIN_BASE_OX, o.X)
+				p:SetAttribute(ATTR_URCHIN_BASE_OY, o.Y)
+				p:SetAttribute(ATTR_URCHIN_BASE_OZ, o.Z)
+			end
+		end
+	end
+end
+
+local function applyUrchinScale(inst: Instance, root: BasePart, scale: number)
+	local s = math.clamp(scale, URCHIN_SCALE_MIN, URCHIN_SCALE_MAX)
+	ensureUrchinBaseSnapshot(inst, root)
+	for _, p in ipairs(collectBaseParts(inst)) do
+		local bx = p:GetAttribute(ATTR_URCHIN_BASE_SX)
+		local by = p:GetAttribute(ATTR_URCHIN_BASE_SY)
+		local bz = p:GetAttribute(ATTR_URCHIN_BASE_SZ)
+		if typeof(bx) == "number" and typeof(by) == "number" and typeof(bz) == "number" then
+			p.Size = Vector3.new(bx * s, by * s, bz * s)
+		end
+		if p ~= root then
+			local ox = p:GetAttribute(ATTR_URCHIN_BASE_OX)
+			local oy = p:GetAttribute(ATTR_URCHIN_BASE_OY)
+			local oz = p:GetAttribute(ATTR_URCHIN_BASE_OZ)
+			if typeof(ox) == "number" and typeof(oy) == "number" and typeof(oz) == "number" then
+				local rel = root.CFrame:ToObjectSpace(p.CFrame)
+				local _, _, _, r00, r01, r02, r10, r11, r12, r20, r21, r22 = rel:GetComponents()
+				local rot = CFrame.new(0, 0, 0, r00, r01, r02, r10, r11, r12, r20, r21, r22)
+				p.CFrame = root.CFrame * CFrame.new(ox * s, oy * s, oz * s) * rot
+			end
+		end
+	end
+	inst:SetAttribute(ATTR_URCHIN_SCALE, s)
 end
 
 local function stripHungerUi(root: BasePart)
@@ -253,6 +382,39 @@ local function getArrowTemplate(): Instance?
 	return arrows
 end
 
+local redArrowTemplateCache: Instance? = nil
+
+local function getRedArrowTemplate(): Instance?
+	if redArrowTemplateCache and redArrowTemplateCache.Parent then
+		return redArrowTemplateCache
+	end
+	local arrows = ReplicatedStorage:FindFirstChild("RedArrows")
+	if arrows then
+		redArrowTemplateCache = arrows
+		return arrows
+	end
+	return nil
+end
+
+local function paintArrowModel(model: Instance, color: Color3)
+	local function paint(p: BasePart)
+		p.Color = color
+		if p:IsA("MeshPart") then
+			-- Solid tint so green mesh textures don't fight the crab path color.
+			p.TextureID = ""
+		end
+	end
+	if model:IsA("BasePart") then
+		paint(model)
+	end
+	for _, d in ipairs(model:GetDescendants()) do
+		if d:IsA("BasePart") then
+			paint(d)
+		end
+	end
+	model:SetAttribute(ATTR_ARROW_TINT, "red")
+end
+
 local function newFishFromTemplate(kind: string): (Instance?, BasePart?)
 	if kind == WaveEntityPool.FISH_TANG then
 		local meshes = getHungryMeshTemplates()
@@ -280,7 +442,9 @@ local function newFishFromTemplate(kind: string): (Instance?, BasePart?)
 	end
 	local clone = tmpl:Clone()
 	local root: BasePart?
-	if kind == WaveEntityPool.FISH_CRAB or kind == WaveEntityPool.FISH_URCHIN then
+	if kind == WaveEntityPool.FISH_URCHIN then
+		root = prepareUrchinInstance(clone)
+	elseif kind == WaveEntityPool.FISH_CRAB then
 		root = prepareCrabInstance(clone)
 	else
 		prepareLocalFxInstance(clone)
@@ -318,12 +482,17 @@ function WaveEntityPool.acquireFish(kind: string, name: string): (Instance?, Bas
 	end
 	local function finish(inst: Instance, root: BasePart): (Instance, BasePart)
 		stripHungerUi(root)
+		resetPartVisibility(inst)
 		inst.Name = name
 		if inst:IsA("Model") and not inst.PrimaryPart then
 			inst.PrimaryPart = root
 		end
 		if kind == WaveEntityPool.FISH_TANG then
 			applyHungrySizeJitter(root)
+		elseif kind == WaveEntityPool.FISH_URCHIN then
+			-- Re-assert anchors (pooled urchins may have been crab-prepared historically).
+			prepareUrchinInstance(inst)
+			applyUrchinScale(inst, root, URCHIN_SCALE_MIN + math.random() * (URCHIN_SCALE_MAX - URCHIN_SCALE_MIN))
 		end
 		fishInUse[inst] = true
 		return inst, root
@@ -357,11 +526,23 @@ function WaveEntityPool.releaseFish(kind: string, model: Instance)
 		return
 	end
 	fishInUse[model] = nil
-	local root = findPrimary(model)
+	local root = if kind == WaveEntityPool.FISH_URCHIN
+		then resolveMovementRoot(model)
+		else findPrimary(model)
 	if root then
 		stripHungerUi(root)
 	end
-	model.Parent = nil
+	resetPartVisibility(model)
+	if kind == WaveEntityPool.FISH_URCHIN and root then
+		applyUrchinScale(model, root, 1)
+	end
+	-- Skip pooling if Destroy already ran (Parent locked); pcall avoids the throw.
+	local ok = pcall(function()
+		model.Parent = nil
+	end)
+	if not ok then
+		return
+	end
 	local pool = fishPools[kind]
 	if not pool then
 		pool = {}
@@ -441,8 +622,8 @@ function WaveEntityPool.releaseAmmo(p: BasePart)
 	end
 end
 
-local function newArrowFromTemplate(name: string): Instance?
-	local tmpl = getArrowTemplate()
+local function newArrowFromTemplate(name: string, preferRed: boolean): Instance?
+	local tmpl = if preferRed then (getRedArrowTemplate() or getArrowTemplate()) else getArrowTemplate()
 	if not tmpl then
 		return nil
 	end
@@ -464,6 +645,11 @@ local function newArrowFromTemplate(name: string): Instance?
 			clone.PrimaryPart = root
 		end
 	end
+	if preferRed and not getRedArrowTemplate() then
+		paintArrowModel(clone, Color3.fromRGB(230, 45, 55))
+	elseif preferRed then
+		clone:SetAttribute(ATTR_ARROW_TINT, "red")
+	end
 	return clone
 end
 
@@ -476,7 +662,7 @@ function WaveEntityPool.acquireArrows(name: string, parent: Instance): Instance?
 			return inst
 		end
 	end
-	local clone = newArrowFromTemplate(name)
+	local clone = newArrowFromTemplate(name, false)
 	if not clone then
 		return nil
 	end
@@ -488,6 +674,36 @@ function WaveEntityPool.releaseArrows(model: Instance)
 	model.Parent = nil
 	if #arrowPool < MAX_ARROW then
 		table.insert(arrowPool, model)
+	else
+		model:Destroy()
+	end
+end
+
+function WaveEntityPool.acquireRedArrows(name: string, parent: Instance, tint: Color3?): Instance?
+	while #redArrowPool > 0 do
+		local inst = table.remove(redArrowPool) :: Instance
+		if inst then
+			inst.Name = name
+			inst.Parent = parent
+			return inst
+		end
+	end
+	local clone = newArrowFromTemplate(name, true)
+	if not clone then
+		return nil
+	end
+	-- Prefer Studio RedArrows; otherwise tint a GreenArrows clone.
+	if not getRedArrowTemplate() then
+		paintArrowModel(clone, tint or Color3.fromRGB(230, 45, 55))
+	end
+	clone.Parent = parent
+	return clone
+end
+
+function WaveEntityPool.releaseRedArrows(model: Instance)
+	model.Parent = nil
+	if #redArrowPool < MAX_ARROW then
+		table.insert(redArrowPool, model)
 	else
 		model:Destroy()
 	end
@@ -600,6 +816,7 @@ function WaveEntityPool.debugCounts(): { [string]: number }
 	local out: { [string]: number } = {
 		food = #foodPool,
 		arrow = #arrowPool,
+		redArrow = #redArrowPool,
 		ammo = #ammoPool,
 	}
 	for kind, pool in pairs(fishPools) do

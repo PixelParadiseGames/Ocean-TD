@@ -10,6 +10,8 @@ local Constants = require(game:GetService("ReplicatedStorage"):WaitForChild("Oce
 local PlotTypes = require(game:GetService("ReplicatedStorage"):WaitForChild("OceanTD"):WaitForChild("Shared"):WaitForChild("PlotTypes"))
 local PlotOutlineColors = require(game:GetService("ReplicatedStorage"):WaitForChild("OceanTD"):WaitForChild("Shared"):WaitForChild("PlotOutlineColors"))
 local SkillStages = require(game:GetService("ReplicatedStorage"):WaitForChild("OceanTD"):WaitForChild("Shared"):WaitForChild("SkillStages"))
+local SeedWheel = require(game:GetService("ReplicatedStorage"):WaitForChild("OceanTD"):WaitForChild("Shared"):WaitForChild("SeedWheel"))
+local Remotes = require(game:GetService("ReplicatedStorage"):WaitForChild("OceanTD"):WaitForChild("Remotes"))
 
 type PlayerProfile = PlotTypes.PlayerProfile
 type LayoutObject = PlotTypes.LayoutObject
@@ -326,6 +328,13 @@ local function sanitizeInventory(raw: any, isNewProfile: boolean): { [string]: a
 			inv[k] = v
 		end
 	end
+	-- Migrate old "unlimited SeaFan" sentinel stocks to normal starting count.
+	if Constants.SEA_FAN_UNLIMITED_SEEDS ~= true then
+		local seaFan = tonumber(inv.SeaFan)
+		if typeof(seaFan) == "number" and seaFan >= 999999 then
+			inv.SeaFan = Constants.STARTING_SEA_FAN_SEEDS
+		end
+	end
 	return inv
 end
 
@@ -395,6 +404,7 @@ function PersistenceService.init()
 	end
 	getStore()
 	log("Using DataStore", Constants.DATASTORE_NAME)
+	PersistenceService.initSeedWheel()
 end
 
 function PersistenceService.getProfile(player: Player): PlayerProfile?
@@ -527,6 +537,59 @@ end
 
 function PersistenceService.syncSandDollarsAttribute(player: Player)
 	player:SetAttribute(Constants.SAND_DOLLARS_ATTR, PersistenceService.getSandDollars(player))
+end
+
+-- Spend $D if the player can afford it. Returns ok, newBalance, errorCode?.
+function PersistenceService.trySpendSandDollars(
+	player: Player,
+	amount: number
+): (boolean, number, string?)
+	local profile = profiles[player]
+	if not profile then
+		return false, 0, "NoProfile"
+	end
+	local cost = math.max(0, math.floor(tonumber(amount) or 0))
+	local cash = clampSandDollars(profile.currencies.sandDollars)
+	if cost <= 0 then
+		return true, cash, nil
+	end
+	if cash < cost then
+		return false, cash, "CantAfford"
+	end
+	profile.currencies.sandDollars = cash - cost
+	PersistenceService.syncSandDollarsAttribute(player)
+	return true, profile.currencies.sandDollars, nil
+end
+
+-- Steal up to `maxAmount` $D (clamped to balance). Always succeeds; stolen may be 0.
+function PersistenceService.stealSandDollars(player: Player, maxAmount: number): (number, number)
+	local profile = profiles[player]
+	if not profile then
+		return 0, 0
+	end
+	local cap = math.max(0, math.floor(tonumber(maxAmount) or 0))
+	local cash = clampSandDollars(profile.currencies.sandDollars)
+	local stolen = math.min(cap, cash)
+	if stolen > 0 then
+		profile.currencies.sandDollars = cash - stolen
+		PersistenceService.syncSandDollarsAttribute(player)
+	end
+	return stolen, profile.currencies.sandDollars
+end
+
+-- Credit $D (orb pickups, etc.). Returns ok, granted, newBalance.
+function PersistenceService.creditSandDollars(player: Player, amount: number): (boolean, number, number)
+	local profile = profiles[player]
+	if not profile or loadFailed[player] == true then
+		return false, 0, 0
+	end
+	local grant = math.max(0, math.floor(tonumber(amount) or 0))
+	if grant <= 0 then
+		return true, 0, clampSandDollars(profile.currencies.sandDollars)
+	end
+	profile.currencies.sandDollars = clampSandDollars(profile.currencies.sandDollars + grant)
+	PersistenceService.syncSandDollarsAttribute(player)
+	return true, grant, profile.currencies.sandDollars
 end
 
 function PersistenceService.didLoadFail(player: Player): boolean
@@ -872,6 +935,7 @@ function PersistenceService.creditItem(player: Player, itemId: string, amount: n
 	if isUnlimitedSeedItem(itemId) then
 		local nextCount = ensureUnlimitedStock(inv, itemId)
 		log("Credit skipped (unlimited)", itemId, "→", nextCount, "for", player.Name)
+		PersistenceService.syncInventoryToClient(player)
 		return nextCount
 	end
 	local add = math.max(1, math.floor(tonumber(amount) or 1))
@@ -879,7 +943,100 @@ function PersistenceService.creditItem(player: Player, itemId: string, amount: n
 	local nextCount = cur + add
 	inv[itemId] = nextCount
 	log("Credit", itemId, "x", add, "→", nextCount, "for", player.Name)
+	PersistenceService.syncInventoryToClient(player)
 	return nextCount
+end
+
+-- Pending prize-wheel grants: credit only after client finishes the reveal fly.
+type SeedWheelPending = { itemId: string, token: number, amount: number, at: number }
+local seedWheelPending: { [number]: SeedWheelPending } = {}
+local seedWheelTokenSeq = 0
+local SEED_WHEEL_CLAIM_TIMEOUT_SEC = 25
+
+local function clearSeedWheelPending(userId: number)
+	seedWheelPending[userId] = nil
+end
+
+local function fulfillSeedWheel(player: Player, pending: SeedWheelPending)
+	clearSeedWheelPending(player.UserId)
+	PersistenceService.creditItem(player, pending.itemId, pending.amount)
+	log("SeedWheel grant", pending.itemId, "x", pending.amount, "for", player.Name)
+	-- Keep spinning: next random seed as soon as this one is claimed.
+	task.defer(function()
+		if player.Parent then
+			PersistenceService.beginSeedWheelGrant(player, 1)
+		end
+	end)
+end
+
+-- Start a random coral seed wheel for the player. Seed is credited after claim (or timeout).
+function PersistenceService.beginSeedWheelGrant(player: Player, amount: number?): (boolean, string?)
+	if not player or not player.Parent then
+		return false, "NoPlayer"
+	end
+	if not profiles[player] then
+		return false, "NoProfile"
+	end
+	local userId = player.UserId
+	if seedWheelPending[userId] then
+		return false, "Busy"
+	end
+	local add = math.max(1, math.floor(tonumber(amount) or 1))
+	local itemId = SeedWheel.pickRandom()
+	local colorIndex = SeedWheel.pickRandomColorIndex()
+	seedWheelTokenSeq += 1
+	local token = seedWheelTokenSeq
+	seedWheelPending[userId] = {
+		itemId = itemId,
+		token = token,
+		amount = add,
+		at = os.clock(),
+	}
+	Remotes.get("SeedWheelReveal"):FireClient(player, itemId, token, add, colorIndex)
+	task.delay(SEED_WHEEL_CLAIM_TIMEOUT_SEC, function()
+		local pending = seedWheelPending[userId]
+		if not pending or pending.token ~= token then
+			return
+		end
+		if player.Parent then
+			fulfillSeedWheel(player, pending)
+		else
+			clearSeedWheelPending(userId)
+		end
+	end)
+	return true, itemId
+end
+
+function PersistenceService.claimSeedWheel(player: Player, itemId: any, token: any): boolean
+	if not player or not player.Parent then
+		return false
+	end
+	-- Studio smoke-test: F7 client → grant a wheel spin.
+	if RunService:IsStudio() and itemId == "__RequestStudioGrant__" then
+		PersistenceService.beginSeedWheelGrant(player, 1)
+		return true
+	end
+	local pending = seedWheelPending[player.UserId]
+	if not pending then
+		return false
+	end
+	if typeof(itemId) ~= "string" or itemId ~= pending.itemId then
+		return false
+	end
+	if typeof(token) ~= "number" or token ~= pending.token then
+		return false
+	end
+	fulfillSeedWheel(player, pending)
+	return true
+end
+
+function PersistenceService.initSeedWheel()
+	Remotes.get("SeedWheelClaim").OnServerEvent:Connect(function(player: Player, itemId: any, token: any)
+		PersistenceService.claimSeedWheel(player, itemId, token)
+	end)
+	Players.PlayerRemoving:Connect(function(player)
+		clearSeedWheelPending(player.UserId)
+	end)
 end
 
 -- Debit seed count (floor at 0). Used when undoing a recycle credit / consuming on place.
@@ -896,6 +1053,7 @@ function PersistenceService.debitItem(player: Player, itemId: string, amount: nu
 	if isUnlimitedSeedItem(itemId) then
 		local nextCount = ensureUnlimitedStock(inv, itemId)
 		log("Debit skipped (unlimited)", itemId, "→", nextCount, "for", player.Name)
+		PersistenceService.syncInventoryToClient(player)
 		return nextCount
 	end
 	local sub = math.max(1, math.floor(tonumber(amount) or 1))
@@ -903,6 +1061,7 @@ function PersistenceService.debitItem(player: Player, itemId: string, amount: nu
 	local nextCount = math.max(0, cur - sub)
 	inv[itemId] = nextCount
 	log("Debit", itemId, "x", sub, "→", nextCount, "for", player.Name)
+	PersistenceService.syncInventoryToClient(player)
 	return nextCount
 end
 
@@ -920,6 +1079,7 @@ function PersistenceService.tryDebitItem(player: Player, itemId: string, amount:
 	if isUnlimitedSeedItem(itemId) then
 		local nextCount = ensureUnlimitedStock(inv, itemId)
 		log("TryDebit skipped (unlimited)", itemId, "→", nextCount, "for", player.Name)
+		PersistenceService.syncInventoryToClient(player)
 		return true, nextCount
 	end
 	local sub = math.max(1, math.floor(tonumber(amount) or 1))
@@ -930,6 +1090,7 @@ function PersistenceService.tryDebitItem(player: Player, itemId: string, amount:
 	local nextCount = cur - sub
 	inv[itemId] = nextCount
 	log("TryDebit", itemId, "x", sub, "→", nextCount, "for", player.Name)
+	PersistenceService.syncInventoryToClient(player)
 	return true, nextCount
 end
 
@@ -943,6 +1104,42 @@ function PersistenceService.getItemCount(player: Player, itemId: string): number
 		return 0
 	end
 	return tonumber(inv[itemId]) or 0
+end
+
+function PersistenceService.getInventoryPayload(player: Player): { [string]: number }
+	local profile = profiles[player]
+	local out: { [string]: number } = {}
+	if not profile or typeof(profile.inventory) ~= "table" then
+		return out
+	end
+	for itemId, raw in pairs(profile.inventory) do
+		if typeof(itemId) == "string" then
+			local n = tonumber(raw)
+			if typeof(n) == "number" and n == n then
+				out[itemId] = math.max(0, math.floor(n))
+			end
+		end
+	end
+	return out
+end
+
+local inventorySyncQueued: { [Player]: boolean } = {}
+
+function PersistenceService.syncInventoryToClient(player: Player)
+	if not player or not player.Parent then
+		return
+	end
+	if inventorySyncQueued[player] then
+		return
+	end
+	inventorySyncQueued[player] = true
+	task.defer(function()
+		inventorySyncQueued[player] = nil
+		if not player.Parent then
+			return
+		end
+		Remotes.get("InventorySync"):FireClient(player, PersistenceService.getInventoryPayload(player))
+	end)
 end
 
 function PersistenceService.allowIntentionalClear(userId: number)
@@ -1158,6 +1355,7 @@ function PersistenceService.release(player: Player)
 	profiles[player] = nil
 	loadFailed[player] = nil
 	feedRate[player] = nil
+	inventorySyncQueued[player] = nil
 end
 
 return PersistenceService

@@ -2,6 +2,12 @@
   "name": "OceanTD",
   "tree": {
     "$className": "DataModel",
+    "Workspace": {
+      "$properties": {
+        "Gravity": 156.96
+      },
+      "$ignoreUnknownInstances": true
+    },
     "ReplicatedStorage": {
       "OceanTD": {
         "$path": "src/ReplicatedStorage/OceanTD",
@@ -41,6 +47,10 @@
       }
     },
     "StarterPlayer": {
+      "$properties": {
+        "CharacterUseJumpPower": false,
+        "CharacterJumpHeight": 10.8
+      },
       "StarterPlayerScripts": {
         "OceanTD": {
           "$path": "src/StarterPlayerScripts/OceanTD",

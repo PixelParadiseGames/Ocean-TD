@@ -99,6 +99,31 @@ function GridService.isOccupied(plotId: PlotId, lx: number, ly: number, lz: numb
 	return GridService.getCell(plotId, lx, ly, lz) ~= nil
 end
 
+-- Tallest BrainCoral in the same XZ grid column (any gy).
+function GridService.findTopBrainInColumn(plotId: PlotId, gx: number, gz: number): CellData?
+	local rx = math.round(gx)
+	local rz = math.round(gz)
+	local best: CellData? = nil
+	for _, cell in pairs(cells) do
+		if cell.plotId == plotId and cell.id == "BrainCoral" and cell.gx == rx and cell.gz == rz then
+			if not best or cell.ly > best.ly or (cell.ly == best.ly and cell.gy > best.gy) then
+				best = cell
+			end
+		end
+	end
+	return best
+end
+
+function GridService.nextFreeGyInColumn(plotId: PlotId, gx: number, gz: number, startGy: number): number
+	local rx = math.round(gx)
+	local rz = math.round(gz)
+	local gy = math.round(startGy)
+	while GridService.getCellAtGrid(plotId, rx, gy, rz) do
+		gy += 1
+	end
+	return gy
+end
+
 function GridService.tryOccupy(
 	plotId: PlotId,
 	ownerUserId: number,

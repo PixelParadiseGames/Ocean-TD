@@ -36,8 +36,10 @@ local ZOAS_SCALE_HALF_SPREAD = (FIRE_CORAL_SCALE_MAX - FIRE_CORAL_SCALE_MIN) * 0
 local ZOAS_SCALE_MIN = 1 - ZOAS_SCALE_HALF_SPREAD
 local ZOAS_SCALE_MAX = 1 + ZOAS_SCALE_HALF_SPREAD
 -- Leather Coral: wide colony jitter so S/M/L placements don't look cloned (±25%).
+-- Large may roll up to +50% so the biggest colonies can tower over med.
 local LEATHER_CORAL_SCALE_MIN = 0.75
 local LEATHER_CORAL_SCALE_MAX = 1.25
+local LEATHER_CORAL_LARGE_SCALE_MAX = 1.5
 local SEA_FAN_AXIS_MIN = 0.85
 local SEA_FAN_AXIS_MAX = 1.15
 -- SeaGrass authored meshes need a large in-game scale boost.
@@ -145,7 +147,7 @@ function CoralVisual.sanitizeSpongeScale(raw: any): number
 	return math.clamp(n, 0.7, 1.35)
 end
 
-function CoralVisual.randomMeshScale(speciesId: string?): number
+function CoralVisual.randomMeshScale(speciesId: string?, sizeClass: number?): number
 	if speciesId == "FireCoral" then
 		return FIRE_CORAL_SCALE_MIN + math.random() * (FIRE_CORAL_SCALE_MAX - FIRE_CORAL_SCALE_MIN)
 	end
@@ -153,7 +155,11 @@ function CoralVisual.randomMeshScale(speciesId: string?): number
 		return ZOAS_SCALE_MIN + math.random() * (ZOAS_SCALE_MAX - ZOAS_SCALE_MIN)
 	end
 	if speciesId == "LeatherCoral" then
-		return LEATHER_CORAL_SCALE_MIN + math.random() * (LEATHER_CORAL_SCALE_MAX - LEATHER_CORAL_SCALE_MIN)
+		local maxS = LEATHER_CORAL_SCALE_MAX
+		if typeof(sizeClass) == "number" and CoralSize.clampTier(sizeClass) >= CoralSize.LARGE then
+			maxS = LEATHER_CORAL_LARGE_SCALE_MAX
+		end
+		return LEATHER_CORAL_SCALE_MIN + math.random() * (maxS - LEATHER_CORAL_SCALE_MIN)
 	end
 	return CoralVisual.randomSpongeScale()
 end
@@ -163,7 +169,8 @@ function CoralVisual.sanitizeMeshScale(raw: any, speciesId: string?): number
 	if typeof(n) ~= "number" or n ~= n then
 		return CoralVisual.randomMeshScale(speciesId)
 	end
-	return math.clamp(n, 0.7, 1.35)
+	local maxClamp = if speciesId == "LeatherCoral" then LEATHER_CORAL_LARGE_SCALE_MAX else 1.35
+	return math.clamp(n, 0.7, maxClamp)
 end
 
 function CoralVisual.randomMeshVariant(speciesId: string?): number
@@ -699,7 +706,9 @@ function CoralVisual.applySeaFanScaleMult(stem: BasePart, stemFullSize: Vector3,
 		end
 	end
 	if surfacePos then
-		alignMeshToSurface(stem, surfacePos)
+		-- Keep current facing while only re-planting for embed (size changed).
+		-- Passing no override rebuilds yaw without plotCFrame and spins Sea Fan until UI close.
+		alignMeshToSurface(stem, surfacePos, nil, stem.CFrame)
 	end
 end
 

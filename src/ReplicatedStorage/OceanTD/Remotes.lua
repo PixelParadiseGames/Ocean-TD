@@ -18,9 +18,15 @@ local REMOTE_EVENTS = {
 	"PlotRoster",
 	"WaveWatchPush",
 	"SkillStagesSync",
+	"InventorySync",
 	"ReportFishFed",
 	"PlotSizeChanged",
 	"ReportPlotSizeCinematicDone",
+	"ReportUrchinSting",
+	"UrchinSting",
+	"UrchinSandOrbPicked",
+	"SeedWheelReveal",
+	"SeedWheelClaim",
 }
 
 local REMOTE_FUNCTIONS = {

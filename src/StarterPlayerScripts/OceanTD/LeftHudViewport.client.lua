@@ -164,6 +164,7 @@ local function applyLeftHud()
 		return
 	end
 
+	LeftHudLayout.hardenScreenGui(left)
 	left.IgnoreGuiInset = true
 	left.ClipToDeviceSafeArea = false
 

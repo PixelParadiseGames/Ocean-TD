@@ -1443,6 +1443,41 @@ local function makeItemButton(def, layoutOrder: number, instanceSuffix: string?)
 	aspect.DominantAxis = Enum.DominantAxis.Width
 	aspect.Parent = icon
 
+	-- Seed count badge: black circle, white N, top-left of the item slot.
+	local seedBadge = Instance.new("Frame")
+	seedBadge.Name = "SeedCount"
+	seedBadge.BackgroundColor3 = Color3.new(0, 0, 0)
+	seedBadge.BackgroundTransparency = 0.15
+	seedBadge.BorderSizePixel = 0
+	seedBadge.AnchorPoint = Vector2.new(0, 0)
+	seedBadge.Position = UDim2.new(0, 0, 0, 0)
+	seedBadge.Size = UDim2.new(0.26, 0, 0.26, 0)
+	seedBadge.ZIndex = icon.ZIndex + 3
+	seedBadge.Active = false
+	seedBadge.Parent = btn
+	UiCircles.ensure(seedBadge)
+	local seedAspect = Instance.new("UIAspectRatioConstraint")
+	seedAspect.AspectRatio = 1
+	seedAspect.DominantAxis = Enum.DominantAxis.Width
+	seedAspect.Parent = seedBadge
+	local seedLbl = Instance.new("TextLabel")
+	seedLbl.Name = "Amount"
+	seedLbl.BackgroundTransparency = 1
+	seedLbl.Size = UDim2.fromScale(1, 1)
+	seedLbl.Font = UiTheme.Font
+	seedLbl.TextColor3 = Color3.new(1, 1, 1)
+	seedLbl.TextScaled = true
+	seedLbl.Text = InventoryState.formatSeedCount(def.id)
+	seedLbl.ZIndex = seedBadge.ZIndex + 1
+	seedLbl.Active = false
+	seedLbl.Parent = seedBadge
+	local seedPad = Instance.new("UIPadding")
+	seedPad.PaddingTop = UDim.new(0.12, 0)
+	seedPad.PaddingBottom = UDim.new(0.12, 0)
+	seedPad.PaddingLeft = UDim.new(0.08, 0)
+	seedPad.PaddingRight = UDim.new(0.08, 0)
+	seedPad.Parent = seedLbl
+
 	local label = Instance.new("TextLabel")
 	label.Name = "Name"
 	label.BackgroundTransparency = 1
@@ -1672,6 +1707,51 @@ end
 
 rebuildItems()
 
+local function refreshSeedCountBadges()
+	local backpackOpen = InventoryState.isOpen()
+	for _, btn in ipairs(itemButtons) do
+		local itemId = btn:GetAttribute("OceanTD_ItemId")
+		if typeof(itemId) == "string" then
+			local badge = btn:FindFirstChild("SeedCount")
+			local amount = badge and badge:FindFirstChild("Amount")
+			if amount and amount:IsA("TextLabel") and badge and badge:IsA("GuiObject") then
+				local nextText = InventoryState.formatSeedCount(itemId)
+				local changed = amount.Text ~= nextText
+				amount.Text = nextText
+				if backpackOpen and changed then
+					local punch = badge:FindFirstChild("_CountPunch")
+					if not punch or not punch:IsA("UIScale") then
+						punch = Instance.new("UIScale")
+						punch.Name = "_CountPunch"
+						punch.Parent = badge
+					end
+					local scaleObj = punch :: UIScale
+					scaleObj.Scale = 1
+					local up = TweenService:Create(
+						scaleObj,
+						TweenInfo.new(0.44, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+						{ Scale = 2.7 }
+					)
+					local down = TweenService:Create(
+						scaleObj,
+						TweenInfo.new(0.44, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+						{ Scale = 1 }
+					)
+					up:Play()
+					up.Completed:Once(function()
+						if scaleObj.Parent then
+							down:Play()
+						end
+					end)
+				end
+			end
+		end
+	end
+end
+
+InventoryState.onCountsChanged(refreshSeedCountBadges)
+refreshSeedCountBadges()
+
 InventoryState.setItemSlotScreenPosProvider(function(itemId: string): Vector2?
 	-- Prefer the pulsed/selected cell when several share an id (TEMP fill).
 	local pulsed: ImageButton? = nil
@@ -1704,6 +1784,16 @@ InventoryState.setScrollCenterProvider(function(): Vector2?
 	end
 	local pos = scroll.AbsolutePosition
 	local size = scroll.AbsoluteSize
+	return Vector2.new(pos.X + size.X * 0.5, pos.Y + size.Y * 0.5)
+end)
+
+InventoryState.setBackpackButtonScreenPosProvider(function(): Vector2?
+	local btn = slotButton or slot4
+	if not btn or not btn.Parent then
+		return nil
+	end
+	local pos = btn.AbsolutePosition
+	local size = btn.AbsoluteSize
 	return Vector2.new(pos.X + size.X * 0.5, pos.Y + size.Y * 0.5)
 end)
 

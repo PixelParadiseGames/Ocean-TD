@@ -92,6 +92,7 @@ local pathData: PathData? = nil
 local pathDataGround: WaveCrab.PathData? = nil
 local fishList: { GhostFish } = {}
 local arrowPreviews: { ArrowPreview } = {}
+local crabArrowPreviews: { ArrowPreview } = {}
 local wavePathLabels: { WaveLabel } = {}
 local moveConn: RBXScriptConnection? = nil
 local activePlotId: string? = nil
@@ -181,6 +182,10 @@ local function destroyArrowPreview()
 		WaveEntityPool.releaseArrows(preview.model)
 	end
 	table.clear(arrowPreviews)
+	for _, preview in ipairs(crabArrowPreviews) do
+		WaveEntityPool.releaseRedArrows(preview.model)
+	end
+	table.clear(crabArrowPreviews)
 	for _, label in ipairs(wavePathLabels) do
 		if label.part.Parent then
 			label.part:Destroy()
@@ -459,12 +464,17 @@ local function syncUrchinRig(agent: GhostFish)
 	local shell = agent.shellHitbox
 	local shellLocal = agent.shellLocalCf
 	if shell and shell.Parent and shellLocal then
+		shell.Anchored = true
 		shell.CFrame = rootCf * shellLocal
 	end
 	local bodyLocal = agent.bodyLocalCf
 	local model = agent.model
 	if bodyLocal and model:IsA("BasePart") and model ~= agent.root then
+		model.Anchored = true
 		model.CFrame = rootCf * bodyLocal
+	end
+	if agent.root.Parent then
+		agent.root.Anchored = true
 	end
 end
 
@@ -771,43 +781,83 @@ local function playArrowStartSound()
 	WaveEntityPool.playSound("arrow", arrowSound, 1, 0.9, true)
 end
 
-local function startWaveArrowPreview(wave: number)
-	destroyArrowPreview()
-	local path = pathData
-	local tmpl = getGreenArrowsTemplate()
-	if not path or not tmpl or lodFar then
+local function startCrabArrowPreview(wave: number)
+	for _, preview in ipairs(crabArrowPreviews) do
+		WaveEntityPool.releaseRedArrows(preview.model)
+	end
+	table.clear(crabArrowPreviews)
+	if lodFar or not pathDataGround or (waveCrabExpected <= 0 and waveUrchinExpected <= 0) then
 		return
 	end
-	playArrowStartSound()
+	local path = pathDataGround
 	local folderFx = ensureFolder()
-	local waveText = "Wave " .. tostring(math.max(1, wave))
+	local lift = Vector3.new(0, C.CRAB_ARROW_Y_LIFT, 0)
 	local d = 0
-	local i = 0
-	while d < path.totalLen - 0.05 do
-		i += 1
-		local clone = WaveEntityPool.acquireArrows("OceanTD_GhostArrows_" .. tostring(i), folderFx)
+	for i = 1, C.CRAB_ARROW_COUNT do
+		if d >= path.totalLen - 0.05 then
+			break
+		end
+		local clone = WaveEntityPool.acquireRedArrows(
+			"OceanTD_GhostRedArrows_" .. tostring(i),
+			folderFx,
+			C.CRAB_ARROW_COLOR
+		)
 		if not clone then
 			break
 		end
 		local spin0 = (i - 1) * 0.55
-		local pos, tang = samplePath(path, d)
-		setArrowCFrame(clone, pos, tang, spin0)
-		table.insert(arrowPreviews, {
+		local pos, tang = WaveCrab.sample(path, d)
+		setArrowCFrame(clone, pos + lift, tang, spin0)
+		table.insert(crabArrowPreviews, {
 			model = clone,
 			dist = d,
 			spin = spin0,
 			alive = true,
 		})
-		if i % C.ARROW_LABEL_EVERY == 0 then
-			local part = createWavePathLabel(waveText, pos, folderFx)
-			table.insert(wavePathLabels, {
-				part = part,
+		d += C.CRAB_ARROW_PATH_SPACING
+	end
+end
+
+local function startWaveArrowPreview(wave: number)
+	destroyArrowPreview()
+	if lodFar then
+		return
+	end
+	local path = pathData
+	local tmpl = getGreenArrowsTemplate()
+	if path and tmpl then
+		playArrowStartSound()
+		local folderFx = ensureFolder()
+		local waveText = "Wave " .. tostring(math.max(1, wave))
+		local d = 0
+		local i = 0
+		while d < path.totalLen - 0.05 do
+			i += 1
+			local clone = WaveEntityPool.acquireArrows("OceanTD_GhostArrows_" .. tostring(i), folderFx)
+			if not clone then
+				break
+			end
+			local spin0 = (i - 1) * 0.55
+			local pos, tang = samplePath(path, d)
+			setArrowCFrame(clone, pos, tang, spin0)
+			table.insert(arrowPreviews, {
+				model = clone,
 				dist = d,
+				spin = spin0,
 				alive = true,
 			})
+			if i % C.ARROW_LABEL_EVERY == 0 then
+				local part = createWavePathLabel(waveText, pos, folderFx)
+				table.insert(wavePathLabels, {
+					part = part,
+					dist = d,
+					alive = true,
+				})
+			end
+			d += C.ARROW_PATH_SPACING
 		end
-		d += C.ARROW_PATH_SPACING
 	end
+	startCrabArrowPreview(wave)
 end
 
 local function tickArrowPreview(dt: number)
@@ -847,6 +897,34 @@ local function tickArrowPreview(dt: number)
 		end
 		local pos = samplePath(path, label.dist)
 		label.part.CFrame = CFrame.new(pos)
+	end
+
+	local ground = pathDataGround
+	if ground then
+		local crabSpeed = C.FISH_SPEED * C.CRAB_SPEED_MULT * C.ARROW_SPEED_MULT * speedMult
+		local lift = Vector3.new(0, C.CRAB_ARROW_Y_LIFT, 0)
+		for i = #crabArrowPreviews, 1, -1 do
+			local preview = crabArrowPreviews[i]
+			if not preview.alive or not preview.model.Parent then
+				WaveEntityPool.releaseRedArrows(preview.model)
+				table.remove(crabArrowPreviews, i)
+				continue
+			end
+			preview.dist += crabSpeed * dt
+			preview.spin += C.ARROW_SPIN_RAD_PER_SEC * dt
+			if preview.dist >= ground.totalLen then
+				WaveEntityPool.releaseRedArrows(preview.model)
+				table.remove(crabArrowPreviews, i)
+				continue
+			end
+			local pos, tang = WaveCrab.sample(ground, preview.dist)
+			setArrowCFrame(preview.model, pos + lift, tang, preview.spin)
+		end
+	elseif #crabArrowPreviews > 0 then
+		for _, preview in ipairs(crabArrowPreviews) do
+			WaveEntityPool.releaseRedArrows(preview.model)
+		end
+		table.clear(crabArrowPreviews)
 	end
 end
 
@@ -1358,6 +1436,9 @@ function WaveGhostSim.stop(fade: boolean?)
 		WaveEndVfx.clearRouteEnd(plotId)
 	end
 	if f and f.Parent and doFade then
+		-- Release pool fish first (visibility reset) so live WaveSim never
+		-- reuses GhostSim fade-tweened Transparency=1 instances.
+		clearFish()
 		for _, d in ipairs(f:GetDescendants()) do
 			if d:IsA("BasePart") then
 				TweenService:Create(d, TweenInfo.new(0.85), { Transparency = 1 }):Play()
@@ -1372,7 +1453,6 @@ function WaveGhostSim.stop(fade: boolean?)
 			if folder == f then
 				folder = nil
 			end
-			clearFish()
 			fading = false
 		end)
 	else
