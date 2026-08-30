@@ -27,6 +27,9 @@ local UiViewportTags = require(oceanRoot:WaitForChild("Shared"):WaitForChild("Ui
 local RelocateController = require(script.Parent:WaitForChild("RelocateController"))
 local CoralRangeRings = require(script.Parent:WaitForChild("CoralRangeRings"))
 local CoralVisual = require(oceanRoot:WaitForChild("Shared"):WaitForChild("CoralVisual"))
+local ColorUnlocks = require(oceanRoot:WaitForChild("Shared"):WaitForChild("ColorUnlocks"))
+local CoralColorUnlockState = require(script.Parent:WaitForChild("CoralColorUnlockState"))
+local InventoryState = require(script.Parent:WaitForChild("InventoryState"))
 
 local CoralInspectPanel = {}
 
@@ -54,12 +57,14 @@ local WORDS = { "Small", "Medium", "Large" }
 local root: Frame? = nil
 local catalog: GuiObject? = nil
 local iconLbl: ImageLabel? = nil
+local headerSeedAmount: TextLabel? = nil
 local nameLbl: TextLabel? = nil
 local recycleBtn: TextButton? = nil
 local upgradeBtn: TextButton? = nil
 local colorScroll: ScrollingFrame? = nil
 local colorSwatchBtns: { [number]: GuiButton } = {}
 local colorSwatchStrokes: { [number]: UIStroke } = {}
+local colorSwatchLocks: { [number]: ImageLabel } = {}
 local colorDice: ImageLabel? = nil
 local fedLbl: TextLabel? = nil
 local wavesLbl: TextLabel? = nil
@@ -77,6 +82,8 @@ local h3Labels: { { TextLabel } } = {}
 local h3Hits: { TextButton } = {}
 local confirmGui: ScreenGui? = nil
 local confirmUnlockTarget: number? = nil
+local confirmColorItemId: string? = nil
+local confirmColorIndex: number? = nil
 local toastGui: ScreenGui? = nil
 local pulseConn: RBXScriptConnection? = nil
 local hintConn: RBXScriptConnection? = nil
@@ -90,6 +97,7 @@ local lifePart: BasePart? = nil
 
 local sizeRf = Remotes.getFunction("RequestCoralSize")
 local colorRf = Remotes.getFunction("RequestCoralColor")
+local unlockColorRf = Remotes.getFunction("RequestUnlockCoralColor")
 
 local function isGamepad(): boolean
 	local t = UserInputService:GetLastInputType()
@@ -139,6 +147,8 @@ end
 local function hideConfirm()
 	RelocateController.setInspectModal(false)
 	confirmUnlockTarget = nil
+	confirmColorItemId = nil
+	confirmColorIndex = nil
 	if confirmStrokeConn then
 		confirmStrokeConn:Disconnect()
 		confirmStrokeConn = nil
@@ -821,7 +831,31 @@ local function invokeSize(targetClass: number, unlockNext: boolean)
 	refreshSizeColors()
 end
 
+local function selectedItemId(): string?
+	local part = selectedPart()
+	if not part then
+		return nil
+	end
+	local itemId = part:GetAttribute("OceanTD_ItemId")
+	return if typeof(itemId) == "string" and itemId ~= "" then itemId else nil
+end
+
+local function refreshColorLockOverlays()
+	local itemId = selectedItemId()
+	for idx, lock in pairs(colorSwatchLocks) do
+		local btn = colorSwatchBtns[idx]
+		local locked = itemId ~= nil and not CoralColorUnlockState.isUnlocked(itemId, idx)
+		lock.Visible = locked
+		lock.ImageTransparency = 0
+		if btn then
+			btn.BackgroundTransparency = if locked then 0.35 else 0
+		end
+	end
+end
+
 local function showConfirmUnlock(targetClass: number?)
+	confirmColorItemId = nil
+	confirmColorIndex = nil
 	local part = selectedPart()
 	if not part then
 		return
@@ -981,6 +1015,169 @@ local function showConfirmUnlock(targetClass: number?)
 	end
 end
 
+local function tryUnlockColorConfirm()
+	local itemId = confirmColorItemId
+	local idx = confirmColorIndex
+	if typeof(itemId) ~= "string" or typeof(idx) ~= "number" then
+		return
+	end
+	local cost = ColorUnlocks.UNLOCK_COST
+	local cash = tonumber(player:GetAttribute(Constants.SAND_DOLLARS_ATTR)) or 0
+	if cash < cost then
+		showToast("Collect More $D")
+		return
+	end
+	local ok, result = pcall(function()
+		return unlockColorRf:InvokeServer(itemId, idx)
+	end)
+	if not ok or typeof(result) ~= "table" or result.ok ~= true then
+		local err = if typeof(result) == "table" then result.errorCode else nil
+		if err == "CantAfford" then
+			showToast("Collect More $D")
+		else
+			showToast("Unlock Failed")
+		end
+		return
+	end
+	CoralColorUnlockState.markUnlocked(itemId, idx)
+	hideConfirm()
+	refreshColorLockOverlays()
+	selectCoralColor(idx)
+end
+
+local function showConfirmColorUnlock(itemId: string, colorIndex: number)
+	confirmUnlockTarget = nil
+	confirmColorItemId = itemId
+	confirmColorIndex = PlotOutlineColors.clampCoralIndex(colorIndex)
+	local cost = ColorUnlocks.UNLOCK_COST
+	hideConfirm()
+	RelocateController.setInspectModal(true)
+	local sg = Instance.new("ScreenGui")
+	sg.Name = "OceanTD_CoralColorConfirm"
+	sg.ResetOnSpawn = false
+	sg.IgnoreGuiInset = true
+	sg.DisplayOrder = 25000
+	sg.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+	sg.Parent = playerGui
+	confirmGui = sg
+
+	local dim = Instance.new("TextButton")
+	dim.Text = ""
+	dim.AutoButtonColor = false
+	dim.BackgroundColor3 = Color3.fromRGB(0, 8, 16)
+	dim.BackgroundTransparency = 0.4
+	dim.Size = UDim2.fromScale(1, 1)
+	dim.Selectable = false
+	dim.ZIndex = 1
+	dim.Parent = sg
+	dim.Activated:Connect(hideConfirm)
+
+	local panel = Instance.new("Frame")
+	panel.AnchorPoint = Vector2.new(0.5, 0.5)
+	panel.Position = UDim2.fromScale(0.5, 0.5)
+	panel.Size = UDim2.fromOffset(320, 240)
+	panel.BackgroundColor3 = PANEL_BG
+	panel.BorderSizePixel = 0
+	panel.ZIndex = 2
+	panel.Selectable = false
+	panel.Parent = sg
+	local pc = Instance.new("UICorner")
+	pc.CornerRadius = UDim.new(0, 14)
+	pc.Parent = panel
+	local panelStroke = Instance.new("UIStroke")
+	panelStroke.Name = "_OceanTD_UnlockStroke"
+	panelStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+	panelStroke.LineJoinMode = Enum.LineJoinMode.Round
+	panelStroke.Thickness = 3
+	panelStroke.Color = STROKE_DARK
+	panelStroke.Parent = panel
+
+	local title = Instance.new("TextLabel")
+	title.BackgroundTransparency = 1
+	title.Size = UDim2.new(1, -24, 0, 44)
+	title.Position = UDim2.fromOffset(12, 16)
+	title.Font = UiTheme.Font
+	title.TextSize = 24
+	title.TextColor3 = Color3.fromRGB(240, 248, 255)
+	title.Text = "Unlock " .. ColorUnlocks.displayName(confirmColorIndex)
+	title.ZIndex = 3
+	title.Parent = panel
+
+	local costLbl = Instance.new("TextLabel")
+	costLbl.BackgroundTransparency = 1
+	costLbl.Size = UDim2.new(1, -24, 0, 28)
+	costLbl.Position = UDim2.fromOffset(12, 58)
+	costLbl.Font = UiTheme.Font
+	costLbl.TextSize = 22
+	costLbl.TextColor3 = Color3.fromRGB(255, 220, 120)
+	costLbl.Text = tostring(cost) .. " $D"
+	costLbl.ZIndex = 3
+	costLbl.Parent = panel
+
+	local unlock = Instance.new("TextButton")
+	unlock.Name = "UNLOCK"
+	unlock.Text = "UNLOCK"
+	unlock.Font = UiTheme.Font
+	unlock.TextSize = 20
+	unlock.TextColor3 = WHITE
+	unlock.BackgroundColor3 = GREEN
+	unlock.BorderSizePixel = 0
+	unlock.Size = UDim2.fromOffset(200, 48)
+	unlock.AnchorPoint = Vector2.new(0.5, 0)
+	unlock.Position = UDim2.new(0.5, 0, 0, 100)
+	unlock.ZIndex = 3
+	unlock.Parent = panel
+	local uc = Instance.new("UICorner")
+	uc.CornerRadius = UDim.new(0, 10)
+	uc.Parent = unlock
+	applyUnlockStroke(unlock)
+	local unlockStroke = unlock:FindFirstChild("_OceanTD_UnlockStroke")
+	if confirmStrokeConn then
+		confirmStrokeConn:Disconnect()
+		confirmStrokeConn = nil
+	end
+	confirmStrokeConn = RunService.Heartbeat:Connect(function()
+		if confirmGui ~= sg then
+			return
+		end
+		local u = (math.sin(os.clock() * math.pi * 1.35) + 1) * 0.5
+		local c = STROKE_DARK:Lerp(PULSE_GREEN, u)
+		panelStroke.Color = c
+		if unlockStroke and unlockStroke:IsA("UIStroke") then
+			unlockStroke.Color = c
+			unlockStroke.Thickness = 2 + u * 2
+		end
+		panelStroke.Thickness = 3 + u * 2
+	end)
+	unlock.Activated:Connect(tryUnlockColorConfirm)
+
+	local cancel = Instance.new("TextButton")
+	cancel.Name = "CANCEL"
+	cancel.Text = "CANCEL"
+	cancel.Font = UiTheme.Font
+	cancel.TextSize = 18
+	cancel.TextColor3 = WHITE
+	cancel.BackgroundColor3 = RED
+	cancel.BorderSizePixel = 0
+	cancel.Size = UDim2.fromOffset(200, 44)
+	cancel.AnchorPoint = Vector2.new(0.5, 0)
+	cancel.Position = UDim2.new(0.5, 0, 0, 160)
+	cancel.ZIndex = 3
+	cancel.Parent = panel
+	local cc = Instance.new("UICorner")
+	cc.CornerRadius = UDim.new(0, 10)
+	cc.Parent = cancel
+	cancel.Activated:Connect(hideConfirm)
+
+	if isGamepad() then
+		unlock.Selectable = true
+		cancel.Selectable = true
+		linkTwoWay(unlock, cancel)
+		GuiService.AutoSelectGuiEnabled = true
+		GuiService.SelectedObject = unlock
+	end
+end
+
 local function onLetter(i: number)
 	local part = selectedPart()
 	if not part then
@@ -1052,6 +1249,7 @@ local function refreshColorSwatches()
 			dice.Visible = false
 		end
 	end
+	refreshColorLockOverlays()
 end
 
 local function scrollFocusIntoView()
@@ -1206,6 +1404,13 @@ local function selectCoralColor(index: number)
 	end
 	local idx = PlotOutlineColors.clampCoralIndex(index)
 	focusColorIndex = idx
+	local itemId = part:GetAttribute("OceanTD_ItemId")
+	if typeof(itemId) == "string" and itemId ~= "" and not CoralColorUnlockState.isUnlocked(itemId, idx) then
+		if activeColorIndex ~= idx then
+			showConfirmColorUnlock(itemId, idx)
+			return true
+		end
+	end
 	if activeColorIndex == idx then
 		-- Re-tap active swatch: spin dice and roll a new shade in that hue.
 		spinColorDice()
@@ -1217,6 +1422,18 @@ local function selectCoralColor(index: number)
 	return true
 end
 
+local function refreshHeaderSeedBadge()
+	if not headerSeedAmount then
+		return
+	end
+	local itemId = selectedItemId()
+	if typeof(itemId) == "string" then
+		headerSeedAmount.Text = InventoryState.formatSeedCount(itemId)
+	else
+		headerSeedAmount.Text = "0"
+	end
+end
+
 local function fillHeader(part: BasePart)
 	local itemId = part:GetAttribute("OceanTD_ItemId")
 	local def = if typeof(itemId) == "string" then ItemCatalog.get(itemId) else nil
@@ -1226,6 +1443,7 @@ local function fillHeader(part: BasePart)
 	if nameLbl then
 		nameLbl.Text = if def then def.displayName else "Coral"
 	end
+	refreshHeaderSeedBadge()
 	syncColorFromPart(part)
 end
 
@@ -1370,6 +1588,41 @@ function CoralInspectPanel.bind(panel: GuiObject, catalogFrame: GuiObject)
 	aspect.DominantAxis = Enum.DominantAxis.Height
 	aspect.Parent = icon
 	iconLbl = icon
+
+	local seedBadge = Instance.new("Frame")
+	seedBadge.Name = "SeedCount"
+	seedBadge.BackgroundColor3 = Color3.new(0, 0, 0)
+	seedBadge.BackgroundTransparency = 0.15
+	seedBadge.BorderSizePixel = 0
+	seedBadge.AnchorPoint = Vector2.new(0, 0)
+	seedBadge.Position = UDim2.new(0, 0, 0, 0)
+	seedBadge.Size = UDim2.new(0.26, 0, 0.26, 0)
+	seedBadge.ZIndex = icon.ZIndex + 3
+	seedBadge.Active = false
+	seedBadge.Parent = icon
+	UiCircles.ensure(seedBadge)
+	local seedAspect = Instance.new("UIAspectRatioConstraint")
+	seedAspect.AspectRatio = 1
+	seedAspect.DominantAxis = Enum.DominantAxis.Width
+	seedAspect.Parent = seedBadge
+	local seedLbl = Instance.new("TextLabel")
+	seedLbl.Name = "Amount"
+	seedLbl.BackgroundTransparency = 1
+	seedLbl.Size = UDim2.fromScale(1, 1)
+	seedLbl.Font = UiTheme.Font
+	seedLbl.TextColor3 = Color3.new(1, 1, 1)
+	seedLbl.TextScaled = true
+	seedLbl.Text = "0"
+	seedLbl.ZIndex = seedBadge.ZIndex + 1
+	seedLbl.Active = false
+	seedLbl.Parent = seedBadge
+	local seedPad = Instance.new("UIPadding")
+	seedPad.PaddingTop = UDim.new(0.12, 0)
+	seedPad.PaddingBottom = UDim.new(0.12, 0)
+	seedPad.PaddingLeft = UDim.new(0.08, 0)
+	seedPad.PaddingRight = UDim.new(0.08, 0)
+	seedPad.Parent = seedLbl
+	headerSeedAmount = seedLbl
 
 	local nm = Instance.new("TextLabel")
 	nm.BackgroundTransparency = 1
@@ -1557,6 +1810,9 @@ function CoralInspectPanel.bind(panel: GuiObject, catalogFrame: GuiObject)
 		stroke.Parent = btn
 		colorSwatchBtns[sw.index] = btn
 		colorSwatchStrokes[sw.index] = stroke
+		local lock = CoralColorUnlockState.createLockOverlay(btn, 6)
+		lock.Visible = false
+		colorSwatchLocks[sw.index] = lock
 		local idx = sw.index
 		btn.Activated:Connect(function()
 			if colorDragMoved then
@@ -1965,6 +2221,14 @@ function CoralInspectPanel.bind(panel: GuiObject, catalogFrame: GuiObject)
 	RelocateController.onActiveChanged(function(active: boolean)
 		setVisible(active)
 	end)
+	CoralColorUnlockState.onChanged(function()
+		if root and root.Visible then
+			refreshColorSwatches()
+		end
+	end)
+	InventoryState.onCountsChanged(function()
+		refreshHeaderSeedBadge()
+	end)
 	RelocateController.setR1WhileActiveHandler(function(): boolean
 		if confirmGui then
 			return true
@@ -1989,6 +2253,18 @@ function CoralInspectPanel.bind(panel: GuiObject, catalogFrame: GuiObject)
 				hideConfirm()
 				return
 			end
+			if input.KeyCode == Enum.KeyCode.ButtonA then
+				if confirmColorItemId and confirmColorIndex then
+					tryUnlockColorConfirm()
+				else
+					local n = confirmUnlockTarget
+					if n then
+						hideConfirm()
+						invokeSize(n, true)
+					end
+				end
+				return
+			end
 			if input.UserInputType ~= Enum.UserInputType.Keyboard then
 				return
 			end
@@ -1997,10 +2273,14 @@ function CoralInspectPanel.bind(panel: GuiObject, catalogFrame: GuiObject)
 			end
 			local key = input.KeyCode
 			if key == Enum.KeyCode.Return or key == Enum.KeyCode.KeypadEnter then
-				local n = confirmUnlockTarget
-				if n then
-					hideConfirm()
-					invokeSize(n, true)
+				if confirmColorItemId and confirmColorIndex then
+					tryUnlockColorConfirm()
+				else
+					local n = confirmUnlockTarget
+					if n then
+						hideConfirm()
+						invokeSize(n, true)
+					end
 				end
 				return
 			end

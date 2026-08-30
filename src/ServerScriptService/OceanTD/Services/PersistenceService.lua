@@ -9,6 +9,7 @@ local RunService = game:GetService("RunService")
 local Constants = require(game:GetService("ReplicatedStorage"):WaitForChild("OceanTD"):WaitForChild("Shared"):WaitForChild("Constants"))
 local PlotTypes = require(game:GetService("ReplicatedStorage"):WaitForChild("OceanTD"):WaitForChild("Shared"):WaitForChild("PlotTypes"))
 local PlotOutlineColors = require(game:GetService("ReplicatedStorage"):WaitForChild("OceanTD"):WaitForChild("Shared"):WaitForChild("PlotOutlineColors"))
+local ColorUnlocks = require(game:GetService("ReplicatedStorage"):WaitForChild("OceanTD"):WaitForChild("Shared"):WaitForChild("ColorUnlocks"))
 local SkillStages = require(game:GetService("ReplicatedStorage"):WaitForChild("OceanTD"):WaitForChild("Shared"):WaitForChild("SkillStages"))
 local SeedWheel = require(game:GetService("ReplicatedStorage"):WaitForChild("OceanTD"):WaitForChild("Shared"):WaitForChild("SeedWheel"))
 local Remotes = require(game:GetService("ReplicatedStorage"):WaitForChild("OceanTD"):WaitForChild("Remotes"))
@@ -380,6 +381,7 @@ local function sanitizeProfile(raw: any): PlayerProfile
 	profile.plotOutlineColorIndex = PlotOutlineColors.clampIndex(raw.plotOutlineColorIndex)
 	profile.skillStages = SkillStages.sanitizeMap(raw.skillStages)
 	profile.skillActiveStages = SkillStages.sanitizeActiveMap(raw.skillActiveStages, profile.skillStages)
+	profile.coralColorUnlocks = ColorUnlocks.sanitize(raw.coralColorUnlocks)
 	profile.version = math.max(profile.version, Constants.PROFILE_VERSION)
 	return profile
 end
@@ -712,6 +714,103 @@ function PersistenceService.tryUnlockSkillStage(player: Player, skillId: string)
 	}
 end
 
+function PersistenceService.getCoralColorUnlocksPayload(player: Player): ColorUnlocks.UnlockMap
+	local profile = profiles[player]
+	if not profile then
+		return {}
+	end
+	profile.coralColorUnlocks = ColorUnlocks.sanitize(profile.coralColorUnlocks)
+	return profile.coralColorUnlocks
+end
+
+function PersistenceService.syncCoralColorUnlocksToClient(player: Player)
+	if not player or not player.Parent then
+		return
+	end
+	Remotes.get("CoralColorUnlocksSync"):FireClient(player, PersistenceService.getCoralColorUnlocksPayload(player))
+end
+
+function PersistenceService.isCoralColorUnlocked(player: Player, itemId: string, colorIndex: number): boolean
+	local profile = profiles[player]
+	if not profile then
+		return false
+	end
+	profile.coralColorUnlocks = ColorUnlocks.sanitize(profile.coralColorUnlocks)
+	return ColorUnlocks.isUnlocked(profile.coralColorUnlocks, itemId, colorIndex)
+end
+
+function PersistenceService.tryUnlockCoralColor(player: Player, itemId: string, colorIndex: number): {
+	ok: boolean,
+	errorCode: string?,
+	sandDollars: number?,
+	colorIndex: number?,
+	itemId: string?,
+	alreadyUnlocked: boolean?,
+}
+	local profile = profiles[player]
+	if not profile then
+		return { ok = false, errorCode = "NoProfile", sandDollars = 0 }
+	end
+	if typeof(itemId) ~= "string" or itemId == "" then
+		return { ok = false, errorCode = "BadItem", sandDollars = profile.currencies.sandDollars }
+	end
+	if not ColorUnlocks.isWheelItem(itemId) then
+		return { ok = false, errorCode = "BadItem", sandDollars = profile.currencies.sandDollars }
+	end
+	local idx = PlotOutlineColors.clampCoralIndex(colorIndex)
+	profile.coralColorUnlocks = ColorUnlocks.sanitize(profile.coralColorUnlocks)
+	if ColorUnlocks.isUnlocked(profile.coralColorUnlocks, itemId, idx) then
+		return {
+			ok = true,
+			alreadyUnlocked = true,
+			colorIndex = idx,
+			itemId = itemId,
+			sandDollars = clampSandDollars(profile.currencies.sandDollars),
+		}
+	end
+	local cost = ColorUnlocks.UNLOCK_COST
+	local cash = clampSandDollars(profile.currencies.sandDollars)
+	if cash < cost then
+		return { ok = false, errorCode = "CantAfford", sandDollars = cash, colorIndex = idx, itemId = itemId }
+	end
+	profile.currencies.sandDollars = cash - cost
+	profile.coralColorUnlocks = ColorUnlocks.markUnlocked(profile.coralColorUnlocks, itemId, idx)
+	PersistenceService.syncSandDollarsAttribute(player)
+	PersistenceService.syncCoralColorUnlocksToClient(player)
+	task.spawn(function()
+		PersistenceService.save(player)
+	end)
+	return {
+		ok = true,
+		colorIndex = idx,
+		itemId = itemId,
+		sandDollars = profile.currencies.sandDollars,
+	}
+end
+
+-- Free unlock (seed wheel prize, grants, etc.).
+function PersistenceService.grantCoralColorUnlock(player: Player, itemId: string, colorIndex: number): boolean
+	local profile = profiles[player]
+	if not profile then
+		return false
+	end
+	if typeof(itemId) ~= "string" or itemId == "" or not ColorUnlocks.isWheelItem(itemId) then
+		return false
+	end
+	local idx = PlotOutlineColors.clampCoralIndex(colorIndex)
+	profile.coralColorUnlocks = ColorUnlocks.sanitize(profile.coralColorUnlocks)
+	if ColorUnlocks.isUnlocked(profile.coralColorUnlocks, itemId, idx) then
+		return true
+	end
+	profile.coralColorUnlocks = ColorUnlocks.markUnlocked(profile.coralColorUnlocks, itemId, idx)
+	PersistenceService.syncCoralColorUnlocksToClient(player)
+	task.spawn(function()
+		PersistenceService.save(player)
+	end)
+	log("ColorUnlock grant", itemId, "idx", idx, "for", player.Name)
+	return true
+end
+
 -- TEMP / debug: reset every skill to stage 1.
 function PersistenceService.resetSkillStages(player: Player): { unlocked: { [string]: number }, active: { [string]: number } }
 	local profile = profiles[player]
@@ -948,8 +1047,9 @@ function PersistenceService.creditItem(player: Player, itemId: string, amount: n
 end
 
 -- Pending prize-wheel grants: credit only after client finishes the reveal fly.
-type SeedWheelPending = { itemId: string, token: number, amount: number, at: number }
+type SeedWheelPending = { itemId: string, token: number, amount: number, colorIndex: number, at: number }
 local seedWheelPending: { [number]: SeedWheelPending } = {}
+local seedWheelAutoRollEnabled: { [number]: boolean } = {}
 local seedWheelTokenSeq = 0
 local SEED_WHEEL_CLAIM_TIMEOUT_SEC = 25
 
@@ -957,16 +1057,45 @@ local function clearSeedWheelPending(userId: number)
 	seedWheelPending[userId] = nil
 end
 
+local function isSeedWheelAutoRollEnabled(userId: number): boolean
+	return seedWheelAutoRollEnabled[userId] == true
+end
+
+function PersistenceService.syncSeedWheelAutoRollToClient(player: Player)
+	if not player or not player.Parent then
+		return
+	end
+	Remotes.get("SeedWheelAutoRollSync"):FireClient(player, isSeedWheelAutoRollEnabled(player.UserId))
+end
+
+function PersistenceService.setSeedWheelAutoRollEnabled(player: Player, enabled: boolean)
+	if not player or not player.Parent then
+		return
+	end
+	local userId = player.UserId
+	local next = enabled == true
+	seedWheelAutoRollEnabled[userId] = next
+	Remotes.get("SeedWheelAutoRollSync"):FireClient(player, next)
+	if next then
+		task.defer(function()
+			if player.Parent and isSeedWheelAutoRollEnabled(userId) and not seedWheelPending[userId] then
+				PersistenceService.beginSeedWheelGrant(player, 1)
+			end
+		end)
+	end
+end
+
 local function fulfillSeedWheel(player: Player, pending: SeedWheelPending)
 	clearSeedWheelPending(player.UserId)
 	PersistenceService.creditItem(player, pending.itemId, pending.amount)
 	log("SeedWheel grant", pending.itemId, "x", pending.amount, "for", player.Name)
-	-- Keep spinning: next random seed as soon as this one is claimed.
-	task.defer(function()
-		if player.Parent then
-			PersistenceService.beginSeedWheelGrant(player, 1)
-		end
-	end)
+	if isSeedWheelAutoRollEnabled(player.UserId) then
+		task.defer(function()
+			if player.Parent and isSeedWheelAutoRollEnabled(player.UserId) then
+				PersistenceService.beginSeedWheelGrant(player, 1)
+			end
+		end)
+	end
 end
 
 -- Start a random coral seed wheel for the player. Seed is credited after claim (or timeout).
@@ -981,15 +1110,20 @@ function PersistenceService.beginSeedWheelGrant(player: Player, amount: number?)
 	if seedWheelPending[userId] then
 		return false, "Busy"
 	end
+	if not isSeedWheelAutoRollEnabled(userId) then
+		return false, "AutoRollOff"
+	end
 	local add = math.max(1, math.floor(tonumber(amount) or 1))
 	local itemId = SeedWheel.pickRandom()
 	local colorIndex = SeedWheel.pickRandomColorIndex()
+	PersistenceService.grantCoralColorUnlock(player, itemId, colorIndex)
 	seedWheelTokenSeq += 1
 	local token = seedWheelTokenSeq
 	seedWheelPending[userId] = {
 		itemId = itemId,
 		token = token,
 		amount = add,
+		colorIndex = colorIndex,
 		at = os.clock(),
 	}
 	Remotes.get("SeedWheelReveal"):FireClient(player, itemId, token, add, colorIndex)
@@ -1034,8 +1168,15 @@ function PersistenceService.initSeedWheel()
 	Remotes.get("SeedWheelClaim").OnServerEvent:Connect(function(player: Player, itemId: any, token: any)
 		PersistenceService.claimSeedWheel(player, itemId, token)
 	end)
+	Remotes.get("SeedWheelAutoRoll").OnServerEvent:Connect(function(player: Player, enabled: any)
+		if typeof(enabled) ~= "boolean" then
+			return
+		end
+		PersistenceService.setSeedWheelAutoRollEnabled(player, enabled)
+	end)
 	Players.PlayerRemoving:Connect(function(player)
 		clearSeedWheelPending(player.UserId)
+		seedWheelAutoRollEnabled[player.UserId] = nil
 	end)
 end
 
@@ -1284,6 +1425,7 @@ function PersistenceService.save(player: Player, layoutOverride: { LayoutObject 
 		plotOutlineColorIndex = PlotOutlineColors.clampIndex(profile.plotOutlineColorIndex),
 		skillStages = SkillStages.sanitizeMap(profile.skillStages),
 		skillActiveStages = SkillStages.sanitizeActiveMap(profile.skillActiveStages, profile.skillStages),
+		coralColorUnlocks = ColorUnlocks.sanitize(profile.coralColorUnlocks),
 	}
 
 	local saved = false

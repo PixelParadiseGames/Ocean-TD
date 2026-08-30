@@ -35,11 +35,13 @@ end
 
 function SeedWheel.pickRandom(rng: Random?): string
 	local r = rng or Random.new()
+	-- Uniform over POOL (each coral equally likely).
 	return POOL[r:NextInteger(1, #POOL)]
 end
 
 function SeedWheel.pickRandomColorIndex(rng: Random?): number
 	local r = rng or Random.new()
+	-- Uniform over coral paint indices 1–14.
 	return r:NextInteger(PlotOutlineColors.MIN_INDEX, PlotOutlineColors.CORAL_MAX_INDEX)
 end
 

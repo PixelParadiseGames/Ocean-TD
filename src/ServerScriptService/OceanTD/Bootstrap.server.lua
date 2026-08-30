@@ -117,12 +117,9 @@ local function onPlayerAdded(player: Player)
 	plotAssignedRemote:FireClient(player, payload)
 	sessionReadyRemote:FireClient(player)
 	Remotes.get("SkillStagesSync"):FireClient(player, PersistenceService.getSkillStagesPayload(player))
-	-- Continuous random seed wheel (re-arms after each claim).
-	task.defer(function()
-		if player.Parent then
-			PersistenceService.beginSeedWheelGrant(player, 1)
-		end
-	end)
+	PersistenceService.syncCoralColorUnlocksToClient(player)
+	-- Seed wheel auto-roll off until the player presses START (StopAutoRoll button).
+	PersistenceService.syncSeedWheelAutoRollToClient(player)
 	-- Joiner first (race-safe), then everyone.
 	WaveWatchService.broadcastRoster(player)
 	WaveWatchService.broadcastRoster(nil)
@@ -451,4 +448,16 @@ requestCoralColor.OnServerInvoke = function(
 		tonumber(webColorG),
 		tonumber(webColorB)
 	)
+end
+
+local requestUnlockCoralColor = Remotes.getFunction("RequestUnlockCoralColor")
+requestUnlockCoralColor.OnServerInvoke = function(player: Player, itemId: any, colorIndex: any)
+	if typeof(itemId) ~= "string" then
+		return { ok = false, errorCode = "BadItem" }
+	end
+	local idx = tonumber(colorIndex)
+	if typeof(idx) ~= "number" then
+		return { ok = false, errorCode = "BadRequest" }
+	end
+	return PersistenceService.tryUnlockCoralColor(player, itemId, idx)
 end

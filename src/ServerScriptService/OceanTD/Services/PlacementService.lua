@@ -1630,6 +1630,14 @@ function PlacementService.setCoralColor(
 	end
 	local idx = PlotOutlineColors.clampCoralIndex(colorIndex)
 	local paint = PlotOutlineColors.resolveCoralPaint(idx, colorR, colorG, colorB)
+	local itemId = visual:GetAttribute("OceanTD_ItemId")
+	if typeof(itemId) == "string" and itemId ~= "" then
+		local currentAttr = visual:GetAttribute("OceanTD_ColorIndex")
+		local currentIdx = if typeof(currentAttr) == "number" then PlotOutlineColors.clampCoralIndex(currentAttr) else nil
+		if currentIdx ~= idx and not PersistenceService.isCoralColorUnlocked(player, itemId, idx) then
+			return { ok = false, errorCode = "ColorLocked" }
+		end
+	end
 	local slot = PlotService.getSlot(plotId)
 	if not slot then
 		return { ok = false, errorCode = "BadPlot" }

@@ -83,6 +83,8 @@ export type PlayerProfile = {
 	plotOutlineColorIndex: number, -- 1–15 (15 = no stroke); see PlotOutlineColors
 	skillStages: { [string]: number }, -- skillId → highest unlocked stage 1..8
 	skillActiveStages: { [string]: number }, -- skillId → currently enabled stage (≤ unlocked)
+	-- itemId → color index string → true when that paint swatch is unlocked for that coral type.
+	coralColorUnlocks: { [string]: { [string]: boolean } },
 }
 
 local Constants = require(script.Parent.Constants)
@@ -137,6 +139,7 @@ function PlotTypes.defaultProfile(): PlayerProfile
 		plotOutlineColorIndex = 2, -- teal
 		skillStages = SkillStages.defaultMap(),
 		skillActiveStages = SkillStages.defaultMap(),
+		coralColorUnlocks = {},
 	}
 end
 

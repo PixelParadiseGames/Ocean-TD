@@ -27,6 +27,9 @@ local REMOTE_EVENTS = {
 	"UrchinSandOrbPicked",
 	"SeedWheelReveal",
 	"SeedWheelClaim",
+	"SeedWheelAutoRoll",
+	"SeedWheelAutoRollSync",
+	"CoralColorUnlocksSync",
 }
 
 local REMOTE_FUNCTIONS = {
@@ -47,6 +50,7 @@ local REMOTE_FUNCTIONS = {
 	"RequestResetSkillStages",
 	"RequestCoralSize",
 	"RequestCoralColor",
+	"RequestUnlockCoralColor",
 }
 
 local function getRoot(): Instance
