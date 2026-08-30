@@ -25,6 +25,10 @@ export type LayoutObject = {
 	gz: number?,
 	-- Optional visual diameter (BrainCoral size bands). Missing → species default.
 	diameter: number?,
+	-- Stable id for this placed instance (brain stacks / inspect). Missing → assigned on hydrate.
+	placeId: string?,
+	-- Brain stack parent placeId (nil = ground root).
+	parentPlaceId: string?,
 	-- Max unlocked size band 1=S 2=M 3=L. Missing → inferred from diameter.
 	sizeTier: number?,
 	-- Current size band (may be smaller than sizeTier if player switched down).

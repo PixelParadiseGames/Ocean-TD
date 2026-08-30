@@ -254,7 +254,7 @@ local function ensureSlot4GuiButton(slot: GuiObject): GuiButton
 	hit.Text = ""
 	hit.AutoButtonColor = false
 	hit.BackgroundColor3 = Color3.new(1, 1, 1)
-	hit.BackgroundTransparency = 0.99
+	hit.BackgroundTransparency = 1
 	hit.BorderSizePixel = 0
 	hit.Size = UDim2.fromScale(1, 1)
 	hit.Position = UDim2.fromScale(0, 0)

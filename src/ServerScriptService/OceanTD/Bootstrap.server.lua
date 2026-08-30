@@ -206,11 +206,12 @@ requestPlace.OnServerInvoke = function(player: Player, itemId: any, worldPos: an
 end
 
 local requestMove = Remotes.getFunction("RequestMove")
-requestMove.OnServerInvoke = function(player: Player, placeId: any, fromWorldPos: any, toWorldPos: any, facingYaw: any)
+requestMove.OnServerInvoke = function(player: Player, placeId: any, fromWorldPos: any, toWorldPos: any, facingYaw: any, parentPlaceId: any)
 	if typeof(placeId) ~= "string" or typeof(fromWorldPos) ~= "Vector3" or typeof(toWorldPos) ~= "Vector3" then
 		return { ok = false, errorCode = "BadRequest" }
 	end
-	return PlacementService.move(player, placeId, fromWorldPos, toWorldPos, tonumber(facingYaw))
+	local parentId = if typeof(parentPlaceId) == "string" and parentPlaceId ~= "" then parentPlaceId else nil
+	return PlacementService.move(player, placeId, fromWorldPos, toWorldPos, tonumber(facingYaw), parentId)
 end
 
 local requestRecycle = Remotes.getFunction("RequestRecycle")

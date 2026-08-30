@@ -19,10 +19,12 @@ local SpeciesCatalog = require(oceanRoot:WaitForChild("Shared"):WaitForChild("Sp
 local UiTheme = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiTheme"))
 local CoralVisual = require(oceanRoot:WaitForChild("Shared"):WaitForChild("CoralVisual"))
 local CoralSize = require(oceanRoot:WaitForChild("Shared"):WaitForChild("CoralSize"))
+local BrainStack = require(oceanRoot:WaitForChild("Shared"):WaitForChild("BrainStack"))
 local UiHaptics = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiHaptics"))
 local SkillStages = require(oceanRoot:WaitForChild("Shared"):WaitForChild("SkillStages"))
 
 local ClientPlot = require(script.Parent:WaitForChild("ClientPlot"))
+local PlacedCoralIndex = require(script.Parent:WaitForChild("PlacedCoralIndex"))
 local WaveEntityPool = require(script.Parent:WaitForChild("WaveEntityPool"))
 local WaveCrab = require(script.Parent:WaitForChild("WaveCrab"))
 local WaveUrchin = require(script.Parent:WaitForChild("WaveUrchin"))
@@ -161,6 +163,8 @@ type CoralAgent = {
 	ammo: BasePart?,
 	ammoSlots: { BasePart },
 	ammoSizeMult: number, -- 0.70..0.99 — each neon food is 1–30% smaller
+	-- Cached local ammo nest offsets (rebuilt on create / size change, not every frame).
+	ammoLocalOffs: { Vector3 }?,
 	growing: boolean,
 	growT0: number,
 	busy: boolean, -- projectile in flight
@@ -1350,6 +1354,7 @@ local function destroyAmmo(coral: CoralAgent)
 	end
 	table.clear(coral.ammoSlots)
 	coral.ammo = nil
+	coral.ammoLocalOffs = nil
 	-- Do not clear coral.growing here — createAmmo calls this while starting a grow.
 end
 
@@ -1363,7 +1368,7 @@ local function ammoFullDiameter(coral: CoralAgent): number
 	return C.AMMO_RADIUS * 2 * coral.ammoSizeMult * CoralSize.ammoSizeScale(coral.foodCount)
 end
 
-local function ammoWorldPos(coral: CoralAgent, slot: number?): Vector3
+local function rebuildAmmoLocalOffs(coral: CoralAgent)
 	applySizeStats(coral)
 	local r = CoralSize.ammoAnchorRadius(coral.part)
 	local ammoR = C.AMMO_RADIUS * coral.ammoSizeMult * CoralSize.ammoSizeScale(coral.foodCount)
@@ -1373,12 +1378,42 @@ local function ammoWorldPos(coral: CoralAgent, slot: number?): Vector3
 	end
 	local speciesId = coral.part:GetAttribute("OceanTD_SpeciesId")
 	local sid = if typeof(speciesId) == "string" then speciesId else nil
-	local offs = CoralSize.ammoLocalOffsets(nVis, r, ammoR, sid, coral.part.Size, coral.part)
+	if BrainStack.isBrainId(sid) then
+		-- Prefer link neighbors only; gather brains once (not every GetAttribute on whole plot twice).
+		local brains: { BasePart } = {}
+		local mir = ClientPlot.get()
+		if mir then
+			for _, p in ipairs(PlacedCoralIndex.getParts(mir.plotId)) do
+				local oid = p:GetAttribute("OceanTD_SpeciesId")
+				if BrainStack.isBrainId(oid) then
+					table.insert(brains, p)
+				end
+			end
+		end
+		local neighbors = BrainStack.collectLinkNeighbors(coral.part, brains)
+		coral.ammoLocalOffs = BrainStack.ammoLocalOffsets(coral.part, nVis, ammoR, neighbors)
+	else
+		coral.ammoLocalOffs = CoralSize.ammoLocalOffsets(nVis, r, ammoR, sid, coral.part.Size, coral.part)
+	end
+end
+
+local function ammoWorldPos(coral: CoralAgent, slot: number?): Vector3
+	local offs = coral.ammoLocalOffs
+	if not offs or #offs < 1 then
+		rebuildAmmoLocalOffs(coral)
+		offs = coral.ammoLocalOffs
+	end
+	if not offs or #offs < 1 then
+		return coral.part.Position
+	end
 	local i = math.clamp(slot or 1, 1, #offs)
 	return coral.part.CFrame:PointToWorldSpace(offs[i])
 end
 
 local function parkAmmo(coral: CoralAgent)
+	if not coral.ammoLocalOffs or #coral.ammoLocalOffs < 1 then
+		rebuildAmmoLocalOffs(coral)
+	end
 	for i, p in ipairs(coral.ammoSlots) do
 		if p.Parent then
 			p.CFrame = CFrame.new(ammoWorldPos(coral, i))
@@ -1403,6 +1438,7 @@ local function createAmmo(coral: CoralAgent, scale: number)
 		local p = WaveEntityPool.acquireAmmo(ensureFolder(), coral.color, s)
 		table.insert(coral.ammoSlots, p)
 	end
+	rebuildAmmoLocalOffs(coral)
 	parkAmmo(coral)
 	coral.ammo = coral.ammoSlots[1]
 end
@@ -1504,6 +1540,7 @@ local function makeCoralAgent(part: BasePart): CoralAgent?
 		ammo = nil,
 		ammoSlots = {},
 		ammoSizeMult = 1,
+		ammoLocalOffs = nil,
 		growing = false,
 		growT0 = 0,
 		busy = false,
@@ -1523,6 +1560,7 @@ local function makeCoralAgent(part: BasePart): CoralAgent?
 	part:GetPropertyChangedSignal("Size"):Connect(function()
 		agent.diameter = math.max(part.Size.X, part.Size.Y, part.Size.Z)
 		applySizeStats(agent)
+		agent.ammoLocalOffs = nil
 		parkAmmo(agent)
 	end)
 	return agent
@@ -1533,7 +1571,6 @@ local function gatherPlotCoralParts(): { BasePart }
 	if not mirrored then
 		return {}
 	end
-	local PlacedCoralIndex = require(script.Parent:WaitForChild("PlacedCoralIndex"))
 	local indexed = PlacedCoralIndex.getParts(mirrored.plotId)
 	local parts: { BasePart } = {}
 	for _, inst in ipairs(indexed) do
@@ -1648,6 +1685,10 @@ local function syncCorals(sessionStart: boolean)
 		c.diameter = math.max(c.part.Size.X, c.part.Size.Y, c.part.Size.Z)
 		applySizeStats(c)
 		parkAmmo(c)
+		-- Recover nests left empty after cancelled shots / rapid wave skips.
+		if not c.stunned and not c.growing and #c.ammoSlots == 0 and c.shotsOut <= 0 then
+			startAmmoGrow(c)
+		end
 	end
 	-- Full reproject only when arming a wave session (path is live); new places project above.
 	if sessionStart then
@@ -2405,7 +2446,13 @@ local function tickCombat()
 		if now < coral.readyAt then
 			continue
 		end
+		-- Empty nest: wait for in-flight shots, else reload. shotsOut can desync after skip;
+		-- clearActiveWaveEntities zeros it, and this recovers any leftover stuck empties.
 		if #coral.ammoSlots == 0 then
+			if coral.shotsOut <= 0 then
+				coral.busy = false
+				startAmmoGrow(coral)
+			end
 			continue
 		end
 		local target = findClosestHungryFish(coral)
@@ -2737,6 +2784,7 @@ local function hardCleanup()
 	for _, c in ipairs(coralList) do
 		c.growing = false
 		c.busy = false
+		c.shotsOut = 0
 		destroyAmmo(c)
 	end
 	table.clear(coralList)
@@ -2758,14 +2806,18 @@ local function clearActiveWaveEntities()
 			releaseFoodPart(shot.part)
 		end
 		shot.alive = false
-		local coral = shot.coral
 		clearShotTarget(shot)
+	end
+	table.clear(activeShots)
+	-- Cancelled shots never call finishShot — reset counters or corals stay empty forever
+	-- (shotsOut stays > 0, so the next reload never starts after the next volley lands).
+	for _, coral in ipairs(coralList) do
 		coral.busy = false
-		if not coral.ammo and not coral.growing then
+		coral.shotsOut = 0
+		if not coral.stunned and not coral.growing and #coral.ammoSlots == 0 then
 			startAmmoGrow(coral)
 		end
 	end
-	table.clear(activeShots)
 	local kept: { FishAgent } = {}
 	for _, f in ipairs(fishList) do
 		if f.isUrchin and not f.finished then

@@ -60,6 +60,8 @@ export type PlaceOpts = {
 	scaleWidth: number?,
 	scaleHeight: number?,
 	facingYaw: number?,
+	-- Opt-in brain stack: only nest when client snapped to a host.
+	parentPlaceId: string?,
 }
 
 export type PlaceResult = {
@@ -108,6 +110,74 @@ end
 
 function PlacementService.clearPendingColorSave(player: Player)
 	colorSaveTokenByUser[player.UserId] = nil
+end
+
+-- Write paint onto a grid cell (by placeId preferred).
+local function writeCellColor(
+	plotId: string,
+	placeId: string?,
+	gx: number?,
+	gy: number?,
+	gz: number?,
+	colorIndex: number,
+	colorR: number,
+	colorG: number,
+	colorB: number,
+	webR: number?,
+	webG: number?,
+	webB: number?
+): boolean
+	local cell: any = nil
+	if typeof(placeId) == "string" and placeId ~= "" then
+		cell = GridService.findCellByPlaceId(plotId, placeId)
+	end
+	if not cell and typeof(gx) == "number" and typeof(gy) == "number" and typeof(gz) == "number" then
+		cell = GridService.getCellAtGrid(plotId, gx, gy, gz)
+	end
+	if not cell then
+		return false
+	end
+	local ok = GridService.setColorAtGrid(plotId, cell.gx, cell.gy, cell.gz, colorIndex, colorR, colorG, colorB)
+	if ok and typeof(webR) == "number" and typeof(webG) == "number" and typeof(webB) == "number" then
+		GridService.setSeaFanExtras(plotId, cell.gx, cell.gy, cell.gz, nil, nil, nil, webR, webG, webB)
+	end
+	return ok
+end
+
+-- Pull color attrs from a live visual into a layout object (snapshot enrichment).
+local function enrichLayoutObjFromVisual(obj: any, visual: BasePart)
+	local idxAttr = visual:GetAttribute("OceanTD_ColorIndex")
+	if typeof(idxAttr) == "number" then
+		obj.colorIndex = PlotOutlineColors.clampCoralIndex(idxAttr)
+	elseif typeof(obj.colorIndex) ~= "number" then
+		-- Legacy place with only RGB on the part — keep a stable palette tag.
+		obj.colorIndex = PlotOutlineColors.DEFAULT_INDEX
+	end
+	local r = visual:GetAttribute("OceanTD_RestR")
+	local g = visual:GetAttribute("OceanTD_RestG")
+	local b = visual:GetAttribute("OceanTD_RestB")
+	if typeof(r) == "number" and typeof(g) == "number" and typeof(b) == "number" then
+		obj.colorR = math.clamp(r, 0, 1)
+		obj.colorG = math.clamp(g, 0, 1)
+		obj.colorB = math.clamp(b, 0, 1)
+	else
+		obj.colorR = math.clamp(visual.Color.R, 0, 1)
+		obj.colorG = math.clamp(visual.Color.G, 0, 1)
+		obj.colorB = math.clamp(visual.Color.B, 0, 1)
+	end
+	local wr = visual:GetAttribute("OceanTD_WebRestR")
+	local wg = visual:GetAttribute("OceanTD_WebRestG")
+	local wb = visual:GetAttribute("OceanTD_WebRestB")
+	if typeof(wr) ~= "number" then
+		wr = visual:GetAttribute("OceanTD_WebR")
+		wg = visual:GetAttribute("OceanTD_WebG")
+		wb = visual:GetAttribute("OceanTD_WebB")
+	end
+	if typeof(wr) == "number" and typeof(wg) == "number" and typeof(wb) == "number" then
+		obj.webColorR = math.clamp(wr, 0, 1)
+		obj.webColorG = math.clamp(wg, 0, 1)
+		obj.webColorB = math.clamp(wb, 0, 1)
+	end
 end
 
 local function warnPlace(...: any)
@@ -176,37 +246,76 @@ function PlacementService.validateWorldPos(player: Player, worldPos: Vector3, al
 	end
 	if GridService.isOccupied(plotId, localPos.X, localPos.Y, localPos.Z) then
 		if allowBrainStack then
+			local host = GridService.findNearestBrainHost(plotId, localPos, nil, nil, nil)
+			if host then
+				return true, nil, plotId
+			end
 			local gx, _, gz = GridMath.worldToGrid(localPos, Vector3.zero)
 			local top = GridService.findTopBrainInColumn(plotId, gx, gz)
 			if top then
-				-- Occupied by a Brain column — place() will restack onto it.
 				return true, nil, plotId
 			end
 		end
 		return false, "SpotTaken", plotId
 	end
+	-- Empty cell but may still be stacking onto a nearby offset brain.
+	if allowBrainStack then
+		local host = GridService.findNearestBrainHost(plotId, localPos, nil, nil, nil)
+		if host then
+			return true, nil, plotId
+		end
+	end
 	return true, nil, plotId
 end
 
--- Server-authoritative Brain stack: snap onto tallest Brain in XZ column with sink overlap.
+-- Server Brain stack: only nests when client opts in with parentPlaceId (dot snap).
 local function resolveBrainStackLocal(
 	plotId: string,
 	localPos: Vector3,
 	newDiam: number,
 	ignoreGx: number?,
 	ignoreGy: number?,
-	ignoreGz: number?
-): (Vector3, number, number, number)
+	ignoreGz: number?,
+	parentPlaceId: string?
+): (Vector3, number, number, number, any?)
 	local gx, gy, gz = GridMath.worldToGrid(localPos, Vector3.zero)
-	local top = GridService.findTopBrainInColumn(plotId, gx, gz)
-	if top and not (ignoreGx == top.gx and ignoreGy == top.gy and ignoreGz == top.gz) then
-		local d0 = if typeof(top.diameter) == "number" and top.diameter > 0 then top.diameter else 4
-		local newY = BrainStack.stackCenterY(top.ly, d0, newDiam)
-		local stacked = Vector3.new(top.lx, newY, top.lz)
-		local freeGy = GridService.nextFreeGyInColumn(plotId, top.gx, top.gz, top.gy + 1)
-		return stacked, top.gx, freeGy, top.gz
+	if typeof(parentPlaceId) ~= "string" or parentPlaceId == "" then
+		return localPos, gx, gy, gz, nil
 	end
-	return localPos, gx, gy, gz
+	local host = GridService.findCellByPlaceId(plotId, parentPlaceId)
+	if not host or host.id ~= "BrainCoral" then
+		return localPos, gx, gy, gz, nil
+	end
+	if ignoreGx == host.gx and ignoreGy == host.gy and ignoreGz == host.gz then
+		return localPos, gx, gy, gz, nil
+	end
+	if not GridService.brainHasFreeSlot(plotId, host, ignoreGx, ignoreGy, ignoreGz) then
+		return localPos, gx, gy, gz, nil
+	end
+	local d0 = if typeof(host.diameter) == "number" and host.diameter > 0 then host.diameter else 4
+	local hostPos = Vector3.new(host.lx, host.ly, host.lz)
+	local ox = localPos.X - host.lx
+	local oz = localPos.Z - host.lz
+	local horiz = math.sqrt(ox * ox + oz * oz)
+	local maxSide = d0 * 0.5 + newDiam * 0.45
+	local stacked: Vector3
+	if localPos.Y > host.ly + 0.15 and horiz <= maxSide + 0.35 then
+		stacked = localPos
+	else
+		stacked = BrainStack.topNestCenter(hostPos, d0, newDiam, ox, oz)
+	end
+	local drift = BrainStack.horizontalDist(Vector3.new(host.lx, 0, host.lz), Vector3.new(stacked.X, 0, stacked.Z))
+	if drift > BrainStack.MAX_ROOT_DRIFT then
+		local scale = BrainStack.MAX_ROOT_DRIFT / drift
+		stacked = Vector3.new(
+			host.lx + (stacked.X - host.lx) * scale,
+			stacked.Y,
+			host.lz + (stacked.Z - host.lz) * scale
+		)
+	end
+	local sgx, _, sgz = GridMath.worldToGrid(stacked, Vector3.zero)
+	local freeGy = GridService.nextFreeGyInColumn(plotId, sgx, sgz, math.max(host.gy + 1, 0))
+	return stacked, sgx, freeGy, sgz, host
 end
 
 function PlacementService.spawnVisual(
@@ -280,7 +389,33 @@ end
 -- Snapshot live grid. SeaFan facingYaw lives on the cell (set at place/move) — do not
 -- re-derive from mesh LookVector (that corrupted saves; FBX fronts ≠ Angles yaw).
 function PlacementService.snapshotLayout(plotId: string): { any }
-	return GridService.snapshot(plotId)
+	local layout = GridService.snapshot(plotId)
+	-- Cell color can lag the visual (legacy places / failed grid writes). Live paint is source of truth.
+	for _, obj in ipairs(layout) do
+		local pid = obj.placeId
+		if typeof(pid) == "string" and pid ~= "" then
+			local visual = findVisualByPlaceId(plotId, pid)
+			if visual then
+				enrichLayoutObjFromVisual(obj, visual)
+				-- Keep the live grid cell in sync so bare GridService.snapshot also stays correct.
+				writeCellColor(
+					plotId,
+					pid,
+					obj.gx,
+					obj.gy,
+					obj.gz,
+					obj.colorIndex,
+					obj.colorR,
+					obj.colorG,
+					obj.colorB,
+					obj.webColorR,
+					obj.webColorG,
+					obj.webColorB
+				)
+			end
+		end
+	end
+	return layout
 end
 
 function PlacementService.hydrateVisuals(plotId: string, boundsCFrame: CFrame)
@@ -296,9 +431,14 @@ function PlacementService.hydrateVisuals(plotId: string, boundsCFrame: CFrame)
 		if typeof(cell.webColorR) == "number" and typeof(cell.webColorG) == "number" and typeof(cell.webColorB) == "number" then
 			webColor = Color3.new(cell.webColorR, cell.webColorG, cell.webColorB)
 		end
+		local paintIdx: number? = if typeof(cell.colorIndex) == "number"
+			then PlotOutlineColors.clampCoralIndex(cell.colorIndex)
+			elseif typeof(cell.colorR) == "number" and typeof(cell.colorG) == "number" and typeof(cell.colorB) == "number"
+			then PlotOutlineColors.DEFAULT_INDEX
+			else nil
 		local paint: Color3? = nil
-		if typeof(cell.colorIndex) == "number" then
-			paint = PlotOutlineColors.resolveCoralPaint(cell.colorIndex, cell.colorR, cell.colorG, cell.colorB)
+		if paintIdx then
+			paint = PlotOutlineColors.resolveCoralPaint(paintIdx, cell.colorR, cell.colorG, cell.colorB)
 		end
 		local visual = PlacementService.spawnVisual(
 			plotId,
@@ -343,14 +483,30 @@ function PlacementService.hydrateVisuals(plotId: string, boundsCFrame: CFrame)
 				visual:SetAttribute("OceanTD_FacingYaw", cell.facingYaw)
 				CoralVisual.alignMeshToSurface(visual, world, cell.facingYaw, nil, boundsCFrame)
 			end
-			if typeof(cell.colorIndex) == "number" then
-				local idx = PlotOutlineColors.clampCoralIndex(cell.colorIndex)
-				visual:SetAttribute("OceanTD_ColorIndex", idx)
-				local stemPaint = paint or PlotOutlineColors.resolveCoralPaint(idx, cell.colorR, cell.colorG, cell.colorB)
-				CoralVisual.setRestColor(visual, stemPaint, webColor)
+			if paintIdx and paint then
+				visual:SetAttribute("OceanTD_ColorIndex", paintIdx)
+				CoralVisual.setRestColor(visual, paint, webColor)
+				-- Keep cell in sync so later GridService.snapshot doesn't drop paint.
+				cell.colorIndex = paintIdx
+				cell.colorR = paint.R
+				cell.colorG = paint.G
+				cell.colorB = paint.B
+			end
+			-- Stable stack identity.
+			if typeof(cell.placeId) == "string" and cell.placeId ~= "" then
+				visual:SetAttribute("OceanTD_PlaceId", cell.placeId)
+			else
+				local pid = visual:GetAttribute("OceanTD_PlaceId")
+				if typeof(pid) == "string" then
+					cell.placeId = pid
+				end
+			end
+			if typeof(cell.parentPlaceId) == "string" and cell.parentPlaceId ~= "" then
+				visual:SetAttribute("OceanTD_ParentPlaceId", cell.parentPlaceId)
 			end
 		end
 	end)
+	PlacementService.rebuildBrainParentLinks(plotId)
 	log("Hydrated visuals", plotId)
 end
 
@@ -381,6 +537,10 @@ function PlacementService.placeFromSave(
 		webColorR: number?,
 		webColorG: number?,
 		webColorB: number?,
+	}?,
+	stackMeta: {
+		placeId: string?,
+		parentPlaceId: string?,
 	}?
 ): PlaceResult
 	local shouldConsume = consumeSeed == true
@@ -413,12 +573,20 @@ function PlacementService.placeFromSave(
 
 	-- exactPos = plot.CFrame:PointToWorldSpace(VisualPos) — never re-snap to terrain/grid center.
 	local worldPos = GridMath.plotLocalToWorld(visualLocal, slot.cframe)
-	local paintIdx = if typeof(colorIndex) == "number" then PlotOutlineColors.clampCoralIndex(colorIndex) else nil
+	local paintIdx = if typeof(colorIndex) == "number"
+		then PlotOutlineColors.clampCoralIndex(colorIndex)
+		elseif typeof(colorR) == "number" and typeof(colorG) == "number" and typeof(colorB) == "number"
+		then PlotOutlineColors.DEFAULT_INDEX
+		else nil
 	local paintColor = if paintIdx
 		then PlotOutlineColors.resolveCoralPaint(paintIdx, colorR, colorG, colorB)
 		else nil
 	local extras = seaFanExtras or {}
-	local class = CoralSize.clampTier(sizeClass or 1)
+	local class = if typeof(sizeClass) == "number"
+		then CoralSize.clampTier(sizeClass)
+		elseif typeof(diameter) == "number" and diameter > 0
+		then CoralSize.classFromDiameter(diameter)
+		else 1
 	local variant = if CoralVisual.isMeshSpecies(species.speciesId)
 		then CoralVisual.clampMeshVariant(variantIndex, species.speciesId)
 		else nil
@@ -459,7 +627,7 @@ function PlacementService.placeFromSave(
 		gy,
 		gz,
 		diameter,
-		sizeTier,
+		CoralSize.clampTier(sizeTier or class),
 		class,
 		paintIdx,
 		if paintColor then paintColor.R else nil,
@@ -568,12 +736,25 @@ function PlacementService.placeFromSave(
 	end
 
 	local placeIdAttr = visual:GetAttribute("OceanTD_PlaceId")
-	local placeId = if typeof(placeIdAttr) == "string" then placeIdAttr else HttpService:GenerateGUID(false)
+	local savedPlaceId = if stackMeta and typeof(stackMeta.placeId) == "string" and stackMeta.placeId ~= ""
+		then stackMeta.placeId
+		else nil
+	local placeId = savedPlaceId
+		or (if typeof(placeIdAttr) == "string" then placeIdAttr else HttpService:GenerateGUID(false))
 	visual:SetAttribute("OceanTD_PlaceId", placeId)
 	visual:SetAttribute("OceanTD_ItemId", itemId)
 	visual:SetAttribute("OceanTD_SpeciesId", species.speciesId)
+	local savedParent = if stackMeta and typeof(stackMeta.parentPlaceId) == "string" and stackMeta.parentPlaceId ~= ""
+		then stackMeta.parentPlaceId
+		else nil
+	if savedParent then
+		visual:SetAttribute("OceanTD_ParentPlaceId", savedParent)
+	end
 	if paintIdx then
 		visual:SetAttribute("OceanTD_ColorIndex", paintIdx)
+		if paintColor then
+			CoralVisual.setRestColor(visual, paintColor, webColor)
+		end
 	end
 	local tier = CoralSize.clampTier(sizeTier or class)
 	CoralSize.applyToPart(visual, diameter or visual.Size.Y, class, tier)
@@ -581,6 +762,48 @@ function PlacementService.placeFromSave(
 	if CoralVisual.needsFacingYaw(species.speciesId) and typeof(facingYaw) == "number" then
 		visual:SetAttribute("OceanTD_FacingYaw", facingYaw)
 		CoralVisual.alignMeshToSurface(visual, worldPos, facingYaw, nil, slot.cframe)
+	end
+
+	local rx: number
+	local ry: number
+	local rz: number
+	if typeof(gx) == "number" and typeof(gy) == "number" and typeof(gz) == "number" then
+		rx, ry, rz = math.round(gx), math.round(gy), math.round(gz)
+	else
+		rx, ry, rz = GridMath.worldToGrid(visualLocal, Vector3.zero)
+	end
+	GridService.setPlaceMeta(plotId, rx, ry, rz, placeId, savedParent)
+	-- Ensure grid cell keeps full visual meta (snapshot/load must not drop upgrades/colors).
+	local cell = GridService.getCellAtGrid(plotId, rx, ry, rz)
+	if cell then
+		local dAttr = visual:GetAttribute("OceanTD_Diameter")
+		local resolvedDiam = if typeof(dAttr) == "number" and dAttr > 0
+			then dAttr
+			elseif typeof(diameter) == "number" and diameter > 0
+			then diameter
+			else math.max(visual.Size.X, visual.Size.Y, visual.Size.Z)
+		cell.diameter = resolvedDiam
+		cell.sizeClass = class
+		cell.sizeTier = tier
+		if paintIdx then
+			cell.colorIndex = paintIdx
+		end
+		if paintColor then
+			cell.colorR = paintColor.R
+			cell.colorG = paintColor.G
+			cell.colorB = paintColor.B
+		end
+		if webColor then
+			cell.webColorR = webColor.R
+			cell.webColorG = webColor.G
+			cell.webColorB = webColor.B
+		end
+		if typeof(variant) == "number" then
+			cell.variantIndex = variant
+		end
+		if typeof(scale) == "number" then
+			cell.scaleMult = scale
+		end
 	end
 
 	return {
@@ -597,6 +820,7 @@ local function parsePlaceOpts(raw: any): PlaceOpts
 		return { diameter = raw }
 	end
 	if typeof(raw) == "table" then
+		local parentId = raw.parentPlaceId
 		return {
 			diameter = tonumber(raw.diameter),
 			variantIndex = tonumber(raw.variantIndex),
@@ -605,6 +829,7 @@ local function parsePlaceOpts(raw: any): PlaceOpts
 			scaleWidth = tonumber(raw.scaleWidth),
 			scaleHeight = tonumber(raw.scaleHeight),
 			facingYaw = tonumber(raw.facingYaw),
+			parentPlaceId = if typeof(parentId) == "string" and parentId ~= "" then parentId else nil,
 		}
 	end
 	return {}
@@ -665,11 +890,13 @@ function PlacementService.place(
 	local gx: number
 	local gy: number
 	local gz: number
+	local brainHostCell: any = nil
 	if isBrain then
 		-- Prefer client ghost size so preview matches the placed coral.
 		diameter = CoralVisual.sanitizeBrainDiameter(opts.diameter)
 		local stackedLocal
-		stackedLocal, gx, gy, gz = resolveBrainStackLocal(plotId, localPos, diameter)
+		stackedLocal, gx, gy, gz, brainHostCell =
+			resolveBrainStackLocal(plotId, localPos, diameter, nil, nil, nil, opts.parentPlaceId)
 		localPos = stackedLocal
 		local slot = PlotService.getSlot(plotId)
 		if slot then
@@ -704,6 +931,18 @@ function PlacementService.place(
 	else
 		gx, gy, gz = GridMath.worldToGrid(localPos, Vector3.zero)
 	end
+	-- Stable palette paint from day one — never leave color only on the Part.
+	local placeColorIdx = PlotOutlineColors.clampCoralIndex(
+		math.random(PlotOutlineColors.MIN_INDEX, PlotOutlineColors.CORAL_MAX_INDEX)
+	)
+	local placePaint = PlotOutlineColors.randomHueVariant(placeColorIdx)
+	local placeWebPaint: Color3? = nil
+	if CoralVisual.isSeaFan(species.speciesId) then
+		placeWebPaint = PlotOutlineColors.randomHueVariant(placeColorIdx)
+	elseif CoralVisual.isMainAccentMesh(species.speciesId) then
+		placeWebPaint = PlotOutlineColors.randomBrightAccent()
+	end
+
 	local occupied, occupyErr = GridService.tryOccupy(
 		plotId,
 		player.UserId,
@@ -717,10 +956,10 @@ function PlacementService.place(
 		diameter,
 		1,
 		sizeClass,
-		nil,
-		nil,
-		nil,
-		nil,
+		placeColorIdx,
+		placePaint.R,
+		placePaint.G,
+		placePaint.B,
 		variant,
 		scale
 	)
@@ -735,7 +974,7 @@ function PlacementService.place(
 		plotId,
 		species.speciesId,
 		worldPos,
-		nil,
+		placePaint,
 		diameter,
 		sizeClass,
 		variant,
@@ -743,7 +982,7 @@ function PlacementService.place(
 		scaleWidth,
 		scaleHeight,
 		facingYaw,
-		nil
+		placeWebPaint
 	)
 	if not visual then
 		warnPlace("Visual spawn failed after occupy — rolling back cell")
@@ -762,19 +1001,45 @@ function PlacementService.place(
 			cell.diameter = diameter
 		end
 		if CoralVisual.isSeaFan(species.speciesId) then
-			GridService.setSeaFanExtras(plotId, gx, gy, gz, scaleWidth, scaleHeight, facingYaw, nil, nil, nil)
+			GridService.setSeaFanExtras(
+				plotId,
+				gx,
+				gy,
+				gz,
+				scaleWidth,
+				scaleHeight,
+				facingYaw,
+				if placeWebPaint then placeWebPaint.R else nil,
+				if placeWebPaint then placeWebPaint.G else nil,
+				if placeWebPaint then placeWebPaint.B else nil
+			)
 			local slotCf = PlotService.getSlot(plotId)
 			local pcf = if slotCf then slotCf.cframe else nil
 			if typeof(facingYaw) == "number" then
 				visual:SetAttribute("OceanTD_FacingYaw", facingYaw)
 				CoralVisual.alignMeshToSurface(visual, worldPos, facingYaw, nil, pcf)
 			end
+			CoralVisual.setRestColor(visual, placePaint, placeWebPaint, placeColorIdx)
 		elseif CoralVisual.needsFacingYaw(species.speciesId) and typeof(facingYaw) == "number" then
-			GridService.setSeaFanExtras(plotId, gx, gy, gz, nil, nil, facingYaw, nil, nil, nil)
+			GridService.setSeaFanExtras(
+				plotId,
+				gx,
+				gy,
+				gz,
+				nil,
+				nil,
+				facingYaw,
+				if placeWebPaint then placeWebPaint.R else nil,
+				if placeWebPaint then placeWebPaint.G else nil,
+				if placeWebPaint then placeWebPaint.B else nil
+			)
 			local slotCf = PlotService.getSlot(plotId)
 			local pcf = if slotCf then slotCf.cframe else nil
 			visual:SetAttribute("OceanTD_FacingYaw", facingYaw)
 			CoralVisual.alignMeshToSurface(visual, worldPos, facingYaw, nil, pcf)
+			if placeWebPaint then
+				CoralVisual.setRestColor(visual, placePaint, placeWebPaint, placeColorIdx)
+			end
 		end
 	end
 
@@ -783,7 +1048,63 @@ function PlacementService.place(
 	visual:SetAttribute("OceanTD_PlaceId", placeId)
 	visual:SetAttribute("OceanTD_ItemId", itemId)
 	visual:SetAttribute("OceanTD_SpeciesId", species.speciesId)
+	visual:SetAttribute("OceanTD_ColorIndex", placeColorIdx)
+	CoralVisual.setRestColor(visual, placePaint, placeWebPaint, placeColorIdx)
+	writeCellColor(
+		plotId,
+		placeId,
+		gx,
+		gy,
+		gz,
+		placeColorIdx,
+		placePaint.R,
+		placePaint.G,
+		placePaint.B,
+		if placeWebPaint then placeWebPaint.R else nil,
+		if placeWebPaint then placeWebPaint.G else nil,
+		if placeWebPaint then placeWebPaint.B else nil
+	)
+	if brainHostCell then
+		local slot = PlotService.getSlot(plotId)
+		local hostVis: BasePart? = nil
+		if typeof(brainHostCell.placeId) == "string" and brainHostCell.placeId ~= "" then
+			hostVis = findVisualByPlaceId(plotId, brainHostCell.placeId)
+		end
+		if not hostVis and slot then
+			for _, inst in ipairs(getPlotFolder(plotId):GetChildren()) do
+				if inst:IsA("BasePart") and BrainStack.isBrainId(inst:GetAttribute("OceanTD_SpeciesId")) then
+					local lp = GridMath.worldToPlotLocal(inst.Position, slot.cframe)
+					if math.abs(lp.X - brainHostCell.lx) < 0.05
+						and math.abs(lp.Y - brainHostCell.ly) < 0.05
+						and math.abs(lp.Z - brainHostCell.lz) < 0.05
+					then
+						hostVis = inst
+						break
+					end
+				end
+			end
+		end
+		if hostVis then
+			local parentId = hostVis:GetAttribute("OceanTD_PlaceId")
+			if typeof(parentId) == "string" and parentId ~= "" then
+				visual:SetAttribute("OceanTD_ParentPlaceId", parentId)
+				if typeof(brainHostCell.placeId) ~= "string" or brainHostCell.placeId == "" then
+					brainHostCell.placeId = parentId
+				end
+			end
+		end
+	end
 	CoralSize.applyToPart(visual, diameter or visual.Size.X, sizeClass, 1)
+	GridService.setPlaceMeta(
+		plotId,
+		gx,
+		gy,
+		gz,
+		placeId,
+		if typeof(visual:GetAttribute("OceanTD_ParentPlaceId")) == "string"
+			then (visual:GetAttribute("OceanTD_ParentPlaceId") :: string)
+			else nil
+	)
 	if CoralVisual.needsFacingYaw(species.speciesId) and typeof(facingYaw) == "number" then
 		local slotCf = PlotService.getSlot(plotId)
 		visual:SetAttribute("OceanTD_FacingYaw", facingYaw)
@@ -834,7 +1155,8 @@ function PlacementService.move(
 	placeId: string,
 	fromWorldPos: Vector3,
 	toWorldPos: Vector3,
-	facingYaw: number?
+	facingYaw: number?,
+	parentPlaceId: string?
 ): MoveResult
 	if typeof(placeId) ~= "string" or placeId == "" then
 		return { ok = false, errorCode = "BadRequest" }
@@ -857,7 +1179,7 @@ function PlacementService.move(
 	end
 
 	local visualForFrom = findVisualByPlaceId(plotId, placeId)
-	local fromAnchor = if visualForFrom then CoralVisual.readGridAnchor(visualForFrom) else nil
+	local fromAnchor = if visualForFrom then (visualForFrom.Position) else nil
 	fromAnchor = fromAnchor or fromWorldPos
 
 	local fromLocal = worldToPlotLocal(plotId, fromAnchor)
@@ -866,20 +1188,31 @@ function PlacementService.move(
 		return { ok = false, errorCode = "BadPlot" }
 	end
 
-	local fromCell = GridService.getCell(plotId, fromLocal.X, fromLocal.Y, fromLocal.Z)
+	-- Prefer placeId (stacked brains bump gy; worldToGrid(VisualPos) often misses).
+	local fromCell = GridService.findCellByPlaceId(plotId, placeId)
+		or GridService.findCellByLocalPos(plotId, fromLocal.X, fromLocal.Y, fromLocal.Z, 0.5)
+		or GridService.getCell(plotId, fromLocal.X, fromLocal.Y, fromLocal.Z)
 	if not fromCell then
 		return { ok = false, errorCode = "NotFound" }
 	end
 	if fromCell.ownerUserId ~= player.UserId then
 		return { ok = false, errorCode = "NotOwner" }
 	end
+	-- Use authoritative stored VisualPos for vacate / same-cell checks.
+	fromLocal = Vector3.new(fromCell.lx, fromCell.ly, fromCell.lz)
 
 	local resolvedPlaceId = placeId
 	if resolvedPlaceId == "" then
 		resolvedPlaceId = HttpService:GenerateGUID(false)
 	end
+	if typeof(fromCell.placeId) ~= "string" or fromCell.placeId == "" then
+		fromCell.placeId = resolvedPlaceId
+	else
+		resolvedPlaceId = fromCell.placeId
+	end
 
 	local visual = findVisualByPlaceId(plotId, placeId)
+		or findVisualByPlaceId(plotId, resolvedPlaceId)
 		or findVisualAtGrid(plotId, toWorldPos)
 		or findVisualAtGrid(plotId, fromWorldPos)
 	if not visual then
@@ -903,7 +1236,7 @@ function PlacementService.move(
 		end
 	end
 
-	local fgx, fgy, fgz = GridMath.worldToGrid(fromLocal, Vector3.zero)
+	local fgx, fgy, fgz = fromCell.gx, fromCell.gy, fromCell.gz
 	local tgx, tgy, tgz = GridMath.worldToGrid(toLocal, Vector3.zero)
 	if fgx == tgx and fgy == tgy and fgz == tgz then
 		applyFacing(fgx, fgy, fgz)
@@ -918,6 +1251,10 @@ function PlacementService.move(
 		else
 			visual.CFrame = CFrame.new(toWorldPos)
 		end
+		-- Keep cell VisualPos in sync when sliding within the same key.
+		fromCell.lx = toLocal.X
+		fromCell.ly = toLocal.Y
+		fromCell.lz = toLocal.Z
 		local returnedYaw = yawToApply
 		if typeof(returnedYaw) ~= "number" then
 			local attr = visual:GetAttribute("OceanTD_FacingYaw")
@@ -937,20 +1274,55 @@ function PlacementService.move(
 		}
 	end
 
-	-- Brain → Brain stack when relocating onto another Brain column.
+	-- Brain → Brain stack only when client snapped to a host (parentPlaceId).
 	if BrainStack.isBrainId(fromCell.id) then
 		local diam = if typeof(fromCell.diameter) == "number" and fromCell.diameter > 0
 			then fromCell.diameter
 			else CoralVisual.sanitizeBrainDiameter(nil)
-		local stackedLocal, sgx, sgy, sgz = resolveBrainStackLocal(plotId, toLocal, diam, fgx, fgy, fgz)
-		-- Only treat as stack when the column has another brain (not our vacated self).
-		local top = GridService.findTopBrainInColumn(plotId, sgx, sgz)
-		if top and not (top.gx == fgx and top.gy == fgy and top.gz == fgz) then
+		local wantedParent = if typeof(parentPlaceId) == "string" and parentPlaceId ~= "" then parentPlaceId else nil
+		local stackedLocal, sgx, sgy, sgz, hostCell =
+			resolveBrainStackLocal(plotId, toLocal, diam, fgx, fgy, fgz, wantedParent)
+		if hostCell then
 			toLocal = stackedLocal
 			tgx, tgy, tgz = sgx, sgy, sgz
 			local slot = PlotService.getSlot(plotId)
 			if slot then
 				toWorldPos = GridMath.plotLocalToWorld(toLocal, slot.cframe)
+			end
+			if visual then
+				local hostVis: BasePart? = nil
+				if typeof(hostCell.placeId) == "string" and hostCell.placeId ~= "" then
+					hostVis = findVisualByPlaceId(plotId, hostCell.placeId)
+				end
+				if not hostVis and slot then
+					for _, inst in ipairs(getPlotFolder(plotId):GetChildren()) do
+						if inst:IsA("BasePart")
+							and inst ~= visual
+							and BrainStack.isBrainId(inst:GetAttribute("OceanTD_SpeciesId"))
+						then
+							local lp = GridMath.worldToPlotLocal(inst.Position, slot.cframe)
+							if math.abs(lp.X - hostCell.lx) < 0.05
+								and math.abs(lp.Y - hostCell.ly) < 0.05
+								and math.abs(lp.Z - hostCell.lz) < 0.05
+							then
+								hostVis = inst
+								break
+							end
+						end
+					end
+				end
+				if hostVis then
+					local parentId = hostVis:GetAttribute("OceanTD_PlaceId")
+					if typeof(parentId) == "string" and parentId ~= "" then
+						visual:SetAttribute("OceanTD_ParentPlaceId", parentId)
+					end
+				else
+					visual:SetAttribute("OceanTD_ParentPlaceId", nil)
+				end
+			end
+		else
+			if visual then
+				visual:SetAttribute("OceanTD_ParentPlaceId", nil)
 			end
 		end
 	end
@@ -959,10 +1331,10 @@ function PlacementService.move(
 		return { ok = false, errorCode = "SpotTaken" }
 	end
 
-	local vacated, cell = GridService.vacate(plotId, fromLocal.X, fromLocal.Y, fromLocal.Z, fgx, fgy, fgz)
-	if not vacated or not cell then
+	if not GridService.vacateCell(fromCell) then
 		return { ok = false, errorCode = "NotFound" }
 	end
+	local cell = fromCell
 
 	local occupied, occupyErr = GridService.tryOccupy(
 		plotId,
@@ -1008,6 +1380,8 @@ function PlacementService.move(
 		)
 		local rolled = GridService.getCellAtGrid(plotId, fgx, fgy, fgz)
 		if rolled then
+			rolled.placeId = cell.placeId
+			rolled.parentPlaceId = cell.parentPlaceId
 			GridService.copySeaFanExtras(cell, rolled)
 		end
 		return { ok = false, errorCode = occupyErr or "SpotTaken" }
@@ -1016,6 +1390,13 @@ function PlacementService.move(
 	local newCell = GridService.getCellAtGrid(plotId, tgx, tgy, tgz)
 	if newCell then
 		GridService.copySeaFanExtras(cell, newCell)
+		newCell.placeId = resolvedPlaceId
+		local parentAttr = visual:GetAttribute("OceanTD_ParentPlaceId")
+		if typeof(parentAttr) == "string" and parentAttr ~= "" then
+			newCell.parentPlaceId = parentAttr
+		else
+			newCell.parentPlaceId = nil
+		end
 	end
 	applyFacing(tgx, tgy, tgz)
 
@@ -1318,6 +1699,10 @@ function PlacementService.applyLayout(player: Player, layout: { LayoutObject }):
 				webColorR = obj.webColorR,
 				webColorG = obj.webColorG,
 				webColorB = obj.webColorB,
+			},
+			{
+				placeId = obj.placeId,
+				parentPlaceId = obj.parentPlaceId,
 			}
 		)
 		if result.ok then
@@ -1327,6 +1712,7 @@ function PlacementService.applyLayout(player: Player, layout: { LayoutObject }):
 		end
 	end
 	suppressUndoRecord = false
+	PlacementService.rebuildBrainParentLinks(plotId)
 
 	log("Applied layout for", player.Name, "placed=", placed, "/", #layout)
 	return { ok = true, placed = placed }
@@ -1457,12 +1843,234 @@ function PlacementService.undoLast(player: Player): UndoResult
 	return { ok = false, errorCode = err or "UndoFail", kind = step.kind }
 end
 
+function PlacementService.rebuildBrainParentLinks(plotId: string)
+	local brains: { any } = {}
+	GridService.forEachCell(plotId, function(cell)
+		if BrainStack.isBrainId(cell.id) then
+			if typeof(cell.placeId) ~= "string" or cell.placeId == "" then
+				cell.placeId = HttpService:GenerateGUID(false)
+			end
+			table.insert(brains, cell)
+		end
+	end)
+	table.sort(brains, function(a, b)
+		return a.ly < b.ly
+	end)
+	for _, cell in ipairs(brains) do
+		if typeof(cell.parentPlaceId) == "string" and cell.parentPlaceId ~= "" then
+			local parent = GridService.findCellByPlaceId(plotId, cell.parentPlaceId)
+			if parent then
+				continue
+			end
+			cell.parentPlaceId = nil
+		end
+		local best: any = nil
+		local bestScore = math.huge
+		local d1 = if typeof(cell.diameter) == "number" and cell.diameter > 0 then cell.diameter else 4
+		for _, other in ipairs(brains) do
+			if other ~= cell and other.ly < cell.ly - 0.05 then
+				local d0 = if typeof(other.diameter) == "number" and other.diameter > 0 then other.diameter else 4
+				local dx = cell.lx - other.lx
+				local dz = cell.lz - other.lz
+				local horiz = math.sqrt(dx * dx + dz * dz)
+				local maxDist = (d0 + d1) * 0.55
+				if horiz <= maxDist then
+					local score = (cell.ly - other.ly) + horiz * 0.35
+					if score < bestScore then
+						bestScore = score
+						best = other
+					end
+				end
+			end
+		end
+		if best and typeof(best.placeId) == "string" then
+			cell.parentPlaceId = best.placeId
+		end
+	end
+	-- Mirror onto visuals.
+	local slot = PlotService.getSlot(plotId)
+	if not slot then
+		return
+	end
+	for _, inst in ipairs(getPlotFolder(plotId):GetChildren()) do
+		if inst:IsA("BasePart") and BrainStack.isBrainId(inst:GetAttribute("OceanTD_SpeciesId")) then
+			local pid = inst:GetAttribute("OceanTD_PlaceId")
+			if typeof(pid) == "string" then
+				local cell = GridService.findCellByPlaceId(plotId, pid)
+				if cell then
+					if typeof(cell.parentPlaceId) == "string" and cell.parentPlaceId ~= "" then
+						inst:SetAttribute("OceanTD_ParentPlaceId", cell.parentPlaceId)
+					else
+						inst:SetAttribute("OceanTD_ParentPlaceId", nil)
+					end
+				end
+			end
+		end
+	end
+end
+
+export type StackMove = {
+	placeId: string,
+	worldPos: Vector3,
+	stackParentPlaceId: string?,
+}
+
+-- After a brain changes diameter: lift it (vs parent/ground) and slide descendants up.
+local function reflowBrainStackAfterSize(
+	plotId: string,
+	changedPlaceId: string,
+	oldDiam: number,
+	newDiam: number
+): { StackMove }
+	local moves: { StackMove } = {}
+	local slot = PlotService.getSlot(plotId)
+	if not slot then
+		return moves
+	end
+	local byId: { [string]: any } = {}
+	GridService.forEachCell(plotId, function(cell)
+		if BrainStack.isBrainId(cell.id) and typeof(cell.placeId) == "string" then
+			byId[cell.placeId] = cell
+		end
+	end)
+	local changed = byId[changedPlaceId]
+	if not changed then
+		return moves
+	end
+
+	-- Capture child lists + offsets before moving.
+	type Off = { ox: number, oz: number, yRel: number, oldParentDiam: number }
+	local offsets: { [string]: Off } = {}
+	local childrenOf: { [string]: { string } } = {}
+	for id, cell in pairs(byId) do
+		local pid = cell.parentPlaceId
+		if typeof(pid) == "string" and byId[pid] then
+			childrenOf[pid] = childrenOf[pid] or {}
+			table.insert(childrenOf[pid], id)
+			local parent = byId[pid]
+			local pd = if typeof(parent.diameter) == "number" and parent.diameter > 0 then parent.diameter else 4
+			-- For the changed node, parent still has its diameter; changed has newDiam already applied.
+			if id == changedPlaceId then
+				pd = if typeof(parent.diameter) == "number" and parent.diameter > 0 then parent.diameter else 4
+			end
+			offsets[id] = {
+				ox = cell.lx - parent.lx,
+				oz = cell.lz - parent.lz,
+				yRel = cell.ly - parent.ly,
+				oldParentDiam = if id == changedPlaceId or pid == changedPlaceId
+					then (if pid == changedPlaceId then oldDiam else pd)
+					else pd,
+			}
+			if pid == changedPlaceId then
+				offsets[id].oldParentDiam = oldDiam
+			end
+		end
+	end
+
+	local function applyMove(cell: any)
+		local world = GridMath.plotLocalToWorld(Vector3.new(cell.lx, cell.ly, cell.lz), slot.cframe)
+		local vis = findVisualByPlaceId(plotId, cell.placeId)
+		if vis then
+			vis.CFrame = CFrame.new(world)
+			if typeof(cell.parentPlaceId) == "string" and cell.parentPlaceId ~= "" then
+				vis:SetAttribute("OceanTD_ParentPlaceId", cell.parentPlaceId)
+			else
+				vis:SetAttribute("OceanTD_ParentPlaceId", nil)
+			end
+		end
+		table.insert(moves, {
+			placeId = cell.placeId,
+			worldPos = world,
+			stackParentPlaceId = cell.parentPlaceId,
+		})
+	end
+
+	-- 1) Move the upgraded coral.
+	local parentId = changed.parentPlaceId
+	if typeof(parentId) == "string" and byId[parentId] then
+		local parent = byId[parentId]
+		local pd = if typeof(parent.diameter) == "number" and parent.diameter > 0 then parent.diameter else 4
+		local off = offsets[changedPlaceId]
+		local ox = if off then off.ox else 0
+		local oz = if off then off.oz else 0
+		local yRel = if off then off.yRel * (pd / math.max(off.oldParentDiam, 0.1)) else nil
+		local pos = BrainStack.restackChildCenter(
+			Vector3.new(parent.lx, parent.ly, parent.lz),
+			pd,
+			newDiam,
+			ox,
+			oz,
+			yRel
+		)
+		GridService.relocateCellLocal(changed, pos.X, pos.Y, pos.Z)
+		changed.diameter = newDiam
+		applyMove(changed)
+	else
+		-- Ground root: lift so bottom stays planted.
+		local newY = BrainStack.liftRootCenter(changed.ly, oldDiam, newDiam)
+		GridService.relocateCellLocal(changed, changed.lx, newY, changed.lz)
+		changed.diameter = newDiam
+		applyMove(changed)
+	end
+
+	-- 2) BFS descendants — parents before children.
+	local queue: { string } = { changedPlaceId }
+	local qi = 1
+	while qi <= #queue do
+		local pid = queue[qi]
+		qi += 1
+		local kids = childrenOf[pid]
+		if not kids then
+			continue
+		end
+		local parent = byId[pid]
+		if not parent then
+			continue
+		end
+		local pd = if typeof(parent.diameter) == "number" and parent.diameter > 0 then parent.diameter else 4
+		for _, cid in ipairs(kids) do
+			local child = byId[cid]
+			if not child then
+				continue
+			end
+			local cd = if typeof(child.diameter) == "number" and child.diameter > 0 then child.diameter else 4
+			local off = offsets[cid]
+			local ox = if off then off.ox else (child.lx - parent.lx)
+			local oz = if off then off.oz else (child.lz - parent.lz)
+			local scale = pd / math.max(if off then off.oldParentDiam else pd, 0.1)
+			local yRel = if off then off.yRel * scale else nil
+			local pos = BrainStack.restackChildCenter(
+				Vector3.new(parent.lx, parent.ly, parent.lz),
+				pd,
+				cd,
+				ox,
+				oz,
+				yRel
+			)
+			GridService.relocateCellLocal(child, pos.X, pos.Y, pos.Z)
+			applyMove(child)
+			table.insert(queue, cid)
+		end
+	end
+
+	return moves
+end
+
 function PlacementService.setCoralSize(
 	player: Player,
 	placeId: string,
 	targetClass: number,
 	unlockNext: boolean
-): { ok: boolean, errorCode: string?, diameter: number?, sizeClass: number?, sizeTier: number?, variantIndex: number?, scaleMult: number? }
+): {
+	ok: boolean,
+	errorCode: string?,
+	diameter: number?,
+	sizeClass: number?,
+	sizeTier: number?,
+	variantIndex: number?,
+	scaleMult: number?,
+	stackMoves: { StackMove }?,
+}
 	if typeof(placeId) ~= "string" or placeId == "" then
 		return { ok = false, errorCode = "BadRequest" }
 	end
@@ -1477,7 +2085,7 @@ function PlacementService.setCoralSize(
 	if not visual then
 		return { ok = false, errorCode = "Missing" }
 	end
-	local _curD, _curClass, tier = CoralSize.readFromPart(visual)
+	local curD, _curClass, tier = CoralSize.readFromPart(visual)
 	local want = CoralSize.clampTier(targetClass)
 	local newTier = tier
 	local unlockCost = 0
@@ -1486,7 +2094,6 @@ function PlacementService.setCoralSize(
 		if not nxt then
 			return { ok = false, errorCode = "Maxed" }
 		end
-		-- Allow skipping Medium → Large in one unlock (client shows "Medium + Large").
 		if want < nxt then
 			want = nxt
 		end
@@ -1503,17 +2110,32 @@ function PlacementService.setCoralSize(
 	local newDiam: number
 	local variant: number? = nil
 	local scale: number? = nil
-	-- Lock grid cell from the planted anchor BEFORE restyle (mesh swap must not drift cell lookup).
 	local slot = PlotService.getSlot(plotId)
 	if not slot then
 		return { ok = false, errorCode = "BadPlot" }
 	end
+
+	-- Resolve grid cell by placeId first (stacked brains often miss rounded-key lookup).
+	local cell = GridService.findCellByPlaceId(plotId, placeId)
+	if not cell then
+		local savedAnchor = CoralVisual.readGridAnchor(visual) or visual.Position
+		local localPos = GridMath.worldToPlotLocal(savedAnchor, slot.cframe)
+		local gx, gy, gz = GridMath.worldToGrid(localPos, Vector3.zero)
+		cell = GridService.getCellAtGrid(plotId, gx, gy, gz)
+			or GridService.findCellByLocalPos(plotId, localPos.X, localPos.Y, localPos.Z, 0.35)
+	end
+	if not cell then
+		return { ok = false, errorCode = "Missing" }
+	end
+	if typeof(cell.placeId) ~= "string" or cell.placeId == "" then
+		cell.placeId = placeId
+	end
+
+	local oldDiam = if typeof(cell.diameter) == "number" and cell.diameter > 0 then cell.diameter else curD
+	local gx, gy, gz = cell.gx, cell.gy, cell.gz
 	local savedAnchor = CoralVisual.readGridAnchor(visual) or visual.Position
-	local localPos = GridMath.worldToPlotLocal(savedAnchor, slot.cframe)
-	local gx, gy, gz = GridMath.worldToGrid(localPos, Vector3.zero)
 
 	if CoralVisual.isMeshSpecies(speciesId) then
-		-- New random mesh + scale jitter each size change / unlock.
 		variant = CoralVisual.randomMeshVariant(if typeof(speciesId) == "string" then speciesId else nil)
 		local scaleWidth: number? = nil
 		local scaleHeight: number? = nil
@@ -1556,14 +2178,6 @@ function PlacementService.setCoralSize(
 		end
 	end
 
-	-- Keep saved VisualPos on the cell matching the plant anchor (restyle must not relocate the cell).
-	local cell = GridService.getCellAtGrid(plotId, gx, gy, gz)
-	if cell then
-		cell.lx = localPos.X
-		cell.ly = localPos.Y
-		cell.lz = localPos.Z
-	end
-	-- Client plays the scale cinematic; persist attributes now so a leave/rejoin matches.
 	visual:SetAttribute("OceanTD_Diameter", newDiam)
 	visual:SetAttribute("OceanTD_SizeClass", want)
 	visual:SetAttribute("OceanTD_SizeTier", newTier)
@@ -1573,6 +2187,14 @@ function PlacementService.setCoralSize(
 	if typeof(scale) == "number" then
 		visual:SetAttribute("OceanTD_ScaleMult", scale)
 	end
+
+	local stackMoves: { StackMove }? = nil
+	if BrainStack.isBrainId(speciesId) or BrainStack.isBrainId(cell.id) then
+		-- Ensure parent links exist before reflow (covers older stacks).
+		PlacementService.rebuildBrainParentLinks(plotId)
+		stackMoves = reflowBrainStackAfterSize(plotId, placeId, oldDiam, newDiam)
+	end
+
 	if unlockCost > 0 then
 		local spent, _balance, spendErr = PersistenceService.trySpendSandDollars(player, unlockCost)
 		if not spent then
@@ -1580,7 +2202,7 @@ function PlacementService.setCoralSize(
 		end
 	end
 	PersistenceService.save(player, PlacementService.snapshotLayout(plotId))
-	log("Size", placeId, "class", want, "tier", newTier, "d", newDiam)
+	log("Size", placeId, "class", want, "tier", newTier, "d", newDiam, "moves", if stackMoves then #stackMoves else 0)
 	return {
 		ok = true,
 		diameter = newDiam,
@@ -1588,6 +2210,7 @@ function PlacementService.setCoralSize(
 		sizeTier = newTier,
 		variantIndex = variant,
 		scaleMult = scale,
+		stackMoves = stackMoves,
 	}
 end
 
@@ -1638,14 +2261,22 @@ function PlacementService.setCoralColor(
 			return { ok = false, errorCode = "ColorLocked" }
 		end
 	end
-	local slot = PlotService.getSlot(plotId)
-	if not slot then
-		return { ok = false, errorCode = "BadPlot" }
+	-- Resolve cell by placeId (stacked brains sit off worldToGrid of the mesh center).
+	local cell = GridService.findCellByPlaceId(plotId, placeId)
+	if not cell then
+		local slot = PlotService.getSlot(plotId)
+		if not slot then
+			return { ok = false, errorCode = "BadPlot" }
+		end
+		local anchorPos = CoralVisual.readGridAnchor(visual) or visual.Position
+		local localPos = GridMath.worldToPlotLocal(anchorPos, slot.cframe)
+		local gx, gy, gz = GridMath.worldToGrid(localPos, Vector3.zero)
+		cell = GridService.getCellAtGrid(plotId, gx, gy, gz)
 	end
-	-- Mesh species sit above the planted anchor; grid cells are keyed by anchor, not mesh center.
-	local anchorPos = CoralVisual.readGridAnchor(visual) or visual.Position
-	local localPos = GridMath.worldToPlotLocal(anchorPos, slot.cframe)
-	local gx, gy, gz = GridMath.worldToGrid(localPos, Vector3.zero)
+	if not cell then
+		return { ok = false, errorCode = "Missing" }
+	end
+	local gx, gy, gz = cell.gx, cell.gy, cell.gz
 	if not GridService.setColorAtGrid(plotId, gx, gy, gz, idx, paint.R, paint.G, paint.B) then
 		return { ok = false, errorCode = "Missing" }
 	end

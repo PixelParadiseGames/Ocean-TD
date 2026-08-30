@@ -9,7 +9,7 @@ local Workspace = game:GetService("Workspace")
 
 local PlaceAimScreen = {}
 
-local GHOST_SCREEN_OFFSET_Y = 105
+local GHOST_SCREEN_OFFSET_Y = 32 -- was 105; 70% less raise above finger
 local touchHeld = 0
 
 function PlaceAimScreen.trackTouch(input: InputObject, ended: boolean)

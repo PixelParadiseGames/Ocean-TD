@@ -551,6 +551,7 @@ local function runUnlockCinematic(part: BasePart, newDiam: number)
 	end
 	local _finD, class, tier = CoralSize.readFromPart(part)
 	CoralSize.applyToPart(part, newDiam, class, tier)
+	RelocateController.syncHomeToPart(part)
 	RelocateController.refreshSelectRing()
 end
 
@@ -562,6 +563,8 @@ applyServerSize = function(result: any, unlock: boolean, partOverride: BasePart?
 	if not part then
 		return
 	end
+	local BrainStackClient = require(script.Parent:WaitForChild("BrainStackClient"))
+	BrainStackClient.applyStackMoves(result.stackMoves, if unlock then 0.55 else 0.28)
 	local d = tonumber(result.diameter)
 	local class = tonumber(result.sizeClass)
 	local tier = tonumber(result.sizeTier)
@@ -624,6 +627,7 @@ applyServerSize = function(result: any, unlock: boolean, partOverride: BasePart?
 		task.spawn(function()
 			tweenSize(part, fromD, d, 0.28)
 			CoralSize.applyToPart(part, d, class or CoralSize.classFromDiameter(d), tier or (class or 1))
+			RelocateController.syncHomeToPart(part)
 			RelocateController.refreshSelectRing()
 			refreshSizeColors()
 		end)

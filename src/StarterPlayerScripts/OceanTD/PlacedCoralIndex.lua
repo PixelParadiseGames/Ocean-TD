@@ -11,6 +11,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local oceanShared = ReplicatedStorage:WaitForChild("OceanTD"):WaitForChild("Shared")
 local GridMath = require(oceanShared:WaitForChild("GridMath"))
+local BrainStack = require(oceanShared:WaitForChild("BrainStack"))
 
 local ClientPlot = require(script.Parent:WaitForChild("ClientPlot"))
 
@@ -329,6 +330,228 @@ function PlacedCoralIndex.getTopBrainInColumn(
 		end
 	end
 	return best
+end
+
+-- Brains with free child slots on this plot (for snap dots).
+-- Single O(n) attribute pass + O(n) stack sizing (not O(n²) per host).
+function PlacedCoralIndex.getBrainHostsWithFreeSlots(plotId: string, ignore: BasePart?): { BasePart }
+	PlacedCoralIndex.ensure()
+	local bucket = buckets[plotId]
+	if not bucket then
+		return {}
+	end
+
+	local brains: { BasePart } = {}
+	local byId: { [string]: BasePart } = {}
+	local placeIdOf: { [BasePart]: string? } = {}
+	local parentIdOf: { [BasePart]: string? } = {}
+	local maxKidsOf: { [BasePart]: number } = {}
+
+	for _, part in ipairs(bucket.parts) do
+		if part ~= ignore and part.Parent and BrainStack.isBrainId(part:GetAttribute("OceanTD_SpeciesId")) then
+			table.insert(brains, part)
+			local id = BrainStack.readPlaceId(part)
+			local pid = BrainStack.readParentPlaceId(part)
+			placeIdOf[part] = id
+			parentIdOf[part] = pid
+			maxKidsOf[part] = BrainStack.maxChildrenForPart(part)
+			if id then
+				byId[id] = part
+			end
+		end
+	end
+
+	local childCount: { [string]: number } = {}
+	for _, part in ipairs(brains) do
+		local pid = parentIdOf[part]
+		if pid and byId[pid] then
+			childCount[pid] = (childCount[pid] or 0) + 1
+		end
+	end
+
+	local stackSizeByRoot: { [BasePart]: number } = {}
+	local rootOf: { [BasePart]: BasePart } = {}
+	for _, part in ipairs(brains) do
+		local cur = part
+		local guard = 0
+		while guard < 64 do
+			guard += 1
+			local pid = parentIdOf[cur]
+			if pid and byId[pid] then
+				cur = byId[pid]
+			else
+				break
+			end
+		end
+		rootOf[part] = cur
+		stackSizeByRoot[cur] = (stackSizeByRoot[cur] or 0) + 1
+	end
+
+	local out: { BasePart } = {}
+	for _, part in ipairs(brains) do
+		local id = placeIdOf[part]
+		local kids = if id then (childCount[id] or 0) else 0
+		local root = rootOf[part]
+		local stackN = stackSizeByRoot[root] or 1
+		if stackN < BrainStack.MAX_STACK_SIZE and kids < maxKidsOf[part] then
+			table.insert(out, part)
+		end
+	end
+	return out
+end
+
+-- Free-slot hosts within maxDist of aim (world studs).
+function PlacedCoralIndex.getBrainHostsWithFreeSlotsNear(
+	plotId: string,
+	aimPos: Vector3,
+	maxDist: number,
+	ignore: BasePart?
+): { BasePart }
+	local all = PlacedCoralIndex.getBrainHostsWithFreeSlots(plotId, ignore)
+	local out: { BasePart } = {}
+	local maxSq = maxDist * maxDist
+	for _, host in ipairs(all) do
+		local d = host.Position - aimPos
+		if d:Dot(d) <= maxSq then
+			table.insert(out, host)
+		end
+	end
+	return out
+end
+
+-- Brains whose snap circle / footprint is near aim (for stack markers + engage).
+function PlacedCoralIndex.getBrainHostsNear(plotId: string, aimPos: Vector3, ignore: BasePart?): { BasePart }
+	PlacedCoralIndex.ensure()
+	local bucket = buckets[plotId]
+	if not bucket then
+		return {}
+	end
+	local out: { BasePart } = {}
+	for _, part in ipairs(bucket.parts) do
+		if part ~= ignore and part.Parent and BrainStack.isBrainId(part:GetAttribute("OceanTD_SpeciesId")) then
+			local d0 = BrainStack.diameterOfPart(part)
+			local reach = BrainStack.engageRadius(d0) + 6
+			if BrainStack.horizontalDist(aimPos, part.Position) <= reach then
+				table.insert(out, part)
+			end
+		end
+	end
+	return out
+end
+
+local function brainRootPart(plotId: string, host: BasePart, ignore: BasePart?): BasePart
+	local bucket = buckets[plotId]
+	if not bucket then
+		return host
+	end
+	local byId: { [string]: BasePart } = {}
+	for _, p in ipairs(bucket.parts) do
+		if p ~= ignore and p.Parent and BrainStack.isBrainId(p:GetAttribute("OceanTD_SpeciesId")) then
+			local id = BrainStack.readPlaceId(p)
+			if id then
+				byId[id] = p
+			end
+		end
+	end
+	local cur = host
+	local guard = 0
+	while guard < 64 do
+		guard += 1
+		local pid = BrainStack.readParentPlaceId(cur)
+		if pid and byId[pid] then
+			cur = byId[pid]
+		else
+			break
+		end
+	end
+	return cur
+end
+
+-- Walk parentPlaceId to stack root (ignore optional relocating part).
+function PlacedCoralIndex.getBrainRoot(plotId: string, host: BasePart, ignore: BasePart?): BasePart
+	return brainRootPart(plotId, host, ignore)
+end
+
+-- Count brains in the stack tree containing host (root + descendants).
+function PlacedCoralIndex.countBrainStackSize(plotId: string, host: BasePart, ignore: BasePart?): number
+	PlacedCoralIndex.ensure()
+	local bucket = buckets[plotId]
+	if not bucket then
+		return 0
+	end
+	local root = brainRootPart(plotId, host, ignore)
+	local rootId = BrainStack.readPlaceId(root)
+	local byId: { [string]: BasePart } = {}
+	local brains: { BasePart } = {}
+	for _, p in ipairs(bucket.parts) do
+		if p ~= ignore and p.Parent and BrainStack.isBrainId(p:GetAttribute("OceanTD_SpeciesId")) then
+			table.insert(brains, p)
+			local id = BrainStack.readPlaceId(p)
+			if id then
+				byId[id] = p
+			end
+		end
+	end
+	local n = 0
+	for _, p in ipairs(brains) do
+		local cur = p
+		local guard = 0
+		local inTree = cur == root
+		while not inTree and guard < 64 do
+			guard += 1
+			local pid = BrainStack.readParentPlaceId(cur)
+			if not pid or not byId[pid] then
+				break
+			end
+			cur = byId[pid]
+			if cur == root or (rootId and BrainStack.readPlaceId(cur) == rootId) then
+				inTree = true
+				break
+			end
+		end
+		if inTree then
+			n += 1
+		end
+	end
+	return n
+end
+
+function PlacedCoralIndex.countBrainChildren(plotId: string, host: BasePart, ignore: BasePart?): number
+	PlacedCoralIndex.ensure()
+	local bucket = buckets[plotId]
+	if not bucket then
+		return 0
+	end
+	local hostId = BrainStack.readPlaceId(host)
+	local n = 0
+	local hostR = BrainStack.diameterOfPart(host) * 0.5
+	for _, part in ipairs(bucket.parts) do
+		if part ~= host and part ~= ignore and part.Parent and BrainStack.isBrainId(part:GetAttribute("OceanTD_SpeciesId")) then
+			local linked = hostId ~= nil and BrainStack.readParentPlaceId(part) == hostId
+			local spatial = false
+			if not linked and part.Position.Y > host.Position.Y + 0.15 then
+				local otherR = BrainStack.diameterOfPart(part) * 0.5
+				spatial = BrainStack.horizontalDist(part.Position, host.Position) <= (hostR + otherR) * 0.85
+			end
+			if linked or spatial then
+				n += 1
+			end
+		end
+	end
+	return n
+end
+
+function PlacedCoralIndex.brainHasFreeSlot(plotId: string, host: BasePart, ignore: BasePart?): boolean
+	if PlacedCoralIndex.countBrainStackSize(plotId, host, ignore) >= BrainStack.MAX_STACK_SIZE then
+		return false
+	end
+	local maxKids = BrainStack.maxChildrenForPart(host)
+	return PlacedCoralIndex.countBrainChildren(plotId, host, ignore) < maxKids
+end
+
+-- True if another brain is nested on / above this host (same stack neighborhood).
+function PlacedCoralIndex.brainHasChild(plotId: string, host: BasePart): boolean
+	return PlacedCoralIndex.countBrainChildren(plotId, host, nil) > 0
 end
 
 return PlacedCoralIndex

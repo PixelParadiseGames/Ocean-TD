@@ -16,6 +16,7 @@ local ClientPlot = require(script.Parent:WaitForChild("ClientPlot"))
 local PlacedCoralIndex = require(script.Parent:WaitForChild("PlacedCoralIndex"))
 local PlaceAimScreen = require(script.Parent:WaitForChild("PlaceAimScreen"))
 local SkillPowerUpUI = require(script.Parent:WaitForChild("SkillPowerUpUI"))
+local BrainSnapPreview = require(script.Parent:WaitForChild("BrainSnapPreview"))
 
 local PlaceRaycast = {}
 
@@ -45,19 +46,15 @@ function PlaceRaycast.isSpotTaken(worldPos: Vector3): boolean
 	return PlaceRaycast.findBlockingCoral(worldPos) ~= nil
 end
 
--- Snap Brain aim onto the tallest Brain in this XZ column (slight sink overlap).
-function PlaceRaycast.resolveBrainStackPos(hitPos: Vector3, newDiameter: number, ignore: BasePart?): Vector3
-	local plot = ClientPlot.get()
-	if not plot then
-		return hitPos
-	end
-	local top = PlacedCoralIndex.getTopBrainInColumn(plot.plotId, hitPos, plot.cframe, ignore)
-	if not top then
-		return hitPos
-	end
-	local d0 = BrainStack.diameterOfPart(top)
-	local y = BrainStack.stackCenterY(top.Position.Y, d0, newDiameter)
-	return Vector3.new(top.Position.X, y, top.Position.Z)
+-- Snap Brain aim onto a nearby host (offset nest). Optional screenPos improves circle pick.
+function PlaceRaycast.resolveBrainStackPos(
+	hitPos: Vector3,
+	newDiameter: number,
+	ignore: BasePart?,
+	screenPos: Vector2?
+): Vector3
+	local world, _ = BrainSnapPreview.resolve(hitPos, newDiameter, ignore, screenPos)
+	return world
 end
 
 function PlaceRaycast.evaluatePos(worldPos: Vector3, itemId: string?): (boolean, string?)
@@ -70,12 +67,13 @@ function PlaceRaycast.evaluatePos(worldPos: Vector3, itemId: string?): (boolean,
 	end
 	local blocker = PlaceRaycast.findBlockingCoral(worldPos)
 	if blocker then
-		-- Brain-on-Brain stack: same XZ cell is OK when the new center sits above the lower ball.
+		-- Brain-on-Brain stack: same cell OK when the new center sits above the lower ball.
 		if BrainStack.isBrainId(itemId) and BrainStack.isBrainId(blocker:GetAttribute("OceanTD_SpeciesId")) then
 			if worldPos.Y > blocker.Position.Y + 0.25 then
 				return true, nil
 			end
 		end
+		-- Offset stacks may land in a neighboring cell that is empty — only block exact grid hits.
 		return false, "Spot Taken"
 	end
 	return true, nil

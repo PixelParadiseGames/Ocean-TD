@@ -37,6 +37,7 @@ local PlaceConfirmChrome = require(script.Parent:WaitForChild("PlaceConfirmChrom
 local PlaceConfirmHitTest = require(script.Parent:WaitForChild("PlaceConfirmHitTest"))
 local RelocateConsts = require(script.Parent:WaitForChild("RelocateConsts"))
 local RelocateHitTest = require(script.Parent:WaitForChild("RelocateHitTest"))
+local BrainSnapPreview = require(script.Parent:WaitForChild("BrainSnapPreview"))
 
 local RelocateController = {}
 
@@ -103,6 +104,10 @@ local grabFromMoveIcon = false
 local relocateFacingYaw: number? = nil
 local originFacingYaw: number? = nil
 local hasRotated = false
+
+-- Forward decls: makeUi's rot-hold closures call these before their definitions below.
+local rotateSelectedSeaFan: (dir: number) -> ()
+local rotateBrainSnapOrbit: (dir: number) -> ()
 
 local frozen = false
 local savedWalkSpeed = C.DEFAULT_WALK_SPEED
@@ -482,12 +487,16 @@ local function isSelectedSeaFan(): boolean
 	return part ~= nil and CoralVisual.isSeaFan(part:GetAttribute("OceanTD_SpeciesId"))
 end
 
+local function isSelectedBrain(): boolean
+	return part ~= nil and BrainStack.isBrainId(part:GetAttribute("OceanTD_SpeciesId"))
+end
+
 local function layoutWaistChrome(btnPx: number, showCheck: boolean): boolean
 	if not checkBtn or not cancelBtn or not gui then
 		hideWaistChrome()
 		return false
 	end
-	local showRot = isSelectedSeaFan() and not recyclePending
+	local showRot = ((isSelectedSeaFan() or (isSelectedBrain() and BrainSnapPreview.isSnapped())) and not recyclePending)
 	local bb, adornee = PlaceConfirmChrome.layoutOnTorso(
 		btnPx,
 		playerGui,
@@ -506,6 +515,7 @@ local function layoutWaistChrome(btnPx: number, showCheck: boolean): boolean
 end
 
 local function destroyUi()
+	PlaceConfirmChrome.stopRotateHold()
 	uiSession += 1
 	if moveBillboard then
 		moveBillboard:Destroy()
@@ -629,10 +639,14 @@ local function makeUi()
 			target = claimed
 		elseif resolved == "check" or resolved == "cancel" then
 			target = resolved
+		elseif resolved == "rotLeft" or resolved == "rotRight" then
+			target = resolved
+		elseif claimed == "rotLeft" and PlaceConfirmHitTest.isOverGui(screenPos, rotLeftBtn) then
+			target = "rotLeft"
+		elseif claimed == "rotRight" and PlaceConfirmHitTest.isOverGui(screenPos, rotRightBtn) then
+			target = "rotRight"
 		elseif resolved then
 			target = resolved
-		elseif claimed == "rotLeft" or claimed == "rotRight" then
-			target = claimed
 		else
 			return
 		end
@@ -642,6 +656,19 @@ local function makeUi()
 		pressOrigin = nil
 		dragging = false
 		grabFromMoveIcon = false
+		if target == "rotLeft" or target == "rotRight" then
+			local dir = if target == "rotLeft" then 1 else -1
+			local btn = if target == "rotLeft" then rotLeftBtn else rotRightBtn
+			PlaceConfirmChrome.beginRotateHold(btn, function()
+				if BrainSnapPreview.isSnapped() then
+					rotateBrainSnapOrbit(dir)
+				else
+					rotateSelectedSeaFan(dir)
+				end
+			end)
+		else
+			PlaceConfirmChrome.stopRotateHold()
+		end
 	end
 	checkBtn.MouseButton1Down:Connect(function()
 		markDown("check")
@@ -794,10 +821,12 @@ end
 
 local function resolveRelocatePos(worldPos: Vector3): Vector3
 	if not part or not BrainStack.isBrainId(part:GetAttribute("OceanTD_SpeciesId")) then
+		BrainSnapPreview.setVisible(false)
 		return worldPos
 	end
 	local diam = BrainStack.diameterOfPart(part)
-	return PlaceRaycast.resolveBrainStackPos(worldPos, diam, part)
+	BrainSnapPreview.setVisible(true)
+	return PlaceRaycast.resolveBrainStackPos(worldPos, diam, part, aimScreenPos())
 end
 
 local function evaluate(worldPos: Vector3): (boolean, string?)
@@ -1455,6 +1484,9 @@ local function updateAt(worldPos: Vector3)
 	if recyclePending then
 		return
 	end
+	if cinematicHold then
+		return
+	end
 	if not part or not originPos then
 		return
 	end
@@ -1491,7 +1523,7 @@ local function updateAt(worldPos: Vector3)
 	syncChrome()
 end
 
-local function rotateSelectedSeaFan(dir: number)
+rotateSelectedSeaFan = function(dir: number)
 	if recyclePending or not part or not part.Parent then
 		return
 	end
@@ -1510,6 +1542,26 @@ local function rotateSelectedSeaFan(dir: number)
 	CoralVisual.alignMeshToSurface(part, anchor, yaw, nil, if mir then mir.cframe else nil)
 	UiHaptics.pulseShort()
 	syncChrome()
+end
+
+rotateBrainSnapOrbit = function(dir: number)
+	if recyclePending or not part or not part.Parent then
+		return
+	end
+	if not BrainStack.isBrainId(part:GetAttribute("OceanTD_SpeciesId")) then
+		return
+	end
+	local diam = BrainStack.diameterOfPart(part)
+	if BrainSnapPreview.nudgeOrbit(dir, diam, part) then
+		local snap = BrainSnapPreview.getActive()
+		if snap then
+			part.CFrame = CFrame.new(snap.worldPos)
+			moveGridAnchor = snap.worldPos
+			gridAnchorPos = snap.worldPos
+		end
+		UiHaptics.pulseShort()
+		syncChrome()
+	end
 end
 
 local function restorePartLook(p: BasePart?)
@@ -1669,6 +1721,7 @@ local function playIntro(fromScreen: Vector2)
 end
 
 local function clearState()
+	BrainSnapPreview.hide()
 	clearBlockHighlight()
 	ClientPlot.setOutOfPlotFlash(false)
 	restorePartLook(part)
@@ -1823,6 +1876,32 @@ function RelocateController.refreshSelectRing()
 	end
 end
 
+-- After stack reflow / size upgrade: home is the new lifted pose (don't snap back to pre-grow).
+function RelocateController.syncHomeToPart(target: BasePart?)
+	local p = target or part
+	if not p or not p.Parent then
+		return
+	end
+	if part and p ~= part then
+		local pid = p:GetAttribute("OceanTD_PlaceId")
+		if typeof(pid) ~= "string" or pid ~= placeId then
+			return
+		end
+	end
+	local home = CoralVisual.readGridAnchor(p) or p.Position
+	gridAnchorPos = home
+	originPos = home
+	moveGridAnchor = home
+	hasMoved = false
+	hasRotated = false
+	validSpot = true
+	rejectReason = nil
+	if part == p then
+		SelectRing.ensure(selectRing, p, playerGui)
+		syncChrome()
+	end
+end
+
 function RelocateController.clearHoverHighlight()
 	clearHover()
 end
@@ -1835,6 +1914,7 @@ function RelocateController.cancel(instant: boolean?)
 	if busy and not instant then
 		return
 	end
+	BrainSnapPreview.hide()
 	local p = part
 	local origin = originPos
 	local moved = hasMoved
@@ -2100,7 +2180,14 @@ function RelocateController.commit()
 	busy = true
 	PlaceVfx.playSound(toPos)
 	local rf = Remotes.getFunction("RequestMove")
-	local result = rf:InvokeServer(id, fromPos, toPos, yaw)
+	local parentId: string? = nil
+	if BrainStack.isBrainId(part:GetAttribute("OceanTD_SpeciesId")) then
+		local snap = BrainSnapPreview.getActive()
+		if snap and snap.valid and typeof(snap.hostPlaceId) == "string" and snap.hostPlaceId ~= "" then
+			parentId = snap.hostPlaceId
+		end
+	end
+	local result = rf:InvokeServer(id, fromPos, toPos, yaw, parentId)
 	if typeof(result) == "table" and result.ok then
 		UiHaptics.pulseShort()
 		if part and part.Parent then
@@ -2334,6 +2421,19 @@ table.insert(inputConns, UserInputService.InputBegan:Connect(function(input, _pr
 				pendingCoralSwitchScreen = nil
 				fingerDown = false
 				dragging = false
+				if chromeTarget == "rotLeft" or chromeTarget == "rotRight" then
+					local dir = if chromeTarget == "rotLeft" then 1 else -1
+					local btn = if chromeTarget == "rotLeft" then rotLeftBtn else rotRightBtn
+					PlaceConfirmChrome.beginRotateHold(btn, function()
+						if BrainSnapPreview.isSnapped() then
+							rotateBrainSnapOrbit(dir)
+						else
+							rotateSelectedSeaFan(dir)
+						end
+					end)
+				else
+					PlaceConfirmChrome.stopRotateHold()
+				end
 				return
 			end
 		end
@@ -2469,6 +2569,11 @@ table.insert(inputConns, UserInputService.InputEnded:Connect(function(input, _pr
 
 	-- BillboardGui Click is flaky — fire chrome actions on release from the press target.
 	if active and wasChrome and chromeTarget then
+		if chromeTarget == "rotLeft" or chromeTarget == "rotRight" then
+			PlaceConfirmChrome.stopRotateHold()
+			return
+		end
+		PlaceConfirmChrome.stopRotateHold()
 		if chromeTarget == "check" then
 			RelocateController.commit()
 			return
@@ -2477,35 +2582,6 @@ table.insert(inputConns, UserInputService.InputEnded:Connect(function(input, _pr
 			return
 		elseif chromeTarget == "recycle" then
 			RelocateController.beginRecycleConfirm()
-			return
-		elseif chromeTarget == "rotLeft" then
-			-- Ignore rot if release is clearly on Confirm/Cancel.
-			local still = resolveRelocateChrome(screenPos)
-			if still == "check" then
-				RelocateController.commit()
-				return
-			elseif still == "cancel" then
-				RelocateController.cancel()
-				return
-			end
-			if rotLeftBtn then
-				PlaceConfirmChrome.playRotatePressFeedback(rotLeftBtn)
-			end
-			rotateSelectedSeaFan(1)
-			return
-		elseif chromeTarget == "rotRight" then
-			local still = resolveRelocateChrome(screenPos)
-			if still == "check" then
-				RelocateController.commit()
-				return
-			elseif still == "cancel" then
-				RelocateController.cancel()
-				return
-			end
-			if rotRightBtn then
-				PlaceConfirmChrome.playRotatePressFeedback(rotRightBtn)
-			end
-			rotateSelectedSeaFan(-1)
 			return
 		end
 	end

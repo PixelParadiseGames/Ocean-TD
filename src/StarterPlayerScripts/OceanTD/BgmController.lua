@@ -65,8 +65,13 @@ local function rebuildPlayOrder()
 			local j = math.random(1, i)
 			playOrder[i], playOrder[j] = playOrder[j], playOrder[i]
 		end
+		orderIndex = 1
+	elseif #playOrder > 1 then
+		-- Sequential playlist, but start on a random track each session.
+		orderIndex = math.random(1, #playOrder)
+	else
+		orderIndex = 1
 	end
-	orderIndex = 1
 end
 
 local function ensureSound(): Sound

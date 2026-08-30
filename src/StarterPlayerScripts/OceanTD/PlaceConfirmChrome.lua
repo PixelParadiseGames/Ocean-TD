@@ -9,6 +9,7 @@ local GuiService = game:GetService("GuiService")
 local TweenService = game:GetService("TweenService")
 local SoundService = game:GetService("SoundService")
 local Workspace = game:GetService("Workspace")
+local RunService = game:GetService("RunService")
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local UiCircles = require(ReplicatedStorage:WaitForChild("OceanTD"):WaitForChild("Shared"):WaitForChild("UiCircles"))
@@ -168,6 +169,45 @@ function PlaceConfirmChrome.playRotatePressFeedback(btn: GuiObject)
 	task.delay(3, function()
 		if s.Parent then
 			s:Destroy()
+		end
+	end)
+end
+
+local ROT_HOLD_INTERVAL = 0.5
+local rotHoldConn: RBXScriptConnection? = nil
+local rotHoldToken = 0
+
+function PlaceConfirmChrome.stopRotateHold()
+	rotHoldToken += 1
+	if rotHoldConn then
+		rotHoldConn:Disconnect()
+		rotHoldConn = nil
+	end
+end
+
+-- Immediate step, then another every 0.5s while held. Call stopRotateHold on release.
+function PlaceConfirmChrome.beginRotateHold(btn: GuiObject?, onStep: () -> ())
+	-- Ignore duplicate start from both Gui MouseButton1Down and UIS InputBegan.
+	if rotHoldConn then
+		return
+	end
+	local token = rotHoldToken
+	if btn then
+		PlaceConfirmChrome.playRotatePressFeedback(btn)
+	end
+	onStep()
+	local elapsed = 0
+	rotHoldConn = RunService.Heartbeat:Connect(function(dt)
+		if token ~= rotHoldToken then
+			return
+		end
+		elapsed += dt
+		while elapsed >= ROT_HOLD_INTERVAL do
+			elapsed -= ROT_HOLD_INTERVAL
+			if btn and btn.Parent then
+				PlaceConfirmChrome.playRotatePressFeedback(btn)
+			end
+			onStep()
 		end
 	end)
 end

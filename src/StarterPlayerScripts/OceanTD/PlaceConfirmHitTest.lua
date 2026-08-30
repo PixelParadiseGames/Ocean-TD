@@ -79,7 +79,8 @@ function PlaceConfirmHitTest.resolveTarget(
 	-- Confirm stacks above Close; Close + rot share the bottom row.
 	local bottomRef = if rotLeftBtn and rotLeftBtn.Visible then rotLeftBtn else cancelBtn
 	local midY = twoRowMidY(checkBtn, bottomRef)
-	local rotPad = 14 -- generous so rot never misses and falls through to coral picks
+	-- No pad: pad was stealing presses in the gap above the rot buttons.
+	local rotPad = 0
 	if midY then
 		local onTop = y < midY or yAlt < midY
 		if onTop then

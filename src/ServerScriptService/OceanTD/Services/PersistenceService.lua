@@ -157,6 +157,12 @@ local function sanitizeLayout(raw: any): { LayoutObject }
 				entry.webColorG = math.clamp(webColorG, 0, 1)
 				entry.webColorB = math.clamp(webColorB, 0, 1)
 			end
+			if typeof(obj.placeId) == "string" and obj.placeId ~= "" then
+				entry.placeId = obj.placeId
+			end
+			if typeof(obj.parentPlaceId) == "string" and obj.parentPlaceId ~= "" then
+				entry.parentPlaceId = obj.parentPlaceId
+			end
 			table.insert(layout, entry)
 		end
 	end
@@ -189,6 +195,8 @@ local function cloneLayout(layout: { LayoutObject }): { LayoutObject }
 			webColorR = obj.webColorR,
 			webColorG = obj.webColorG,
 			webColorB = obj.webColorB,
+			placeId = obj.placeId,
+			parentPlaceId = obj.parentPlaceId,
 		})
 	end
 	return out

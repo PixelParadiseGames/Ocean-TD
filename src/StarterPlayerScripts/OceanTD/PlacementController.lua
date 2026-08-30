@@ -38,8 +38,10 @@ local PlaceAimScreen = require(script.Parent:WaitForChild("PlaceAimScreen"))
 local PlaceBlockFlash = require(script.Parent:WaitForChild("PlaceBlockFlash"))
 local PlaceRaycast = require(script.Parent:WaitForChild("PlaceRaycast"))
 local PlaceArmDisarmAnim = require(script.Parent:WaitForChild("PlaceArmDisarmAnim"))
+local BrainSnapPreview = require(script.Parent:WaitForChild("BrainSnapPreview"))
 local CoralRangeRings = require(script.Parent:WaitForChild("CoralRangeRings"))
 local CoralSize = require(oceanRoot:WaitForChild("Shared"):WaitForChild("CoralSize"))
+local BrainStack = require(oceanRoot:WaitForChild("Shared"):WaitForChild("BrainStack"))
 
 local PlacementController = {}
 
@@ -408,6 +410,7 @@ end
 
 local function clearGhost()
 	stopGhostScaleIn()
+	BrainSnapPreview.hide()
 	PlaceBlockFlash.clear()
 	ClientPlot.setOutOfPlotFlash(false)
 	warnLabel = nil
@@ -431,6 +434,7 @@ local function clearGhost()
 end
 
 local function destroyConfirmUi()
+	PlaceConfirmChrome.stopRotateHold()
 	if checkPromptConn then
 		checkPromptConn:Disconnect()
 		checkPromptConn = nil
@@ -584,8 +588,11 @@ local function resolvePlaceAnchor(rawPos: Vector3): Vector3
 			diam = CoralVisual.randomBrainDiameter()
 			ghostPlaceDiameter = diam
 		end
-		return PlaceRaycast.resolveBrainStackPos(rawPos, diam :: number, nil)
+		BrainSnapPreview.setVisible(true)
+		local screen = PlaceRaycast.getPlaceAimScreenPos(placeAimOpts())
+		return PlaceRaycast.resolveBrainStackPos(rawPos, diam :: number, nil, screen)
 	end
+	BrainSnapPreview.setVisible(false)
 	return rawPos
 end
 
@@ -944,6 +951,7 @@ local function syncConfirmButtonsImpl()
 	cancelBtn.Visible = true
 	local showRot = armedItemId == "SeaFan"
 		or CoralVisual.isSeaFan(if armedItemId then getSpeciesIdForItem(armedItemId) else nil)
+		or (armedItemId == "BrainCoral" and BrainSnapPreview.isSnapped())
 	local bb, adornee = PlaceConfirmChrome.layoutOnTorso(
 		BTN_SIZE,
 		playerGui,
@@ -1003,6 +1011,22 @@ local function rotateSeaFanGhost(dir: number)
 	local mir = ClientPlot.get()
 	CoralVisual.alignMeshToSurface(ghost, placeAnchor, yaw, nil, if mir then mir.cframe else nil)
 	UiHaptics.pulseShort()
+end
+
+local function rotateBrainSnapOrbit(dir: number)
+	if armedItemId ~= "BrainCoral" or not ghost then
+		return
+	end
+	local diam = BrainStack.diameterOfPart(ghost)
+	if BrainSnapPreview.nudgeOrbit(dir, diam, nil) then
+		local snap = BrainSnapPreview.getActive()
+		if snap and ghost.Parent then
+			ghost.CFrame = CFrame.new(snap.worldPos)
+			placeAnchor = snap.worldPos
+		end
+		UiHaptics.pulseShort()
+		syncConfirmButtons()
+	end
 end
 
 local function makeConfirmUiImpl()
@@ -1093,10 +1117,14 @@ local function makeConfirmUiImpl()
 		elseif resolved == "check" or resolved == "cancel" then
 			-- Rot Gui got the event but pointer is on Confirm/Cancel — promote.
 			target = resolved
+		elseif resolved == "rotLeft" or resolved == "rotRight" then
+			target = resolved
+		elseif claimed == "rotLeft" and PlaceConfirmHitTest.isOverGui(screenPos, rotLeftBtn) then
+			target = "rotLeft"
+		elseif claimed == "rotRight" and PlaceConfirmHitTest.isOverGui(screenPos, rotRightBtn) then
+			target = "rotRight"
 		elseif resolved then
 			target = resolved
-		elseif claimed == "rotLeft" or claimed == "rotRight" then
-			target = claimed
 		else
 			return
 		end
@@ -1105,6 +1133,19 @@ local function makeConfirmUiImpl()
 		aimFingerDown = false
 		confirmPressOrigin = nil
 		confirmDragging = false
+		if target == "rotLeft" or target == "rotRight" then
+			local dir = if target == "rotLeft" then 1 else -1
+			local btn = if target == "rotLeft" then rotLeftBtn else rotRightBtn
+			PlaceConfirmChrome.beginRotateHold(btn, function()
+				if BrainSnapPreview.isSnapped() then
+					rotateBrainSnapOrbit(dir)
+				else
+					rotateSeaFanGhost(dir)
+				end
+			end)
+		else
+			PlaceConfirmChrome.stopRotateHold()
+		end
 	end
 
 	-- MouseButton1Down fires on the button; also blocks ghost-aim if UIS already peeked.
@@ -1517,13 +1558,27 @@ local function commitPlace()
 		return
 	end
 	local placePos = confirmPos
+	if ghost and ghost.Parent and armedItemId == "BrainCoral" then
+		-- Save the exact stacked pose the ghost shows (not a stale aim sample).
+		placePos = ghost.Position
+		placeAnchor = placePos
+		confirmPos = placePos
+	end
 	local vfxColor = if ghost then ghost.Color else Color3.fromRGB(100, 200, 255)
 	-- Sound + hand-orb fly on ✓ immediately; don't wait for the server.
 	PlaceVfx.playSound(placePos)
 	HandOrb.flyToPlant(placePos)
 
 	local rf = Remotes.getFunction("RequestPlace")
-	local placePayload: any = ghostPlaceDiameter
+	local placePayload: any = {
+		diameter = ghostPlaceDiameter,
+	}
+	if armedItemId == "BrainCoral" then
+		local snap = BrainSnapPreview.getActive()
+		if snap and snap.valid and typeof(snap.hostPlaceId) == "string" and snap.hostPlaceId ~= "" then
+			placePayload.parentPlaceId = snap.hostPlaceId
+		end
+	end
 	if CoralVisual.isMeshSpecies(armedItemId) or ghostPlaceVariant ~= nil then
 		local yaw = ghostPlaceFacingYaw
 		if typeof(yaw) ~= "number" and ghost then
@@ -1532,15 +1587,12 @@ local function commitPlace()
 		if typeof(yaw) ~= "number" then
 			yaw = 0
 		end
-		placePayload = {
-			diameter = ghostPlaceDiameter,
-			variantIndex = ghostPlaceVariant,
-			scaleMult = ghostPlaceScale,
-			sizeClass = 1,
-			scaleWidth = ghostPlaceScaleWidth,
-			scaleHeight = ghostPlaceScaleHeight,
-			facingYaw = yaw,
-		}
+		placePayload.variantIndex = ghostPlaceVariant
+		placePayload.scaleMult = ghostPlaceScale
+		placePayload.sizeClass = 1
+		placePayload.scaleWidth = ghostPlaceScaleWidth
+		placePayload.scaleHeight = ghostPlaceScaleHeight
+		placePayload.facingYaw = yaw
 	end
 	local result = rf:InvokeServer(armedItemId, placePos, placePayload)
 	if typeof(result) == "table" and result.ok then
@@ -1964,6 +2016,17 @@ table.insert(inputConns, UserInputService.InputBegan:Connect(function(input, _pr
 			if target then
 				chromePressTarget = target
 				chromeBtnPointerDown = true
+				if target == "rotLeft" or target == "rotRight" then
+					local dir = if target == "rotLeft" then 1 else -1
+					local btn = if target == "rotLeft" then rotLeftBtn else rotRightBtn
+					PlaceConfirmChrome.beginRotateHold(btn, function()
+						if BrainSnapPreview.isSnapped() then
+							rotateBrainSnapOrbit(dir)
+						else
+							rotateSeaFanGhost(dir)
+						end
+					end)
+				end
 			else
 				-- Remember the press even if it starts on the backpack (drag-off parks).
 				placePointerHeld = true
@@ -2025,6 +2088,19 @@ table.insert(inputConns, UserInputService.InputBegan:Connect(function(input, _pr
 		aimFingerDown = false
 		chromePressTarget = chromeTarget
 		chromeBtnPointerDown = true
+		if chromeTarget == "rotLeft" or chromeTarget == "rotRight" then
+			local dir = if chromeTarget == "rotLeft" then 1 else -1
+			local btn = if chromeTarget == "rotLeft" then rotLeftBtn else rotRightBtn
+			PlaceConfirmChrome.beginRotateHold(btn, function()
+				if BrainSnapPreview.isSnapped() then
+					rotateBrainSnapOrbit(dir)
+				else
+					rotateSeaFanGhost(dir)
+				end
+			end)
+		else
+			PlaceConfirmChrome.stopRotateHold()
+		end
 		return
 	end
 	-- Touches on the open backpack list must not aim/park the ghost under the panel.
@@ -2131,20 +2207,15 @@ table.insert(inputConns, UserInputService.InputEnded:Connect(function(input, _pr
 		placePointerHeld = false
 		confirmPressOrigin = nil
 		confirmDragging = false
+		if target == "rotLeft" or target == "rotRight" then
+			PlaceConfirmChrome.stopRotateHold()
+			return
+		end
+		PlaceConfirmChrome.stopRotateHold()
 		if target == "check" then
 			onCheck()
 		elseif target == "cancel" then
 			onCancel()
-		elseif target == "rotLeft" then
-			if rotLeftBtn then
-				PlaceConfirmChrome.playRotatePressFeedback(rotLeftBtn)
-			end
-			rotateSeaFanGhost(1)
-		elseif target == "rotRight" then
-			if rotRightBtn then
-				PlaceConfirmChrome.playRotatePressFeedback(rotRightBtn)
-			end
-			rotateSeaFanGhost(-1)
 		end
 		return
 	end

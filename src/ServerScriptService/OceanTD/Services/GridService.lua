@@ -4,6 +4,7 @@
 
 local PlotTypes = require(game:GetService("ReplicatedStorage"):WaitForChild("OceanTD"):WaitForChild("Shared"):WaitForChild("PlotTypes"))
 local GridMath = require(game:GetService("ReplicatedStorage"):WaitForChild("OceanTD"):WaitForChild("Shared"):WaitForChild("GridMath"))
+local BrainStack = require(game:GetService("ReplicatedStorage"):WaitForChild("OceanTD"):WaitForChild("Shared"):WaitForChild("BrainStack"))
 
 type LayoutObject = PlotTypes.LayoutObject
 type PlotId = PlotTypes.PlotId
@@ -33,6 +34,8 @@ export type CellData = {
 	webColorR: number?,
 	webColorG: number?,
 	webColorB: number?,
+	placeId: string?,
+	parentPlaceId: string?,
 }
 
 local GridService = {}
@@ -95,6 +98,96 @@ function GridService.getCellAtGrid(plotId: PlotId, gx: number, gy: number, gz: n
 	return cells[compoundKey(plotId, math.round(gx), math.round(gy), math.round(gz))]
 end
 
+function GridService.findCellByPlaceId(plotId: PlotId, placeId: string): CellData?
+	if placeId == "" then
+		return nil
+	end
+	for _, cell in pairs(cells) do
+		if cell.plotId == plotId and cell.placeId == placeId then
+			return cell
+		end
+	end
+	return nil
+end
+
+-- Prefer exact VisualPos match (stacked brains often sit off their rounded grid key).
+function GridService.findCellByLocalPos(plotId: PlotId, lx: number, ly: number, lz: number, tol: number?): CellData?
+	local t = if typeof(tol) == "number" then tol else 0.08
+	local best: CellData? = nil
+	local bestDist = math.huge
+	for _, cell in pairs(cells) do
+		if cell.plotId == plotId then
+			local dx = cell.lx - lx
+			local dy = cell.ly - ly
+			local dz = cell.lz - lz
+			local d = dx * dx + dy * dy + dz * dz
+			if d < bestDist and d <= t * t then
+				bestDist = d
+				best = cell
+			end
+		end
+	end
+	return best
+end
+
+function GridService.setPlaceMeta(plotId: PlotId, gx: number, gy: number, gz: number, placeId: string?, parentPlaceId: string?): boolean
+	local cell = GridService.getCellAtGrid(plotId, gx, gy, gz)
+	if not cell then
+		return false
+	end
+	if typeof(placeId) == "string" and placeId ~= "" then
+		cell.placeId = placeId
+	end
+	if typeof(parentPlaceId) == "string" and parentPlaceId ~= "" then
+		cell.parentPlaceId = parentPlaceId
+	else
+		cell.parentPlaceId = nil
+	end
+	return true
+end
+
+function GridService.setParentPlaceId(cell: CellData, parentPlaceId: string?)
+	if typeof(parentPlaceId) == "string" and parentPlaceId ~= "" then
+		cell.parentPlaceId = parentPlaceId
+	else
+		cell.parentPlaceId = nil
+	end
+end
+
+-- Move a cell to a new VisualPos; preserves identity fields; re-keys grid occupancy.
+function GridService.relocateCellLocal(cell: CellData, lx: number, ly: number, lz: number): boolean
+	local oldKey = compoundKey(cell.plotId, cell.gx, cell.gy, cell.gz)
+	if cells[oldKey] ~= cell then
+		-- Key drift — find by identity.
+		for key, c in pairs(cells) do
+			if c == cell then
+				cells[key] = nil
+				break
+			end
+		end
+	else
+		cells[oldKey] = nil
+	end
+	local gx, gy, gz = GridMath.worldToGrid(Vector3.new(lx, ly, lz), Vector3.zero)
+	-- Keep unique gy if target key occupied by someone else.
+	local key = compoundKey(cell.plotId, gx, gy, gz)
+	if cells[key] and cells[key] ~= cell then
+		gy = GridService.nextFreeGyInColumn(cell.plotId, gx, gz, gy)
+		key = compoundKey(cell.plotId, gx, gy, gz)
+	end
+	if cells[key] and cells[key] ~= cell then
+		return false
+	end
+	cell.lx = lx
+	cell.ly = ly
+	cell.lz = lz
+	cell.gx = math.round(gx)
+	cell.gy = math.round(gy)
+	cell.gz = math.round(gz)
+	cells[key] = cell
+	return true
+end
+
 function GridService.isOccupied(plotId: PlotId, lx: number, ly: number, lz: number): boolean
 	return GridService.getCell(plotId, lx, ly, lz) ~= nil
 end
@@ -107,6 +200,151 @@ function GridService.findTopBrainInColumn(plotId: PlotId, gx: number, gz: number
 	for _, cell in pairs(cells) do
 		if cell.plotId == plotId and cell.id == "BrainCoral" and cell.gx == rx and cell.gz == rz then
 			if not best or cell.ly > best.ly or (cell.ly == best.ly and cell.gy > best.gy) then
+				best = cell
+			end
+		end
+	end
+	return best
+end
+
+-- Closest BrainCoral host for offset stacking (by XZ distance to cell center).
+function GridService.countBrainChildren(
+	plotId: PlotId,
+	host: CellData,
+	ignoreGx: number?,
+	ignoreGy: number?,
+	ignoreGz: number?
+): number
+	local hostId = host.placeId
+	local n = 0
+	for _, cell in pairs(cells) do
+		if cell.plotId == plotId and cell.id == "BrainCoral" and cell ~= host then
+			if ignoreGx == cell.gx and ignoreGy == cell.gy and ignoreGz == cell.gz then
+				continue
+			end
+			local linked = typeof(hostId) == "string" and hostId ~= "" and cell.parentPlaceId == hostId
+			if linked then
+				n += 1
+			end
+		end
+	end
+	return n
+end
+
+local function brainRootCell(plotId: PlotId, host: CellData, ignoreGx: number?, ignoreGy: number?, ignoreGz: number?): CellData
+	local byId: { [string]: CellData } = {}
+	for _, cell in pairs(cells) do
+		if cell.plotId == plotId and cell.id == "BrainCoral" then
+			if ignoreGx == cell.gx and ignoreGy == cell.gy and ignoreGz == cell.gz then
+				continue
+			end
+			if typeof(cell.placeId) == "string" and cell.placeId ~= "" then
+				byId[cell.placeId] = cell
+			end
+		end
+	end
+	local cur = host
+	local guard = 0
+	while guard < 64 do
+		guard += 1
+		local pid = cur.parentPlaceId
+		if typeof(pid) == "string" and pid ~= "" and byId[pid] then
+			cur = byId[pid]
+		else
+			break
+		end
+	end
+	return cur
+end
+
+function GridService.countBrainStackSize(
+	plotId: PlotId,
+	host: CellData,
+	ignoreGx: number?,
+	ignoreGy: number?,
+	ignoreGz: number?
+): number
+	local root = brainRootCell(plotId, host, ignoreGx, ignoreGy, ignoreGz)
+	local rootId = root.placeId
+	local byId: { [string]: CellData } = {}
+	local list: { CellData } = {}
+	for _, cell in pairs(cells) do
+		if cell.plotId == plotId and cell.id == "BrainCoral" then
+			if ignoreGx == cell.gx and ignoreGy == cell.gy and ignoreGz == cell.gz then
+				continue
+			end
+			table.insert(list, cell)
+			if typeof(cell.placeId) == "string" and cell.placeId ~= "" then
+				byId[cell.placeId] = cell
+			end
+		end
+	end
+	local n = 0
+	for _, cell in ipairs(list) do
+		local cur = cell
+		local inTree = cur == root
+		local guard = 0
+		while not inTree and guard < 64 do
+			guard += 1
+			local pid = cur.parentPlaceId
+			if typeof(pid) ~= "string" or pid == "" or not byId[pid] then
+				break
+			end
+			cur = byId[pid]
+			if cur == root or (typeof(rootId) == "string" and cur.placeId == rootId) then
+				inTree = true
+				break
+			end
+		end
+		if inTree then
+			n += 1
+		end
+	end
+	return n
+end
+
+function GridService.brainHasFreeSlot(
+	plotId: PlotId,
+	host: CellData,
+	ignoreGx: number?,
+	ignoreGy: number?,
+	ignoreGz: number?
+): boolean
+	if GridService.countBrainStackSize(plotId, host, ignoreGx, ignoreGy, ignoreGz) >= BrainStack.MAX_STACK_SIZE then
+		return false
+	end
+	local class = if typeof(host.sizeClass) == "number" then host.sizeClass else BrainStack.classFromDiameter(
+		if typeof(host.diameter) == "number" and host.diameter > 0 then host.diameter else 4
+	)
+	local maxKids = BrainStack.maxChildrenForClass(class)
+	return GridService.countBrainChildren(plotId, host, ignoreGx, ignoreGy, ignoreGz) < maxKids
+end
+
+function GridService.findNearestBrainHost(
+	plotId: PlotId,
+	localPos: Vector3,
+	ignoreGx: number?,
+	ignoreGy: number?,
+	ignoreGz: number?
+): CellData?
+	local best: CellData? = nil
+	local bestDist = math.huge
+	for _, cell in pairs(cells) do
+		if cell.plotId == plotId and cell.id == "BrainCoral" then
+			if ignoreGx == cell.gx and ignoreGy == cell.gy and ignoreGz == cell.gz then
+				continue
+			end
+			if not GridService.brainHasFreeSlot(plotId, cell, ignoreGx, ignoreGy, ignoreGz) then
+				continue
+			end
+			local d0 = if typeof(cell.diameter) == "number" and cell.diameter > 0 then cell.diameter else 4
+			local hostPos = Vector3.new(cell.lx, cell.ly, cell.lz)
+			local dx = localPos.X - hostPos.X
+			local dz = localPos.Z - hostPos.Z
+			local horiz = math.sqrt(dx * dx + dz * dz)
+			local engage = d0 * 0.5 + 1.25 + d0 * 0.35
+			if horiz <= engage and horiz < bestDist then
+				bestDist = horiz
 				best = cell
 			end
 		end
@@ -293,11 +531,48 @@ function GridService.vacate(
 	local _, _, _, key = resolveGridKey(plotId, lx, ly, lz, gx, gy, gz)
 	local cell = cells[key]
 	if not cell then
+		-- Stacked brains often use a bumped gy that doesn't match worldToGrid(VisualPos).
+		cell = GridService.findCellByLocalPos(plotId, lx, ly, lz, 0.35)
+		if cell then
+			key = compoundKey(cell.plotId, cell.gx, cell.gy, cell.gz)
+		end
+	end
+	if not cell then
 		return false, nil
 	end
-	cells[key] = nil
+	if cells[key] == cell then
+		cells[key] = nil
+	else
+		for k, c in pairs(cells) do
+			if c == cell then
+				cells[k] = nil
+				break
+			end
+		end
+	end
 	plotObjectCounts[plotId] = math.max(0, (plotObjectCounts[plotId] or 0) - 1)
 	return true, cell
+end
+
+function GridService.vacateCell(cell: CellData): boolean
+	local key = compoundKey(cell.plotId, cell.gx, cell.gy, cell.gz)
+	if cells[key] == cell then
+		cells[key] = nil
+	else
+		local found = false
+		for k, c in pairs(cells) do
+			if c == cell then
+				cells[k] = nil
+				found = true
+				break
+			end
+		end
+		if not found then
+			return false
+		end
+	end
+	plotObjectCounts[cell.plotId] = math.max(0, (plotObjectCounts[cell.plotId] or 0) - 1)
+	return true
 end
 
 function GridService.hydrate(plotId: PlotId, ownerUserId: number, layout: { LayoutObject }, _boundsCFrame: CFrame)
@@ -357,6 +632,12 @@ function GridService.hydrate(plotId: PlotId, ownerUserId: number, layout: { Layo
 						tonumber(obj.webColorG),
 						tonumber(obj.webColorB)
 					)
+					if typeof(obj.placeId) == "string" and obj.placeId ~= "" then
+						cell.placeId = obj.placeId
+					end
+					if typeof(obj.parentPlaceId) == "string" and obj.parentPlaceId ~= "" then
+						cell.parentPlaceId = obj.parentPlaceId
+					end
 				end
 			end
 		end
@@ -405,6 +686,8 @@ function GridService.snapshot(plotId: PlotId): { LayoutObject }
 				webColorR = cell.webColorR,
 				webColorG = cell.webColorG,
 				webColorB = cell.webColorB,
+				placeId = cell.placeId,
+				parentPlaceId = cell.parentPlaceId,
 			})
 		end
 	end

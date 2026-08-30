@@ -37,6 +37,23 @@ local function cloneLayout(layout: { LayoutObject }): { LayoutObject }
 			gx = obj.gx,
 			gy = obj.gy,
 			gz = obj.gz,
+			diameter = obj.diameter,
+			sizeTier = obj.sizeTier,
+			sizeClass = obj.sizeClass,
+			colorIndex = obj.colorIndex,
+			colorR = obj.colorR,
+			colorG = obj.colorG,
+			colorB = obj.colorB,
+			variantIndex = obj.variantIndex,
+			scaleMult = obj.scaleMult,
+			scaleWidth = obj.scaleWidth,
+			scaleHeight = obj.scaleHeight,
+			facingYaw = obj.facingYaw,
+			webColorR = obj.webColorR,
+			webColorG = obj.webColorG,
+			webColorB = obj.webColorB,
+			placeId = obj.placeId,
+			parentPlaceId = obj.parentPlaceId,
 		})
 	end
 	return out
@@ -184,17 +201,21 @@ function PlotSaveService.loadSlot(player: Player, slotIndex: number): any
 		return { ok = false, errorCode = "NoPlot" }
 	end
 
-	-- Snapshot current work into the current active slot before switching.
-	local currentLayout = GridService.snapshot(plotId)
-	local currentActive = saves.activeIndex
-	PersistenceService.writeSlotLayout(player, currentActive, currentLayout, true)
-
+	-- Capture destination layout FIRST — never clobber a saved slot with live before apply.
 	local layoutToApply: { LayoutObject }
 	if target.saved then
 		layoutToApply = cloneLayout(target.layout)
 	else
-		-- NEW: claim empty preset.
 		layoutToApply = {}
+	end
+
+	local currentActive = saves.activeIndex
+	-- Only auto-save the slot we're leaving. Reloading the same slot must keep its saved meta.
+	-- Use PlacementService.snapshotLayout so live visual colors/web paint are written into the slot.
+	if currentActive ~= idx then
+		PersistenceService.writeSlotLayout(player, currentActive, PlacementService.snapshotLayout(plotId), true)
+	end
+	if not target.saved then
 		PersistenceService.writeSlotLayout(player, idx, {}, true)
 	end
 
@@ -204,15 +225,18 @@ function PlotSaveService.loadSlot(player: Player, slotIndex: number): any
 	end
 
 	PersistenceService.setActiveSlotIndex(player, idx)
-	-- Re-write active layout from what actually applied (grid truth).
-	local live = GridService.snapshot(plotId)
-	PersistenceService.writeSlotLayout(player, idx, live, true)
-	if #live == 0 then
+	-- Keep the applied save as canonical slot data (do not replace with a lossy live re-snapshot).
+	PersistenceService.writeSlotLayout(player, idx, layoutToApply, true)
+	if #layoutToApply == 0 then
 		PersistenceService.allowIntentionalClear(player.UserId)
 	end
 
 	UndoService.clear(player)
-	persistNow(player, "load-slot-" .. tostring(idx))
+	-- Persist the same rich layout we applied — not a fresh live snapshot that can drop fields.
+	PlayerSession.setSaving(player, true)
+	local ok = PersistenceService.save(player, layoutToApply)
+	PlayerSession.setSaving(player, false)
+	log("Persist load-slot-" .. tostring(idx), "ok=", ok, player.Name)
 
 	log("Loaded slot", idx, "for", player.Name, "placed=", applied.placed, "wasSaved=", target.saved)
 	local state = PlotSaveService.getClientState(player)
