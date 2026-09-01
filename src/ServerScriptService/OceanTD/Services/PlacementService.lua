@@ -11,6 +11,7 @@ local HttpService = game:GetService("HttpService")
 
 local oceanShared = ReplicatedStorage:WaitForChild("OceanTD"):WaitForChild("Shared")
 local GridMath = require(oceanShared:WaitForChild("GridMath"))
+local LayoutRestore = require(oceanShared:WaitForChild("LayoutRestore"))
 local SpeciesCatalog = require(oceanShared:WaitForChild("SpeciesCatalog"))
 local CoralVisual = require(oceanShared:WaitForChild("CoralVisual"))
 local CoralSize = require(oceanShared:WaitForChild("CoralSize"))
@@ -119,10 +120,10 @@ local function writeCellColor(
 	gx: number?,
 	gy: number?,
 	gz: number?,
-	colorIndex: number,
-	colorR: number,
-	colorG: number,
-	colorB: number,
+	colorIndex: number?,
+	colorR: number?,
+	colorG: number?,
+	colorB: number?,
 	webR: number?,
 	webG: number?,
 	webB: number?
@@ -144,14 +145,16 @@ local function writeCellColor(
 	return ok
 end
 
--- Pull color attrs from a live visual into a layout object (snapshot enrichment).
+-- Pull color attrs from a live visual when the grid cell has no saved paint yet.
 local function enrichLayoutObjFromVisual(obj: any, visual: BasePart)
+	local hasCellPaint = typeof(obj.colorIndex) == "number"
+		or (typeof(obj.colorR) == "number" and typeof(obj.colorG) == "number" and typeof(obj.colorB) == "number")
+	if hasCellPaint then
+		return
+	end
 	local idxAttr = visual:GetAttribute("OceanTD_ColorIndex")
 	if typeof(idxAttr) == "number" then
 		obj.colorIndex = PlotOutlineColors.clampCoralIndex(idxAttr)
-	elseif typeof(obj.colorIndex) ~= "number" then
-		-- Legacy place with only RGB on the part — keep a stable palette tag.
-		obj.colorIndex = PlotOutlineColors.DEFAULT_INDEX
 	end
 	local r = visual:GetAttribute("OceanTD_RestR")
 	local g = visual:GetAttribute("OceanTD_RestG")
@@ -177,6 +180,30 @@ local function enrichLayoutObjFromVisual(obj: any, visual: BasePart)
 		obj.webColorR = math.clamp(wr, 0, 1)
 		obj.webColorG = math.clamp(wg, 0, 1)
 		obj.webColorB = math.clamp(wb, 0, 1)
+	end
+end
+
+-- After a fresh place, persist species-default RGB on the cell (no palette index until recolor).
+local function syncDefaultVisualPaintToCell(plotId: string, gx: number, gy: number, gz: number, visual: BasePart)
+	local cell = GridService.getCellAtGrid(plotId, gx, gy, gz)
+	if not cell then
+		return
+	end
+	local idxAttr = visual:GetAttribute("OceanTD_ColorIndex")
+	if typeof(idxAttr) == "number" then
+		cell.colorIndex = PlotOutlineColors.clampCoralIndex(idxAttr)
+	end
+	local _, color = CoralVisual.readRestLook(visual)
+	cell.colorR = color.R
+	cell.colorG = color.G
+	cell.colorB = color.B
+	local wr = visual:GetAttribute("OceanTD_WebRestR")
+	local wg = visual:GetAttribute("OceanTD_WebRestG")
+	local wb = visual:GetAttribute("OceanTD_WebRestB")
+	if typeof(wr) == "number" and typeof(wg) == "number" and typeof(wb) == "number" then
+		cell.webColorR = wr
+		cell.webColorG = wg
+		cell.webColorB = wb
 	end
 end
 
@@ -397,21 +424,23 @@ function PlacementService.snapshotLayout(plotId: string): { any }
 			local visual = findVisualByPlaceId(plotId, pid)
 			if visual then
 				enrichLayoutObjFromVisual(obj, visual)
-				-- Keep the live grid cell in sync so bare GridService.snapshot also stays correct.
-				writeCellColor(
-					plotId,
-					pid,
-					obj.gx,
-					obj.gy,
-					obj.gz,
-					obj.colorIndex,
-					obj.colorR,
-					obj.colorG,
-					obj.colorB,
-					obj.webColorR,
-					obj.webColorG,
-					obj.webColorB
-				)
+				-- Backfill grid cells that still lack paint after legacy places.
+				if typeof(obj.colorR) == "number" and typeof(obj.colorG) == "number" and typeof(obj.colorB) == "number" then
+					writeCellColor(
+						plotId,
+						pid,
+						obj.gx,
+						obj.gy,
+						obj.gz,
+						obj.colorIndex,
+						obj.colorR,
+						obj.colorG,
+						obj.colorB,
+						obj.webColorR,
+						obj.webColorG,
+						obj.webColorB
+					)
+				end
 			end
 		end
 	end
@@ -433,12 +462,12 @@ function PlacementService.hydrateVisuals(plotId: string, boundsCFrame: CFrame)
 		end
 		local paintIdx: number? = if typeof(cell.colorIndex) == "number"
 			then PlotOutlineColors.clampCoralIndex(cell.colorIndex)
-			elseif typeof(cell.colorR) == "number" and typeof(cell.colorG) == "number" and typeof(cell.colorB) == "number"
-			then PlotOutlineColors.DEFAULT_INDEX
 			else nil
 		local paint: Color3? = nil
 		if paintIdx then
 			paint = PlotOutlineColors.resolveCoralPaint(paintIdx, cell.colorR, cell.colorG, cell.colorB)
+		elseif typeof(cell.colorR) == "number" and typeof(cell.colorG) == "number" and typeof(cell.colorB) == "number" then
+			paint = Color3.new(cell.colorR, cell.colorG, cell.colorB)
 		end
 		local visual = PlacementService.spawnVisual(
 			plotId,
@@ -483,11 +512,14 @@ function PlacementService.hydrateVisuals(plotId: string, boundsCFrame: CFrame)
 				visual:SetAttribute("OceanTD_FacingYaw", cell.facingYaw)
 				CoralVisual.alignMeshToSurface(visual, world, cell.facingYaw, nil, boundsCFrame)
 			end
-			if paintIdx and paint then
-				visual:SetAttribute("OceanTD_ColorIndex", paintIdx)
+			if paint then
+				if paintIdx then
+					visual:SetAttribute("OceanTD_ColorIndex", paintIdx)
+				end
 				CoralVisual.setRestColor(visual, paint, webColor)
-				-- Keep cell in sync so later GridService.snapshot doesn't drop paint.
-				cell.colorIndex = paintIdx
+				if paintIdx then
+					cell.colorIndex = paintIdx
+				end
 				cell.colorR = paint.R
 				cell.colorG = paint.G
 				cell.colorB = paint.B
@@ -552,7 +584,7 @@ function PlacementService.placeFromSave(
 	if not species then
 		return { ok = false, errorCode = "UnknownSpecies" }
 	end
-	if not PlayerSession.canSave(player) then
+	if not PlayerSession.canMutatePlot(player) then
 		return { ok = false, errorCode = "NotReady" }
 	end
 	local plotId = PlotService.getOwnerPlotId(player)
@@ -575,11 +607,11 @@ function PlacementService.placeFromSave(
 	local worldPos = GridMath.plotLocalToWorld(visualLocal, slot.cframe)
 	local paintIdx = if typeof(colorIndex) == "number"
 		then PlotOutlineColors.clampCoralIndex(colorIndex)
-		elseif typeof(colorR) == "number" and typeof(colorG) == "number" and typeof(colorB) == "number"
-		then PlotOutlineColors.DEFAULT_INDEX
 		else nil
 	local paintColor = if paintIdx
 		then PlotOutlineColors.resolveCoralPaint(paintIdx, colorR, colorG, colorB)
+		elseif typeof(colorR) == "number" and typeof(colorG) == "number" and typeof(colorB) == "number"
+		then Color3.new(colorR, colorG, colorB)
 		else nil
 	local extras = seaFanExtras or {}
 	local class = if typeof(sizeClass) == "number"
@@ -931,18 +963,6 @@ function PlacementService.place(
 	else
 		gx, gy, gz = GridMath.worldToGrid(localPos, Vector3.zero)
 	end
-	-- Stable palette paint from day one — never leave color only on the Part.
-	local placeColorIdx = PlotOutlineColors.clampCoralIndex(
-		math.random(PlotOutlineColors.MIN_INDEX, PlotOutlineColors.CORAL_MAX_INDEX)
-	)
-	local placePaint = PlotOutlineColors.randomHueVariant(placeColorIdx)
-	local placeWebPaint: Color3? = nil
-	if CoralVisual.isSeaFan(species.speciesId) then
-		placeWebPaint = PlotOutlineColors.randomHueVariant(placeColorIdx)
-	elseif CoralVisual.isMainAccentMesh(species.speciesId) then
-		placeWebPaint = PlotOutlineColors.randomBrightAccent()
-	end
-
 	local occupied, occupyErr = GridService.tryOccupy(
 		plotId,
 		player.UserId,
@@ -956,10 +976,10 @@ function PlacementService.place(
 		diameter,
 		1,
 		sizeClass,
-		placeColorIdx,
-		placePaint.R,
-		placePaint.G,
-		placePaint.B,
+		nil,
+		nil,
+		nil,
+		nil,
 		variant,
 		scale
 	)
@@ -974,7 +994,7 @@ function PlacementService.place(
 		plotId,
 		species.speciesId,
 		worldPos,
-		placePaint,
+		nil,
 		diameter,
 		sizeClass,
 		variant,
@@ -982,7 +1002,7 @@ function PlacementService.place(
 		scaleWidth,
 		scaleHeight,
 		facingYaw,
-		placeWebPaint
+		nil
 	)
 	if not visual then
 		warnPlace("Visual spawn failed after occupy — rolling back cell")
@@ -1009,9 +1029,9 @@ function PlacementService.place(
 				scaleWidth,
 				scaleHeight,
 				facingYaw,
-				if placeWebPaint then placeWebPaint.R else nil,
-				if placeWebPaint then placeWebPaint.G else nil,
-				if placeWebPaint then placeWebPaint.B else nil
+				nil,
+				nil,
+				nil
 			)
 			local slotCf = PlotService.getSlot(plotId)
 			local pcf = if slotCf then slotCf.cframe else nil
@@ -1019,27 +1039,12 @@ function PlacementService.place(
 				visual:SetAttribute("OceanTD_FacingYaw", facingYaw)
 				CoralVisual.alignMeshToSurface(visual, worldPos, facingYaw, nil, pcf)
 			end
-			CoralVisual.setRestColor(visual, placePaint, placeWebPaint, placeColorIdx)
 		elseif CoralVisual.needsFacingYaw(species.speciesId) and typeof(facingYaw) == "number" then
-			GridService.setSeaFanExtras(
-				plotId,
-				gx,
-				gy,
-				gz,
-				nil,
-				nil,
-				facingYaw,
-				if placeWebPaint then placeWebPaint.R else nil,
-				if placeWebPaint then placeWebPaint.G else nil,
-				if placeWebPaint then placeWebPaint.B else nil
-			)
+			GridService.setSeaFanExtras(plotId, gx, gy, gz, nil, nil, facingYaw, nil, nil, nil)
 			local slotCf = PlotService.getSlot(plotId)
 			local pcf = if slotCf then slotCf.cframe else nil
 			visual:SetAttribute("OceanTD_FacingYaw", facingYaw)
 			CoralVisual.alignMeshToSurface(visual, worldPos, facingYaw, nil, pcf)
-			if placeWebPaint then
-				CoralVisual.setRestColor(visual, placePaint, placeWebPaint, placeColorIdx)
-			end
 		end
 	end
 
@@ -1048,22 +1053,7 @@ function PlacementService.place(
 	visual:SetAttribute("OceanTD_PlaceId", placeId)
 	visual:SetAttribute("OceanTD_ItemId", itemId)
 	visual:SetAttribute("OceanTD_SpeciesId", species.speciesId)
-	visual:SetAttribute("OceanTD_ColorIndex", placeColorIdx)
-	CoralVisual.setRestColor(visual, placePaint, placeWebPaint, placeColorIdx)
-	writeCellColor(
-		plotId,
-		placeId,
-		gx,
-		gy,
-		gz,
-		placeColorIdx,
-		placePaint.R,
-		placePaint.G,
-		placePaint.B,
-		if placeWebPaint then placeWebPaint.R else nil,
-		if placeWebPaint then placeWebPaint.G else nil,
-		if placeWebPaint then placeWebPaint.B else nil
-	)
+	syncDefaultVisualPaintToCell(plotId, gx, gy, gz, visual)
 	if brainHostCell then
 		local slot = PlotService.getSlot(plotId)
 		local hostVis: BasePart? = nil
@@ -1534,7 +1524,7 @@ export type ClearPlotResult = {
 -- recordUndo: false for load swaps (undo stack is wiped instead).
 function PlacementService.clearPlot(player: Player, allowEmpty: boolean?, recordUndo: boolean?): ClearPlotResult
 	local shouldRecordUndo = recordUndo ~= false
-	if not PlayerSession.canSave(player) then
+	if not PlayerSession.canMutatePlot(player) then
 		return { ok = false, errorCode = "NotReady" }
 	end
 	local plotId = PlotService.getOwnerPlotId(player)
@@ -1651,7 +1641,7 @@ export type ApplyLayoutResult = {
 
 -- Wipe live plot (credit seeds, no undo) then place layout objects (debit seeds).
 function PlacementService.applyLayout(player: Player, layout: { LayoutObject }): ApplyLayoutResult
-	if not PlayerSession.canSave(player) then
+	if not PlayerSession.canMutatePlot(player) then
 		return { ok = false, errorCode = "NotReady" }
 	end
 	local plotId = PlotService.getOwnerPlotId(player)
@@ -1674,14 +1664,15 @@ function PlacementService.applyLayout(player: Player, layout: { LayoutObject }):
 		if typeof(obj) ~= "table" or typeof(obj.id) ~= "string" then
 			continue
 		end
-		-- fromSave: exact VisualPos + saved grid keys — never re-raycast / cell-center snap.
+		local visualLocal = LayoutRestore.resolveVisualLocal(obj, slot.cframe)
+		-- fromSave: world-anchored VisualPos — never re-raycast; ignore stale grid keys.
 		local result = PlacementService.placeFromSave(
 			player,
 			obj.id,
-			Vector3.new(obj.lx, obj.ly, obj.lz),
-			obj.gx,
-			obj.gy,
-			obj.gz,
+			visualLocal,
+			nil,
+			nil,
+			nil,
 			true,
 			obj.diameter,
 			obj.sizeTier,

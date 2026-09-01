@@ -710,6 +710,12 @@ local function runSpongeSizeCinematic(oldPart: BasePart, placeId: string, target
 		end
 	end
 	if token ~= cineToken or not oldPart.Parent then
+		if oldPart.Parent then
+			oldPart.LocalTransparencyModifier = 0
+			if CoralVisual.isDualColorMesh(oldPart:GetAttribute("OceanTD_SpeciesId")) then
+				CoralVisual.clearSeaFanClientHide(oldPart)
+			end
+		end
 		if unlockNext then
 			RelocateController.setCinematicHold(false)
 		end
@@ -744,7 +750,13 @@ local function runSpongeSizeCinematic(oldPart: BasePart, placeId: string, target
 		return
 	end
 
-	local part: BasePart? = if oldPart.Parent then oldPart else waitForPlacedByPlaceId(placeId, 2.5, oldPart)
+	-- Server rebuilds mesh species (TreeCoral, SeaFan, …) — wait for the new instance.
+	-- oldPart.Parent can still be set for a frame after Destroy replicates; using it skips the grow.
+	task.wait(0.05)
+	local part: BasePart? = waitForPlacedByPlaceId(placeId, 2.5, oldPart)
+	if not part and oldPart.Parent then
+		part = oldPart
+	end
 	disarmHide()
 	if not part then
 		applyServerSize(result, unlockNext, nil, true)

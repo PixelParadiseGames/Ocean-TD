@@ -28,6 +28,7 @@ local HOLD_SEC = 1.0
 local CAM_IN_SEC = 0.55
 local CAM_OUT_SEC = 1.0
 local GROW_SEC = 1.15
+local DIAL_GROW_SEC = 0.9
 local GROW_COLOR = Color3.fromRGB(80, 220, 160)
 
 local player = Players.LocalPlayer
@@ -227,15 +228,25 @@ export type PlayPoses = {
 	plotId: string?,
 }
 
-function PlotSizeCinematic.play(prevStage: number, newStage: number, opts: { skipCamera: boolean?, poses: PlayPoses? }?)
+function PlotSizeCinematic.play(
+	prevStage: number,
+	newStage: number,
+	opts: { skipCamera: boolean?, keepSkillsOpen: boolean?, dial: boolean?, poses: PlayPoses? }?
+)
 	if busy then
-		return
+		if not (opts and opts.dial == true) then
+			return
+		end
+		token += 1
 	end
 	busy = true
 	token += 1
 	local my = token
 	local skipCam = opts ~= nil and opts.skipCamera == true
+	local keepSkillsOpen = opts ~= nil and opts.keepSkillsOpen == true
+	local isDial = opts ~= nil and opts.dial == true
 	local poses = if opts then opts.poses else nil
+	local growSec = if isDial then DIAL_GROW_SEC else GROW_SEC
 
 	local WaveEndVfx = require(script.Parent:WaitForChild("WaveEndVfx"))
 	WaveEndVfx.setRouteHeartDriveLocked(true)
@@ -245,9 +256,11 @@ function PlotSizeCinematic.play(prevStage: number, newStage: number, opts: { ski
 	end
 
 	playerGui:SetAttribute("OceanTD_PlotSizeCinematicBusy", true)
-	forceCloseSkills()
-	forceCloseFreeCam()
-	task.wait(0.05)
+	if not keepSkillsOpen then
+		forceCloseSkills()
+		forceCloseFreeCam()
+		task.wait(0.05)
+	end
 
 	local folder = getPlotSizesFolder()
 	if folder then
@@ -330,7 +343,13 @@ function PlotSizeCinematic.play(prevStage: number, newStage: number, opts: { ski
 			busy = false
 		end
 		playerGui:SetAttribute("OceanTD_PlotSizeCinematicBusy", false)
-		playerGui:SetAttribute("OceanTD_SkillsUiRestore", os.clock())
+		if not keepSkillsOpen then
+			playerGui:SetAttribute("OceanTD_SkillsUiRestore", os.clock())
+		elseif okCommit then
+			pcall(function()
+				require(script.Parent:WaitForChild("SkillsBubbleSim")).refreshStageLayouts()
+			end)
+		end
 	end
 
 	if cam and not skipCam then
@@ -379,7 +398,7 @@ function PlotSizeCinematic.play(prevStage: number, newStage: number, opts: { ski
 	local heartFrom = WaveEndVfx.getRouteEndWorldPosForStage(prevStage)
 	local heartTo = WaveEndVfx.getRouteEndWorldPosForStage(newStage)
 	local box = makeGrowBox(fromCf, fromSize)
-	tweenGrowBox(box, fromSize, toSize, fromCf, toCf, GROW_SEC, my, heartFrom, heartTo)
+	tweenGrowBox(box, fromSize, toSize, fromCf, toCf, growSec, my, heartFrom, heartTo)
 	if box.Parent then
 		local fade = TweenService:Create(box, TweenInfo.new(0.35), { Transparency = 1 })
 		fade:Play()
@@ -400,7 +419,11 @@ function PlotSizeCinematic.play(prevStage: number, newStage: number, opts: { ski
 	end
 
 	if my == token then
-		restorePlayerCamera(true)
+		if skipCam then
+			restorePlayerCamera(false)
+		else
+			restorePlayerCamera(true)
+		end
 		finishCinematic(true)
 	else
 		restorePlayerCamera(false)
@@ -457,11 +480,15 @@ Remotes.get("PlotSizeChanged").OnClientEvent:Connect(function(payload: any)
 		end
 		return
 	end
-	if stage <= prev then
+	local isDial = payload.dial == true
+	if not isDial and stage <= prev then
 		return
 	end
 	task.spawn(function()
 		PlotSizeCinematic.play(prev, stage, {
+			skipCamera = isDial,
+			keepSkillsOpen = isDial,
+			dial = isDial,
 			poses = {
 				prevCFrame = if typeof(payload.prevCFrame) == "CFrame" then payload.prevCFrame else nil,
 				prevSize = if typeof(payload.prevSize) == "Vector3" then payload.prevSize else nil,

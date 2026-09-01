@@ -16,6 +16,7 @@ export type PlotBoundsPayload = {
 export type LayoutObject = {
 	id: string,
 	-- Plot-local VisualPos (exact). Restore via plot.CFrame:PointToWorldSpace — never re-raycast.
+	-- Portable across Plot1..Plot6 reassignment; plotSizeStage + reframeLayout handle size stage changes.
 	lx: number,
 	ly: number,
 	lz: number,
@@ -57,6 +58,8 @@ export type PlotSaveSlot = {
 	name: string,
 	saved: boolean, -- false → UI shows NEW instead of LOAD
 	layout: { LayoutObject },
+	-- Plot Size stage when this slot layout was last written (for legacy restore).
+	plotSizeStage: number?,
 }
 
 export type PlotSaves = {

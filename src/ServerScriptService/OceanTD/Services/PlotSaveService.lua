@@ -10,6 +10,7 @@ local oceanShared = ReplicatedStorage:WaitForChild("OceanTD"):WaitForChild("Shar
 local Constants = require(oceanShared:WaitForChild("Constants"))
 local ItemCatalog = require(oceanShared:WaitForChild("ItemCatalog"))
 local PlotTypes = require(oceanShared:WaitForChild("PlotTypes"))
+local LayoutRestore = require(oceanShared:WaitForChild("LayoutRestore"))
 
 local PlotService = require(script.Parent:WaitForChild("PlotService"))
 local GridService = require(script.Parent:WaitForChild("GridService"))
@@ -92,6 +93,23 @@ local function clampSlot(index: number): number?
 		return nil
 	end
 	return idx
+end
+
+local function prepareLayoutForLoad(
+	layout: { LayoutObject },
+	ringSlot: any,
+	savedPlotSizeStage: number?,
+	currentPlotSizeStage: number
+): { LayoutObject }
+	local savedStage = if typeof(savedPlotSizeStage) == "number" then math.floor(savedPlotSizeStage) else nil
+	if savedStage and savedStage ~= currentPlotSizeStage then
+		local oldCf, _ = PlotService.getStageWorldPose(ringSlot, savedStage)
+		local newCf, _ = PlotService.getStageWorldPose(ringSlot, currentPlotSizeStage)
+		if oldCf and newCf and oldCf ~= newCf then
+			return LayoutRestore.reframeLayout(layout, oldCf, newCf)
+		end
+	end
+	return layout
 end
 
 local function persistNow(player: Player, reason: string): boolean
@@ -180,7 +198,7 @@ end
 
 -- LOAD saved slot or NEW empty slot: switch active, credit live corals, apply layout, wipe undo.
 function PlotSaveService.loadSlot(player: Player, slotIndex: number): any
-	if not PlayerSession.canSave(player) then
+	if not PlayerSession.canMutatePlot(player) then
 		return { ok = false, errorCode = "NotReady" }
 	end
 	local idx = clampSlot(slotIndex)
@@ -201,19 +219,24 @@ function PlotSaveService.loadSlot(player: Player, slotIndex: number): any
 		return { ok = false, errorCode = "NoPlot" }
 	end
 
+	PlayerSession.setPlotLoading(player, true)
+
 	-- Capture destination layout FIRST — never clobber a saved slot with live before apply.
 	local layoutToApply: { LayoutObject }
+	local ringSlot = PlotService.getSlot(plotId)
+	local currentPlotSizeStage = PersistenceService.getSkillStage(player, "PlotSize")
 	if target.saved then
-		layoutToApply = cloneLayout(target.layout)
+		layoutToApply = prepareLayoutForLoad(cloneLayout(target.layout), ringSlot, target.plotSizeStage, currentPlotSizeStage)
 	else
 		layoutToApply = {}
 	end
 
 	local currentActive = saves.activeIndex
+	local leavingSnapshot: { LayoutObject }? = nil
 	-- Only auto-save the slot we're leaving. Reloading the same slot must keep its saved meta.
-	-- Use PlacementService.snapshotLayout so live visual colors/web paint are written into the slot.
 	if currentActive ~= idx then
-		PersistenceService.writeSlotLayout(player, currentActive, PlacementService.snapshotLayout(plotId), true)
+		leavingSnapshot = PlacementService.snapshotLayout(plotId)
+		PersistenceService.writeSlotLayout(player, currentActive, leavingSnapshot, true)
 	end
 	if not target.saved then
 		PersistenceService.writeSlotLayout(player, idx, {}, true)
@@ -221,21 +244,30 @@ function PlotSaveService.loadSlot(player: Player, slotIndex: number): any
 
 	local applied = PlacementService.applyLayout(player, layoutToApply)
 	if not applied.ok then
+		PlayerSession.setPlotLoading(player, false)
 		return { ok = false, errorCode = applied.errorCode or "LoadFail" }
 	end
 
 	PersistenceService.setActiveSlotIndex(player, idx)
-	-- Keep the applied save as canonical slot data (do not replace with a lossy live re-snapshot).
-	PersistenceService.writeSlotLayout(player, idx, layoutToApply, true)
+	-- Canonical post-apply snapshot (grid + visuals aligned). Skip if partial restore would wipe saves.
+	local persistLayout: { LayoutObject }
+	if applied.placed == #layoutToApply then
+		persistLayout = PlacementService.snapshotLayout(plotId)
+	else
+		warn("[PLOTSAVE] Partial layout restore", applied.placed, "/", #layoutToApply, "for", player.Name)
+		persistLayout = layoutToApply
+	end
+	PersistenceService.writeSlotLayout(player, idx, persistLayout, true)
 	if #layoutToApply == 0 then
 		PersistenceService.allowIntentionalClear(player.UserId)
 	end
 
 	UndoService.clear(player)
-	-- Persist the same rich layout we applied — not a fresh live snapshot that can drop fields.
+	PlacementService.clearPendingColorSave(player)
 	PlayerSession.setSaving(player, true)
-	local ok = PersistenceService.save(player, layoutToApply)
+	local ok = PersistenceService.save(player, persistLayout)
 	PlayerSession.setSaving(player, false)
+	PlayerSession.setPlotLoading(player, false)
 	log("Persist load-slot-" .. tostring(idx), "ok=", ok, player.Name)
 
 	log("Loaded slot", idx, "for", player.Name, "placed=", applied.placed, "wasSaved=", target.saved)

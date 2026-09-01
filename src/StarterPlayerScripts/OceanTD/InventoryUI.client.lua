@@ -114,6 +114,23 @@ end
 local TEMP_BRAIN_CORAL_SLOT_COUNT = 0
 local BACKPACK_SLOT_COUNT = 24
 
+local SKILLS_OPEN_ATTR = "OceanTD_SkillsBubblesOpen"
+local SKILLS_DISMISS_KEY_ATTR = "OceanTD_SkillsDismissKey"
+local SKILLS_DISMISS_BLOCK_SEC = 0.25
+
+local function skillsBubblesOpen(): boolean
+	return playerGui:GetAttribute(SKILLS_OPEN_ATTR) == true
+end
+
+local function skillsDismissKeyRecentlyConsumed(): boolean
+	local t = playerGui:GetAttribute(SKILLS_DISMISS_KEY_ATTR)
+	return typeof(t) == "number" and os.clock() - t < SKILLS_DISMISS_BLOCK_SEC
+end
+
+local function backpackToggleBlockedBySkills(): boolean
+	return skillsBubblesOpen() or skillsDismissKeyRecentlyConsumed()
+end
+
 local function log(...: any)
 	print("[INV]", ...)
 end
@@ -2014,6 +2031,9 @@ end)
 
 local lastToggleClock = 0
 local function toggleFromUser(fromGamepad: boolean?)
+	if backpackToggleBlockedBySkills() then
+		return
+	end
 	if animating then
 		return
 	end
@@ -2072,6 +2092,9 @@ end
 
 UserInputService.InputBegan:Connect(function(input, gameProcessed)
 	if input.KeyCode == Enum.KeyCode.ButtonY then
+		if backpackToggleBlockedBySkills() then
+			return
+		end
 		toggleFromUser(true)
 		return
 	end
@@ -2290,6 +2313,9 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
 		return
 	end
 	if input.KeyCode == Enum.KeyCode.Q then
+		if backpackToggleBlockedBySkills() then
+			return
+		end
 		toggleFromUser(false)
 	end
 end)

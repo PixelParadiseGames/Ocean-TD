@@ -51,6 +51,7 @@ local cachedControls: any = nil
 local hiddenHudGuis: { { gui: GuiObject, wasVisible: boolean, scale: UIScale?, wasScale: number? } } = {}
 
 local SKILLS_OPEN_ATTR = "OceanTD_SkillsBubblesOpen"
+local SKILLS_DISMISS_KEY_ATTR = "OceanTD_SkillsDismissKey"
 local skillsScaleConn: RBXScriptConnection? = nil
 
 local function applySkillsViewportScale(panel: Instance)
@@ -879,6 +880,19 @@ task.spawn(function()
 		end
 	end)
 
+	local function dismissSkillsFromKeyboard()
+		playerGui:SetAttribute(SKILLS_DISMISS_KEY_ATTR, os.clock())
+		if SkillPowerUpUI.isConfirmOpen() then
+			SkillPowerUpUI.cancelConfirm()
+			return
+		end
+		if SkillPowerUpUI.isOpen() then
+			SkillPowerUpUI.close()
+			return
+		end
+		closeOnly()
+	end
+
 	UserInputService.InputBegan:Connect(function(input, gameProcessed)
 		if input.KeyCode == Enum.KeyCode.DPadRight then
 			-- Opens skills only (B closes). Blocked while backpack is open.
@@ -888,17 +902,12 @@ task.spawn(function()
 		if not open then
 			return
 		end
-		-- Keyboard X / gamepad B: close power-up first, then skills bubbles.
-		if input.KeyCode == Enum.KeyCode.X or input.KeyCode == Enum.KeyCode.ButtonB then
-			if SkillPowerUpUI.isConfirmOpen() then
-				SkillPowerUpUI.cancelConfirm()
-				return
-			end
-			if SkillPowerUpUI.isOpen() then
-				SkillPowerUpUI.close()
-				return
-			end
-			closeOnly()
+		-- Keyboard X / Q / gamepad B: close power-up first, then skills bubbles.
+		if input.KeyCode == Enum.KeyCode.X
+			or input.KeyCode == Enum.KeyCode.Q
+			or input.KeyCode == Enum.KeyCode.ButtonB
+		then
+			dismissSkillsFromKeyboard()
 			return
 		end
 		if input.KeyCode == Enum.KeyCode.ButtonA then

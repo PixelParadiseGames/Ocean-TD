@@ -585,8 +585,19 @@ function PlotService.setOwnerPlotSize(player: Player, size: Vector3, boundsCf: C
 	if oldCf ~= newCf then
 		local GridService = require(script.Parent:WaitForChild("GridService"))
 		local PlacementService = require(script.Parent:WaitForChild("PlacementService"))
+		local PersistenceService = require(script.Parent:WaitForChild("PersistenceService"))
+		local PlayerSession = require(script.Parent:WaitForChild("PlayerSession"))
 		GridService.reframe(plotId, oldCf, newCf)
 		PlacementService.hydrateVisuals(plotId, newCf)
+		if PlayerSession.canSave(player) then
+			PersistenceService.reframeAllPlotSaveLayouts(player, oldCf, newCf)
+			local layout = PlacementService.snapshotLayout(plotId)
+			local activeIdx = PersistenceService.getActiveSlotIndex(player)
+			PersistenceService.writeSlotLayout(player, activeIdx, layout, true)
+			PlayerSession.setSaving(player, true)
+			PersistenceService.save(player, layout)
+			PlayerSession.setSaving(player, false)
+		end
 	end
 	return buildPayload(slot)
 end

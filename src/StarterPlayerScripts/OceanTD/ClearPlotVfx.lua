@@ -127,6 +127,28 @@ local function playTick(pitch: number)
 	end)
 end
 
+local function sanitizePartForFx(root: Instance)
+	if root:IsA("BasePart") then
+		root.Anchored = true
+		root.CanCollide = false
+		root.CanTouch = false
+		root.CanQuery = false
+		root.Massless = true
+	end
+	for _, d in ipairs(root:GetDescendants()) do
+		if d:IsA("BasePart") then
+			-- Keep welded children unanchored so they follow the stem CFrame tween.
+			if d ~= root then
+				d.Anchored = false
+			end
+			d.CanCollide = false
+			d.CanTouch = false
+			d.CanQuery = false
+			d.Massless = true
+		end
+	end
+end
+
 local function tweenPartToHand(part: BasePart, duration: number, myToken: number): boolean
 	local startPos = part.Position
 	local startSize = part.Size
@@ -158,6 +180,11 @@ function ClearPlotVfx.cancel()
 	busy = false
 end
 
+-- Disable collision on stem + welded children (walk Colliders, SeaGrass truss, etc.).
+function ClearPlotVfx.sanitizePartForFx(root: Instance)
+	sanitizePartForFx(root)
+end
+
 export type PlayArgs = {
 	parts: { BasePart },
 	count: number,
@@ -184,10 +211,7 @@ function ClearPlotVfx.play(args: PlayArgs)
 		local animParts: { BasePart } = {}
 		for _, p in ipairs(parts) do
 			if p.Parent then
-				p.Anchored = true
-				p.CanCollide = false
-				p.CanQuery = false
-				p.CanTouch = false
+				sanitizePartForFx(p)
 				p.CastShadow = false
 				p.Parent = folder
 				table.insert(animParts, p)

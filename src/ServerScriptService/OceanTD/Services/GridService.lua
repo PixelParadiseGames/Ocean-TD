@@ -4,6 +4,7 @@
 
 local PlotTypes = require(game:GetService("ReplicatedStorage"):WaitForChild("OceanTD"):WaitForChild("Shared"):WaitForChild("PlotTypes"))
 local GridMath = require(game:GetService("ReplicatedStorage"):WaitForChild("OceanTD"):WaitForChild("Shared"):WaitForChild("GridMath"))
+local LayoutRestore = require(game:GetService("ReplicatedStorage"):WaitForChild("OceanTD"):WaitForChild("Shared"):WaitForChild("LayoutRestore"))
 local BrainStack = require(game:GetService("ReplicatedStorage"):WaitForChild("OceanTD"):WaitForChild("Shared"):WaitForChild("BrainStack"))
 
 type LayoutObject = PlotTypes.LayoutObject
@@ -424,6 +425,17 @@ function GridService.copySeaFanExtras(from: CellData, to: CellData)
 	to.webColorB = from.webColorB
 end
 
+-- placeId / parentPlaceId / mesh extras survive plot-size reframe.
+function GridService.copyCellMeta(from: CellData, to: CellData)
+	if typeof(from.placeId) == "string" and from.placeId ~= "" then
+		to.placeId = from.placeId
+	end
+	if typeof(from.parentPlaceId) == "string" and from.parentPlaceId ~= "" then
+		to.parentPlaceId = from.parentPlaceId
+	end
+	GridService.copySeaFanExtras(from, to)
+end
+
 function GridService.setSeaFanExtras(
 	plotId: PlotId,
 	gx: number,
@@ -497,7 +509,7 @@ function GridService.setColorAtGrid(
 	gx: number,
 	gy: number,
 	gz: number,
-	colorIndex: number,
+	colorIndex: number?,
 	colorR: number?,
 	colorG: number?,
 	colorB: number?
@@ -506,12 +518,15 @@ function GridService.setColorAtGrid(
 	if not cell then
 		return false
 	end
-	cell.colorIndex = math.clamp(math.floor(colorIndex), 1, 14)
+	if typeof(colorIndex) == "number" then
+		cell.colorIndex = math.clamp(math.floor(colorIndex), 1, 14)
+	end
 	if typeof(colorR) == "number" and typeof(colorG) == "number" and typeof(colorB) == "number" then
 		cell.colorR = math.clamp(colorR, 0, 1)
 		cell.colorG = math.clamp(colorG, 0, 1)
 		cell.colorB = math.clamp(colorB, 0, 1)
-	else
+	elseif typeof(colorIndex) == "number" then
+		-- Palette set without RGB — clear stale channels.
 		cell.colorR = nil
 		cell.colorG = nil
 		cell.colorB = nil
@@ -581,12 +596,10 @@ function GridService.hydrate(plotId: PlotId, ownerUserId: number, layout: { Layo
 	local count = 0
 	for _, obj in ipairs(layout) do
 		if typeof(obj) == "table" and typeof(obj.id) == "string" then
-			local lx = tonumber(obj.lx) or 0
-			local ly = tonumber(obj.ly) or 0
-			local lz = tonumber(obj.lz) or 0
-			local gx = tonumber(obj.gx)
-			local gy = tonumber(obj.gy)
-			local gz = tonumber(obj.gz)
+			local visualLocal = LayoutRestore.resolveVisualLocal(obj, _boundsCFrame)
+			local lx = visualLocal.X
+			local ly = visualLocal.Y
+			local lz = visualLocal.Z
 			local diameter = tonumber(obj.diameter)
 			local sizeTier = tonumber(obj.sizeTier)
 			local sizeClass = tonumber(obj.sizeClass)
@@ -603,9 +616,9 @@ function GridService.hydrate(plotId: PlotId, ownerUserId: number, layout: { Layo
 				lx,
 				ly,
 				lz,
-				gx,
-				gy,
-				gz,
+				nil,
+				nil,
+				nil,
 				diameter,
 				sizeTier,
 				sizeClass,
@@ -736,7 +749,7 @@ function GridService.reframe(plotId: PlotId, oldCf: CFrame, newCf: CFrame): numb
 		)
 		local newCell = GridService.getCell(plotId, lx, ly, lz)
 		if newCell then
-			GridService.copySeaFanExtras(cell, newCell)
+			GridService.copyCellMeta(cell, newCell)
 		end
 		moved += 1
 	end

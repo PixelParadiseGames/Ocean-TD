@@ -466,10 +466,23 @@ local function applyGameplayForActiveStages()
 end
 
 local function requestSetActiveStage(skillId: string, stage: number)
+	local prevPlotSize = if skillId == "PlotSize" then currentStage("PlotSize") else nil
+	if skillId == "PlotSize" and stage ~= prevPlotSize then
+		local WaveEndVfx = require(script.Parent:WaitForChild("WaveEndVfx"))
+		WaveEndVfx.setRouteHeartDriveLocked(true)
+		local park = WaveEndVfx.getRouteEndWorldPosForStage(prevPlotSize :: number)
+		if park then
+			WaveEndVfx.setRouteEndWorldPos(park)
+		end
+	end
 	local ok, result = pcall(function()
 		return setActiveRf:InvokeServer(skillId, stage)
 	end)
 	if not ok or typeof(result) ~= "table" or result.ok ~= true then
+		if skillId == "PlotSize" and stage ~= prevPlotSize then
+			local WaveEndVfx = require(script.Parent:WaitForChild("WaveEndVfx"))
+			WaveEndVfx.setRouteHeartDriveLocked(false)
+		end
 		return false
 	end
 	if typeof(result.active) == "number" then
@@ -479,6 +492,15 @@ local function requestSetActiveStage(skillId: string, stage: number)
 	end
 	if typeof(result.unlocked) == "number" then
 		unlockedMap[skillId] = SkillStages.clampStageFor(skillId, result.unlocked)
+	end
+	if skillId == "PlotSize" and prevPlotSize and currentStage("PlotSize") ~= prevPlotSize then
+		if popupOpen then
+			refreshTemplate()
+		end
+		if SkillsBubbleSim.isRunning() then
+			SkillsBubbleSim.refreshStageLayouts()
+		end
+		return true
 	end
 	applyGameplayForActiveStages()
 	if popupOpen then
@@ -1216,11 +1238,15 @@ end
 
 function SkillPowerUpUI.close()
 	hideConfirm()
+	local wasPlotSize = activeSkillId == "PlotSize"
 	popupOpen = false
 	activeSkillId = nil
 	stopUnlockDescPulse()
 	stopUnlockBtnPulse()
 	SkillsBubbleSim.setSuppressed(false)
+	if wasPlotSize then
+		SkillsBubbleSim.fadeBackgroundIn()
+	end
 	playerGui:SetAttribute(POWERUP_OPEN_ATTR, false)
 	endGamepadNav()
 	stopCloseXOverlay()
@@ -1260,7 +1286,14 @@ function SkillPowerUpUI.open(skillId: string)
 	lastOpenAt = now
 	activeSkillId = skillId
 	popupOpen = true
-	SkillsBubbleSim.setSuppressed(true)
+	if skillId == "PlotSize" then
+		SkillsBubbleSim.setSuppressed(true, { deferBackgroundHide = true })
+		if not SkillsBubbleSim.fadeBackgroundOut() then
+			SkillsBubbleSim.setSuppressed(true)
+		end
+	else
+		SkillsBubbleSim.setSuppressed(true)
+	end
 	playerGui:SetAttribute(POWERUP_OPEN_ATTR, true)
 	template.Visible = true
 	raiseTreeAboveBubbles(template)

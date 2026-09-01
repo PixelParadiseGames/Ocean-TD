@@ -129,6 +129,8 @@ local physAcc = 0
 local bobTime = 0
 local stopToken = 0
 local bgFade: BgFade? = nil
+local bgFades: { BgFade } = {}
+local bgFadeAlpha = 0
 local bgTweenConn: RBXScriptConnection? = nil
 local gamepadFocus = 0 -- 1-based; 0 = none
 local focusStroke: UIStroke? = nil
@@ -336,7 +338,7 @@ local function absCenter(btn: GuiObject): (number, number, number)
 	return cx, cy, r
 end
 
-local function collectImageButtons(root: Instance): { GuiButton }
+local function collectImageButtons(root: Instance, allowPowerUpCopies: boolean?): { GuiButton }
 	local powerUp = root:FindFirstChild("PowerUpTemplate", true)
 	local list: { GuiButton } = {}
 	local seenIds: { [string]: boolean } = {}
@@ -351,7 +353,7 @@ local function collectImageButtons(root: Instance): { GuiButton }
 			continue
 		end
 		-- Prefer outer dPad icons; ignore decorative copies under the popup template.
-		if powerUp and d:IsDescendantOf(powerUp) then
+		if not allowPowerUpCopies and powerUp and d:IsDescendantOf(powerUp) then
 			continue
 		end
 		local def = SkillStages.fromButtonName(d.Name)
@@ -365,7 +367,54 @@ local function collectImageButtons(root: Instance): { GuiButton }
 			break
 		end
 	end
+	if #list == 0 and not allowPowerUpCopies then
+		return collectImageButtons(root, true)
+	end
 	return list
+end
+
+local function skillButtonHome(panel: Instance): Instance
+	local dPad = panel:FindFirstChild("dPad") or panel:FindFirstChild("dPad", true)
+	return if dPad then dPad else panel
+end
+
+-- Skill BTNs left on the bubble layer (crashed close / stop race) must move home before layer:Destroy().
+local function recoverSkillButtonsFromLayer(panel: Instance, sg: ScreenGui?): number
+	local layerInst: Instance? = layer
+	if not layerInst and sg then
+		layerInst = sg:FindFirstChild("_OceanTD_BubbleLayer")
+	end
+	if not layerInst then
+		return 0
+	end
+	local home = skillButtonHome(panel)
+	local n = 0
+	for _, d in ipairs(layerInst:GetDescendants()) do
+		if d:IsA("GuiButton") and SkillStages.isSkillButtonName(d.Name) then
+			d.Parent = home
+			d.Visible = true
+			n += 1
+		end
+	end
+	return n
+end
+
+local function waitForSkillButtons(panel: Instance, token: number, maxSec: number): { GuiButton }
+	local deadline = os.clock() + maxSec
+	while true do
+		local buttons = collectImageButtons(panel)
+		if #buttons > 0 then
+			return buttons
+		end
+		if token ~= stopToken then
+			return {}
+		end
+		if os.clock() >= deadline then
+			break
+		end
+		RunService.Heartbeat:Wait()
+	end
+	return collectImageButtons(panel)
 end
 
 local function findNamedButton(root: Instance, name: string): GuiButton?
@@ -855,50 +904,18 @@ local function stopBgTween()
 	end
 end
 
-local function findBackgroundGradient(panel: Instance): BgFade?
-	local named: Instance? = nil
-	for _, d in ipairs(panel:GetDescendants()) do
-		if string.lower(d.Name) == "backgroundgradient" then
-			named = d
-			break
-		end
-	end
-	if not named then
-		-- Common Studio layout: Frame "Background" + UIGradient child.
-		local bg = panel:FindFirstChild("Background", true)
-		if bg then
-			local g = bg:FindFirstChildWhichIsA("UIGradient")
-			if g then
-				named = bg
-			end
-		end
-	end
-	if not named then
+local function normalizeBgName(name: string): string
+	return (string.gsub(string.lower(name), "[%s_%-]", ""))
+end
+
+local function buildBgFade(gui: GuiObject?, gradient: UIGradient?): BgFade?
+	if not gui and not gradient then
 		return nil
 	end
-
-	local gui: GuiObject? = nil
-	local gradient: UIGradient? = nil
-	if named:IsA("UIGradient") then
-		gradient = named
-		if named.Parent and named.Parent:IsA("GuiObject") then
-			gui = named.Parent
-		end
-	elseif named:IsA("GuiObject") then
-		gui = named
-		local g = named:FindFirstChildWhichIsA("UIGradient")
-		if g and g:IsA("UIGradient") then
-			gradient = g
-		end
-	else
-		return nil
-	end
-
 	local imgTrans: number? = nil
 	if gui and (gui:IsA("ImageLabel") or gui:IsA("ImageButton")) then
 		imgTrans = (gui :: ImageLabel).ImageTransparency
 	end
-
 	return {
 		gui = gui,
 		gradient = gradient,
@@ -908,20 +925,103 @@ local function findBackgroundGradient(panel: Instance): BgFade?
 	}
 end
 
+local function findBackgroundFades(panel: Instance): { BgFade }
+	local out: { BgFade } = {}
+	local seenGui: { [GuiObject]: boolean } = {}
+
+	local function tryAdd(gui: GuiObject?, gradient: UIGradient?)
+		local fade = buildBgFade(gui, gradient)
+		if fade and fade.gui and not seenGui[fade.gui] then
+			seenGui[fade.gui] = true
+			table.insert(out, fade)
+		end
+	end
+
+	for _, d in ipairs(panel:GetDescendants()) do
+		local nn = normalizeBgName(d.Name)
+		if nn == "backgroundgradient" then
+			if d:IsA("UIGradient") then
+				local parent = d.Parent
+				tryAdd(if parent and parent:IsA("GuiObject") then parent else nil, d)
+			elseif d:IsA("GuiObject") then
+				tryAdd(d, d:FindFirstChildWhichIsA("UIGradient", true))
+			end
+		elseif nn == "background" and d:IsA("GuiObject") then
+			local g = d:FindFirstChildWhichIsA("UIGradient", true)
+			if g then
+				tryAdd(d, g)
+			end
+		end
+	end
+
+	if #out == 0 then
+		for _, d in ipairs(panel:GetDescendants()) do
+			if d:IsA("UIGradient") then
+				local parent = d.Parent
+				if parent and parent:IsA("GuiObject") then
+					local g = parent :: GuiObject
+					if g.Size.X.Scale >= 0.85 and g.Size.Y.Scale >= 0.85 then
+						tryAdd(g, d)
+					end
+				end
+			end
+		end
+	end
+	return out
+end
+
+local function findBackgroundGradient(panel: Instance): BgFade?
+	local fades = findBackgroundFades(panel)
+	bgFades = fades
+	bgFade = fades[1]
+	return bgFade
+end
+
+local function resolveBgFades(): { BgFade }
+	if #bgFades > 0 then
+		for _, fade in ipairs(bgFades) do
+			if fade.gui and fade.gui.Parent then
+				return bgFades
+			end
+		end
+	end
+	if hostPanel then
+		findBackgroundGradient(hostPanel)
+	end
+	return bgFades
+end
+
+local function setBgFadesVisible(visible: boolean)
+	for _, fade in ipairs(bgFades) do
+		if fade.gui and fade.gui.Parent then
+			fade.gui.Visible = visible
+		end
+	end
+end
+
 local function applyBgFade(fade: BgFade, alpha: number)
 	-- alpha 0 = fully hidden, 1 = studio look
 	local a = math.clamp(alpha, 0, 1)
 	local inv = 1 - a
 	if fade.gui then
-		fade.gui.BackgroundTransparency = fade.bgTrans + (1 - fade.bgTrans) * inv
-		if fade.imgTrans ~= nil and (fade.gui:IsA("ImageLabel") or fade.gui:IsA("ImageButton")) then
-			(fade.gui :: ImageLabel).ImageTransparency = fade.imgTrans + (1 - fade.imgTrans) * inv
+		if a <= 0.001 then
+			fade.gui.BackgroundTransparency = 1
+			if fade.imgTrans ~= nil and (fade.gui:IsA("ImageLabel") or fade.gui:IsA("ImageButton")) then
+				(fade.gui :: ImageLabel).ImageTransparency = 1
+			end
+		else
+			fade.gui.BackgroundTransparency = fade.bgTrans + (1 - fade.bgTrans) * inv
+			if fade.imgTrans ~= nil and (fade.gui:IsA("ImageLabel") or fade.gui:IsA("ImageButton")) then
+				(fade.gui :: ImageLabel).ImageTransparency = fade.imgTrans + (1 - fade.imgTrans) * inv
+			end
 		end
 	end
 	if fade.gradient then
 		-- Uniform veil over Studio sequence while fading; restore exact sequence at full.
 		if a >= 0.999 and fade.gradTrans then
 			fade.gradient.Transparency = fade.gradTrans
+		elseif a <= 0.001 then
+			fade.gradient.Transparency = NumberSequence.new(1)
 		else
 			local base = 0
 			if fade.gradTrans then
@@ -935,9 +1035,29 @@ local function applyBgFade(fade: BgFade, alpha: number)
 	end
 end
 
-local function tweenBgFade(fade: BgFade, fromAlpha: number, toAlpha: number, info: TweenInfo, token: number)
+local function applyBgFadeAll(alpha: number)
+	bgFadeAlpha = math.clamp(alpha, 0, 1)
+	for _, fade in ipairs(bgFades) do
+		applyBgFade(fade, bgFadeAlpha)
+	end
+end
+
+local function tweenBgFadeAll(
+	fromAlpha: number,
+	toAlpha: number,
+	info: TweenInfo,
+	token: number,
+	onComplete: (() -> ())?
+)
+	local fades = resolveBgFades()
+	if #fades == 0 then
+		if onComplete then
+			onComplete()
+		end
+		return
+	end
 	stopBgTween()
-	applyBgFade(fade, fromAlpha)
+	applyBgFadeAll(fromAlpha)
 	local proxy = Instance.new("NumberValue")
 	proxy.Value = fromAlpha
 	local tw = TweenService:Create(proxy, info, { Value = toAlpha })
@@ -945,29 +1065,48 @@ local function tweenBgFade(fade: BgFade, fromAlpha: number, toAlpha: number, inf
 		if token ~= stopToken then
 			return
 		end
-		applyBgFade(fade, proxy.Value)
+		applyBgFadeAll(proxy.Value)
 	end)
 	tw.Completed:Once(function()
 		if token == stopToken then
-			applyBgFade(fade, toAlpha)
+			applyBgFadeAll(toAlpha)
+			if toAlpha <= 0.001 then
+				setBgFadesVisible(false)
+			end
 		end
 		stopBgTween()
 		proxy:Destroy()
+		if token == stopToken and onComplete then
+			onComplete()
+		end
 	end)
 	tw:Play()
 end
 
-local function clearBgFadeKeepHidden()
-	stopBgTween()
-	local fade = bgFade
-	bgFade = nil
-	return fade
+local function tweenBgFade(fade: BgFade, fromAlpha: number, toAlpha: number, info: TweenInfo, token: number)
+	if fade.gui and not table.find(bgFades, fade) then
+		table.insert(bgFades, fade)
+		bgFade = bgFades[1]
+	end
+	tweenBgFadeAll(fromAlpha, toAlpha, info, token, nil)
 end
 
-local function restoreBgFadeStudio(fade: BgFade?)
-	if fade then
+local function clearBgFadeKeepHidden(): { BgFade }
+	stopBgTween()
+	local saved = table.clone(bgFades)
+	bgFade = nil
+	table.clear(bgFades)
+	return saved
+end
+
+local function restoreBgFadeStudio(fades: { BgFade })
+	for _, fade in ipairs(fades) do
+		if fade.gui then
+			fade.gui.Visible = true
+		end
 		applyBgFade(fade, 1)
 	end
+	bgFadeAlpha = 1
 end
 
 -- Pre-hide icons + background before the panel is shown (avoids one-frame flash).
@@ -980,10 +1119,9 @@ function SkillsBubbleSim.preHide(panel: Instance)
 			d.Visible = false
 		end
 	end
-	local fade = findBackgroundGradient(panel)
-	bgFade = fade
-	if fade then
-		applyBgFade(fade, 0)
+	findBackgroundGradient(panel)
+	if #bgFades > 0 then
+		applyBgFadeAll(0)
 	end
 end
 
@@ -1267,8 +1405,9 @@ end
 
 local function playPopIn()
 	local token = stopToken
-	if bgFade then
-		tweenBgFade(bgFade, 0, 1, BG_FADE_IN_INFO, token)
+	if #bgFades > 0 then
+		setBgFadesVisible(true)
+		tweenBgFadeAll(0, 1, BG_FADE_IN_INFO, token, nil)
 	end
 	local rng = Random.new()
 	local popInTotal = #bubbles
@@ -1323,8 +1462,8 @@ end
 local function playPopOut(done: () -> ())
 	closing = true
 	local token = stopToken
-	if bgFade then
-		tweenBgFade(bgFade, 1, 0, BG_FADE_OUT_INFO, token)
+	if #bgFades > 0 then
+		tweenBgFadeAll(1, 0, BG_FADE_OUT_INFO, token, nil)
 	end
 	local left = #bubbles
 	if left == 0 then
@@ -1428,22 +1567,28 @@ function SkillsBubbleSim.start(panel: Instance)
 	-- restoreBubbles forces Visible=true; hide again before any layout wait (prevents flash).
 	SkillsBubbleSim.preHide(panel)
 	-- Keep bgFade from preHide (already at alpha 0); re-resolve if missing.
-	if not bgFade then
-		bgFade = findBackgroundGradient(panel)
-		if bgFade then
-			applyBgFade(bgFade, 0)
+	if #bgFades == 0 then
+		findBackgroundGradient(panel)
+		if #bgFades > 0 then
+			applyBgFadeAll(0)
 		end
 	end
-	if layer then
-		layer:Destroy()
-		layer = nil
-	end
-
 	local sg: ScreenGui? = if panel:IsA("ScreenGui") then panel else panel:FindFirstAncestorOfClass("ScreenGui")
 	if not sg then
 		warn("[SkillsBubbles] No ScreenGui for bubble layer")
 		return
 	end
+	-- Recover skill BTNs stuck on the bubble layer before Destroy (stop race / ForceClose).
+	local recovered = recoverSkillButtonsFromLayer(panel, sg)
+	if layer then
+		layer:Destroy()
+		layer = nil
+	end
+	local staleLayer = sg:FindFirstChild("_OceanTD_BubbleLayer")
+	if staleLayer and staleLayer:IsA("Frame") then
+		staleLayer:Destroy()
+	end
+
 	hostGui = sg
 	hostPanel = panel
 	-- Do NOT toggle IgnoreGuiInset — keeps AbsolutePosition consistent with other UI
@@ -1453,9 +1598,18 @@ function SkillsBubbleSim.start(panel: Instance)
 	local bubbleLayer = ensureLayer(sg)
 	layer = bubbleLayer
 
-	local buttons = collectImageButtons(panel)
+	local myStart = stopToken
+	local buttons = waitForSkillButtons(panel, myStart, 2)
 	if #buttons == 0 then
-		warn("[SkillsBubbles] No ImageButtons under MobileSkillsA")
+		local hasDPad = panel:FindFirstChild("dPad", true) ~= nil
+		warn(
+			"[SkillsBubbles] No skill ImageButtons under MobileSkillsA",
+			"(dPad=",
+			hasDPad,
+			"recovered=",
+			recovered,
+			") — add PlotSizeBTN / EarnMoreBTN / … under dPad"
+		)
 		return
 	end
 
@@ -1467,7 +1621,6 @@ function SkillsBubbleSim.start(panel: Instance)
 		ensureScale(btn).Scale = 0
 	end
 
-	local myStart = stopToken
 	-- Layer AbsoluteSize only — keep skill buttons hidden during this wait.
 	if not waitForGuiLayout(myStart) then
 		return
@@ -1657,7 +1810,7 @@ function SkillsBubbleSim.isRunning(): boolean
 	return running
 end
 
-function SkillsBubbleSim.setSuppressed(value: boolean)
+function SkillsBubbleSim.setSuppressed(value: boolean, opts: { deferBackgroundHide: boolean? }?)
 	suppressed = value == true
 	if suppressed then
 		-- Cancel in-flight drags without firing bubble activate (was stealing Close/UNLOCK clicks).
@@ -1682,13 +1835,38 @@ function SkillsBubbleSim.setSuppressed(value: boolean)
 	if layer and layer.Parent then
 		layer.Visible = not suppressed
 	end
-	if bgFade and bgFade.gui and bgFade.gui.Parent then
+	if not (opts and opts.deferBackgroundHide) then
 		if suppressed then
-			bgFade.gui.Visible = false
+			stopBgTween()
+			setBgFadesVisible(false)
 		else
-			bgFade.gui.Visible = true
+			setBgFadesVisible(true)
 		end
 	end
+end
+
+function SkillsBubbleSim.fadeBackgroundOut(): boolean
+	local fades = resolveBgFades()
+	if #fades == 0 then
+		return false
+	end
+	setBgFadesVisible(true)
+	local fromAlpha = if bgFadeAlpha > 0.05 then bgFadeAlpha else 1
+	tweenBgFadeAll(fromAlpha, 0, BG_FADE_OUT_INFO, stopToken, function()
+		applyBgFadeAll(0)
+		setBgFadesVisible(false)
+	end)
+	return true
+end
+
+function SkillsBubbleSim.fadeBackgroundIn()
+	local fades = resolveBgFades()
+	if #fades == 0 then
+		return
+	end
+	setBgFadesVisible(true)
+	applyBgFadeAll(0)
+	tweenBgFadeAll(0, 1, BG_FADE_IN_INFO, stopToken, nil)
 end
 
 function SkillsBubbleSim.isSuppressed(): boolean

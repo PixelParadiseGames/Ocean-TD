@@ -237,10 +237,12 @@ local function sanitizePlotSaves(raw: any, legacyLayout: { LayoutObject }): Plot
 			layout = cloneLayout(legacyLayout)
 			saved = true
 		end
+		local plotSizeStage = tonumber(src.plotSizeStage)
 		table.insert(slots, {
 			name = name,
 			saved = saved,
 			layout = layout,
+			plotSizeStage = if plotSizeStage then math.floor(plotSizeStage) else nil,
 		})
 	end
 
@@ -988,11 +990,29 @@ function PersistenceService.writeSlotLayout(player: Player, index: number, layou
 	slot.layout = cloneLayout(layout)
 	if markSaved ~= false then
 		slot.saved = true
+		slot.plotSizeStage = PersistenceService.getSkillStage(player, "PlotSize")
 	end
 	if idx == profile.plotSaves.activeIndex then
 		profile.layout = cloneLayout(layout)
 	end
 	return true
+end
+
+-- Rewrite every saved slot layout when Plot Size stage changes CFrame (world positions preserved).
+function PersistenceService.reframeAllPlotSaveLayouts(player: Player, oldCf: CFrame, newCf: CFrame)
+	local profile = profiles[player]
+	if not profile or oldCf == newCf then
+		return
+	end
+	local LayoutRestore = require(game:GetService("ReplicatedStorage"):WaitForChild("OceanTD"):WaitForChild("Shared"):WaitForChild("LayoutRestore"))
+	local stage = PersistenceService.getSkillStage(player, "PlotSize")
+	for _, slot in ipairs(profile.plotSaves.slots) do
+		if #slot.layout > 0 then
+			slot.layout = LayoutRestore.reframeLayout(slot.layout, oldCf, newCf)
+			slot.plotSizeStage = stage
+		end
+	end
+	profile.layout = cloneLayout(profile.plotSaves.slots[profile.plotSaves.activeIndex].layout)
 end
 
 function PersistenceService.renameSlot(player: Player, index: number, name: string): boolean

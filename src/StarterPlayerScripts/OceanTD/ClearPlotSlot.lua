@@ -702,10 +702,7 @@ function ClearPlotSlot.commit()
 	end
 	for _, src in ipairs(liveParts) do
 		local clone = src:Clone()
-		clone.Anchored = true
-		clone.CanCollide = false
-		clone.CanQuery = false
-		clone.CanTouch = false
+		ClearPlotVfx.sanitizePartForFx(clone)
 		clone.CastShadow = false
 		clone.Parent = folder
 		table.insert(parts, clone)

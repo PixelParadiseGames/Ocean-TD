@@ -66,6 +66,10 @@ local function onCharacterAdded(player: Player, _character: Model)
 end
 
 local function savePlayer(player: Player, reason: string)
+	if PlayerSession.isPlotLoading(player) then
+		print("[PERSIST] Skip save (" .. reason .. ") — plot slot load in progress for", player.Name)
+		return
+	end
 	if not PlayerSession.canSave(player) then
 		print("[PERSIST] Skip save (" .. reason .. ") — session not ready for", player.Name)
 		return
@@ -103,6 +107,25 @@ local function onPlayerAdded(player: Player)
 		local sized = PlotService.applyOwnerPlotSizeStage(player, plotSizeStage)
 		if sized then
 			payload = sized
+		end
+	end
+
+	local LayoutRestore = require(game:GetService("ReplicatedStorage"):WaitForChild("OceanTD"):WaitForChild("Shared"):WaitForChild("LayoutRestore"))
+	local ringSlot = PlotService.getSlot(payload.plotId)
+	local activeIdx = profile.plotSaves.activeIndex
+	local activeSlot = profile.plotSaves.slots[activeIdx]
+	if ringSlot and activeSlot and #activeSlot.layout > 0 then
+		local currentStage = PersistenceService.getSkillStage(player, "PlotSize")
+		local savedStage = activeSlot.plotSizeStage
+		if typeof(savedStage) == "number" and savedStage ~= currentStage then
+			local oldCf, _ = PlotService.getStageWorldPose(ringSlot, savedStage)
+			local newCf, _ = PlotService.getStageWorldPose(ringSlot, currentStage)
+			if oldCf and newCf and oldCf ~= newCf then
+				local reframed = LayoutRestore.reframeLayout(activeSlot.layout, oldCf, newCf)
+				profile.layout = reframed
+				activeSlot.layout = reframed
+				activeSlot.plotSizeStage = currentStage
+			end
 		end
 	end
 
@@ -306,14 +329,47 @@ requestSetSkillActiveStage.OnServerInvoke = function(player: Player, skillId: an
 	if typeof(skillId) ~= "string" or typeof(stage) ~= "number" then
 		return { ok = false, errorCode = "BadArgs" }
 	end
+	local prevPlotSize: number? = nil
+	if skillId == "PlotSize" then
+		prevPlotSize = PersistenceService.getSkillStage(player, "PlotSize")
+	end
 	local result = PersistenceService.setSkillActiveStage(player, skillId, stage)
 	if result.ok then
 		Remotes.get("SkillStagesSync"):FireClient(player, PersistenceService.getSkillStagesPayload(player))
 		if skillId == "PlotSize" then
-			local payload = PlotService.applyOwnerPlotSizeStage(player, result.active :: number)
-			if payload then
-				Remotes.get("PlotAssigned"):FireClient(player, payload)
-				WaveWatchService.broadcastRoster(nil)
+			local newActive = result.active :: number
+			if typeof(prevPlotSize) == "number" and newActive ~= prevPlotSize then
+				-- Defer bounds until client grow tween (dial up/down between unlocked stages).
+				local plotId = PlotService.getOwnerPlotId(player)
+				local slot = if plotId then PlotService.getSlot(plotId) else nil
+				local prevCf: CFrame? = nil
+				local prevSize: Vector3? = nil
+				local newCf: CFrame? = nil
+				local newSize: Vector3? = nil
+				local ringCf: CFrame? = nil
+				local spawnCf: CFrame? = nil
+				local plot1Cf: CFrame? = nil
+				if slot then
+					prevCf, prevSize = PlotService.getStageWorldPose(slot, prevPlotSize :: number)
+					newCf, newSize = PlotService.getStageWorldPose(slot, newActive)
+					ringCf = slot.ringCFrame
+					spawnCf = slot.spawnCFrame
+					local bounds = PlotService.getBoundsPayload(player)
+					plot1Cf = if bounds then bounds.plot1CFrame else nil
+				end
+				Remotes.get("PlotSizeChanged"):FireClient(player, {
+					prevStage = prevPlotSize,
+					stage = newActive,
+					dial = true,
+					prevCFrame = prevCf,
+					prevSize = prevSize,
+					cframe = newCf,
+					size = newSize,
+					plotId = plotId,
+					plot1CFrame = plot1Cf,
+					ringCFrame = ringCf,
+					spawnCFrame = spawnCf,
+				})
 			end
 		end
 	end
