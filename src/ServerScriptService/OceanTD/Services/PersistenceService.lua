@@ -11,6 +11,7 @@ local PlotTypes = require(game:GetService("ReplicatedStorage"):WaitForChild("Oce
 local PlotOutlineColors = require(game:GetService("ReplicatedStorage"):WaitForChild("OceanTD"):WaitForChild("Shared"):WaitForChild("PlotOutlineColors"))
 local ColorUnlocks = require(game:GetService("ReplicatedStorage"):WaitForChild("OceanTD"):WaitForChild("Shared"):WaitForChild("ColorUnlocks"))
 local HueSeeds = require(game:GetService("ReplicatedStorage"):WaitForChild("OceanTD"):WaitForChild("Shared"):WaitForChild("HueSeeds"))
+local HideUiUnlock = require(game:GetService("ReplicatedStorage"):WaitForChild("OceanTD"):WaitForChild("Shared"):WaitForChild("HideUiUnlock"))
 local SkillStages = require(game:GetService("ReplicatedStorage"):WaitForChild("OceanTD"):WaitForChild("Shared"):WaitForChild("SkillStages"))
 local SeedWheel = require(game:GetService("ReplicatedStorage"):WaitForChild("OceanTD"):WaitForChild("Shared"):WaitForChild("SeedWheel"))
 local Remotes = require(game:GetService("ReplicatedStorage"):WaitForChild("OceanTD"):WaitForChild("Remotes"))
@@ -369,6 +370,7 @@ local function sanitizeProfile(raw: any): PlayerProfile
 	profile.skillStages = SkillStages.sanitizeMap(raw.skillStages)
 	profile.skillActiveStages = SkillStages.sanitizeActiveMap(raw.skillActiveStages, profile.skillStages)
 	profile.coralColorUnlocks = {}
+	profile.hideUiUnlocked = raw.hideUiUnlocked == true
 	profile.version = math.max(profile.version, Constants.PROFILE_VERSION)
 	return profile
 end
@@ -762,6 +764,55 @@ function PersistenceService.tryUnlockCoralColor(player: Player, itemId: string, 
 		ok = true,
 		colorIndex = idx,
 		itemId = itemId,
+		sandDollars = profile.currencies.sandDollars,
+	}
+end
+
+function PersistenceService.isHideUiUnlocked(player: Player): boolean
+	local profile = profiles[player]
+	if not profile then
+		return false
+	end
+	return profile.hideUiUnlocked == true
+end
+
+function PersistenceService.syncHideUiToClient(player: Player)
+	local unlocked = PersistenceService.isHideUiUnlocked(player)
+	player:SetAttribute(Constants.HIDE_UI_UNLOCKED_ATTR, unlocked)
+	Remotes.get("HideUiSync"):FireClient(player, unlocked)
+end
+
+function PersistenceService.tryUnlockHideUi(player: Player): {
+	ok: boolean,
+	errorCode: string?,
+	sandDollars: number?,
+	alreadyUnlocked: boolean?,
+}
+	local profile = profiles[player]
+	if not profile then
+		return { ok = false, errorCode = "NoProfile", sandDollars = 0 }
+	end
+	if profile.hideUiUnlocked then
+		return {
+			ok = true,
+			alreadyUnlocked = true,
+			sandDollars = clampSandDollars(profile.currencies.sandDollars),
+		}
+	end
+	local cost = HideUiUnlock.UNLOCK_COST
+	local cash = clampSandDollars(profile.currencies.sandDollars)
+	if cash < cost then
+		return { ok = false, errorCode = "CantAfford", sandDollars = cash }
+	end
+	profile.currencies.sandDollars = cash - cost
+	profile.hideUiUnlocked = true
+	PersistenceService.syncSandDollarsAttribute(player)
+	PersistenceService.syncHideUiToClient(player)
+	task.spawn(function()
+		PersistenceService.save(player)
+	end)
+	return {
+		ok = true,
 		sandDollars = profile.currencies.sandDollars,
 	}
 end
@@ -1367,6 +1418,7 @@ function PersistenceService.save(player: Player, layoutOverride: { LayoutObject 
 		skillStages = SkillStages.sanitizeMap(profile.skillStages),
 		skillActiveStages = SkillStages.sanitizeActiveMap(profile.skillActiveStages, profile.skillStages),
 		coralColorUnlocks = {},
+		hideUiUnlocked = profile.hideUiUnlocked == true,
 	}
 
 	local saved = false

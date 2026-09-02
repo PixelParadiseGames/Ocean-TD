@@ -43,6 +43,8 @@ local Constants = {
 	-- Studio left HUD: MobileLeftUI.dPad.$D + $DCount
 	SAND_DOLLARS_LABEL_NAME = "$D",
 	SAND_DOLLARS_COUNT_NAME = "$DCount",
+	HIDE_UI_UNLOCKED_ATTR = "OceanTD_HideUiUnlocked",
+	HIDE_UI_ACTIVE_ATTR = "OceanTD_HideUiActive",
 
 	-- Four named plot presets; autosave writes the active slot.
 	PLOT_SAVE_SLOT_COUNT = 4,

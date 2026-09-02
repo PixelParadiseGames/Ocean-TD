@@ -141,8 +141,9 @@ local function onPlayerAdded(player: Player)
 	sessionReadyRemote:FireClient(player)
 	Remotes.get("SkillStagesSync"):FireClient(player, PersistenceService.getSkillStagesPayload(player))
 	PersistenceService.syncCoralColorUnlocksToClient(player)
-	-- Seed wheel auto-roll off until the player presses START (StopAutoRoll button).
-	PersistenceService.syncSeedWheelAutoRollToClient(player)
+	PersistenceService.syncHideUiToClient(player)
+	-- Seed wheel auto-roll on by default (StopAutoRoll UI hidden).
+	PersistenceService.setSeedWheelAutoRollEnabled(player, true)
 	-- Joiner first (race-safe), then everyone.
 	WaveWatchService.broadcastRoster(player)
 	WaveWatchService.broadcastRoster(nil)
@@ -525,4 +526,9 @@ requestUnlockCoralColor.OnServerInvoke = function(player: Player, itemId: any, c
 		return { ok = false, errorCode = "BadRequest" }
 	end
 	return PersistenceService.tryUnlockCoralColor(player, itemId, idx)
+end
+
+local requestUnlockHideUi = Remotes.getFunction("RequestUnlockHideUi")
+requestUnlockHideUi.OnServerInvoke = function(player: Player)
+	return PersistenceService.tryUnlockHideUi(player)
 end

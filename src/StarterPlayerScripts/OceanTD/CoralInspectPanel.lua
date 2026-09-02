@@ -916,6 +916,24 @@ local function seedCountLabelColor(swatchIndex: number): Color3
 	return WHITE
 end
 
+local BASE_HUE_COUNT_MAX_TEXT = 12
+local BASE_HUE_COUNT_MIN_TEXT = 8
+local WIDE_HUE_COUNT_TEXT_MULT = 3
+
+local function hueCountTextSizes(): (number, number)
+	local mult = if UiViewportTags.isWideWidth() then WIDE_HUE_COUNT_TEXT_MULT else 1
+	return math.floor(BASE_HUE_COUNT_MAX_TEXT * mult + 0.5), math.floor(BASE_HUE_COUNT_MIN_TEXT * mult + 0.5)
+end
+
+local function applyHueCountLabelSizing(countLbl: TextLabel)
+	local maxSz, minSz = hueCountTextSizes()
+	local limit = countLbl:FindFirstChildOfClass("UITextSizeConstraint")
+	if limit then
+		limit.MaxTextSize = maxSz
+		limit.MinTextSize = minSz
+	end
+end
+
 local function getHueAvailableSlots(itemId: string, hue: number, excludePlaceId: string?): number
 	local owned = InventoryState.getHueSeedCount(itemId, hue)
 	local plot = ClientPlot.get()
@@ -941,6 +959,7 @@ local function refreshColorSeedLabels()
 			lock.Visible = false
 		end
 		if countLbl then
+			applyHueCountLabelSizing(countLbl)
 			if isActive then
 				countLbl.Visible = false
 			else
@@ -2054,8 +2073,9 @@ function CoralInspectPanel.bind(panel: GuiObject, catalogFrame: GuiObject)
 		countLbl.Active = false
 		countLbl.Parent = btn
 		local countSizeLimit = Instance.new("UITextSizeConstraint")
-		countSizeLimit.MaxTextSize = 12
-		countSizeLimit.MinTextSize = 8
+		local maxSz, minSz = hueCountTextSizes()
+		countSizeLimit.MaxTextSize = maxSz
+		countSizeLimit.MinTextSize = minSz
 		countSizeLimit.Parent = countLbl
 		local countPad = Instance.new("UIPadding")
 		countPad.PaddingTop = UDim.new(0.16, 0)
@@ -2491,6 +2511,14 @@ function CoralInspectPanel.bind(panel: GuiObject, catalogFrame: GuiObject)
 			refreshColorSeedLabels()
 		end
 	end)
+	local cam = workspace.CurrentCamera
+	if cam then
+		cam:GetPropertyChangedSignal("ViewportSize"):Connect(function()
+			if root and root.Visible then
+				refreshColorSeedLabels()
+			end
+		end)
+	end
 	RelocateController.setR1WhileActiveHandler(function(): boolean
 		if confirmGui then
 			return true

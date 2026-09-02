@@ -8,6 +8,7 @@
 ]]
 
 local Players = game:GetService("Players")
+local ContentProvider = game:GetService("ContentProvider")
 local GuiService = game:GetService("GuiService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
@@ -22,16 +23,17 @@ local Remotes = require(oceanRoot:WaitForChild("Remotes"))
 local SeedWheel = require(oceanRoot:WaitForChild("Shared"):WaitForChild("SeedWheel"))
 local ItemCatalog = require(oceanRoot:WaitForChild("Shared"):WaitForChild("ItemCatalog"))
 local UiTheme = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiTheme"))
+local UiViewportTags = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiViewportTags"))
 local InventoryState = require(script.Parent:WaitForChild("InventoryState"))
 local CoralColorUnlockState = require(script.Parent:WaitForChild("CoralColorUnlockState"))
 local SeedWheelAutoRollState = require(script.Parent:WaitForChild("SeedWheelAutoRollState"))
 local SeedWheelRevealApi = require(script.Parent:WaitForChild("SeedWheelRevealApi"))
 
-local COLOR_PX = 65
-local CORAL_FINAL_PX = 52
+local BASE_COLOR_PX = 65
+local BASE_CORAL_FINAL_PX = 52
 local BAND_WIDTH_FRAC = 0.33
 local BAND_TOP_FRAC = 0.03 -- fallback when Slot4 screen pos unavailable
-local STEP_PX = 70
+local BASE_STEP_PX = 70
 local SPIN_SEC = 4.992
 local CORAL_SPIN_SEC = SPIN_SEC * 1.2 / 0.8 -- 20% longer, 20% slower than color spin
 local FLY_SEC = 1.001
@@ -45,16 +47,16 @@ local FIREWORK_LOCKED_SIZE_MAX = 1.8
 local FIREWORK_LOCK_SHRINK_SEC = 0.22
 local FIREWORK_LOCK_START_SCALE = 2.4
 local NAME_RISE_SEC = 0.48
-local NAME_BELOW_PX = 14
-local LABEL_H = 18
-local LABEL_W_MIN = 84
-local LABEL_CHAR_W = 7
-local LABEL_FLY_W = 34
-local LABEL_FLY_H = 19
+local BASE_NAME_BELOW_PX = 14
+local BASE_LABEL_H = 18
+local BASE_LABEL_W_MIN = 84
+local BASE_LABEL_CHAR_W = 7
+local BASE_LABEL_FLY_W = 34
+local BASE_LABEL_FLY_H = 19
 local CORAL_POP_SQUASH = 0.8
 local CORAL_POP_OVERSHOOT = 1.3
 local CORAL_POP_LEAD_SEC = 1
-local STROKE_CLIP_PAD = 4 -- UIStroke extends past bounds; hide before edge bleed
+local BASE_STROKE_CLIP_PAD = 4 -- UIStroke extends past bounds; hide before edge bleed
 local TICK_SOUND_ID = "rbxassetid://128707491647978"
 local TICK_VOLUME = 0.3
 local MIN_STEPS = 16
@@ -76,6 +78,8 @@ tickTemplate.Parent = SoundService
 local overlay: ScreenGui? = nil
 local band: Frame? = nil
 local busy = false
+local busySince = 0
+local BUSY_WATCHDOG_SEC = 20
 local pitchCursor = 0.92
 type Queued = { itemId: string, token: number, amount: number, colorIndex: number, colorWasUnlocked: boolean }
 local queued: Queued? = nil
@@ -83,6 +87,51 @@ local activeConns: { RBXScriptConnection } = {}
 local abortRequested = false
 local currentClaim: { itemId: string, token: number }? = nil
 local savedBandSize: Vector2? = nil
+local wheelIconsReady = false
+local wheelIconsPreloading = false
+
+local abortActiveReveal: (boolean) -> ()
+
+local function collectWheelIconAssets(): { string }
+	local assets: { string } = {}
+	local seen: { [string]: boolean } = {}
+	for _, itemId in ipairs(SeedWheel.pool()) do
+		local icon = SeedWheel.iconFor(itemId)
+		if typeof(icon) == "string" and icon ~= "" and not seen[icon] then
+			seen[icon] = true
+			table.insert(assets, icon)
+		end
+	end
+	return assets
+end
+
+local function preloadWheelIcons()
+	if wheelIconsReady then
+		return
+	end
+	while wheelIconsPreloading do
+		task.wait()
+	end
+	if wheelIconsReady then
+		return
+	end
+	wheelIconsPreloading = true
+	local assets = collectWheelIconAssets()
+	if #assets > 0 then
+		local ok, err = pcall(function()
+			ContentProvider:PreloadAsync(assets)
+		end)
+		if not ok then
+			warn("[SEEDWHEEL] Coral icon preload failed:", err)
+		end
+	end
+	wheelIconsReady = true
+	wheelIconsPreloading = false
+end
+
+local function wheelPx(n: number, viewport: Vector2?): number
+	return math.floor(n * UiViewportTags.wideUiScale(viewport) + 0.5)
+end
 
 local function trackConn(conn: RBXScriptConnection)
 	table.insert(activeConns, conn)
@@ -121,12 +170,24 @@ end
 
 local function finishBusy()
 	busy = false
+	busySince = 0
 	currentClaim = nil
 	local q = queued
 	queued = nil
 	if q and SeedWheelAutoRollState.isEnabled() then
 		task.defer(playReveal, q.itemId, q.token, q.amount, q.colorIndex, q.colorWasUnlocked)
 	end
+end
+
+local function watchdogRecoverIfStuck()
+	if not busy or busySince <= 0 then
+		return
+	end
+	if os.clock() - busySince < BUSY_WATCHDOG_SEC then
+		return
+	end
+	warn("[SEEDWHEEL] Watchdog: reveal stuck — recovering (claim + clear busy)")
+	abortActiveReveal(true)
 end
 
 local function playTick()
@@ -204,6 +265,10 @@ end
 local function ensureOverlay(): (ScreenGui, Frame)
 	if overlay and overlay.Parent and band and band.Parent then
 		applySeedWheelDisplayOrder(overlay)
+		-- Stay hidden while Hide UI is active (logic keeps running).
+		if playerGui:GetAttribute("OceanTD_HideUiActive") == true then
+			overlay.Enabled = false
+		end
 		return overlay, band
 	end
 	local gui = Instance.new("ScreenGui")
@@ -212,6 +277,9 @@ local function ensureOverlay(): (ScreenGui, Frame)
 	gui.IgnoreGuiInset = true
 	applySeedWheelDisplayOrder(gui)
 	gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+	if playerGui:GetAttribute("OceanTD_HideUiActive") == true then
+		gui.Enabled = false
+	end
 	gui.Parent = playerGui
 	overlay = gui
 
@@ -219,7 +287,7 @@ local function ensureOverlay(): (ScreenGui, Frame)
 	host.Name = "Band"
 	host.AnchorPoint = Vector2.new(0.5, 0)
 	host.Position = UDim2.fromScale(0.5, BAND_TOP_FRAC)
-	host.Size = UDim2.fromOffset(200, COLOR_PX + 8)
+	host.Size = UDim2.fromOffset(200, wheelPx(BASE_COLOR_PX) + 8)
 	host.BackgroundTransparency = 1
 	host.ClipsDescendants = true
 	host.Parent = gui
@@ -229,10 +297,12 @@ local function ensureOverlay(): (ScreenGui, Frame)
 end
 
 local function layoutBandForReveal(host: Frame, vp: Vector2): number
-	local minBandW = 2 * (2 * STEP_PX + COLOR_PX * 0.5)
+	local colorPx = wheelPx(BASE_COLOR_PX, vp)
+	local stepPx = wheelPx(BASE_STEP_PX, vp)
+	local minBandW = 2 * (2 * stepPx + colorPx * 0.5)
 	local bandW = math.max(vp.X * BAND_WIDTH_FRAC, minBandW)
-	host.Size = UDim2.new(0, bandW, 0, COLOR_PX + 8)
-	savedBandSize = Vector2.new(bandW, COLOR_PX + 8)
+	host.Size = UDim2.new(0, bandW, 0, colorPx + 8)
+	savedBandSize = Vector2.new(bandW, colorPx + 8)
 	positionBandAtSlot4Height(host, vp)
 	host.Visible = true
 	return bandW * 0.5
@@ -280,7 +350,7 @@ local function tweenWheelTo(target: GuiObject, shrink: boolean, onDone: () -> ()
 		host.Size = UDim2.fromOffset(math.max(4, baseSize.X * s), math.max(4, baseSize.Y * s))
 		for _, extra in ipairs(extras) do
 			if extra.Parent then
-				extra.Position = UDim2.fromOffset(x, y + (if shrink then LABEL_H else 0))
+				extra.Position = UDim2.fromOffset(x, y + (if shrink then wheelPx(BASE_LABEL_H) else 0))
 			end
 		end
 		if u >= 1 then
@@ -354,7 +424,7 @@ local function addInnerWhiteStroke(parent: GuiObject, z: number)
 	local stroke = Instance.new("UIStroke")
 	stroke.Color = Color3.new(1, 1, 1)
 	stroke.Transparency = 0.5
-	stroke.Thickness = 2
+	stroke.Thickness = UiViewportTags.coralSpinnerStrokeThickness()
 	stroke.LineJoinMode = Enum.LineJoinMode.Round
 	stroke.Parent = ring
 	ring.Parent = parent
@@ -390,7 +460,7 @@ local function spawnCoralNameLabel(gui: ScreenGui, host: Frame, displayName: str
 	lbl.BackgroundTransparency = 1
 	lbl.AnchorPoint = Vector2.new(0.5, 0.5)
 	lbl.Position = UDim2.fromOffset(center.X, center.Y)
-	lbl.Size = UDim2.fromOffset(math.max(LABEL_W_MIN, #displayName * LABEL_CHAR_W), LABEL_H)
+	lbl.Size = UDim2.fromOffset(math.max(wheelPx(BASE_LABEL_W_MIN), #displayName * wheelPx(BASE_LABEL_CHAR_W)), wheelPx(BASE_LABEL_H))
 	lbl.Font = UiTheme.Font
 	lbl.Text = displayName
 	lbl.TextColor3 = Color3.new(1, 1, 1)
@@ -416,7 +486,7 @@ local function spawnCoralNameLabel(gui: ScreenGui, host: Frame, displayName: str
 	local riseInfo = TweenInfo.new(NAME_RISE_SEC, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
 	TweenService:Create(scale, riseInfo, { Scale = 1 }):Play()
 	TweenService:Create(lbl, riseInfo, {
-		Position = UDim2.fromOffset(center.X, center.Y + (COLOR_PX * 0.5 + NAME_BELOW_PX)),
+		Position = UDim2.fromOffset(center.X, center.Y + (wheelPx(BASE_COLOR_PX) * 0.5 + wheelPx(BASE_NAME_BELOW_PX))),
 	}):Play()
 
 	return lbl
@@ -461,15 +531,15 @@ local function playCoralLandPop(coral: ImageLabel)
 	end)
 end
 
-local function circleScaleAtOffset(offsetX: number, outerMinScale: number?): number
-	local stepDist = math.abs(offsetX) / STEP_PX
+local function circleScaleAtOffset(offsetX: number, outerMinScale: number?, stepPx: number): number
+	local stepDist = math.abs(offsetX) / stepPx
 	local outerMin = if typeof(outerMinScale) == "number" then outerMinScale else OUTER_PEEK_SCALE_COLOR
 	return if stepDist <= 1 then 1 - stepDist * 0.1 else math.max(outerMin, 0.9 - (stepDist - 1) * (0.9 - outerMin))
 end
 
-local function styleByOffset(guiObj: GuiObject, offsetX: number, _halfW: number, baseSize: number, outerMinScale: number?)
-	local scale = circleScaleAtOffset(offsetX, outerMinScale)
-	local stepDist = math.abs(offsetX) / STEP_PX
+local function styleByOffset(guiObj: GuiObject, offsetX: number, _halfW: number, baseSize: number, outerMinScale: number?, stepPx: number)
+	local scale = circleScaleAtOffset(offsetX, outerMinScale, stepPx)
+	local stepDist = math.abs(offsetX) / stepPx
 	local trans = if stepDist <= 1 then stepDist * 0.26 else 0.26 + (stepDist - 1) * 0.42
 	guiObj.Size = UDim2.fromOffset(baseSize * scale, baseSize * scale)
 	if guiObj:IsA("ImageLabel") then
@@ -585,6 +655,7 @@ local function runSpin(
 	spinSec: number,
 	onDone: () -> (),
 	outerMinScale: number?,
+	stepPx: number,
 	earlyLeadSec: number?,
 	onEarlyDone: (() -> ())?
 )
@@ -595,17 +666,18 @@ local function runSpin(
 	local conn: RBXScriptConnection? = nil
 
 	local function layoutIcons(centerIndex: number)
+		local clipPad = wheelPx(BASE_STROKE_CLIP_PAD)
 		for i, img in ipairs(icons) do
-			local ox = (centerIndex - (i - 1)) * STEP_PX
+			local ox = (centerIndex - (i - 1)) * stepPx
 			img.Position = UDim2.new(0.5, ox, 0.5, 0)
-			local scale = circleScaleAtOffset(ox, outerMinScale)
+			local scale = circleScaleAtOffset(ox, outerMinScale, stepPx)
 			local radius = baseSize * scale * 0.5
 			-- Hide once circle + UIStroke would extend past the band (prevents edge slivers).
-			if ox - radius - STROKE_CLIP_PAD < -halfW or ox + radius + STROKE_CLIP_PAD > halfW then
+			if ox - radius - clipPad < -halfW or ox + radius + clipPad > halfW then
 				img.Visible = false
 			else
 				img.Visible = true
-				styleByOffset(img, ox, halfW, baseSize, outerMinScale)
+				styleByOffset(img, ox, halfW, baseSize, outerMinScale, stepPx)
 			end
 		end
 	end
@@ -644,9 +716,11 @@ local function runSpin(
 			if conn then
 				conn:Disconnect()
 			end
-			if abortRequested or not host.Visible then
+			if abortRequested then
 				return
 			end
+			-- Do not bail on host.Visible — Hide UI (or similar) can hide the band and
+			-- would leave busy=true forever while the server timeout still grants seeds.
 			onDone()
 		end
 	end)
@@ -688,7 +762,7 @@ local function runColorFirework(
 		elseif colorWasUnlocked then
 			sizeFrac *= 0.5
 		end
-		local sizePx = COLOR_PX * sizeFrac
+		local sizePx = wheelPx(BASE_COLOR_PX) * sizeFrac
 		local angle = math.random() * math.pi * 2
 		local dir = Vector2.new(math.cos(angle), math.sin(angle))
 		local dist = FIREWORK_DIST_MIN + math.random() * (FIREWORK_DIST_MAX - FIREWORK_DIST_MIN)
@@ -772,7 +846,7 @@ end
 
 local function applyFlyAmountLabel(nameLabel: TextLabel, amount: number)
 	nameLabel.Text = "+" .. tostring(amount)
-	nameLabel.Size = UDim2.fromOffset(LABEL_FLY_W, LABEL_FLY_H)
+	nameLabel.Size = UDim2.fromOffset(wheelPx(BASE_LABEL_FLY_W), wheelPx(BASE_LABEL_FLY_H))
 	nameLabel.TextTransparency = 0
 	local nameStroke = nameLabel:FindFirstChild("NameOutline")
 	if nameStroke and nameStroke:IsA("UIStroke") then
@@ -791,7 +865,8 @@ local function flyBundle(
 	itemId: string,
 	token: number,
 	amount: number,
-	nameLabel: TextLabel?
+	nameLabel: TextLabel?,
+	colorPx: number
 )
 	local target = backpackOverlayCenter()
 	if not target then
@@ -811,11 +886,11 @@ local function flyBundle(
 	holder.Parent = gui
 	holder.AnchorPoint = Vector2.new(0.5, 0.5)
 	holder.Position = UDim2.fromOffset(start.X, start.Y)
-	holder.Size = UDim2.fromOffset(COLOR_PX, COLOR_PX)
+	holder.Size = UDim2.fromOffset(colorPx, colorPx)
 	holder.ZIndex = 50
 
 	local t0 = os.clock()
-	local labelBelowOffset = COLOR_PX * 0.5 + NAME_BELOW_PX
+	local labelBelowOffset = colorPx * 0.5 + wheelPx(BASE_NAME_BELOW_PX)
 	local nameLbl = nameLabel
 	if nameLbl and nameLbl:IsA("TextLabel") then
 		nameLbl.Parent = gui
@@ -846,7 +921,7 @@ local function flyBundle(
 		local y = start.Y + (target.Y - start.Y) * e
 		local s = 1 - e * 0.45
 		holder.Position = UDim2.fromOffset(x, y)
-		holder.Size = UDim2.fromOffset(COLOR_PX * s, COLOR_PX * s)
+		holder.Size = UDim2.fromOffset(colorPx * s, colorPx * s)
 		if nameLbl and nameLbl.Parent then
 			local hc = overlayScreenPoint(holder)
 			-- Ease from below the circle up to centered on it while flying right.
@@ -882,9 +957,11 @@ local function expandFromTarget(target: GuiObject, onDone: () -> ())
 	host.ClipsDescendants = true
 	local cam = workspace.CurrentCamera
 	local vp = if cam then cam.ViewportSize else Vector2.new(1280, 720)
-	local minBandW = 2 * (2 * STEP_PX + COLOR_PX * 0.5)
+	local colorPx = wheelPx(BASE_COLOR_PX, vp)
+	local stepPx = wheelPx(BASE_STEP_PX, vp)
+	local minBandW = 2 * (2 * stepPx + colorPx * 0.5)
 	local bandW = math.max(vp.X * BAND_WIDTH_FRAC, minBandW)
-	local bandH = COLOR_PX + 8
+	local bandH = colorPx + 8
 	savedBandSize = Vector2.new(bandW, bandH)
 	host.Size = UDim2.new(0, bandW, 0, bandH)
 	positionBandAtSlot4Height(host, vp)
@@ -916,7 +993,7 @@ local function expandFromTarget(target: GuiObject, onDone: () -> ())
 	trackConn(conn :: RBXScriptConnection)
 end
 
-local function abortActiveReveal(claimPending: boolean)
+abortActiveReveal = function(claimPending: boolean)
 	abortRequested = true
 	disconnectAll()
 	queued = nil
@@ -925,6 +1002,7 @@ local function abortActiveReveal(claimPending: boolean)
 	end
 	currentClaim = nil
 	busy = false
+	busySince = 0
 	abortRequested = false
 end
 
@@ -949,9 +1027,11 @@ playReveal = function(itemId: string, token: number, amount: number, colorIndex:
 		return
 	end
 	busy = true
+	busySince = os.clock()
 	currentClaim = { itemId = itemId, token = token }
 	disconnectAll()
 	abortRequested = false
+	preloadWheelIcons()
 	local gui, host = ensureOverlay()
 	applySeedWheelDisplayOrder(gui)
 	clearOverlayExtras(gui)
@@ -961,6 +1041,9 @@ playReveal = function(itemId: string, token: number, amount: number, colorIndex:
 	local cam = workspace.CurrentCamera
 	local vp = if cam then cam.ViewportSize else Vector2.new(1280, 720)
 	local halfW = layoutBandForReveal(host, vp)
+	local colorPx = wheelPx(BASE_COLOR_PX, vp)
+	local coralPx = wheelPx(BASE_CORAL_FINAL_PX, vp)
+	local stepPx = wheelPx(BASE_STEP_PX, vp)
 
 	local function bundleAndFly(colorWinner: Frame, coralWinner: ImageLabel, nameLabel: TextLabel?, amount: number)
 		local start = overlayScreenPoint(colorWinner)
@@ -972,7 +1055,7 @@ playReveal = function(itemId: string, token: number, amount: number, colorIndex:
 		holder.Name = "SeedWheelBundle"
 		holder.BackgroundTransparency = 1
 		holder.AnchorPoint = Vector2.new(0.5, 0.5)
-		holder.Size = UDim2.fromOffset(COLOR_PX, COLOR_PX)
+		holder.Size = UDim2.fromOffset(colorPx, colorPx)
 		holder.Position = UDim2.fromOffset(start.X, start.Y)
 		holder.ZIndex = 50
 		holder.Parent = gui
@@ -985,11 +1068,11 @@ playReveal = function(itemId: string, token: number, amount: number, colorIndex:
 
 		coralWinner.Parent = holder
 		coralWinner.Position = UDim2.fromScale(0.5, 0.5)
-		coralWinner.Size = UDim2.fromScale(CORAL_FINAL_PX / COLOR_PX, CORAL_FINAL_PX / COLOR_PX)
+		coralWinner.Size = UDim2.fromScale(coralPx / colorPx, coralPx / colorPx)
 		coralWinner.ZIndex = 2
 		coralWinner.Visible = true
 
-		flyBundle(holder, start, itemId, token, amount, nameLabel)
+		flyBundle(holder, start, itemId, token, amount, nameLabel, colorPx)
 	end
 
 	-- 1) Coral spin first.
@@ -998,7 +1081,7 @@ playReveal = function(itemId: string, token: number, amount: number, colorIndex:
 	local coralIcons: { GuiObject } = {}
 	for i, id in ipairs(coralSeq) do
 		local icon = SeedWheel.iconFor(id) or ""
-		local img = makeCoralCircle(host, icon, Z_CORAL + i, CORAL_FINAL_PX)
+		local img = makeCoralCircle(host, icon, Z_CORAL + i, coralPx)
 		img.Visible = false
 		table.insert(coralIcons, img)
 	end
@@ -1017,7 +1100,7 @@ playReveal = function(itemId: string, token: number, amount: number, colorIndex:
 		playCoralLandPop(earlyWinner)
 	end
 
-	runSpin(host, halfW, coralIcons, coralWinner0, CORAL_FINAL_PX, CORAL_SPIN_SEC, function()
+	runSpin(host, halfW, coralIcons, coralWinner0, coralPx, CORAL_SPIN_SEC, function()
 		local coralWinner = coralIcons[coralWinner0 + 1] :: ImageLabel?
 		local coralPeek1 = coralIcons[coralWinner0 + 2]
 		local coralPeek2 = coralIcons[coralWinner0 + 3]
@@ -1039,7 +1122,7 @@ playReveal = function(itemId: string, token: number, amount: number, colorIndex:
 		end
 
 		coralWinner.Position = UDim2.new(0.5, 0, 0.5, 0)
-		coralWinner.Size = UDim2.fromOffset(CORAL_FINAL_PX, CORAL_FINAL_PX)
+		coralWinner.Size = UDim2.fromOffset(coralPx, coralPx)
 		coralWinner.ImageTransparency = 0
 		coralWinner.BackgroundTransparency = 1
 		coralWinner.ZIndex = Z_CORAL + 20
@@ -1054,12 +1137,12 @@ playReveal = function(itemId: string, token: number, amount: number, colorIndex:
 		local colorWinner0 = #colorSeq - 3
 		local colorIcons: { GuiObject } = {}
 		for i, idx in ipairs(colorSeq) do
-			local f = makeColorCircle(host, SeedWheel.colorForIndex(idx), Z_COLOR + i, COLOR_PX, itemId, idx)
+			local f = makeColorCircle(host, SeedWheel.colorForIndex(idx), Z_COLOR + i, colorPx, itemId, idx)
 			f.Visible = false
 			table.insert(colorIcons, f)
 		end
 
-		runSpin(host, halfW, colorIcons, colorWinner0, COLOR_PX, SPIN_SEC, function()
+		runSpin(host, halfW, colorIcons, colorWinner0, colorPx, SPIN_SEC, function()
 			local colorWinner = colorIcons[colorWinner0 + 1] :: Frame?
 			local colorLeft1 = if colorWinner0 >= 1 then colorIcons[colorWinner0] else nil
 			local colorLeft2 = if colorWinner0 >= 2 then colorIcons[colorWinner0 - 1] else nil
@@ -1078,34 +1161,34 @@ playReveal = function(itemId: string, token: number, amount: number, colorIndex:
 
 			colorWinner.Position = UDim2.new(0.5, 0, 0.5, 0)
 			colorWinner.Visible = true
-			styleByOffset(colorWinner, 0, halfW, COLOR_PX, OUTER_PEEK_SCALE_COLOR)
+			styleByOffset(colorWinner, 0, halfW, colorPx, OUTER_PEEK_SCALE_COLOR, stepPx)
 			colorWinner.ZIndex = Z_COLOR
 			local stroke = colorWinner:FindFirstChildWhichIsA("UIStroke")
 			if stroke then
 				stroke.Transparency = 0.15
 			end
 			if colorLeft2 and colorLeft2:IsA("Frame") then
-				colorLeft2.Position = UDim2.new(0.5, -STEP_PX * 2, 0.5, 0)
+				colorLeft2.Position = UDim2.new(0.5, -stepPx * 2, 0.5, 0)
 				colorLeft2.Visible = true
-				styleByOffset(colorLeft2, -STEP_PX * 2, halfW, COLOR_PX, OUTER_PEEK_SCALE_COLOR)
+				styleByOffset(colorLeft2, -stepPx * 2, halfW, colorPx, OUTER_PEEK_SCALE_COLOR, stepPx)
 				colorLeft2.ZIndex = Z_COLOR + 4
 			end
 			if colorLeft1 and colorLeft1:IsA("Frame") then
-				colorLeft1.Position = UDim2.new(0.5, -STEP_PX, 0.5, 0)
+				colorLeft1.Position = UDim2.new(0.5, -stepPx, 0.5, 0)
 				colorLeft1.Visible = true
-				styleByOffset(colorLeft1, -STEP_PX, halfW, COLOR_PX, OUTER_PEEK_SCALE_COLOR)
+				styleByOffset(colorLeft1, -stepPx, halfW, colorPx, OUTER_PEEK_SCALE_COLOR, stepPx)
 				colorLeft1.ZIndex = Z_COLOR + 5
 			end
 			if colorPeek1 and colorPeek1:IsA("Frame") then
-				colorPeek1.Position = UDim2.new(0.5, STEP_PX, 0.5, 0)
+				colorPeek1.Position = UDim2.new(0.5, stepPx, 0.5, 0)
 				colorPeek1.Visible = true
-				styleByOffset(colorPeek1, STEP_PX, halfW, COLOR_PX, OUTER_PEEK_SCALE_COLOR)
+				styleByOffset(colorPeek1, stepPx, halfW, colorPx, OUTER_PEEK_SCALE_COLOR, stepPx)
 				colorPeek1.ZIndex = Z_COLOR + 5
 			end
 			if colorPeek2 and colorPeek2:IsA("Frame") then
-				colorPeek2.Position = UDim2.new(0.5, STEP_PX * 2, 0.5, 0)
+				colorPeek2.Position = UDim2.new(0.5, stepPx * 2, 0.5, 0)
 				colorPeek2.Visible = true
-				styleByOffset(colorPeek2, STEP_PX * 2, halfW, COLOR_PX, OUTER_PEEK_SCALE_COLOR)
+				styleByOffset(colorPeek2, stepPx * 2, halfW, colorPx, OUTER_PEEK_SCALE_COLOR, stepPx)
 				colorPeek2.ZIndex = Z_COLOR + 4
 			end
 
@@ -1129,8 +1212,8 @@ playReveal = function(itemId: string, token: number, amount: number, colorIndex:
 				end
 				bundleAndFly(colorWinner, coralWinner, nameLabel, amount)
 			end, colorWasUnlocked)
-		end, OUTER_PEEK_SCALE_COLOR)
-	end, OUTER_PEEK_SCALE_CORAL, CORAL_POP_LEAD_SEC, beginCoralLandPop)
+		end, OUTER_PEEK_SCALE_COLOR, stepPx)
+	end, OUTER_PEEK_SCALE_CORAL, stepPx, CORAL_POP_LEAD_SEC, beginCoralLandPop)
 end
 
 Remotes.get("SeedWheelAutoRollSync").OnClientEvent:Connect(function(enabled: any)
@@ -1144,6 +1227,7 @@ Remotes.get("SeedWheelReveal").OnClientEvent:Connect(function(itemId: any, token
 	if typeof(itemId) ~= "string" or typeof(token) ~= "number" then
 		return
 	end
+	watchdogRecoverIfStuck()
 	local add = math.max(1, math.floor(tonumber(amount) or 1))
 	local cidx = math.clamp(math.floor(tonumber(colorIndex) or SeedWheel.pickRandomColorIndex()), 1, 14)
 	local colorWasUnlocked = false
@@ -1168,5 +1252,7 @@ SeedWheelRevealApi.abortActiveReveal = abortActiveReveal
 SeedWheelRevealApi.isBusy = function(): boolean
 	return busy
 end
+
+task.spawn(preloadWheelIcons)
 
 print("[SEEDWHEEL] Ready")

@@ -94,6 +94,8 @@ export type PlayerProfile = {
 	skillActiveStages: { [string]: number }, -- skillId → currently enabled stage (≤ unlocked)
 	-- itemId → color index string → true when that paint swatch is unlocked for that coral type.
 	coralColorUnlocks: { [string]: { [string]: boolean } },
+	-- Purchased once: dPad HideUI toggles HUD visibility.
+	hideUiUnlocked: boolean,
 }
 
 local Constants = require(script.Parent.Constants)
@@ -140,6 +142,7 @@ function PlotTypes.defaultProfile(): PlayerProfile
 		skillStages = SkillStages.defaultMap(),
 		skillActiveStages = SkillStages.defaultMap(),
 		coralColorUnlocks = {},
+		hideUiUnlocked = false,
 	}
 end
 

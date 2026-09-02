@@ -1379,12 +1379,14 @@ end
 local function setHudVisible(on: boolean)
 	ensureHud()
 	local wasVisible = hudFrame ~= nil and hudFrame.Visible
-	local skillsOpen = Players.LocalPlayer.PlayerGui:GetAttribute("OceanTD_SkillsBubblesOpen") == true
+	local pg = Players.LocalPlayer:FindFirstChild("PlayerGui")
+	local skillsOpen = pg ~= nil and pg:GetAttribute("OceanTD_SkillsBubblesOpen") == true
+	local hideUiActive = pg ~= nil and pg:GetAttribute("OceanTD_HideUiActive") == true
 	if hudFrame then
-		-- Keep wave sim running; only suppress the HUD chrome while skills bubbles are open.
-		hudFrame.Visible = on and not skillsOpen
+		-- Keep wave sim running; suppress chrome while skills / Hide UI are on.
+		hudFrame.Visible = on and not skillsOpen and not hideUiActive
 	end
-	if on then
+	if on and not hideUiActive then
 		layoutHud()
 		if not wasVisible then
 			refreshForkLabel()
@@ -1398,7 +1400,7 @@ local function setHudVisible(on: boolean)
 				end
 			end)
 		end
-	else
+	elseif not on then
 		if hudLayoutConn then
 			hudLayoutConn:Disconnect()
 			hudLayoutConn = nil
@@ -1438,6 +1440,9 @@ local function setHudVisible(on: boolean)
 			hudCritterBarsEye.Visible = false
 			hudCritterBarsEye.Active = false
 		end
+	elseif hideUiActive and hudLayoutConn then
+		hudLayoutConn:Disconnect()
+		hudLayoutConn = nil
 	end
 end
 

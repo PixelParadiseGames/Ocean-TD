@@ -25,6 +25,10 @@ local UiViewportTags = {
 	P720_RIGHT_HUD = "720pRightHUD",
 	-- Short-edge breakpoint (720p class).
 	HEIGHT_BREAKPOINT = 720,
+	-- Viewport width at which hue inspect "N" count text scales up (not seed wheel).
+	WIDE_WIDTH_MIN = 700,
+	WIDE_UI_SCALE = 3.0,
+	CORAL_SPINNER_STROKE_BASE = 2,
 	-- Touch HUD sits above default TouchGui so right-side slots receive taps.
 	RIGHT_HUD_DISPLAY_ORDER = 250,
 }
@@ -62,6 +66,28 @@ end
 
 function UiViewportTags.isMobile(viewport: Vector2?): boolean
 	return not UiViewportTags.is720p(viewport)
+end
+
+function UiViewportTags.isWideWidth(viewport: Vector2?): boolean
+	local vp = viewport or UiViewportTags.readViewport()
+	return vp.X >= UiViewportTags.WIDE_WIDTH_MIN
+end
+
+-- 3× on 720p+ class viewports (seed wheel spinners; same breakpoint as right HUD).
+function UiViewportTags.wideUiScale(viewport: Vector2?): number
+	if UiViewportTags.is720p(viewport) then
+		return UiViewportTags.WIDE_UI_SCALE
+	end
+	return 1
+end
+
+-- White ring around coral icons during the coral spin (before color spin).
+function UiViewportTags.coralSpinnerStrokeThickness(viewport: Vector2?): number
+	local base = UiViewportTags.CORAL_SPINNER_STROKE_BASE
+	if UiViewportTags.is720p(viewport) then
+		return base * 2
+	end
+	return base
 end
 
 function UiViewportTags.preferredRightHudName(is720p: boolean): string

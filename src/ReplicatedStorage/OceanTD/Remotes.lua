@@ -30,6 +30,7 @@ local REMOTE_EVENTS = {
 	"SeedWheelAutoRoll",
 	"SeedWheelAutoRollSync",
 	"CoralColorUnlocksSync",
+	"HideUiSync",
 }
 
 local REMOTE_FUNCTIONS = {
@@ -52,6 +53,7 @@ local REMOTE_FUNCTIONS = {
 	"RequestCoralColor",
 	"RequestClearCoralHue",
 	"RequestUnlockCoralColor",
+	"RequestUnlockHideUi",
 }
 
 local function getRoot(): Instance

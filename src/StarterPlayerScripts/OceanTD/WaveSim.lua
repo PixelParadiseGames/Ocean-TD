@@ -207,6 +207,7 @@ local pathData: PathData? = nil
 local pathDataGround: WaveCrab.PathData? = nil
 local fishList: { FishAgent } = {}
 local critterHungerBarsVisible = true
+local hideUiSuppressesCritterUi = false
 local coralList: { CoralAgent } = {}
 type CoralStats = {
 	fed: number, -- fish fully fed (credited when they hit max hunger)
@@ -1326,13 +1327,17 @@ local function updateHungerVisual(agent: FishAgent)
 	notifyHud()
 end
 
+local function critterWorldUiEnabled(): boolean
+	return critterHungerBarsVisible and not hideUiSuppressesCritterUi
+end
+
 local function applyCritterHungerBarsVisible()
 	for _, agent in ipairs(fishList) do
 		if agent.billboard then
-			agent.billboard.Enabled = critterHungerBarsVisible
+			agent.billboard.Enabled = critterWorldUiEnabled()
 		end
 	end
-	WaveEndVfx.setHappyExitVisible(critterHungerBarsVisible)
+	WaveEndVfx.setHappyExitVisible(critterWorldUiEnabled())
 end
 
 local function applySizeStats(coral: CoralAgent)
@@ -1851,7 +1856,7 @@ local function spawnOneFish(spawnIndex: number)
 		end
 	end
 	if bb then
-		bb.Enabled = critterHungerBarsVisible
+		bb.Enabled = critterWorldUiEnabled()
 	end
 	updateHungerVisual(agent)
 	local world0 = fishWorldOffset(agent, pos, tang)
@@ -1950,7 +1955,7 @@ local function spawnOneCrab(startDist: number?)
 		end
 	end
 	if bb then
-		bb.Enabled = critterHungerBarsVisible
+		bb.Enabled = critterWorldUiEnabled()
 	end
 	updateHungerVisual(agent)
 	agent.lastWorld = pos
@@ -2049,7 +2054,7 @@ local function spawnOneUrchin(startDist: number?)
 		end
 	end
 	if bb then
-		bb.Enabled = critterHungerBarsVisible
+		bb.Enabled = critterWorldUiEnabled()
 	end
 	updateHungerVisual(agent)
 	agent.lastWorld = pos
@@ -2863,6 +2868,14 @@ function WaveSim.toggleCritterHungerBarsVisible(): boolean
 	critterHungerBarsVisible = not critterHungerBarsVisible
 	applyCritterHungerBarsVisible()
 	return critterHungerBarsVisible
+end
+
+function WaveSim.setHideUiSuppressesCritterUi(suppress: boolean)
+	if hideUiSuppressesCritterUi == suppress then
+		return
+	end
+	hideUiSuppressesCritterUi = suppress
+	applyCritterHungerBarsVisible()
 end
 
 function WaveSim.healReef(amount: number): boolean
