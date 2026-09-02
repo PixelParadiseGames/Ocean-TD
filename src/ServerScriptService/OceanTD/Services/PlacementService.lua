@@ -1803,6 +1803,24 @@ function PlacementService.clearPlot(player: Player, allowEmpty: boolean?, record
 	-- Mesh species can miss per-cell visual lookup (center ≠ plant grid); wipe leftovers.
 	PlacementService.clearPlotVisuals(plotId)
 
+	-- Credit + remove any grid cells that failed per-entry vacate (avoids permanent Occupied).
+	local leftovers: { any } = {}
+	GridService.forEachCell(plotId, function(cell)
+		if cell.ownerUserId == player.UserId then
+			table.insert(leftovers, cell)
+		end
+	end)
+	for _, cell in ipairs(leftovers) do
+		local recycleHue = resolveRecycleHue(nil, cell)
+		if GridService.vacateCell(cell) then
+			PersistenceService.creditHueSeed(player, cell.id, recycleHue, 1)
+			credits[cell.id] = (credits[cell.id] or 0) + 1
+		end
+	end
+	if GridService.getPlotCount(plotId) > 0 then
+		GridService.clearPlot(plotId)
+	end
+
 	log("Cleared plot", plotId, "for", player.Name, "count=", #entries)
 	return {
 		ok = true,

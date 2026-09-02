@@ -202,7 +202,8 @@ function InventoryState.getBackpackButtonScreenCenter(): Vector2?
 	return nil
 end
 
--- Slot2 clear-plot confirm / VFX gates place + relocate.
+-- Slot2 clear-plot confirm gates place / relocate.
+-- VFX "busy" only prevents another clear — it must not block placing (can stick if VFX cancels).
 local clearPlotConfirming = false
 local clearPlotBusy = false
 local savePlotsOpen = false
@@ -226,7 +227,7 @@ function InventoryState.isClearPlotBusy(): boolean
 end
 
 function InventoryState.isClearPlotBlocking(): boolean
-	return clearPlotConfirming or clearPlotBusy
+	return clearPlotConfirming
 end
 
 function InventoryState.setSavePlotsOpen(value: boolean)

@@ -8,6 +8,7 @@
 local Players = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
 local RunService = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
 local ContextActionService = game:GetService("ContextActionService")
 local GuiService = game:GetService("GuiService")
 local Workspace = game:GetService("Workspace")
@@ -102,6 +103,12 @@ local waistBb: BillboardGui? = nil
 local waistAdornee: BasePart? = nil
 local chromeBtnDown = false
 local chromePressTarget: string? = nil -- "check" | "cancel" | "recycle" | "rotLeft" | "rotRight"
+-- "gui" = TextButton claimed the press; "uis" = screen hit-test only.
+local chromeClaimSource: string? = nil
+local confirmOutroPlaying = false
+local confirmOutroTween: Tween? = nil
+local confirmOutroGen = 0
+local confirmOutroDone = true
 local fingerDown = false
 local pressOrigin: Vector2? = nil
 local dragging = false
@@ -155,6 +162,24 @@ end
 
 local function log(...: any)
 	print("[RELOCATE]", ...)
+end
+
+-- Prefer Confirm; never let a flaky UIS hit-test downgrade Confirm → Cancel.
+local function claimChromeTarget(target: string, source: string?)
+	local src = source or "uis"
+	if chromeBtnDown and chromePressTarget == "check" and target == "cancel" then
+		return
+	end
+	if chromeClaimSource == "gui" and src == "uis" and chromePressTarget == "check" then
+		return
+	end
+	if target == "check" or not chromeBtnDown or chromePressTarget ~= "check" or src == "gui" then
+		chromePressTarget = target
+		chromeBtnDown = true
+		if src == "gui" or chromeClaimSource ~= "gui" then
+			chromeClaimSource = src
+		end
+	end
 end
 
 local function isUsingGamepad(): boolean
@@ -550,12 +575,14 @@ local function makeUi()
 		local b = Instance.new("TextButton")
 		b.Size = UDim2.fromOffset(sizePx, sizePx)
 		b.BackgroundColor3 = color
-		b.BackgroundTransparency = 0
+		b.BackgroundTransparency = 0 -- opaque so the whole disc is clickable (not just text)
+		b.BorderSizePixel = 0
 		b.Font = UiTheme.Font
 		b.Text = text
 		b.TextColor3 = Color3.new(1, 1, 1)
 		b.TextScaled = true
 		b.AutoButtonColor = true
+		b.Active = true
 		b.Visible = false
 		b.ZIndex = 5
 		b.Parent = g
@@ -635,8 +662,7 @@ local function makeUi()
 		else
 			return
 		end
-		chromeBtnDown = true
-		chromePressTarget = target
+		claimChromeTarget(target, if claimed ~= nil then "gui" else "uis")
 		fingerDown = false
 		pressOrigin = nil
 		dragging = false
@@ -695,7 +721,34 @@ local function makeUi()
 			markDown("recycle")
 		end
 	end)
-	-- BillboardGui Click is flaky on phone — commit on InputEnded via chromePressTarget.
+	-- Same path as Enter → commit. Hit-test InputEnded often maps Confirm → Cancel on billboards.
+	checkBtn.Activated:Connect(function()
+		if not active or busy then
+			return
+		end
+		chromeBtnDown = false
+		chromePressTarget = nil
+		chromeClaimSource = nil
+		RelocateController.commit()
+	end)
+	cancelBtn.Activated:Connect(function()
+		if not active or busy then
+			return
+		end
+		chromeBtnDown = false
+		chromePressTarget = nil
+		chromeClaimSource = nil
+		RelocateController.cancel()
+	end)
+	recycleBtn.Activated:Connect(function()
+		if not active or busy or recyclePending then
+			return
+		end
+		chromeBtnDown = false
+		chromePressTarget = nil
+		chromeClaimSource = nil
+		RelocateController.beginRecycleConfirm()
+	end)
 end
 
 local MOVE_ICON_GROUND_LIFT = 0.9 -- studs above plant point so the handle isn't buried in sand
@@ -1003,7 +1056,7 @@ local function startHoverLoop()
 end
 
 local function syncChrome()
-	if recycleFlying then
+	if recycleFlying or confirmOutroPlaying then
 		return
 	end
 	-- Intro owns recycle tween; still sync ✓ once the coral has been moved.
@@ -1065,22 +1118,10 @@ local function syncChrome()
 	cancelBtn.TextStrokeTransparency = 0
 
 	if checkBtn.Visible then
-		local confirmWord = if isUsingGamepad() then "A" else "Enter"
-		-- Touch has no keyboard tip — keep CONFIRM.
-		if UserInputService:GetLastInputType() == Enum.UserInputType.Touch then
-			confirmWord = "CONFIRM"
-		end
-		-- FredokaOne blanks ✓ — keep word labels (match place chrome).
-		checkBtn.Text = confirmWord
-		if confirmWord == "CONFIRM" then
-			checkBtn.TextScaled = false
-			checkBtn.TextSize = PlaceConfirmChrome.confirmLabelTextSize()
-		else
-			checkBtn.TextScaled = true
-		end
-		checkBtn.TextTransparency = 0
-		checkBtn.TextStrokeColor3 = Color3.fromRGB(12, 55, 25)
-		checkBtn.TextStrokeTransparency = 0
+		checkBtn.Active = true
+		checkBtn.BackgroundTransparency = 0
+		checkBtn.TextColor3 = Color3.new(1, 1, 1)
+		PlaceConfirmChrome.syncConfirmFace(checkBtn, showWord, isUsingGamepad())
 		-- Flash dark green ↔ bright green (same as place confirm).
 		local phase = (math.sin(os.clock() * 6) + 1) * 0.5
 		checkBtn.BackgroundColor3 = Color3.fromRGB(90, 255, 120):Lerp(Color3.fromRGB(35, 85, 45), phase)
@@ -1454,6 +1495,10 @@ local function clearState()
 	recycleSlideActive = false
 	chromeBtnDown = false
 	chromePressTarget = nil
+	chromeClaimSource = nil
+	confirmOutroPlaying = false
+	confirmOutroTween = nil
+	confirmOutroDone = true
 	fingerDown = false
 	pressOrigin = nil
 	dragging = false
@@ -2063,6 +2108,103 @@ local function commitRecycle()
 	end
 end
 
+-- Dark green pop: scale up 0.2s, then scale to 0 over 0.5s on Confirm press.
+local CONFIRM_SCALE_UP_SEC = 0.2
+local CONFIRM_SCALE_DOWN_SEC = 0.5
+local CONFIRM_SCALE_PEAK = 1.2
+local CONFIRM_DARK_GREEN = Color3.fromRGB(35, 85, 45)
+
+local function beginConfirmPressedLook()
+	local btn = checkBtn
+	if not btn then
+		return
+	end
+	confirmOutroPlaying = true
+	confirmOutroDone = false
+	confirmOutroGen += 1
+	local gen = confirmOutroGen
+	if cancelBtn then
+		cancelBtn.Visible = false
+	end
+	if rotLeftBtn then
+		rotLeftBtn.Visible = false
+	end
+	if rotRightBtn then
+		rotRightBtn.Visible = false
+	end
+	if recycleBtn then
+		recycleBtn.Visible = false
+	end
+	if moveIcon then
+		moveIcon.Visible = false
+	end
+	btn.Visible = true
+	btn.Active = false
+	btn.Text = if isUsingGamepad() then "A" else ""
+	btn.TextTransparency = if isUsingGamepad() then 0 else 1
+	btn.BackgroundColor3 = CONFIRM_DARK_GREEN
+	local checkIcon = PlaceConfirmChrome.ensureConfirmCheckIcon(btn)
+	checkIcon.Visible = not isUsingGamepad()
+	local scale = btn:FindFirstChildOfClass("UIScale")
+	if not scale then
+		scale = Instance.new("UIScale")
+		scale.Name = "ConfirmOutroScale"
+		scale.Parent = btn
+	end
+	scale.Scale = 1
+	if confirmOutroTween then
+		confirmOutroTween:Cancel()
+		confirmOutroTween = nil
+	end
+	task.spawn(function()
+		local twUp = TweenService:Create(
+			scale,
+			TweenInfo.new(CONFIRM_SCALE_UP_SEC, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+			{ Scale = CONFIRM_SCALE_PEAK }
+		)
+		confirmOutroTween = twUp
+		twUp:Play()
+		twUp.Completed:Wait()
+		if gen ~= confirmOutroGen or not btn.Parent then
+			confirmOutroDone = true
+			return
+		end
+		local twDown = TweenService:Create(
+			scale,
+			TweenInfo.new(CONFIRM_SCALE_DOWN_SEC, Enum.EasingStyle.Quad, Enum.EasingDirection.In),
+			{ Scale = 0 }
+		)
+		confirmOutroTween = twDown
+		twDown:Play()
+		twDown.Completed:Wait()
+		if gen == confirmOutroGen then
+			confirmOutroTween = nil
+			confirmOutroDone = true
+		end
+	end)
+end
+
+local function playConfirmSuccessOutro(thenDone: () -> ())
+	local btn = checkBtn
+	if not btn or not btn.Parent then
+		confirmOutroPlaying = false
+		confirmOutroTween = nil
+		confirmOutroDone = true
+		thenDone()
+		return
+	end
+	confirmOutroPlaying = true
+	btn.BackgroundColor3 = CONFIRM_DARK_GREEN
+	task.spawn(function()
+		while not confirmOutroDone do
+			task.wait()
+		end
+		confirmOutroPlaying = false
+		confirmOutroTween = nil
+		thenDone()
+	end)
+end
+
 function RelocateController.commit()
 	if not active or busy then
 		return
@@ -2082,6 +2224,7 @@ function RelocateController.commit()
 	local id = placeId
 	local yaw = relocateFacingYaw
 	busy = true
+	beginConfirmPressedLook()
 	PlaceVfx.playSound(toPos)
 	local rf = Remotes.getFunction("RequestMove")
 	local parentId: string? = nil
@@ -2114,12 +2257,28 @@ function RelocateController.commit()
 		end
 		PlaceVfx.playVisuals(toPos, baseColor or Color3.fromRGB(100, 200, 255))
 		log("Saved move")
-		clearState()
+		playConfirmSuccessOutro(function()
+			clearState()
+		end)
 	else
 		local code = typeof(result) == "table" and result.errorCode or "Reject"
 		log("Move rejected", code)
+		confirmOutroPlaying = false
+		confirmOutroGen += 1
+		confirmOutroDone = true
+		if confirmOutroTween then
+			confirmOutroTween:Cancel()
+			confirmOutroTween = nil
+		end
 		busy = false
 		validSpot = false
+		if checkBtn then
+			checkBtn.Active = true
+			local sc = checkBtn:FindFirstChildOfClass("UIScale")
+			if sc then
+				sc.Scale = 1
+			end
+		end
 		syncChrome()
 	end
 end
@@ -2237,6 +2396,7 @@ function RelocateController.begin(target: BasePart)
 	recycleSlideActive = false
 	chromeBtnDown = false
 	chromePressTarget = nil
+	chromeClaimSource = nil
 	fingerDown = false
 	pressOrigin = nil
 	dragging = false
@@ -2360,8 +2520,7 @@ table.insert(inputConns, UserInputService.InputBegan:Connect(function(input, _pr
 		if not grabHandle then
 			local chromeTarget = resolveRelocateChrome(screenPos)
 			if chromeTarget then
-				chromeBtnDown = true
-				chromePressTarget = chromeTarget
+				claimChromeTarget(chromeTarget, "uis")
 				pendingCoralSwitch = nil
 				pendingCoralSwitchScreen = nil
 				fingerDown = false
@@ -2388,10 +2547,12 @@ table.insert(inputConns, UserInputService.InputBegan:Connect(function(input, _pr
 		if recyclePending then
 			return
 		end
-		-- Never world-pick through chrome (rotate Active + GuiObjects can lag a frame).
+		-- Never world-pick through chrome. Never default unresolved hits to Cancel.
 		if isOverChrome(screenPos) then
-			chromeBtnDown = true
-			chromePressTarget = chromePressTarget or resolveRelocateChrome(screenPos) or "cancel"
+			local resolved = resolveRelocateChrome(screenPos)
+			if resolved then
+				claimChromeTarget(resolved, "uis")
+			end
 			pendingCoralSwitch = nil
 			pendingCoralSwitchScreen = nil
 			return
@@ -2532,6 +2693,7 @@ table.insert(inputConns, UserInputService.InputEnded:Connect(function(input, _pr
 	local wasChrome = chromeBtnDown
 	chromeBtnDown = false
 	chromePressTarget = nil
+	chromeClaimSource = nil
 	fingerDown = false
 	pressOrigin = nil
 	dragging = false
@@ -2540,7 +2702,8 @@ table.insert(inputConns, UserInputService.InputEnded:Connect(function(input, _pr
 	pendingCoralSwitchScreen = nil
 	RelocateMultiSelect.clearPendingInput()
 
-	-- BillboardGui Click is flaky — fire chrome actions on release from the press target.
+	-- Trust the press target (same as PlacementController). Re-hit-testing on release
+	-- fought ScreenGui/Billboard coords and canceled moves when tapping Confirm.
 	if active and wasChrome and chromeTarget then
 		if chromeTarget == "rotLeft" or chromeTarget == "rotRight" then
 			PlaceConfirmChrome.stopRotateHold()
@@ -2550,13 +2713,16 @@ table.insert(inputConns, UserInputService.InputEnded:Connect(function(input, _pr
 		if chromeTarget == "check" then
 			RelocateController.commit()
 			return
-		elseif chromeTarget == "cancel" then
+		end
+		if chromeTarget == "cancel" then
 			RelocateController.cancel()
 			return
-		elseif chromeTarget == "recycle" then
+		end
+		if chromeTarget == "recycle" then
 			RelocateController.beginRecycleConfirm()
 			return
 		end
+		return
 	end
 
 	-- Shift+click toggle add/remove.

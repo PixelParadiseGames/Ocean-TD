@@ -131,6 +131,7 @@ local queuedSwitchItemId: string? = nil
 -- ✓/X press owned by confirm chrome (blocks AIM from parking the ghost on that click).
 local chromeBtnPointerDown = false
 local chromePressTarget: string? = nil -- "check" | "cancel"
+local placeCommitBusy = false
 
 -- Forward decls so confirm UI can wire before bodies are assigned.
 local onCheck: () -> ()
@@ -967,29 +968,22 @@ local function syncConfirmButtonsImpl()
 	)
 	chromeBillboard = bb
 	chromeAdorneePart = adornee
-	local btnPx = PlaceConfirmChrome.chromeBtnSize(BTN_SIZE)
 	local showWord = (math.floor(os.clock()) % 2) == 1
 	cancelBtn.Text = if showWord then "CANCEL" else "X"
 	cancelBtn.TextStrokeColor3 = if showWord then Color3.fromRGB(60, 15, 18) else Color3.new(1, 1, 1)
 	cancelBtn.TextStrokeTransparency = 0
 	if checkBtn.Visible then
-		-- FredokaOne has no ✓ — always a readable word (same as Relocate Enter/A).
-		local confirmWord = "CONFIRM"
 		local last = UserInputService:GetLastInputType()
-		if last == Enum.UserInputType.Gamepad1
+		local gamepad = last == Enum.UserInputType.Gamepad1
 			or last == Enum.UserInputType.Gamepad2
 			or last == Enum.UserInputType.Gamepad3
 			or last == Enum.UserInputType.Gamepad4
 			or gamepadPlacement
-		then
-			confirmWord = "A"
-		elseif last == Enum.UserInputType.Keyboard or last == Enum.UserInputType.MouseButton1
-			or last == Enum.UserInputType.MouseMovement
-		then
-			confirmWord = "Enter"
-		end
-		checkBtn.Size = UDim2.fromOffset(btnPx, btnPx)
-		setCheckLabel(confirmWord)
+		local confirmPx = PlaceConfirmChrome.confirmBtnSize(BTN_SIZE)
+		checkBtn.Size = UDim2.fromOffset(confirmPx, confirmPx)
+		checkBtn.TextColor3 = Color3.new(1, 1, 1)
+		checkBtn.ZIndex = 20
+		PlaceConfirmChrome.syncConfirmFace(checkBtn, showWord, gamepad)
 	end
 end
 syncConfirmButtons = syncConfirmButtonsImpl
@@ -1106,19 +1100,21 @@ local function makeConfirmUiImpl()
 	applyGamepadButtonLabels()
 
 	local function markChromePointerDown(claimed: string)
-		-- Only a press that *starts* on chrome counts. Sliding onto the button mid-drag
-		-- (common on phone when releasing over Cancel) must not steal the gesture.
-		if aimFingerDown or backpackDrag or confirmDragging or confirmPressOrigin ~= nil then
-			return
+		-- Gui Confirm/Cancel always wins (UIS may have already tried to re-park under the button).
+		local fromGuiChrome = claimed == "check" or claimed == "cancel"
+		if not fromGuiChrome then
+			-- Only a press that *starts* on chrome counts. Sliding onto rot mid-drag must not steal.
+			if aimFingerDown or backpackDrag or confirmDragging or confirmPressOrigin ~= nil then
+				return
+			end
 		end
 		local screenPos = UserInputService:GetMouseLocation()
 		local resolved = PlaceConfirmHitTest.resolveTarget(screenPos, checkBtn, cancelBtn, playerGui, rotLeftBtn, rotRightBtn)
-		-- If ✓/X received the press (AutoButtonColor), trust that over disc overlap with rot below.
+		-- If ✓/X received the press (AutoButtonColor), trust that over disc overlap with rot.
 		local target: string?
 		if claimed == "check" or claimed == "cancel" then
 			target = claimed
 		elseif resolved == "check" or resolved == "cancel" then
-			-- Rot Gui got the event but pointer is on Confirm/Cancel — promote.
 			target = resolved
 		elseif resolved == "rotLeft" or resolved == "rotRight" then
 			target = resolved
@@ -1131,11 +1127,21 @@ local function makeConfirmUiImpl()
 		else
 			return
 		end
-		chromePressTarget = target
-		chromeBtnPointerDown = true
+		-- Gui button claim wins: never let a later flaky resolve downgrade Confirm → Cancel.
+		if chromeBtnPointerDown and chromePressTarget == "check" and target == "cancel" then
+			return
+		end
+		if target == "check" or not chromeBtnPointerDown then
+			chromePressTarget = target
+			chromeBtnPointerDown = true
+		elseif chromePressTarget ~= "check" then
+			chromePressTarget = target
+			chromeBtnPointerDown = true
+		end
 		aimFingerDown = false
 		confirmPressOrigin = nil
 		confirmDragging = false
+		placePointerHeld = false
 		if target == "rotLeft" or target == "rotRight" then
 			local dir = if target == "rotLeft" then 1 else -1
 			local btn = if target == "rotLeft" then rotLeftBtn else rotRightBtn
@@ -1184,7 +1190,25 @@ local function makeConfirmUiImpl()
 			markChromePointerDown("rotRight")
 		end
 	end)
-	-- Clicks are committed in UserInputService.InputEnded (BillboardGui Click is flaky).
+	-- Native button click — primary commit path (InputEnded is backup).
+	checkBtn.Activated:Connect(function()
+		if mode ~= MODE_CONFIRM and not gamepadPlacement then
+			return
+		end
+		chromeBtnPointerDown = false
+		chromePressTarget = nil
+		PlaceConfirmChrome.stopRotateHold()
+		onCheck()
+	end)
+	cancelBtn.Activated:Connect(function()
+		if mode == MODE_OFF then
+			return
+		end
+		chromeBtnPointerDown = false
+		chromePressTarget = nil
+		PlaceConfirmChrome.stopRotateHold()
+		onCancel()
+	end)
 end
 makeConfirmUi = makeConfirmUiImpl
 
@@ -1411,6 +1435,7 @@ end
 
 beginAim = function(itemId: string, scaleIn: boolean?, keepChromePinned: boolean?)
 	postPlaceWaiting = false
+	placeCommitBusy = false
 	PlaceArmDisarmAnim.stopArmIntro()
 	armedItemId = itemId
 	mode = MODE_AIM
@@ -1518,6 +1543,7 @@ end
 local function exitPlacement(clearArmed: boolean)
 	placeResumeToken += 1
 	postPlaceWaiting = false
+	placeCommitBusy = false
 	pendingGhostScaleIn = false
 	PlaceArmDisarmAnim.stopDisarmAnim()
 	PlaceArmDisarmAnim.stopOutgoingFlyback()
@@ -1554,12 +1580,16 @@ local function exitPlacement(clearArmed: boolean)
 end
 
 local function commitPlace()
+	if placeCommitBusy then
+		return
+	end
 	if not armedItemId or not confirmPos or not validSpot then
 		return
 	end
 	if postPlaceWaiting or PlaceArmDisarmAnim.isDisarmAnimating() or PlaceArmDisarmAnim.isArmIntroAnimating() then
 		return
 	end
+	placeCommitBusy = true
 	local placePos = confirmPos
 	if ghost and ghost.Parent and armedItemId == "BrainCoral" then
 		-- Save the exact stacked pose the ghost shows (not a stale aim sample).
@@ -1637,6 +1667,7 @@ local function commitPlace()
 	else
 		local code = typeof(result) == "table" and result.errorCode or "Reject"
 		log("Place rejected", code)
+		placeCommitBusy = false
 		-- Place failed: cancel fly and put orb back in hand.
 		HandOrb.clear()
 		if ghostBaseColor then
@@ -1660,6 +1691,13 @@ local function commitPlace()
 			ClientPlot.setOutOfPlotFlash(code == "OutOfPlot")
 			if code == "SpotTaken" and placePos then
 				syncBlockFlashForAim(placePos)
+			end
+		elseif code == "NoSeeds" then
+			rejectReason = "No Seeds"
+			validSpot = false
+			if warnLabel then
+				warnLabel.Text = rejectReason
+				warnLabel.Visible = true
 			end
 		end
 	end
@@ -2085,26 +2123,37 @@ table.insert(inputConns, UserInputService.InputBegan:Connect(function(input, _pr
 
 	-- ✓ / X own the press: never start a ghost drag.
 	-- BillboardGui often skips MouseButton1Click — commit happens on InputEnded.
+	-- AbsolutePosition hit-tests on billboard chrome can mis-resolve Confirm as Cancel;
+	-- never downgrade an existing Confirm claim.
 	local chromeTarget = PlaceConfirmHitTest.resolveTarget(screenPos, checkBtn, cancelBtn, playerGui, rotLeftBtn, rotRightBtn)
 	if chromeTarget then
 		confirmPressOrigin = nil
 		confirmDragging = false
 		aimFingerDown = false
-		chromePressTarget = chromeTarget
-		chromeBtnPointerDown = true
-		if chromeTarget == "rotLeft" or chromeTarget == "rotRight" then
-			local dir = if chromeTarget == "rotLeft" then 1 else -1
-			local btn = if chromeTarget == "rotLeft" then rotLeftBtn else rotRightBtn
-			PlaceConfirmChrome.beginRotateHold(btn, function()
-				if BrainSnapPreview.isSnapped() then
-					rotateBrainSnapOrbit(dir)
-				else
-					rotateSeaFanGhost(dir)
-				end
-			end)
-		else
-			PlaceConfirmChrome.stopRotateHold()
+		if chromeBtnPointerDown and chromePressTarget == "check" and chromeTarget == "cancel" then
+			return
 		end
+		if chromeTarget == "check" or not chromeBtnPointerDown or chromePressTarget ~= "check" then
+			chromePressTarget = chromeTarget
+			chromeBtnPointerDown = true
+			if chromeTarget == "rotLeft" or chromeTarget == "rotRight" then
+				local dir = if chromeTarget == "rotLeft" then 1 else -1
+				local btn = if chromeTarget == "rotLeft" then rotLeftBtn else rotRightBtn
+				PlaceConfirmChrome.beginRotateHold(btn, function()
+					if BrainSnapPreview.isSnapped() then
+						rotateBrainSnapOrbit(dir)
+					else
+						rotateSeaFanGhost(dir)
+					end
+				end)
+			else
+				PlaceConfirmChrome.stopRotateHold()
+			end
+		end
+		return
+	end
+	-- Gui already claimed Confirm/Cancel this frame — never re-park under the button.
+	if chromeBtnPointerDown then
 		return
 	end
 	-- Touches on the open backpack list must not aim/park the ghost under the panel.
@@ -2125,14 +2174,13 @@ table.insert(inputConns, UserInputService.InputBegan:Connect(function(input, _pr
 			confirmDragging = true
 			return
 		end
-		-- Mouse: click elsewhere re-parks immediately (Spot Taken / invalid stays until you move).
-		-- Touch still press-then-drag so a tap on the plot doesn't jump the ghost.
-		if isMouse then
-			parkAtPointer(screenPos)
-			return
+		-- Do not re-park on a bare click. That ray often goes through Confirm at the feet
+		-- when hit-test misses, then ✓ places the wrong cell and the orb snaps back.
+		-- Reposition via the move handle (or touch-drag below).
+		if isTouch then
+			confirmPressOrigin = screenPos
+			confirmDragging = false
 		end
-		confirmPressOrigin = screenPos
-		confirmDragging = false
 		return
 	end
 
@@ -2202,7 +2250,7 @@ table.insert(inputConns, UserInputService.InputEnded:Connect(function(input, _pr
 		return
 	end
 	local screenPos = PlaceConfirmHitTest.pointerScreenPos(input)
-	-- Cancel/check press: commit on release (BillboardGui MouseButton1Click is unreliable).
+	-- Cancel/check press: commit on release (backup if Activated didn't fire).
 	if chromeBtnPointerDown then
 		local target = chromePressTarget
 		chromeBtnPointerDown = false

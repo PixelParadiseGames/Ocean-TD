@@ -368,12 +368,26 @@ function ClearPlotSlot.hideConfirm()
 	end
 	if clearConfirmDim then
 		clearConfirmDim.Visible = false
+		clearConfirmDim.Active = false
+	end
+	-- Stop eating place/relocate clicks during the scale-out tween (DisplayOrder > place chrome).
+	if clearConfirmPanel then
+		clearConfirmPanel.Active = false
+	end
+	if clearConfirmCheck then
+		clearConfirmCheck.Active = false
+		clearConfirmCheck.Selectable = false
+	end
+	if clearConfirmCancel then
+		clearConfirmCancel.Active = false
+		clearConfirmCancel.Selectable = false
 	end
 	local sel = GuiService.SelectedObject
 	if sel == clearConfirmCheck or sel == clearConfirmCancel then
 		GuiService.SelectedObject = prevGuiSelected
 	end
 	prevGuiSelected = nil
+	GuiService.SelectedObject = nil
 
 	clearScaleToken += 1
 	local token = clearScaleToken
@@ -747,6 +761,14 @@ function ClearPlotSlot.commit()
 			deps.log("Clear plot VFX done", count)
 		end,
 	})
+	-- Safety: never leave clear-busy stuck if VFX hangs.
+	task.delay(20, function()
+		if InventoryState.isClearPlotBusy() then
+			warn("[INV] Clear plot busy timed out — forcing unlock")
+			ClearPlotVfx.cancel()
+			InventoryState.setClearPlotBusy(false)
+		end
+	end)
 	deps.log("Clear plot", count)
 end
 
@@ -780,6 +802,18 @@ function ClearPlotSlot.beginConfirm()
 	end
 	if clearConfirmDim then
 		clearConfirmDim.Visible = true
+		clearConfirmDim.Active = true
+	end
+	if clearConfirmPanel then
+		clearConfirmPanel.Active = true
+	end
+	if clearConfirmCheck then
+		clearConfirmCheck.Active = true
+		clearConfirmCheck.Selectable = true
+	end
+	if clearConfirmCancel then
+		clearConfirmCancel.Active = true
+		clearConfirmCancel.Selectable = true
 	end
 	if clearConfirmPanel then
 		UiPopupScale.attach(clearConfirmPanel)

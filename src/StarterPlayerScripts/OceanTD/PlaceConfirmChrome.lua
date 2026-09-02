@@ -24,6 +24,8 @@ local BTN_FALLBACK_BOTTOM_PAD = 28
 local FEET_LIFT = 0.45
 -- Base chrome diameter before viewport scale (PlacementController default).
 local BASE_BTN_PX = 52
+-- Confirm is 20% larger than Close / rot.
+local CONFIRM_BTN_SCALE = 1.2
 -- ≤720p class (mobile): 30% smaller. 720p+: 20% larger.
 local MOBILE_BTN_SCALE = 0.7
 local DESKTOP_BTN_SCALE = 1.2
@@ -39,10 +41,68 @@ function PlaceConfirmChrome.chromeBtnSize(basePx: number?): number
 	return math.max(math.floor(base * scale + 0.5), 28)
 end
 
+function PlaceConfirmChrome.confirmBtnSize(basePx: number?): number
+	return math.max(math.floor(PlaceConfirmChrome.chromeBtnSize(basePx) * CONFIRM_BTN_SCALE + 0.5), 28)
+end
+
 -- Fixed px for the word "CONFIRM" inside the circle (TextScaled wraps it on mobile).
 function PlaceConfirmChrome.confirmLabelTextSize(): number
-	return if UiViewportTags.is720p() then 11 else 8
+	return if UiViewportTags.is720p() then 12 else 9
 end
+
+local CONFIRM_CHECK_IMAGE = "rbxassetid://114269375380072"
+
+function PlaceConfirmChrome.ensureConfirmCheckIcon(btn: GuiObject): ImageLabel
+	local existing = btn:FindFirstChild("ConfirmCheckIcon")
+	if existing and existing:IsA("ImageLabel") then
+		return existing
+	end
+	if existing then
+		existing:Destroy()
+	end
+	local icon = Instance.new("ImageLabel")
+	icon.Name = "ConfirmCheckIcon"
+	icon.BackgroundTransparency = 1
+	icon.AnchorPoint = Vector2.new(0.5, 0.5)
+	icon.Position = UDim2.fromScale(0.5, 0.5)
+	icon.Size = UDim2.fromScale(0.58, 0.58)
+	icon.Image = CONFIRM_CHECK_IMAGE
+	icon.ScaleType = Enum.ScaleType.Fit
+	icon.Active = false
+	icon.Visible = false
+	icon.ZIndex = (btn :: GuiObject).ZIndex + 1
+	icon.Parent = btn
+	return icon
+end
+
+-- Alternate CONFIRM text ↔ check graphic (same 1s cadence as CANCEL/X). Gamepad stays on "A".
+function PlaceConfirmChrome.syncConfirmFace(btn: TextButton, showWord: boolean, gamepadLetter: boolean?)
+	local icon = PlaceConfirmChrome.ensureConfirmCheckIcon(btn)
+	if gamepadLetter then
+		icon.Visible = false
+		btn.Text = "A"
+		btn.TextTransparency = 0
+		btn.TextScaled = true
+		btn.TextStrokeColor3 = Color3.fromRGB(12, 55, 25)
+		btn.TextStrokeTransparency = 0
+		return
+	end
+	if showWord then
+		icon.Visible = false
+		btn.Text = "CONFIRM"
+		btn.TextTransparency = 0
+		btn.TextScaled = false
+		btn.TextSize = PlaceConfirmChrome.confirmLabelTextSize()
+		btn.TextStrokeColor3 = Color3.fromRGB(12, 55, 25)
+		btn.TextStrokeTransparency = 0
+	else
+		btn.Text = ""
+		btn.TextTransparency = 1
+		icon.Visible = true
+	end
+end
+
+PlaceConfirmChrome.CONFIRM_CHECK_IMAGE = CONFIRM_CHECK_IMAGE
 
 -- Centered on the character (root XZ), Y at average foot height.
 local function feetOffsetFromRoot(char: Model, root: BasePart): CFrame
@@ -181,7 +241,6 @@ function PlaceConfirmChrome.createRotateButton(parent: Instance, imageId: string
 	b.AutoButtonColor = true
 	b.Visible = false
 	-- Active so presses sink into the button and cannot fall through to world coral picks.
-	-- Confirm stacks above Close; Y-band hit test still prefers Confirm when overlapping.
 	b.Active = true
 	b.ZIndex = 5
 	b.Parent = parent
@@ -294,11 +353,13 @@ local function placeChrome(
 	useScale: boolean -- BillboardGui uses scale-centered coords
 )
 	--[[
-		Close + rot stay fixed. Confirm is always parked above Close; only Visible toggles.
+		Close + rot stay fixed on the top row. Confirm parks below Close; only Visible toggles.
+		Confirm is larger than Close — space centers so discs don't overlap.
 	]]
-	local function setPos(btn: GuiObject, x: number, y: number, visible: boolean?)
+	local checkS = math.max(math.floor(s * CONFIRM_BTN_SCALE + 0.5), s)
+	local function setPos(btn: GuiObject, x: number, y: number, sizePx: number, visible: boolean?)
 		btn.AnchorPoint = Vector2.new(0.5, 0.5)
-		btn.Size = UDim2.fromOffset(s, s)
+		btn.Size = UDim2.fromOffset(sizePx, sizePx)
 		if useScale then
 			btn.Position = UDim2.new(0.5, x, 0.5, y)
 		else
@@ -321,25 +382,24 @@ local function placeChrome(
 	end
 
 	local rowGap = math.max(math.floor(s * 0.35 + 0.5), 10)
-	local botY = 0
-	local topY = -(s + rowGap)
+	local topY = 0
+	local confirmY = checkS * 0.5 + s * 0.5 + rowGap
 
 	if showRot and cancelBtn and rotLeftBtn and rotRightBtn then
-		setPos(rotLeftBtn, -(s + gap), botY)
-		setPos(cancelBtn, 0, botY)
-		setPos(rotRightBtn, (s + gap), botY)
+		setPos(rotLeftBtn, -(s + gap), topY, s)
+		setPos(cancelBtn, 0, topY, s)
+		setPos(rotRightBtn, (s + gap), topY, s)
 		if checkBtn then
-			-- Always park Enter above Close; reveal only (never rebuild offsets).
-			setPos(checkBtn, 0, topY, showCheck)
+			setPos(checkBtn, 0, confirmY, checkS, showCheck)
 		end
 		return
 	end
 
 	if cancelBtn then
-		setPos(cancelBtn, 0, botY)
+		setPos(cancelBtn, 0, topY, s)
 	end
 	if checkBtn then
-		setPos(checkBtn, 0, topY, showCheck)
+		setPos(checkBtn, 0, confirmY, checkS, showCheck)
 	end
 end
 
@@ -376,43 +436,6 @@ function PlaceConfirmChrome.layoutAt(
 	placeChrome(chrome, s, gap, showCheck, doRot, checkBtn, rotLeftBtn, cancelBtn, rotRightBtn, false)
 end
 
-local function ensureChromeBillboard(
-	existing: BillboardGui?,
-	playerGui: PlayerGui,
-	adornee: BasePart,
-	btnSize: number,
-	showRot: boolean
-): BillboardGui
-	local s = btnSize
-	local gap = 6
-	local rowGap = math.max(math.floor(s * 0.35 + 0.5), 10)
-	local pad = 16
-	local width = if showRot then (3 * s + 2 * gap + pad) else (s + pad)
-	local height = 2 * s + rowGap + pad
-
-	local bb = existing
-	if bb and bb.Parent then
-		bb.Enabled = true
-		bb.Adornee = adornee
-		bb.Size = UDim2.fromOffset(width, height)
-		return bb
-	end
-	if bb then
-		bb:Destroy()
-	end
-	bb = Instance.new("BillboardGui")
-	bb.Name = "OceanTD_PlaceChromeBillboard"
-	bb.AlwaysOnTop = true
-	bb.Active = true -- must receive taps on ✓/X/rot
-	bb.LightInfluence = 0
-	bb.Size = UDim2.fromOffset(width, height)
-	bb.StudsOffset = Vector3.zero
-	bb.MaxDistance = 2000
-	bb.Adornee = adornee
-	bb.Parent = playerGui
-	return bb
-end
-
 function PlaceConfirmChrome.layoutOnTorso(
 	btnSize: number,
 	playerGui: PlayerGui,
@@ -429,33 +452,13 @@ function PlaceConfirmChrome.layoutOnTorso(
 	local doRot = showRot == true and rotLeftBtn ~= nil and rotRightBtn ~= nil
 	local adornee = PlaceConfirmChrome.ensureAdornee(chromeAdornee)
 
-	-- Under-720p / touch class: world-anchor chrome on the feet adornee (same idea as
-	-- the touch move-icon billboard). Screen-space projection drifts left on phones.
-	if not UiViewportTags.is720p() then
-		if not adornee or not confirmGui then
-			if chromeBillboard then
-				chromeBillboard.Enabled = false
-			end
-			return chromeBillboard, adornee
-		end
-		local bb = ensureChromeBillboard(chromeBillboard, playerGui, adornee, s, doRot)
-		local showCheck = checkBtn ~= nil and checkBtn.Visible
-		local function parentToBb(btn: GuiObject?)
-			if btn and btn.Parent ~= bb then
-				btn.Parent = bb
-			end
-		end
-		parentToBb(checkBtn)
-		parentToBb(cancelBtn)
-		parentToBb(rotLeftBtn)
-		parentToBb(rotRightBtn)
-		placeChrome(Vector2.zero, s, 6, showCheck, doRot, checkBtn, rotLeftBtn, cancelBtn, rotRightBtn, true)
-		return bb, adornee
-	end
-
-	-- 720p+: screen-space at feet (stable size when zoomed out).
+	-- Always ScreenGui: Billboard AbsolutePosition / hit tests are unreliable (clicks land
+	-- below the visible disc). Screen-space buttons behave like normal GuiButtons.
 	if chromeBillboard then
 		chromeBillboard.Enabled = false
+	end
+	if not adornee or not confirmGui then
+		return chromeBillboard, adornee
 	end
 	PlaceConfirmChrome.layoutAt(
 		PlaceConfirmChrome.screenPos(adornee),

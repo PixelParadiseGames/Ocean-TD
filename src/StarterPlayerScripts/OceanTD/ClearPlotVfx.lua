@@ -44,6 +44,7 @@ local TICK_SOUND_ID = "rbxassetid://138913815716094"
 local player = Players.LocalPlayer
 local busy = false
 local token = 0
+local activeOnDone: (() -> ())? = nil
 
 local tickTemplate = Instance.new("Sound")
 tickTemplate.Name = "OceanTD_ClearTick"
@@ -55,6 +56,17 @@ task.defer(function()
 		ContentProvider:PreloadAsync({ tickTemplate })
 	end)
 end)
+
+local function completeOnce()
+	local cb = activeOnDone
+	activeOnDone = nil
+	busy = false
+	if cb then
+		task.defer(function()
+			pcall(cb)
+		end)
+	end
+end
 
 local function fxFolder(): Folder
 	local cam = Workspace.CurrentCamera
@@ -177,7 +189,7 @@ end
 
 function ClearPlotVfx.cancel()
 	token += 1
-	busy = false
+	completeOnce()
 end
 
 -- Disable collision on stem + welded children (walk Colliders, SeaGrass truss, etc.).
@@ -199,281 +211,265 @@ function ClearPlotVfx.play(args: PlayArgs)
 	token += 1
 	local myToken = token
 	busy = true
+	activeOnDone = args.onDone
 	local parts = args.parts
 	local count = math.max(0, math.floor(args.count))
 	local getScrollCenter = args.getScrollCenter
-	local onDone = args.onDone
 
 	task.spawn(function()
-		local folder = fxFolder()
+		local ok, err = pcall(function()
+			local folder = fxFolder()
 
-		-- Reparent live corals into local FX so server destroy is a no-op / already gone.
-		local animParts: { BasePart } = {}
-		for _, p in ipairs(parts) do
-			if p.Parent then
-				sanitizePartForFx(p)
-				p.CastShadow = false
-				p.Parent = folder
-				table.insert(animParts, p)
-			end
-		end
-
-		-- Light flash at player (range 40), then fade over 5s.
-		local lightHost = Instance.new("Part")
-		lightHost.Name = "OceanTD_ClearLight"
-		lightHost.Anchored = true
-		lightHost.CanCollide = false
-		lightHost.CanQuery = false
-		lightHost.CanTouch = false
-		lightHost.Transparency = 1
-		lightHost.Size = Vector3.new(0.2, 0.2, 0.2)
-		lightHost.CFrame = CFrame.new(playerRootPos())
-		lightHost.Parent = folder
-		local light = Instance.new("PointLight")
-		light.Color = GREEN
-		light.Brightness = LIGHT_BRIGHTNESS
-		light.Range = LIGHT_RANGE
-		light.Parent = lightHost
-		task.spawn(function()
-			local t0 = os.clock()
-			while myToken == token and light.Parent do
-				local u = math.clamp((os.clock() - t0) / LIGHT_FADE_SEC, 0, 1)
-				lightHost.CFrame = CFrame.new(playerRootPos())
-				light.Brightness = LIGHT_BRIGHTNESS * (1 - u)
-				if u >= 1 then
-					break
+			-- Reparent live corals into local FX so server destroy is a no-op / already gone.
+			local animParts: { BasePart } = {}
+			for _, p in ipairs(parts) do
+				if p.Parent then
+					sanitizePartForFx(p)
+					p.CastShadow = false
+					p.Parent = folder
+					table.insert(animParts, p)
 				end
-				RunService.RenderStepped:Wait()
 			end
-			if lightHost.Parent then
-				lightHost:Destroy()
-			end
-		end)
 
-		if #animParts == 0 or count <= 0 then
-			busy = false
-			if onDone then
-				onDone()
-			end
-			return
-		end
-
-		-- Neon green wave from player outward (1–3s).
-		local root = playerRootPos()
-		table.sort(animParts, function(a, b)
-			return (a.Position - root).Magnitude < (b.Position - root).Magnitude
-		end)
-		local maxDist = 1
-		for _, p in ipairs(animParts) do
-			maxDist = math.max(maxDist, (p.Position - root).Magnitude)
-		end
-		local waveSpan = WAVE_MIN_SEC + (WAVE_MAX_SEC - WAVE_MIN_SEC) * math.clamp(maxDist / 80, 0, 1)
-
-		local greened = 0
-		for _, p in ipairs(animParts) do
-			local dist = (p.Position - root).Magnitude
-			local delaySec = (dist / maxDist) * waveSpan
-			task.delay(delaySec, function()
-				if myToken ~= token or not p.Parent then
-					return
+			-- Light flash at player (range 40), then fade over 5s.
+			local lightHost = Instance.new("Part")
+			lightHost.Name = "OceanTD_ClearLight"
+			lightHost.Anchored = true
+			lightHost.CanCollide = false
+			lightHost.CanQuery = false
+			lightHost.CanTouch = false
+			lightHost.Transparency = 1
+			lightHost.Size = Vector3.new(0.2, 0.2, 0.2)
+			lightHost.CFrame = CFrame.new(playerRootPos())
+			lightHost.Parent = folder
+			local light = Instance.new("PointLight")
+			light.Color = GREEN
+			light.Brightness = LIGHT_BRIGHTNESS
+			light.Range = LIGHT_RANGE
+			light.Parent = lightHost
+			task.spawn(function()
+				local t0 = os.clock()
+				while myToken == token and light.Parent do
+					local u = math.clamp((os.clock() - t0) / LIGHT_FADE_SEC, 0, 1)
+					lightHost.CFrame = CFrame.new(playerRootPos())
+					light.Brightness = LIGHT_BRIGHTNESS * (1 - u)
+					if u >= 1 then
+						break
+					end
+					RunService.RenderStepped:Wait()
 				end
-				p.Material = Enum.Material.Neon
-				p.Color = randomNeonGreen()
-				greened += 1
+				if lightHost.Parent then
+					lightHost:Destroy()
+				end
 			end)
-		end
 
-		-- Wait until wave finishes.
-		local waveWait = waveSpan + 0.05
-		local tw0 = os.clock()
-		while os.clock() - tw0 < waveWait and myToken == token do
-			RunService.RenderStepped:Wait()
-		end
-		if myToken ~= token then
-			busy = false
-			return
-		end
-
-		-- Hold green briefly, then stagger flies while counting starts early in-hand.
-		task.wait(GREEN_HOLD_SEC)
-		if myToken ~= token then
-			busy = false
-			return
-		end
-
-		local orb = Instance.new("Part")
-		orb.Name = "OceanTD_ClearHandOrb"
-		orb.Shape = Enum.PartType.Ball
-		orb.Material = Enum.Material.Neon
-		orb.Color = GREEN
-		orb.Size = Vector3.new(HAND_ORB_SIZE, HAND_ORB_SIZE, HAND_ORB_SIZE)
-		orb.Anchored = true
-		orb.CanCollide = false
-		orb.CanQuery = false
-		orb.CanTouch = false
-		orb.CastShadow = false
-		orb.Parent = folder
-
-		local billboard = Instance.new("BillboardGui")
-		billboard.Name = "ClearCount"
-		billboard.Size = UDim2.fromOffset(80, 40)
-		billboard.StudsOffset = Vector3.new(0, 1.4, 0)
-		billboard.AlwaysOnTop = true
-		billboard.Parent = orb
-		local countLabel = Instance.new("TextLabel")
-		countLabel.BackgroundTransparency = 1
-		countLabel.Size = UDim2.fromScale(1, 1)
-		countLabel.Font = UiTheme.Font
-		countLabel.Text = "+0"
-		countLabel.TextColor3 = Color3.new(1, 1, 1)
-		countLabel.TextScaled = true
-		countLabel.TextStrokeTransparency = 0.4
-		countLabel.Parent = billboard
-
-		local followConn = RunService.RenderStepped:Connect(function()
-			if myToken ~= token or not orb.Parent then
+			if #animParts == 0 or count <= 0 then
 				return
 			end
-			orb.CFrame = CFrame.new(handWorldPos())
-		end)
 
-		local countSec = math.clamp(COUNT_MIN_SEC + (count - 1) * COUNT_PER_CORAL, COUNT_MIN_SEC, COUNT_MAX_SEC)
-		local tickInterval = 1 / TICK_MAX_PER_SEC
-		local lastTickAt = -1
-		local displayed = 0
-		local countDone = false
-		local c0 = os.clock()
+			-- Neon green wave from player outward (1–3s).
+			local root = playerRootPos()
+			table.sort(animParts, function(a, b)
+				return (a.Position - root).Magnitude < (b.Position - root).Magnitude
+			end)
+			local maxDist = 1
+			for _, p in ipairs(animParts) do
+				maxDist = math.max(maxDist, (p.Position - root).Magnitude)
+			end
+			local waveSpan = WAVE_MIN_SEC + (WAVE_MAX_SEC - WAVE_MIN_SEC) * math.clamp(maxDist / 80, 0, 1)
 
-		-- Count up in parallel with staggered coral flights.
-		task.spawn(function()
-			while os.clock() - c0 < countSec and myToken == token do
-				local u = math.clamp((os.clock() - c0) / countSec, 0, 1)
-				local n = math.floor(count * u + 1e-6)
-				if n > displayed then
-					displayed = n
-					countLabel.Text = "+" .. tostring(displayed)
-					local now = os.clock()
-					if now - lastTickAt >= tickInterval then
-						lastTickAt = now
-						local pitch = 0.95 + (displayed / math.max(count, 1)) * 0.7
-						playTick(pitch)
+			for _, p in ipairs(animParts) do
+				local dist = (p.Position - root).Magnitude
+				local delaySec = (dist / maxDist) * waveSpan
+				task.delay(delaySec, function()
+					if myToken ~= token or not p.Parent then
+						return
 					end
-				end
+					p.Material = Enum.Material.Neon
+					p.Color = randomNeonGreen()
+				end)
+			end
+
+			-- Wait until wave finishes.
+			local waveWait = waveSpan + 0.05
+			local tw0 = os.clock()
+			while os.clock() - tw0 < waveWait and myToken == token do
 				RunService.RenderStepped:Wait()
 			end
-			if myToken == token then
-				countLabel.Text = "+" .. tostring(count)
-				if lastTickAt < 0 or (os.clock() - lastTickAt) >= tickInterval * 0.5 then
-					playTick(1.65)
-				end
+			if myToken ~= token then
+				return
 			end
-			countDone = true
-		end)
 
-		local flyJobs = 0
-		local flyDone = 0
-		local toFly: { BasePart } = {}
-		for _, p in ipairs(animParts) do
-			if p.Parent then
-				table.insert(toFly, p)
+			-- Hold green briefly, then stagger flies while counting starts early in-hand.
+			task.wait(GREEN_HOLD_SEC)
+			if myToken ~= token then
+				return
 			end
-		end
-		local nFly = #toFly
-		for i, p in ipairs(toFly) do
-			flyJobs += 1
-			local t = if nFly <= 1 then 0 else (i - 1) / (nFly - 1)
-			local stagger = t * FLY_STAGGER_MAX * (0.65 + math.random() * 0.7)
-			task.delay(stagger, function()
-				if myToken ~= token then
-					flyDone += 1
+
+			local orb = Instance.new("Part")
+			orb.Name = "OceanTD_ClearHandOrb"
+			orb.Shape = Enum.PartType.Ball
+			orb.Material = Enum.Material.Neon
+			orb.Color = GREEN
+			orb.Size = Vector3.new(HAND_ORB_SIZE, HAND_ORB_SIZE, HAND_ORB_SIZE)
+			orb.Anchored = true
+			orb.CanCollide = false
+			orb.CanQuery = false
+			orb.CanTouch = false
+			orb.CastShadow = false
+			orb.Parent = folder
+
+			local billboard = Instance.new("BillboardGui")
+			billboard.Name = "ClearCount"
+			billboard.Size = UDim2.fromOffset(80, 40)
+			billboard.StudsOffset = Vector3.new(0, 1.4, 0)
+			billboard.AlwaysOnTop = true
+			billboard.Parent = orb
+			local countLabel = Instance.new("TextLabel")
+			countLabel.BackgroundTransparency = 1
+			countLabel.Size = UDim2.fromScale(1, 1)
+			countLabel.Font = UiTheme.Font
+			countLabel.Text = "+0"
+			countLabel.TextColor3 = Color3.new(1, 1, 1)
+			countLabel.TextScaled = true
+			countLabel.TextStrokeTransparency = 0.4
+			countLabel.Parent = billboard
+
+			local followConn = RunService.RenderStepped:Connect(function()
+				if myToken ~= token or not orb.Parent then
 					return
 				end
-				tweenPartToHand(p, FLY_TO_HAND_SEC, myToken)
-				flyDone += 1
+				orb.CFrame = CFrame.new(handWorldPos())
 			end)
-		end
 
-		while (flyDone < flyJobs or not countDone) and myToken == token do
-			RunService.RenderStepped:Wait()
-		end
-		if myToken ~= token then
+			local countSec = math.clamp(COUNT_MIN_SEC + (count - 1) * COUNT_PER_CORAL, COUNT_MIN_SEC, COUNT_MAX_SEC)
+			local tickInterval = 1 / TICK_MAX_PER_SEC
+			local lastTickAt = -1
+			local displayed = 0
+			local countDone = false
+			local c0 = os.clock()
+
+			-- Count up in parallel with staggered coral flights.
+			task.spawn(function()
+				while os.clock() - c0 < countSec and myToken == token do
+					local u = math.clamp((os.clock() - c0) / countSec, 0, 1)
+					local n = math.floor(count * u + 1e-6)
+					if n > displayed then
+						displayed = n
+						countLabel.Text = "+" .. tostring(displayed)
+						local now = os.clock()
+						if now - lastTickAt >= tickInterval then
+							lastTickAt = now
+							local pitch = 0.95 + (displayed / math.max(count, 1)) * 0.7
+							playTick(pitch)
+						end
+					end
+					RunService.RenderStepped:Wait()
+				end
+				if myToken == token then
+					countLabel.Text = "+" .. tostring(count)
+					if lastTickAt < 0 or (os.clock() - lastTickAt) >= tickInterval * 0.5 then
+						playTick(1.65)
+					end
+				end
+				countDone = true
+			end)
+
+			local flyJobs = 0
+			local flyDone = 0
+			local toFly: { BasePart } = {}
+			for _, p in ipairs(animParts) do
+				if p.Parent then
+					table.insert(toFly, p)
+				end
+			end
+			local nFly = #toFly
+			for i, p in ipairs(toFly) do
+				flyJobs += 1
+				local t = if nFly <= 1 then 0 else (i - 1) / (nFly - 1)
+				local stagger = t * FLY_STAGGER_MAX * (0.65 + math.random() * 0.7)
+				task.delay(stagger, function()
+					if myToken ~= token then
+						flyDone += 1
+						return
+					end
+					tweenPartToHand(p, FLY_TO_HAND_SEC, myToken)
+					flyDone += 1
+				end)
+			end
+
+			local flyDeadline = os.clock() + 12
+			while (flyDone < flyJobs or not countDone) and myToken == token and os.clock() < flyDeadline do
+				RunService.RenderStepped:Wait()
+			end
 			followConn:Disconnect()
+			if myToken ~= token then
+				if orb.Parent then
+					orb:Destroy()
+				end
+				return
+			end
+
+			-- Fly orb + counter to backpack scroll center (screen-space), fade 1s.
+			local startScreen = worldToScreen(orb.Position) or Vector2.new(0, 0)
+			local target = getScrollCenter()
+			if not target then
+				local cam = Workspace.CurrentCamera
+				local vp = if cam then cam.ViewportSize else Vector2.new(800, 600)
+				target = Vector2.new(vp.X * 0.82, vp.Y * 0.5)
+			end
+
+			local gui = Instance.new("ScreenGui")
+			gui.Name = "OceanTD_ClearFly"
+			gui.ResetOnSpawn = false
+			gui.IgnoreGuiInset = true
+			gui.DisplayOrder = 12100
+			gui.Parent = player:WaitForChild("PlayerGui")
+
+			local fly = Instance.new("Frame")
+			fly.Name = "Orb"
+			fly.AnchorPoint = Vector2.new(0.5, 0.5)
+			fly.Position = UDim2.fromOffset(startScreen.X, startScreen.Y)
+			fly.Size = UDim2.fromOffset(48, 48)
+			fly.BackgroundColor3 = GREEN
+			fly.BorderSizePixel = 0
+			fly.Parent = gui
+			local corner = Instance.new("UICorner")
+			corner.CornerRadius = UDim.new(1, 0)
+			corner.Parent = fly
+			local flyLabel = Instance.new("TextLabel")
+			flyLabel.BackgroundTransparency = 1
+			flyLabel.Size = UDim2.fromScale(1, 1)
+			flyLabel.Font = UiTheme.Font
+			flyLabel.Text = "+" .. tostring(count)
+			flyLabel.TextColor3 = Color3.new(1, 1, 1)
+			flyLabel.TextScaled = true
+			flyLabel.Parent = fly
+
 			if orb.Parent then
 				orb:Destroy()
 			end
-			busy = false
-			return
-		end
 
-		followConn:Disconnect()
-		if myToken ~= token then
-			if orb.Parent then
-				orb:Destroy()
+			local fade = TweenService:Create(fly, TweenInfo.new(FLY_TO_BAG_SEC, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
+				Position = UDim2.fromOffset(target.X, target.Y),
+				BackgroundTransparency = 1,
+				Size = UDim2.fromOffset(18, 18),
+			})
+			local fadeText = TweenService:Create(flyLabel, TweenInfo.new(FLY_TO_BAG_SEC, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
+				TextTransparency = 1,
+			})
+			fade:Play()
+			fadeText:Play()
+			fade.Completed:Wait()
+			if gui.Parent then
+				gui:Destroy()
 			end
-			busy = false
-			return
+		end)
+		if not ok then
+			warn("[ClearPlotVfx] play failed:", err)
 		end
-
-		-- Fly orb + counter to backpack scroll center (screen-space), fade 1s.
-		local startScreen = worldToScreen(orb.Position) or Vector2.new(0, 0)
-		local target = getScrollCenter()
-		if not target then
-			local cam = Workspace.CurrentCamera
-			local vp = if cam then cam.ViewportSize else Vector2.new(800, 600)
-			target = Vector2.new(vp.X * 0.82, vp.Y * 0.5)
-		end
-
-		local gui = Instance.new("ScreenGui")
-		gui.Name = "OceanTD_ClearFly"
-		gui.ResetOnSpawn = false
-		gui.IgnoreGuiInset = true
-		gui.DisplayOrder = 12100
-		gui.Parent = player:WaitForChild("PlayerGui")
-
-		local fly = Instance.new("Frame")
-		fly.Name = "Orb"
-		fly.AnchorPoint = Vector2.new(0.5, 0.5)
-		fly.Position = UDim2.fromOffset(startScreen.X, startScreen.Y)
-		fly.Size = UDim2.fromOffset(48, 48)
-		fly.BackgroundColor3 = GREEN
-		fly.BorderSizePixel = 0
-		fly.Parent = gui
-		local corner = Instance.new("UICorner")
-		corner.CornerRadius = UDim.new(1, 0)
-		corner.Parent = fly
-		local flyLabel = Instance.new("TextLabel")
-		flyLabel.BackgroundTransparency = 1
-		flyLabel.Size = UDim2.fromScale(1, 1)
-		flyLabel.Font = UiTheme.Font
-		flyLabel.Text = "+" .. tostring(count)
-		flyLabel.TextColor3 = Color3.new(1, 1, 1)
-		flyLabel.TextScaled = true
-		flyLabel.Parent = fly
-
-		if orb.Parent then
-			orb:Destroy()
-		end
-
-		local fade = TweenService:Create(fly, TweenInfo.new(FLY_TO_BAG_SEC, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
-			Position = UDim2.fromOffset(target.X, target.Y),
-			BackgroundTransparency = 1,
-			Size = UDim2.fromOffset(18, 18),
-		})
-		local fadeText = TweenService:Create(flyLabel, TweenInfo.new(FLY_TO_BAG_SEC, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
-			TextTransparency = 1,
-		})
-		fade:Play()
-		fadeText:Play()
-		fade.Completed:Wait()
-		if gui.Parent then
-			gui:Destroy()
-		end
-
 		if myToken == token then
-			busy = false
-			if onDone then
-				onDone()
-			end
+			completeOnce()
 		end
 	end)
 end

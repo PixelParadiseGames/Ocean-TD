@@ -119,4 +119,34 @@ function RelocateHitTest.resolveChrome(refs: ChromeRefs, screenPos: Vector2): st
 	return nil
 end
 
+-- Prefer GetGuiObjectsAtPosition — Billboard AbsolutePosition is often wrong on phone.
+function RelocateHitTest.pointerOverButton(refs: ChromeRefs, btn: GuiObject?, screenPos: Vector2): boolean
+	if not btn or not btn.Visible then
+		return false
+	end
+	local playerGui = refs.playerGui
+	local function probe(x: number, y: number): boolean
+		local ok, objs = pcall(function()
+			return playerGui:GetGuiObjectsAtPosition(x, y)
+		end)
+		if not ok or typeof(objs) ~= "table" then
+			return false
+		end
+		for _, obj in ipairs(objs) do
+			if obj == btn or obj:IsDescendantOf(btn) then
+				return true
+			end
+		end
+		return false
+	end
+	if probe(screenPos.X, screenPos.Y) then
+		return true
+	end
+	local inset = GuiService:GetGuiInset()
+	if inset.X ~= 0 or inset.Y ~= 0 then
+		return probe(screenPos.X - inset.X, screenPos.Y - inset.Y)
+	end
+	return PlaceConfirmHitTest.isOverGui(screenPos, btn)
+end
+
 return RelocateHitTest
