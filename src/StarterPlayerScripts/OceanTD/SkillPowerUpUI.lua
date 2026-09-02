@@ -1238,15 +1238,11 @@ end
 
 function SkillPowerUpUI.close()
 	hideConfirm()
-	local wasPlotSize = activeSkillId == "PlotSize"
 	popupOpen = false
 	activeSkillId = nil
 	stopUnlockDescPulse()
 	stopUnlockBtnPulse()
 	SkillsBubbleSim.setSuppressed(false)
-	if wasPlotSize then
-		SkillsBubbleSim.fadeBackgroundIn()
-	end
 	playerGui:SetAttribute(POWERUP_OPEN_ATTR, false)
 	endGamepadNav()
 	stopCloseXOverlay()
@@ -1286,14 +1282,7 @@ function SkillPowerUpUI.open(skillId: string)
 	lastOpenAt = now
 	activeSkillId = skillId
 	popupOpen = true
-	if skillId == "PlotSize" then
-		SkillsBubbleSim.setSuppressed(true, { deferBackgroundHide = true })
-		if not SkillsBubbleSim.fadeBackgroundOut() then
-			SkillsBubbleSim.setSuppressed(true)
-		end
-	else
-		SkillsBubbleSim.setSuppressed(true)
-	end
+	SkillsBubbleSim.setSuppressed(true)
 	playerGui:SetAttribute(POWERUP_OPEN_ATTR, true)
 	template.Visible = true
 	raiseTreeAboveBubbles(template)

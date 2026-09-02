@@ -1572,6 +1572,7 @@ local function commitPlace()
 	local rf = Remotes.getFunction("RequestPlace")
 	local placePayload: any = {
 		diameter = ghostPlaceDiameter,
+		placementHue = if armedItemId then InventoryState.getPlacementHue(armedItemId) else nil,
 	}
 	if armedItemId == "BrainCoral" then
 		local snap = BrainSnapPreview.getActive()

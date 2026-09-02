@@ -63,6 +63,8 @@ export type PlaceOpts = {
 	facingYaw: number?,
 	-- Opt-in brain stack: only nest when client snapped to a host.
 	parentPlaceId: string?,
+	-- Hue stack to debit when placing (client shuffle selection).
+	placementHue: number?,
 }
 
 export type PlaceResult = {
@@ -205,6 +207,116 @@ local function syncDefaultVisualPaintToCell(plotId: string, gx: number, gy: numb
 		cell.webColorG = wg
 		cell.webColorB = wb
 	end
+	if typeof(cell.colorIndex) ~= "number" then
+		CoralVisual.snapshotDefaultRestLook(visual)
+	end
+end
+
+local function resolveRecycleHue(visual: BasePart?, cell: any?): number
+	if visual then
+		local colorAttr = visual:GetAttribute("OceanTD_ColorIndex")
+		if typeof(colorAttr) == "number" then
+			return PlotOutlineColors.clampCoralIndex(colorAttr)
+		end
+		local seedAttr = visual:GetAttribute("OceanTD_SeedHue")
+		if typeof(seedAttr) == "number" then
+			return PlotOutlineColors.clampCoralIndex(seedAttr)
+		end
+	end
+	if cell then
+		if typeof(cell.colorIndex) == "number" then
+			return PlotOutlineColors.clampCoralIndex(cell.colorIndex)
+		end
+		if typeof(cell.seedHue) == "number" then
+			return PlotOutlineColors.clampCoralIndex(cell.seedHue)
+		end
+	end
+	return PlotOutlineColors.DEFAULT_INDEX
+end
+
+local function countHuePaintedOnPlot(
+	plotId: string,
+	itemId: string,
+	hue: number,
+	excludePlaceId: string?
+): number
+	local painted = 0
+	GridService.forEachCell(plotId, function(cell)
+		if cell.id ~= itemId then
+			return
+		end
+		if excludePlaceId and cell.placeId == excludePlaceId then
+			return
+		end
+		if typeof(cell.colorIndex) == "number" and PlotOutlineColors.clampCoralIndex(cell.colorIndex) == PlotOutlineColors.clampCoralIndex(hue) then
+			painted += 1
+		end
+	end)
+	return painted
+end
+
+local function countHueGenericOnPlot(
+	plotId: string,
+	itemId: string,
+	hue: number,
+	excludePlaceId: string?
+): number
+	local generic = 0
+	GridService.forEachCell(plotId, function(cell)
+		if cell.id ~= itemId then
+			return
+		end
+		if excludePlaceId and cell.placeId == excludePlaceId then
+			return
+		end
+		if typeof(cell.colorIndex) == "number" then
+			return
+		end
+		if typeof(cell.seedHue) == "number" and PlotOutlineColors.clampCoralIndex(cell.seedHue) == PlotOutlineColors.clampCoralIndex(hue) then
+			generic += 1
+		end
+	end)
+	return generic
+end
+
+local function canAssignHue(
+	player: Player,
+	plotId: string,
+	itemId: string,
+	placeId: string,
+	newHue: number,
+	cell: any
+): boolean
+	local hue = PlotOutlineColors.clampCoralIndex(newHue)
+	local currentHue: number? = nil
+	if typeof(cell.colorIndex) == "number" then
+		currentHue = PlotOutlineColors.clampCoralIndex(cell.colorIndex)
+	elseif typeof(cell) == "table" then
+		local attr = cell.colorIndex
+		if typeof(attr) == "number" then
+			currentHue = PlotOutlineColors.clampCoralIndex(attr)
+		end
+	end
+	if currentHue == hue then
+		return true
+	end
+	-- Coral placed with this hue seed can be painted without spending another slot.
+	if typeof(cell.colorIndex) ~= "number" and typeof(cell.seedHue) == "number" and PlotOutlineColors.clampCoralIndex(cell.seedHue) == hue then
+		return true
+	end
+	local owned = PersistenceService.getHueSeedCount(player, itemId, hue)
+	local paintedExcl = countHuePaintedOnPlot(plotId, itemId, hue, placeId)
+	local genericTotal = countHueGenericOnPlot(plotId, itemId, hue, nil)
+	return paintedExcl + 1 <= owned + genericTotal
+end
+
+local function stampSeedHue(plotId: string, gx: number, gy: number, gz: number, visual: BasePart, seedHue: number)
+	local cell = GridService.getCellAtGrid(plotId, gx, gy, gz)
+	local hue = PlotOutlineColors.clampCoralIndex(seedHue)
+	if cell then
+		cell.seedHue = hue
+	end
+	visual:SetAttribute("OceanTD_SeedHue", hue)
 end
 
 local function warnPlace(...: any)
@@ -596,8 +708,12 @@ function PlacementService.placeFromSave(
 		return { ok = false, errorCode = "BadPlot" }
 	end
 
+	local debitHueForSave: number? = nil
 	if shouldConsume then
-		local debited = select(1, PersistenceService.tryDebitItem(player, itemId, 1))
+		debitHueForSave = if typeof(colorIndex) == "number"
+			then PlotOutlineColors.clampCoralIndex(colorIndex)
+			else PlotOutlineColors.DEFAULT_INDEX
+		local debited = select(1, PersistenceService.tryDebitHueSeed(player, itemId, debitHueForSave, 1))
 		if not debited then
 			return { ok = false, errorCode = "NoSeeds" }
 		end
@@ -669,8 +785,8 @@ function PlacementService.placeFromSave(
 		scale
 	)
 	if not occupied then
-		if shouldConsume then
-			PersistenceService.creditItem(player, itemId, 1)
+		if shouldConsume and debitHueForSave then
+			PersistenceService.creditHueSeed(player, itemId, debitHueForSave, 1)
 		end
 		return { ok = false, errorCode = occupyErr or "SpotTaken" }
 	end
@@ -691,8 +807,8 @@ function PlacementService.placeFromSave(
 	)
 	if not visual then
 		GridService.vacate(plotId, visualLocal.X, visualLocal.Y, visualLocal.Z, gx, gy, gz)
-		if shouldConsume then
-			PersistenceService.creditItem(player, itemId, 1)
+		if shouldConsume and debitHueForSave then
+			PersistenceService.creditHueSeed(player, itemId, debitHueForSave, 1)
 		end
 		return { ok = false, errorCode = "VisualFail" }
 	end
@@ -836,6 +952,15 @@ function PlacementService.placeFromSave(
 		if typeof(scale) == "number" then
 			cell.scaleMult = scale
 		end
+		if typeof(debitHueForSave) == "number" then
+			cell.seedHue = debitHueForSave
+		end
+	end
+	if typeof(debitHueForSave) == "number" then
+		stampSeedHue(plotId, rx, ry, rz, visual, debitHueForSave)
+	end
+	if not paintIdx then
+		CoralVisual.snapshotDefaultRestLook(visual)
 	end
 
 	return {
@@ -862,6 +987,7 @@ local function parsePlaceOpts(raw: any): PlaceOpts
 			scaleHeight = tonumber(raw.scaleHeight),
 			facingYaw = tonumber(raw.facingYaw),
 			parentPlaceId = if typeof(parentId) == "string" and parentId ~= "" then parentId else nil,
+			placementHue = if typeof(raw.placementHue) == "number" then raw.placementHue else nil,
 		}
 	end
 	return {}
@@ -904,8 +1030,15 @@ function PlacementService.place(
 		return { ok = false, errorCode = "PlaceCap" }
 	end
 
+	local seedHue: number? = nil
 	if shouldConsume then
-		local debited = select(1, PersistenceService.tryDebitItem(player, itemId, 1))
+		seedHue = if typeof(opts.placementHue) == "number"
+			then PlotOutlineColors.clampCoralIndex(opts.placementHue)
+			else nil
+		if not seedHue then
+			return { ok = false, errorCode = "NoSeeds" }
+		end
+		local debited = select(1, PersistenceService.tryDebitHueSeed(player, itemId, seedHue, 1))
 		if not debited then
 			return { ok = false, errorCode = "NoSeeds" }
 		end
@@ -936,8 +1069,8 @@ function PlacementService.place(
 		end
 		-- Empty ground: still reject if a non-brain (or conflicting) cell sits here.
 		if GridService.getCellAtGrid(plotId, gx, gy, gz) then
-			if shouldConsume then
-				PersistenceService.creditItem(player, itemId, 1)
+			if shouldConsume and seedHue then
+				PersistenceService.creditHueSeed(player, itemId, seedHue, 1)
 			end
 			return { ok = false, errorCode = "SpotTaken" }
 		end
@@ -984,8 +1117,8 @@ function PlacementService.place(
 		scale
 	)
 	if not occupied then
-		if shouldConsume then
-			PersistenceService.creditItem(player, itemId, 1)
+		if shouldConsume and seedHue then
+			PersistenceService.creditHueSeed(player, itemId, seedHue, 1)
 		end
 		return { ok = false, errorCode = occupyErr or "SpotTaken" }
 	end
@@ -1007,8 +1140,8 @@ function PlacementService.place(
 	if not visual then
 		warnPlace("Visual spawn failed after occupy — rolling back cell")
 		GridService.vacate(plotId, localPos.X, localPos.Y, localPos.Z, gx, gy, gz)
-		if shouldConsume then
-			PersistenceService.creditItem(player, itemId, 1)
+		if shouldConsume and seedHue then
+			PersistenceService.creditHueSeed(player, itemId, seedHue, 1)
 		end
 		return { ok = false, errorCode = "VisualFail" }
 	end
@@ -1054,6 +1187,9 @@ function PlacementService.place(
 	visual:SetAttribute("OceanTD_ItemId", itemId)
 	visual:SetAttribute("OceanTD_SpeciesId", species.speciesId)
 	syncDefaultVisualPaintToCell(plotId, gx, gy, gz, visual)
+	if seedHue then
+		stampSeedHue(plotId, gx, gy, gz, visual, seedHue)
+	end
 	if brainHostCell then
 		local slot = PlotService.getSlot(plotId)
 		local hostVis: BasePart? = nil
@@ -1107,6 +1243,7 @@ function PlacementService.place(
 			placeId = placeId,
 			itemId = itemId,
 			worldPos = worldPos,
+			seedHue = seedHue,
 		})
 	end
 
@@ -1478,8 +1615,9 @@ function PlacementService.recycle(player: Player, placeId: string, worldPos: Vec
 	end
 
 	local creditedId = vacatedCell.id
+	local recycleHue = resolveRecycleHue(visual, vacatedCell)
 	visual:Destroy()
-	local seedCount = PersistenceService.creditItem(player, creditedId, 1)
+	local seedCount = PersistenceService.creditHueSeed(player, creditedId, recycleHue, 1)
 
 	if not suppressUndoRecord then
 		UndoService.push(player, {
@@ -1487,6 +1625,7 @@ function PlacementService.recycle(player: Player, placeId: string, worldPos: Vec
 			placeId = placeId,
 			itemId = creditedId,
 			worldPos = worldPos,
+			seedHue = recycleHue,
 		})
 	end
 
@@ -1596,7 +1735,8 @@ function PlacementService.clearPlot(player: Player, allowEmpty: boolean?, record
 			visual:Destroy()
 		end
 		local creditedId = vacatedCell.id
-		PersistenceService.creditItem(player, creditedId, 1)
+		local recycleHue = resolveRecycleHue(visual, vacatedCell)
+		PersistenceService.creditHueSeed(player, creditedId, recycleHue, 1)
 		credits[creditedId] = (credits[creditedId] or 0) + 1
 		table.insert(entries, {
 			placeId = entry.placeId,
@@ -1736,7 +1876,8 @@ local function removePlacedAndCredit(player: Player, placeId: string, itemId: st
 		visual:Destroy()
 	end
 	local creditedId = if vacatedCell then vacatedCell.id else itemId
-	PersistenceService.creditItem(player, creditedId, 1)
+	local recycleHue = resolveRecycleHue(visual, vacatedCell)
+	PersistenceService.creditHueSeed(player, creditedId, recycleHue, 1)
 	return true
 end
 
@@ -1778,11 +1919,37 @@ function PlacementService.undoLast(player: Player): UndoResult
 		-- Recycle credited a seed; place consumes it again.
 		local worldPos = step.worldPos
 		if typeof(worldPos) == "Vector3" then
-			local result = PlacementService.place(player, step.itemId, worldPos, true)
+			local placeOpts: PlaceOpts = {}
+			if typeof(step.seedHue) == "number" then
+				placeOpts.placementHue = step.seedHue
+			end
+			local result = PlacementService.place(player, step.itemId, worldPos, true, placeOpts)
 			ok = result.ok == true
 			err = result.errorCode
 		else
 			err = "BadStep"
+		end
+	elseif step.kind == "color" then
+		if typeof(step.fromColorIndex) == "number" then
+			local result = PlacementService.setCoralColor(
+				player,
+				step.placeId,
+				step.fromColorIndex,
+				nil,
+				nil,
+				nil,
+				nil,
+				nil,
+				nil,
+				nil,
+				true
+			)
+			ok = result.ok == true
+			err = result.errorCode
+		else
+			local result = PlacementService.clearCoralHue(player, step.placeId, true)
+			ok = result.ok == true
+			err = result.errorCode
 		end
 	elseif step.kind == "clearPlot" then
 		local entries = step.entries
@@ -2205,6 +2372,61 @@ function PlacementService.setCoralSize(
 	}
 end
 
+function PlacementService.clearCoralHue(player: Player, placeId: string, skipCapCheck: boolean?): {
+	ok: boolean,
+	errorCode: string?,
+}
+	if typeof(placeId) ~= "string" or placeId == "" then
+		return { ok = false, errorCode = "BadRequest" }
+	end
+	if not PlayerSession.canSave(player) then
+		return { ok = false, errorCode = "NotReady" }
+	end
+	local plotId = PlotService.getOwnerPlotId(player)
+	if not plotId then
+		return { ok = false, errorCode = "NoPlot" }
+	end
+	local visual = findVisualByPlaceId(plotId, placeId)
+	if not visual then
+		return { ok = false, errorCode = "Missing" }
+	end
+	local cell = GridService.findCellByPlaceId(plotId, placeId)
+	if not cell then
+		return { ok = false, errorCode = "Missing" }
+	end
+	local prevAttr = visual:GetAttribute("OceanTD_ColorIndex")
+	local prevIdx = if typeof(prevAttr) == "number" then PlotOutlineColors.clampCoralIndex(prevAttr) else nil
+	local itemId = visual:GetAttribute("OceanTD_ItemId")
+	local defaultColor = CoralVisual.clearPalettePaint(visual)
+	cell.colorIndex = nil
+	cell.colorR = defaultColor.R
+	cell.colorG = defaultColor.G
+	cell.colorB = defaultColor.B
+	local wr = visual:GetAttribute("OceanTD_WebRestR")
+	local wg = visual:GetAttribute("OceanTD_WebRestG")
+	local wb = visual:GetAttribute("OceanTD_WebRestB")
+	if typeof(wr) == "number" and typeof(wg) == "number" and typeof(wb) == "number" then
+		cell.webColorR = wr
+		cell.webColorG = wg
+		cell.webColorB = wb
+	else
+		cell.webColorR = nil
+		cell.webColorG = nil
+		cell.webColorB = nil
+	end
+	if not skipCapCheck and not suppressUndoRecord and prevIdx ~= nil then
+		UndoService.push(player, {
+			kind = "color",
+			placeId = placeId,
+			itemId = if typeof(itemId) == "string" then itemId else "",
+			fromColorIndex = prevIdx,
+			toColorIndex = nil,
+		})
+	end
+	scheduleCoralColorSave(player, plotId)
+	return { ok = true, colorR = defaultColor.R, colorG = defaultColor.G, colorB = defaultColor.B }
+end
+
 function PlacementService.setCoralColor(
 	player: Player,
 	placeId: string,
@@ -2215,7 +2437,8 @@ function PlacementService.setCoralColor(
 	webColorIndex: number?,
 	webColorR: number?,
 	webColorG: number?,
-	webColorB: number?
+	webColorB: number?,
+	skipCapCheck: boolean?
 ): {
 	ok: boolean,
 	errorCode: string?,
@@ -2245,13 +2468,8 @@ function PlacementService.setCoralColor(
 	local idx = PlotOutlineColors.clampCoralIndex(colorIndex)
 	local paint = PlotOutlineColors.resolveCoralPaint(idx, colorR, colorG, colorB)
 	local itemId = visual:GetAttribute("OceanTD_ItemId")
-	if typeof(itemId) == "string" and itemId ~= "" then
-		local currentAttr = visual:GetAttribute("OceanTD_ColorIndex")
-		local currentIdx = if typeof(currentAttr) == "number" then PlotOutlineColors.clampCoralIndex(currentAttr) else nil
-		if currentIdx ~= idx and not PersistenceService.isCoralColorUnlocked(player, itemId, idx) then
-			return { ok = false, errorCode = "ColorLocked" }
-		end
-	end
+	local prevAttr = visual:GetAttribute("OceanTD_ColorIndex")
+	local prevIdx = if typeof(prevAttr) == "number" then PlotOutlineColors.clampCoralIndex(prevAttr) else nil
 	-- Resolve cell by placeId (stacked brains sit off worldToGrid of the mesh center).
 	local cell = GridService.findCellByPlaceId(plotId, placeId)
 	if not cell then
@@ -2266,6 +2484,17 @@ function PlacementService.setCoralColor(
 	end
 	if not cell then
 		return { ok = false, errorCode = "Missing" }
+	end
+	if prevIdx == nil and typeof(visual:GetAttribute("OceanTD_DefaultRestR")) ~= "number" then
+		CoralVisual.snapshotDefaultRestLook(visual)
+	end
+	if skipCapCheck ~= true and typeof(itemId) == "string" and itemId ~= "" then
+		if prevIdx ~= idx and not canAssignHue(player, plotId, itemId, placeId, idx, cell) then
+			if PersistenceService.getHueSeedCount(player, itemId, idx) <= 0 then
+				return { ok = false, errorCode = "ColorLocked" }
+			end
+			return { ok = false, errorCode = "HueCap" }
+		end
 	end
 	local gx, gy, gz = cell.gx, cell.gy, cell.gz
 	if not GridService.setColorAtGrid(plotId, gx, gy, gz, idx, paint.R, paint.G, paint.B) then
@@ -2316,6 +2545,15 @@ function PlacementService.setCoralColor(
 		GridService.setSeaFanExtras(plotId, gx, gy, gz, nil, nil, nil, webPaint.R, webPaint.G, webPaint.B)
 	else
 		CoralVisual.setRestColor(visual, paint)
+	end
+	if skipCapCheck ~= true and not suppressUndoRecord and prevIdx ~= idx then
+		UndoService.push(player, {
+			kind = "color",
+			placeId = placeId,
+			itemId = if typeof(itemId) == "string" then itemId else "",
+			fromColorIndex = prevIdx,
+			toColorIndex = idx,
+		})
 	end
 	-- Live grid/visual now; DataStore after 5s idle so rapid dice rolls don't thrash saves.
 	scheduleCoralColorSave(player, plotId)

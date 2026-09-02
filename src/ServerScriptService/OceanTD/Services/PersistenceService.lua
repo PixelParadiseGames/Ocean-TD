@@ -10,6 +10,7 @@ local Constants = require(game:GetService("ReplicatedStorage"):WaitForChild("Oce
 local PlotTypes = require(game:GetService("ReplicatedStorage"):WaitForChild("OceanTD"):WaitForChild("Shared"):WaitForChild("PlotTypes"))
 local PlotOutlineColors = require(game:GetService("ReplicatedStorage"):WaitForChild("OceanTD"):WaitForChild("Shared"):WaitForChild("PlotOutlineColors"))
 local ColorUnlocks = require(game:GetService("ReplicatedStorage"):WaitForChild("OceanTD"):WaitForChild("Shared"):WaitForChild("ColorUnlocks"))
+local HueSeeds = require(game:GetService("ReplicatedStorage"):WaitForChild("OceanTD"):WaitForChild("Shared"):WaitForChild("HueSeeds"))
 local SkillStages = require(game:GetService("ReplicatedStorage"):WaitForChild("OceanTD"):WaitForChild("Shared"):WaitForChild("SkillStages"))
 local SeedWheel = require(game:GetService("ReplicatedStorage"):WaitForChild("OceanTD"):WaitForChild("Shared"):WaitForChild("SeedWheel"))
 local Remotes = require(game:GetService("ReplicatedStorage"):WaitForChild("OceanTD"):WaitForChild("Remotes"))
@@ -317,36 +318,12 @@ local function playerByUserId(userId: number): Player?
 	return nil
 end
 
-local function sanitizeInventory(raw: any, isNewProfile: boolean): { [string]: any }
-	if typeof(raw) ~= "table" then
-		if isNewProfile then
-			return {
-				BrainCoral = Constants.STARTING_BRAIN_CORAL_SEEDS,
-				Sponge = Constants.STARTING_SPONGE_SEEDS,
-				SeaGrass = Constants.STARTING_SEA_GRASS_SEEDS,
-				FireCoral = Constants.STARTING_FIRE_CORAL_SEEDS,
-				Zoas = Constants.STARTING_ZOAS_SEEDS,
-				TreeCoral = Constants.STARTING_TREE_CORAL_SEEDS,
-				LeatherCoral = Constants.STARTING_LEATHER_CORAL_SEEDS,
-				SeaFan = Constants.STARTING_SEA_FAN_SEEDS,
-			}
-		end
+local function sanitizeInventory(raw: any, _isNewProfile: boolean): HueSeeds.HueInventory
+	-- v8: hue-specific seeds only. Legacy flat inventory is wiped on load.
+	if HueSeeds.hasLegacyFlatInventory(raw) then
 		return {}
 	end
-	local inv: { [string]: any } = {}
-	for k, v in pairs(raw) do
-		if typeof(k) == "string" then
-			inv[k] = v
-		end
-	end
-	-- Migrate old "unlimited SeaFan" sentinel stocks to normal starting count.
-	if Constants.SEA_FAN_UNLIMITED_SEEDS ~= true then
-		local seaFan = tonumber(inv.SeaFan)
-		if typeof(seaFan) == "number" and seaFan >= 999999 then
-			inv.SeaFan = Constants.STARTING_SEA_FAN_SEEDS
-		end
-	end
-	return inv
+	return HueSeeds.sanitize(raw, false)
 end
 
 local function sanitizeProfile(raw: any): PlayerProfile
@@ -391,7 +368,7 @@ local function sanitizeProfile(raw: any): PlayerProfile
 	profile.plotOutlineColorIndex = PlotOutlineColors.clampIndex(raw.plotOutlineColorIndex)
 	profile.skillStages = SkillStages.sanitizeMap(raw.skillStages)
 	profile.skillActiveStages = SkillStages.sanitizeActiveMap(raw.skillActiveStages, profile.skillStages)
-	profile.coralColorUnlocks = ColorUnlocks.sanitize(raw.coralColorUnlocks)
+	profile.coralColorUnlocks = {}
 	profile.version = math.max(profile.version, Constants.PROFILE_VERSION)
 	return profile
 end
@@ -724,29 +701,16 @@ function PersistenceService.tryUnlockSkillStage(player: Player, skillId: string)
 	}
 end
 
-function PersistenceService.getCoralColorUnlocksPayload(player: Player): ColorUnlocks.UnlockMap
-	local profile = profiles[player]
-	if not profile then
-		return {}
-	end
-	profile.coralColorUnlocks = ColorUnlocks.sanitize(profile.coralColorUnlocks)
-	return profile.coralColorUnlocks
+function PersistenceService.getCoralColorUnlocksPayload(_player: Player): ColorUnlocks.UnlockMap
+	return {}
 end
 
-function PersistenceService.syncCoralColorUnlocksToClient(player: Player)
-	if not player or not player.Parent then
-		return
-	end
-	Remotes.get("CoralColorUnlocksSync"):FireClient(player, PersistenceService.getCoralColorUnlocksPayload(player))
+function PersistenceService.syncCoralColorUnlocksToClient(_player: Player)
+	-- Hue seeds replace per-color unlock map; inventory sync carries counts.
 end
 
 function PersistenceService.isCoralColorUnlocked(player: Player, itemId: string, colorIndex: number): boolean
-	local profile = profiles[player]
-	if not profile then
-		return false
-	end
-	profile.coralColorUnlocks = ColorUnlocks.sanitize(profile.coralColorUnlocks)
-	return ColorUnlocks.isUnlocked(profile.coralColorUnlocks, itemId, colorIndex)
+	return PersistenceService.getHueSeedCount(player, itemId, colorIndex) > 0
 end
 
 function PersistenceService.tryUnlockCoralColor(player: Player, itemId: string, colorIndex: number): {
@@ -768,8 +732,12 @@ function PersistenceService.tryUnlockCoralColor(player: Player, itemId: string, 
 		return { ok = false, errorCode = "BadItem", sandDollars = profile.currencies.sandDollars }
 	end
 	local idx = PlotOutlineColors.clampCoralIndex(colorIndex)
-	profile.coralColorUnlocks = ColorUnlocks.sanitize(profile.coralColorUnlocks)
-	if ColorUnlocks.isUnlocked(profile.coralColorUnlocks, itemId, idx) then
+	local inv = profile.inventory
+	if typeof(inv) ~= "table" then
+		inv = {}
+		profile.inventory = inv
+	end
+	if HueSeeds.getCount(inv, itemId, idx) > 0 then
 		return {
 			ok = true,
 			alreadyUnlocked = true,
@@ -778,15 +746,15 @@ function PersistenceService.tryUnlockCoralColor(player: Player, itemId: string, 
 			sandDollars = clampSandDollars(profile.currencies.sandDollars),
 		}
 	end
-	local cost = ColorUnlocks.UNLOCK_COST
+	local cost = HueSeeds.SEED_COST
 	local cash = clampSandDollars(profile.currencies.sandDollars)
 	if cash < cost then
 		return { ok = false, errorCode = "CantAfford", sandDollars = cash, colorIndex = idx, itemId = itemId }
 	end
 	profile.currencies.sandDollars = cash - cost
-	profile.coralColorUnlocks = ColorUnlocks.markUnlocked(profile.coralColorUnlocks, itemId, idx)
+	HueSeeds.credit(inv, itemId, idx, 1)
 	PersistenceService.syncSandDollarsAttribute(player)
-	PersistenceService.syncCoralColorUnlocksToClient(player)
+	PersistenceService.syncInventoryToClient(player)
 	task.spawn(function()
 		PersistenceService.save(player)
 	end)
@@ -798,26 +766,27 @@ function PersistenceService.tryUnlockCoralColor(player: Player, itemId: string, 
 	}
 end
 
--- Free unlock (seed wheel prize, grants, etc.).
-function PersistenceService.grantCoralColorUnlock(player: Player, itemId: string, colorIndex: number): boolean
+-- Free hue seed (rewards, admin grants).
+function PersistenceService.grantHueSeed(player: Player, itemId: string, colorIndex: number, amount: number?): boolean
 	local profile = profiles[player]
 	if not profile then
 		return false
 	end
-	if typeof(itemId) ~= "string" or itemId == "" or not ColorUnlocks.isWheelItem(itemId) then
+	if typeof(itemId) ~= "string" or itemId == "" or not HueSeeds.isHueItem(itemId) then
 		return false
 	end
 	local idx = PlotOutlineColors.clampCoralIndex(colorIndex)
-	profile.coralColorUnlocks = ColorUnlocks.sanitize(profile.coralColorUnlocks)
-	if ColorUnlocks.isUnlocked(profile.coralColorUnlocks, itemId, idx) then
-		return true
+	local inv = profile.inventory
+	if typeof(inv) ~= "table" then
+		inv = {}
+		profile.inventory = inv
 	end
-	profile.coralColorUnlocks = ColorUnlocks.markUnlocked(profile.coralColorUnlocks, itemId, idx)
-	PersistenceService.syncCoralColorUnlocksToClient(player)
+	HueSeeds.credit(inv, itemId, idx, amount)
+	PersistenceService.syncInventoryToClient(player)
 	task.spawn(function()
 		PersistenceService.save(player)
 	end)
-	log("ColorUnlock grant", itemId, "idx", idx, "for", player.Name)
+	log("HueSeed grant", itemId, "idx", idx, "for", player.Name)
 	return true
 end
 
@@ -1034,44 +1003,52 @@ function PersistenceService.renameSlot(player: Player, index: number, name: stri
 	return true
 end
 
-local function isUnlimitedSeedItem(itemId: string): boolean
-	return Constants.SEA_FAN_UNLIMITED_SEEDS == true and itemId == "SeaFan"
-end
-
-local function ensureUnlimitedStock(inv: { [string]: any }, itemId: string): number
-	local stock = Constants.STARTING_SEA_FAN_SEEDS
-	local cur = tonumber(inv[itemId]) or 0
-	if cur < stock then
-		inv[itemId] = stock
-		return stock
-	end
-	return cur
-end
-
--- Credit seed count in profile.inventory[itemId] (number). Used by recycle / clear / load swap.
-function PersistenceService.creditItem(player: Player, itemId: string, amount: number?): number
-	local profile = profiles[player]
-	if not profile or typeof(itemId) ~= "string" or itemId == "" then
-		return 0
-	end
+local function ensureInventory(profile: PlayerProfile): HueSeeds.HueInventory
 	local inv = profile.inventory
 	if typeof(inv) ~= "table" then
 		inv = {}
 		profile.inventory = inv
 	end
-	if isUnlimitedSeedItem(itemId) then
-		local nextCount = ensureUnlimitedStock(inv, itemId)
-		log("Credit skipped (unlimited)", itemId, "→", nextCount, "for", player.Name)
-		PersistenceService.syncInventoryToClient(player)
-		return nextCount
+	return inv
+end
+
+function PersistenceService.getHueSeedCount(player: Player, itemId: string, colorIndex: number): number
+	local profile = profiles[player]
+	if not profile then
+		return 0
 	end
-	local add = math.max(1, math.floor(tonumber(amount) or 1))
-	local cur = tonumber(inv[itemId]) or 0
-	local nextCount = cur + add
-	inv[itemId] = nextCount
-	log("Credit", itemId, "x", add, "→", nextCount, "for", player.Name)
+	return HueSeeds.getCount(ensureInventory(profile), itemId, colorIndex)
+end
+
+-- Credit one hue seed (recycle / clear / wheel / $D purchase).
+function PersistenceService.creditHueSeed(
+	player: Player,
+	itemId: string,
+	colorIndex: number,
+	amount: number?
+): number
+	local profile = profiles[player]
+	if not profile or typeof(itemId) ~= "string" or itemId == "" then
+		return 0
+	end
+	local inv = ensureInventory(profile)
+	local nextCount = HueSeeds.credit(inv, itemId, colorIndex, amount)
+	log("Credit hue", itemId, "idx", colorIndex, "→", nextCount, "for", player.Name)
 	PersistenceService.syncInventoryToClient(player)
 	return nextCount
+end
+
+-- Back-compat wrapper: credits default teal when hue omitted (avoid in new code).
+function PersistenceService.creditItem(
+	player: Player,
+	itemId: string,
+	amount: number?,
+	colorIndex: number?
+): number
+	local hue = if typeof(colorIndex) == "number"
+		then PlotOutlineColors.clampCoralIndex(colorIndex)
+		else PlotOutlineColors.DEFAULT_INDEX
+	return PersistenceService.creditHueSeed(player, itemId, hue, amount)
 end
 
 -- Pending prize-wheel grants: credit only after client finishes the reveal fly.
@@ -1115,8 +1092,8 @@ end
 
 local function fulfillSeedWheel(player: Player, pending: SeedWheelPending)
 	clearSeedWheelPending(player.UserId)
-	PersistenceService.creditItem(player, pending.itemId, pending.amount)
-	log("SeedWheel grant", pending.itemId, "x", pending.amount, "for", player.Name)
+	PersistenceService.creditHueSeed(player, pending.itemId, pending.colorIndex, pending.amount)
+	log("SeedWheel grant", pending.itemId, "hue", pending.colorIndex, "x", pending.amount, "for", player.Name)
 	if isSeedWheelAutoRollEnabled(player.UserId) then
 		task.defer(function()
 			if player.Parent and isSeedWheelAutoRollEnabled(player.UserId) then
@@ -1144,7 +1121,6 @@ function PersistenceService.beginSeedWheelGrant(player: Player, amount: number?)
 	local add = math.max(1, math.floor(tonumber(amount) or 1))
 	local itemId = SeedWheel.pickRandom()
 	local colorIndex = SeedWheel.pickRandomColorIndex()
-	PersistenceService.grantCoralColorUnlock(player, itemId, colorIndex)
 	seedWheelTokenSeq += 1
 	local token = seedWheelTokenSeq
 	seedWheelPending[userId] = {
@@ -1208,59 +1184,57 @@ function PersistenceService.initSeedWheel()
 	end)
 end
 
--- Debit seed count (floor at 0). Used when undoing a recycle credit / consuming on place.
-function PersistenceService.debitItem(player: Player, itemId: string, amount: number?): number
-	local profile = profiles[player]
-	if not profile or typeof(itemId) ~= "string" or itemId == "" then
-		return 0
-	end
-	local inv = profile.inventory
-	if typeof(inv) ~= "table" then
-		inv = {}
-		profile.inventory = inv
-	end
-	if isUnlimitedSeedItem(itemId) then
-		local nextCount = ensureUnlimitedStock(inv, itemId)
-		log("Debit skipped (unlimited)", itemId, "→", nextCount, "for", player.Name)
-		PersistenceService.syncInventoryToClient(player)
-		return nextCount
-	end
-	local sub = math.max(1, math.floor(tonumber(amount) or 1))
-	local cur = tonumber(inv[itemId]) or 0
-	local nextCount = math.max(0, cur - sub)
-	inv[itemId] = nextCount
-	log("Debit", itemId, "x", sub, "→", nextCount, "for", player.Name)
-	PersistenceService.syncInventoryToClient(player)
-	return nextCount
-end
-
--- Returns false if the player does not have enough seeds.
-function PersistenceService.tryDebitItem(player: Player, itemId: string, amount: number?): (boolean, number)
+function PersistenceService.tryDebitHueSeed(
+	player: Player,
+	itemId: string,
+	colorIndex: number,
+	amount: number?
+): (boolean, number)
 	local profile = profiles[player]
 	if not profile or typeof(itemId) ~= "string" or itemId == "" then
 		return false, 0
 	end
-	local inv = profile.inventory
-	if typeof(inv) ~= "table" then
-		inv = {}
-		profile.inventory = inv
+	local inv = ensureInventory(profile)
+	local ok, nextCount = HueSeeds.tryDebit(inv, itemId, colorIndex, amount)
+	if not ok then
+		return false, nextCount
 	end
-	if isUnlimitedSeedItem(itemId) then
-		local nextCount = ensureUnlimitedStock(inv, itemId)
-		log("TryDebit skipped (unlimited)", itemId, "→", nextCount, "for", player.Name)
-		PersistenceService.syncInventoryToClient(player)
-		return true, nextCount
-	end
-	local sub = math.max(1, math.floor(tonumber(amount) or 1))
-	local cur = tonumber(inv[itemId]) or 0
-	if cur < sub then
-		return false, cur
-	end
-	local nextCount = cur - sub
-	inv[itemId] = nextCount
-	log("TryDebit", itemId, "x", sub, "→", nextCount, "for", player.Name)
+	log("TryDebit hue", itemId, "idx", colorIndex, "→", nextCount, "for", player.Name)
 	PersistenceService.syncInventoryToClient(player)
 	return true, nextCount
+end
+
+function PersistenceService.tryDebitItem(
+	player: Player,
+	itemId: string,
+	amount: number?,
+	colorIndex: number?
+): (boolean, number)
+	local hue = if typeof(colorIndex) == "number"
+		then PlotOutlineColors.clampCoralIndex(colorIndex)
+		else PlotOutlineColors.DEFAULT_INDEX
+	return PersistenceService.tryDebitHueSeed(player, itemId, hue, amount)
+end
+
+function PersistenceService.debitHueSeed(player: Player, itemId: string, colorIndex: number, amount: number?): number
+	local ok, nextCount = PersistenceService.tryDebitHueSeed(player, itemId, colorIndex, amount)
+	if not ok then
+		return 0
+	end
+	return nextCount
+end
+
+function PersistenceService.debitItem(
+	player: Player,
+	itemId: string,
+	amount: number?,
+	colorIndex: number?
+): number
+	local ok, nextCount = PersistenceService.tryDebitItem(player, itemId, amount, colorIndex)
+	if not ok then
+		return 0
+	end
+	return nextCount
 end
 
 function PersistenceService.getItemCount(player: Player, itemId: string): number
@@ -1268,28 +1242,15 @@ function PersistenceService.getItemCount(player: Player, itemId: string): number
 	if not profile or typeof(itemId) ~= "string" then
 		return 0
 	end
-	local inv = profile.inventory
-	if typeof(inv) ~= "table" then
-		return 0
-	end
-	return tonumber(inv[itemId]) or 0
+	return HueSeeds.getSpeciesTotal(ensureInventory(profile), itemId)
 end
 
-function PersistenceService.getInventoryPayload(player: Player): { [string]: number }
+function PersistenceService.getInventoryPayload(player: Player): { [string]: { [string]: number } }
 	local profile = profiles[player]
-	local out: { [string]: number } = {}
-	if not profile or typeof(profile.inventory) ~= "table" then
-		return out
+	if not profile then
+		return {}
 	end
-	for itemId, raw in pairs(profile.inventory) do
-		if typeof(itemId) == "string" then
-			local n = tonumber(raw)
-			if typeof(n) == "number" and n == n then
-				out[itemId] = math.max(0, math.floor(n))
-			end
-		end
-	end
-	return out
+	return HueSeeds.toClientPayload(ensureInventory(profile))
 end
 
 local inventorySyncQueued: { [Player]: boolean } = {}
@@ -1334,59 +1295,11 @@ function PersistenceService.load(player: Player): PlayerProfile
 	loadFailed[player] = nil
 	if result == nil then
 		profiles[player] = profile
-		log("Load new profile userId=", userId, "layout=0", "seeds=", Constants.STARTING_BRAIN_CORAL_SEEDS)
+		log("Load new profile userId=", userId, "layout=0", "seeds=0")
 		return profile
 	end
 
 	profile = sanitizeProfile(result)
-	-- Soft grant: empty plot + no BrainCoral seeds → starter pack (Studio infinite-place leftovers).
-	if #profile.layout == 0 then
-		local inv = profile.inventory
-		if typeof(inv) ~= "table" then
-			inv = {}
-			profile.inventory = inv
-		end
-		if (tonumber(inv.BrainCoral) or 0) <= 0 then
-			inv.BrainCoral = Constants.STARTING_BRAIN_CORAL_SEEDS
-			log("Starter BrainCoral grant userId=", userId, "x", Constants.STARTING_BRAIN_CORAL_SEEDS)
-		end
-	end
-	-- Soft grant mesh-species seeds when the item is missing (new species roll-out).
-	do
-		local inv = profile.inventory
-		if typeof(inv) ~= "table" then
-			inv = {}
-			profile.inventory = inv
-		end
-		if inv.Sponge == nil then
-			inv.Sponge = Constants.STARTING_SPONGE_SEEDS
-			log("Starter Sponge grant userId=", userId, "x", Constants.STARTING_SPONGE_SEEDS)
-		end
-		if inv.SeaGrass == nil then
-			inv.SeaGrass = Constants.STARTING_SEA_GRASS_SEEDS
-			log("Starter SeaGrass grant userId=", userId, "x", Constants.STARTING_SEA_GRASS_SEEDS)
-		end
-		if inv.FireCoral == nil then
-			inv.FireCoral = Constants.STARTING_FIRE_CORAL_SEEDS
-			log("Starter FireCoral grant userId=", userId, "x", Constants.STARTING_FIRE_CORAL_SEEDS)
-		end
-		if inv.Zoas == nil then
-			inv.Zoas = Constants.STARTING_ZOAS_SEEDS
-			log("Starter Zoas grant userId=", userId, "x", Constants.STARTING_ZOAS_SEEDS)
-		end
-		if inv.TreeCoral == nil then
-			inv.TreeCoral = Constants.STARTING_TREE_CORAL_SEEDS
-			log("Starter TreeCoral grant userId=", userId, "x", Constants.STARTING_TREE_CORAL_SEEDS)
-		end
-		if inv.LeatherCoral == nil then
-			inv.LeatherCoral = Constants.STARTING_LEATHER_CORAL_SEEDS
-			log("Starter LeatherCoral grant userId=", userId, "x", Constants.STARTING_LEATHER_CORAL_SEEDS)
-		end
-		if inv.SeaFan == nil then
-			inv.SeaFan = Constants.STARTING_SEA_FAN_SEEDS
-			log("Starter SeaFan grant userId=", userId, "x", Constants.STARTING_SEA_FAN_SEEDS)
-		end
-	end
 	profiles[player] = profile
 	log(
 		"Load userId=",
@@ -1453,7 +1366,7 @@ function PersistenceService.save(player: Player, layoutOverride: { LayoutObject 
 		plotOutlineColorIndex = PlotOutlineColors.clampIndex(profile.plotOutlineColorIndex),
 		skillStages = SkillStages.sanitizeMap(profile.skillStages),
 		skillActiveStages = SkillStages.sanitizeActiveMap(profile.skillActiveStages, profile.skillStages),
-		coralColorUnlocks = ColorUnlocks.sanitize(profile.coralColorUnlocks),
+		coralColorUnlocks = {},
 	}
 
 	local saved = false

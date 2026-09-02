@@ -507,6 +507,14 @@ requestCoralColor.OnServerInvoke = function(
 	)
 end
 
+local requestClearCoralHue = Remotes.getFunction("RequestClearCoralHue")
+requestClearCoralHue.OnServerInvoke = function(player: Player, placeId: any)
+	if typeof(placeId) ~= "string" then
+		return { ok = false, errorCode = "BadRequest" }
+	end
+	return PlacementService.clearCoralHue(player, placeId)
+end
+
 local requestUnlockCoralColor = Remotes.getFunction("RequestUnlockCoralColor")
 requestUnlockCoralColor.OnServerInvoke = function(player: Player, itemId: any, colorIndex: any)
 	if typeof(itemId) ~= "string" then

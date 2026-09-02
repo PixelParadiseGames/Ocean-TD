@@ -7,8 +7,9 @@ local RelocateConsts = {
 	BTN_SIZE = 60,
 	REC_BTN_SIZE = 40,
 	REC_GAP_PX = 6,
-	MOVE_ICON_SIZE = 48,
+	MOVE_ICON_SIZE = 36, -- 25% smaller than 48
 	MOVE_ICON_IMAGE = "rbxassetid://345081302",
+	MOVE_ICON_INSPECT_DROP_SEC = 0.28,
 	RECYCLE_ICON_IMAGE = "rbxassetid://75091344292202",
 	GHOST_INVALID_COLOR = Color3.fromRGB(220, 70, 70),
 	-- Raycast above the cursor so the coral center (+ move icon) sits under the mouse.

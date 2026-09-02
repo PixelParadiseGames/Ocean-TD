@@ -13,13 +13,16 @@ export type ClearPlotEntry = {
 }
 
 export type UndoStep = {
-	kind: string, -- "place" | "move" | "recycle" | "clearPlot"
+	kind: string, -- "place" | "move" | "recycle" | "clearPlot" | "color"
 	placeId: string,
 	itemId: string,
 	worldPos: Vector3?, -- place / recycle position
 	fromWorldPos: Vector3?, -- move origin
 	toWorldPos: Vector3?, -- move destination
 	entries: { ClearPlotEntry }?, -- clearPlot compound
+	seedHue: number?, -- hue stack debited / credited
+	fromColorIndex: number?, -- color undo
+	toColorIndex: number?,
 }
 
 local MAX_STEPS = 10

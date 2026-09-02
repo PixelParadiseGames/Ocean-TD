@@ -92,6 +92,8 @@ local recycleIcon: ImageLabel? = nil
 local recyclePlus: TextLabel? = nil
 local moveBillboard: BillboardGui? = nil
 local moveIcon: ImageLabel? = nil
+local moveIconInspectBlend = 0
+local moveIconDropTweenConn: RBXScriptConnection? = nil
 local moveAdorneePart: BasePart? = nil
 local waistBb: BillboardGui? = nil
 local waistAdornee: BasePart? = nil
@@ -715,12 +717,28 @@ end
 
 local MOVE_ICON_GROUND_LIFT = 0.9 -- studs above plant point so the handle isn't buried in sand
 
+local function moveIconInspectDropStuds(p: BasePart): number
+	if CoralVisual.isMeshSpecies(p:GetAttribute("OceanTD_SpeciesId")) then
+		return math.clamp(p.Size.Y * 0.42 + 2.2, 3.5, 14)
+	end
+	return math.clamp(p.Size.Y * 0.5 + 2.4, 3, 12)
+end
+
+local function stopMoveIconDropTween()
+	if moveIconDropTweenConn then
+		moveIconDropTweenConn:Disconnect()
+		moveIconDropTweenConn = nil
+	end
+end
+
 local function syncMoveIconToGround()
 	if not moveBillboard or not part then
 		return
 	end
 	local anchor = moveGridAnchor or gridAnchorPos or CoralVisual.readGridAnchor(part) or part.Position
-	local world = Vector3.new(anchor.X, anchor.Y + MOVE_ICON_GROUND_LIFT, anchor.Z)
+	local drop = moveIconInspectDropStuds(part) * moveIconInspectBlend
+	local yOff = MOVE_ICON_GROUND_LIFT - drop
+	local world = Vector3.new(anchor.X, anchor.Y + yOff, anchor.Z)
 	local adornee = moveAdorneePart
 	if adornee and adornee.Parent then
 		adornee.CFrame = CFrame.new(world)
@@ -733,7 +751,7 @@ local function syncMoveIconToGround()
 		moveBillboard.StudsOffset = Vector3.zero
 	else
 		moveBillboard.StudsOffsetWorldSpace = Vector3.zero
-		moveBillboard.StudsOffset = Vector3.new(0, MOVE_ICON_GROUND_LIFT, 0)
+		moveBillboard.StudsOffset = Vector3.new(0, yOff, 0)
 	end
 	moveBillboard.Enabled = true
 	if moveIcon then
@@ -746,6 +764,32 @@ local function syncMoveIconToGround()
 			end
 		end
 	end
+end
+
+local function tweenMoveIconInspectBlend(target: number)
+	stopMoveIconDropTween()
+	local from = moveIconInspectBlend
+	if math.abs(from - target) < 0.001 then
+		moveIconInspectBlend = target
+		syncMoveIconToGround()
+		return
+	end
+	local t0 = os.clock()
+	moveIconDropTweenConn = RunService.RenderStepped:Connect(function()
+		if not active or not part then
+			stopMoveIconDropTween()
+			return
+		end
+		local u = math.clamp((os.clock() - t0) / C.MOVE_ICON_INSPECT_DROP_SEC, 0, 1)
+		local a = 1 - (1 - u) * (1 - u)
+		moveIconInspectBlend = from + (target - from) * a
+		syncMoveIconToGround()
+		if u >= 1 then
+			moveIconInspectBlend = target
+			stopMoveIconDropTween()
+			syncMoveIconToGround()
+		end
+	end)
 end
 
 local function attachMoveIcon(adornee: BasePart)
@@ -1512,6 +1556,7 @@ local function updateAt(worldPos: Vector3)
 	local homeAnchor = gridAnchorPos or originPos
 	if not sameGrid(surfacePos, homeAnchor) then
 		hasMoved = true
+		tweenMoveIconInspectBlend(0)
 	end
 	if validSpot or rejectReason ~= "Spot Taken" then
 		clearBlockHighlight()
@@ -1767,6 +1812,8 @@ local function clearState()
 	dragging = false
 	grabFromMoveIcon = false
 	cinematicHold = false
+	stopMoveIconDropTween()
+	moveIconInspectBlend = 0
 	inspectModal = false
 	unfreeze()
 	activeChanged:Fire(false, nil)
@@ -1807,7 +1854,16 @@ function RelocateController.setInspectPanelVisible(on: boolean)
 		recycleBtn.Visible = false
 	end
 	if not on then
+		tweenMoveIconInspectBlend(0)
 		syncChrome()
+	end
+end
+
+function RelocateController.setHueColorEditing(on: boolean)
+	if on then
+		tweenMoveIconInspectBlend(1)
+	else
+		tweenMoveIconInspectBlend(0)
 	end
 end
 
@@ -1824,12 +1880,11 @@ function RelocateController.syncSelectedRestColor()
 	if not part or not part.Parent then
 		return
 	end
+	showPaintSolid = true
+	CoralVisual.applyRestLook(part)
 	local restMat, restColor = CoralVisual.readRestLook(part)
 	baseColor = restColor
 	baseMaterial = restMat
-	showPaintSolid = true
-	part.Material = restMat
-	part.Color = restColor
 end
 
 function RelocateController.isMoveConfirmUp(): boolean

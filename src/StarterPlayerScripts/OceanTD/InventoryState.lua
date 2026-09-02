@@ -2,6 +2,8 @@
 -- Client inventory / backpack selection state. Placement systems subscribe later.
 
 local ItemCatalog = require(game:GetService("ReplicatedStorage"):WaitForChild("OceanTD"):WaitForChild("Shared"):WaitForChild("ItemCatalog"))
+local PlotOutlineColors = require(game:GetService("ReplicatedStorage"):WaitForChild("OceanTD"):WaitForChild("Shared"):WaitForChild("PlotOutlineColors"))
+local HueSeeds = require(game:GetService("ReplicatedStorage"):WaitForChild("OceanTD"):WaitForChild("Shared"):WaitForChild("HueSeeds"))
 local Remotes = require(game:GetService("ReplicatedStorage"):WaitForChild("OceanTD"):WaitForChild("Remotes"))
 
 local InventoryState = {}
@@ -12,7 +14,8 @@ local openChanged: BindableEvent = Instance.new("BindableEvent")
 local selectionChanged: BindableEvent = Instance.new("BindableEvent")
 local countsChanged: BindableEvent = Instance.new("BindableEvent")
 local itemSlotScreenPosProvider: ((string) -> Vector2?)? = nil
-local seedCounts: { [string]: number } = {}
+local hueCounts: HueSeeds.HueInventory = {}
+local placementHueByItem: { [string]: number } = {}
 
 function InventoryState.isOpen(): boolean
 	return open
@@ -29,11 +32,56 @@ function InventoryState.getSelectedDef()
 	return ItemCatalog.get(selectedId)
 end
 
+function InventoryState.getHueSeedCount(itemId: string, colorIndex: number): number
+	return HueSeeds.getCount(hueCounts, itemId, colorIndex)
+end
+
 function InventoryState.getSeedCount(itemId: string): number
-	if typeof(itemId) ~= "string" or itemId == "" then
-		return 0
+	return HueSeeds.getSpeciesTotal(hueCounts, itemId)
+end
+
+function InventoryState.getOwnedHueIndices(itemId: string): { number }
+	return HueSeeds.ownedHueIndices(hueCounts, itemId)
+end
+
+function InventoryState.getPlacementHue(itemId: string): number?
+	local stored = placementHueByItem[itemId]
+	if typeof(stored) == "number" then
+		if InventoryState.getHueSeedCount(itemId, stored) > 0 then
+			return PlotOutlineColors.clampCoralIndex(stored)
+		end
 	end
-	return math.max(0, math.floor(tonumber(seedCounts[itemId]) or 0))
+	local first = HueSeeds.pickFirstOwnedHue(hueCounts, itemId)
+	if first then
+		placementHueByItem[itemId] = first
+	end
+	return first
+end
+
+function InventoryState.cyclePlacementHue(itemId: string, delta: number): number?
+	local owned = InventoryState.getOwnedHueIndices(itemId)
+	if #owned == 0 then
+		placementHueByItem[itemId] = nil
+		return nil
+	end
+	local current = InventoryState.getPlacementHue(itemId) or owned[1]
+	local idx = 1
+	for i, hue in ipairs(owned) do
+		if hue == current then
+			idx = i
+			break
+		end
+	end
+	local nextIdx = idx + delta
+	if nextIdx < 1 then
+		nextIdx = #owned
+	elseif nextIdx > #owned then
+		nextIdx = 1
+	end
+	local nextHue = owned[nextIdx]
+	placementHueByItem[itemId] = nextHue
+	countsChanged:Fire()
+	return nextHue
 end
 
 function InventoryState.formatSeedCount(itemId: string): string
@@ -50,18 +98,13 @@ function InventoryState.formatSeedCount(itemId: string): string
 end
 
 function InventoryState.setSeedCounts(raw: any)
-	local nextCounts: { [string]: number } = {}
-	if typeof(raw) == "table" then
-		for itemId, v in pairs(raw) do
-			if typeof(itemId) == "string" then
-				local n = tonumber(v)
-				if typeof(n) == "number" and n == n then
-					nextCounts[itemId] = math.max(0, math.floor(n))
-				end
-			end
+	hueCounts = HueSeeds.sanitize(raw, false)
+	-- Drop stale placement hues when counts hit zero.
+	for itemId, hue in pairs(placementHueByItem) do
+		if InventoryState.getHueSeedCount(itemId, hue) <= 0 then
+			placementHueByItem[itemId] = nil
 		end
 	end
-	seedCounts = nextCounts
 	countsChanged:Fire()
 end
 
@@ -105,6 +148,9 @@ function InventoryState.setSelected(id: string?, force: boolean?)
 		return
 	end
 	selectedId = id
+	if typeof(id) == "string" then
+		InventoryState.getPlacementHue(id)
+	end
 	selectionChanged:Fire(selectedId)
 end
 

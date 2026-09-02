@@ -12,6 +12,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local oceanShared = ReplicatedStorage:WaitForChild("OceanTD"):WaitForChild("Shared")
 local GridMath = require(oceanShared:WaitForChild("GridMath"))
 local BrainStack = require(oceanShared:WaitForChild("BrainStack"))
+local PlotOutlineColors = require(oceanShared:WaitForChild("PlotOutlineColors"))
 
 local ClientPlot = require(script.Parent:WaitForChild("ClientPlot"))
 
@@ -273,6 +274,75 @@ function PlacedCoralIndex.countLocal(): number
 	local n = 0
 	for _, part in ipairs(bucket.parts) do
 		if part.Parent then
+			n += 1
+		end
+	end
+	return n
+end
+
+-- Corals actively painted with a palette hue (generic / default look does not count).
+function PlacedCoralIndex.countPaintedHue(
+	plotId: string,
+	itemId: string,
+	colorIndex: number,
+	excludePlaceId: string?
+): number
+	PlacedCoralIndex.ensure()
+	local bucket = buckets[plotId]
+	if not bucket then
+		return 0
+	end
+	local hue = PlotOutlineColors.clampCoralIndex(colorIndex)
+	local n = 0
+	for _, part in ipairs(bucket.parts) do
+		if not part.Parent then
+			continue
+		end
+		if part:GetAttribute("OceanTD_ItemId") ~= itemId then
+			continue
+		end
+		local pid = part:GetAttribute("OceanTD_PlaceId")
+		if typeof(excludePlaceId) == "string" and excludePlaceId ~= "" and pid == excludePlaceId then
+			continue
+		end
+		local attr = part:GetAttribute("OceanTD_ColorIndex")
+		if typeof(attr) == "number" and PlotOutlineColors.clampCoralIndex(attr) == hue then
+			n += 1
+		end
+	end
+	return n
+end
+
+-- Generic corals placed with a hue seed but not yet palette-painted.
+function PlacedCoralIndex.countGenericHue(
+	plotId: string,
+	itemId: string,
+	colorIndex: number,
+	excludePlaceId: string?
+): number
+	PlacedCoralIndex.ensure()
+	local bucket = buckets[plotId]
+	if not bucket then
+		return 0
+	end
+	local hue = PlotOutlineColors.clampCoralIndex(colorIndex)
+	local n = 0
+	for _, part in ipairs(bucket.parts) do
+		if not part.Parent then
+			continue
+		end
+		if part:GetAttribute("OceanTD_ItemId") ~= itemId then
+			continue
+		end
+		local pid = part:GetAttribute("OceanTD_PlaceId")
+		if typeof(excludePlaceId) == "string" and excludePlaceId ~= "" and pid == excludePlaceId then
+			continue
+		end
+		if typeof(part:GetAttribute("OceanTD_ColorIndex")) == "number" then
+			continue
+		end
+		local seedHue = part:GetAttribute("OceanTD_SeedHue")
+		if typeof(seedHue) == "number" and PlotOutlineColors.clampCoralIndex(seedHue) == hue then
 			n += 1
 		end
 	end

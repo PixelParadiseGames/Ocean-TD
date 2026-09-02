@@ -1657,6 +1657,103 @@ function CoralVisual.applyRestLook(part: BasePart)
 	end
 end
 
+function CoralVisual.snapshotDefaultRestLook(part: BasePart)
+	if typeof(part:GetAttribute("OceanTD_DefaultRestR")) == "number" then
+		return
+	end
+	local _, color = CoralVisual.readRestLook(part)
+	part:SetAttribute("OceanTD_DefaultRestR", color.R)
+	part:SetAttribute("OceanTD_DefaultRestG", color.G)
+	part:SetAttribute("OceanTD_DefaultRestB", color.B)
+	local web = readWebRestColor(part)
+	if web then
+		part:SetAttribute("OceanTD_DefaultWebRestR", web.R)
+		part:SetAttribute("OceanTD_DefaultWebRestG", web.G)
+		part:SetAttribute("OceanTD_DefaultWebRestB", web.B)
+	else
+		part:SetAttribute("OceanTD_DefaultWebRestR", nil)
+		part:SetAttribute("OceanTD_DefaultWebRestG", nil)
+		part:SetAttribute("OceanTD_DefaultWebRestB", nil)
+	end
+end
+
+local function readTemplateDefaultColors(part: BasePart): (Color3?, Color3?)
+	local speciesId = part:GetAttribute("OceanTD_SpeciesId")
+	if typeof(speciesId) ~= "string" then
+		return nil, nil
+	end
+	if CoralVisual.isMainAccentMesh(speciesId) then
+		local sizeClass = CoralSize.clampTier(tonumber(part:GetAttribute("OceanTD_SizeClass")) or 1)
+		local template = findMainAccentModel(speciesId, sizeClass)
+		if template then
+			local tMain = findMainAccentTemplatePart(template, "main")
+			local tAccent = findMainAccentTemplatePart(template, "accent")
+			local stem = if tMain then tMain.Color else nil
+			local accent = if tAccent and tAccent:IsA("BasePart") then tAccent.Color else stem
+			return stem, accent
+		end
+	elseif CoralVisual.isSeaFan(speciesId) then
+		local sizeClass = CoralSize.clampTier(tonumber(part:GetAttribute("OceanTD_SizeClass")) or 1)
+		local variant = CoralVisual.clampMeshVariant(tonumber(part:GetAttribute("OceanTD_VariantIndex")), speciesId)
+		local template = findSeaFanModel(sizeClass, variant)
+		if template then
+			local tStem = findSeaFanTemplatePart(template, "stem")
+			local tWeb = findSeaFanTemplatePart(template, "web")
+			return if tStem then tStem.Color else nil, if tWeb then tWeb.Color else nil
+		end
+	end
+	return nil, nil
+end
+
+function CoralVisual.readDefaultRestLook(part: BasePart): (Color3, Color3?)
+	local dr = part:GetAttribute("OceanTD_DefaultRestR")
+	local dg = part:GetAttribute("OceanTD_DefaultRestG")
+	local db = part:GetAttribute("OceanTD_DefaultRestB")
+	local color: Color3? = nil
+	if typeof(dr) == "number" and typeof(dg) == "number" and typeof(db) == "number" then
+		color = Color3.new(dr, dg, db)
+	end
+	local wr = part:GetAttribute("OceanTD_DefaultWebRestR")
+	local wg = part:GetAttribute("OceanTD_DefaultWebRestG")
+	local wb = part:GetAttribute("OceanTD_DefaultWebRestB")
+	local webColor: Color3? = nil
+	if typeof(wr) == "number" and typeof(wg) == "number" and typeof(wb) == "number" then
+		webColor = Color3.new(wr, wg, wb)
+	end
+	if not color then
+		local stem, web = readTemplateDefaultColors(part)
+		if stem then
+			color = stem
+			if not webColor then
+				webColor = web
+			end
+		end
+	end
+	if not color then
+		local speciesId = part:GetAttribute("OceanTD_SpeciesId")
+		local def = if typeof(speciesId) == "string" then SpeciesCatalog.get(speciesId) else nil
+		if def then
+			if typeof(def.meshFolder) == "string" and def.meshFolder ~= "" then
+				color = def.colorMin:Lerp(def.colorMax, 0.5)
+			else
+				color = SpeciesCatalog.randomColor(def)
+			end
+		else
+			color = part.Color
+		end
+	end
+	return color, webColor
+end
+
+function CoralVisual.clearPalettePaint(part: BasePart): Color3
+	part:SetAttribute("OceanTD_ColorIndex", nil)
+	part:SetAttribute("OceanTD_WebColorIndex", nil)
+	local color, webColor = CoralVisual.readDefaultRestLook(part)
+	CoralVisual.setRestColor(part, color, webColor, nil)
+	CoralVisual.applyRestLook(part)
+	return color
+end
+
 function CoralVisual.setRestColor(part: BasePart, color: Color3, webColor: Color3?, webColorIndex: number?)
 	part:SetAttribute("OceanTD_RestR", color.R)
 	part:SetAttribute("OceanTD_RestG", color.G)

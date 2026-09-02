@@ -36,6 +36,8 @@ export type LayoutObject = {
 	sizeClass: number?,
 	-- PlotOutlineColors index 1–14 (coral paint). Missing → species random on place.
 	colorIndex: number?,
+	-- Hue stack debited when this coral was placed (default look until assigned).
+	seedHue: number?,
 	-- Optional exact paint (0–1). Missing → palette base for colorIndex.
 	colorR: number?,
 	colorG: number?,
@@ -127,16 +129,7 @@ function PlotTypes.defaultProfile(): PlayerProfile
 			gold = 0,
 		},
 		processedReceipts = {},
-		inventory = {
-			BrainCoral = Constants.STARTING_BRAIN_CORAL_SEEDS,
-			Sponge = Constants.STARTING_SPONGE_SEEDS,
-			SeaGrass = Constants.STARTING_SEA_GRASS_SEEDS,
-			FireCoral = Constants.STARTING_FIRE_CORAL_SEEDS,
-			Zoas = Constants.STARTING_ZOAS_SEEDS,
-			TreeCoral = Constants.STARTING_TREE_CORAL_SEEDS,
-			LeatherCoral = Constants.STARTING_LEATHER_CORAL_SEEDS,
-			SeaFan = Constants.STARTING_SEA_FAN_SEEDS,
-		},
+		inventory = {},
 		skillTree = {},
 		layout = {},
 		plotSaves = PlotTypes.defaultPlotSaves(),

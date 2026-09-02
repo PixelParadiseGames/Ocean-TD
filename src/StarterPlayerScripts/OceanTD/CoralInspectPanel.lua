@@ -25,9 +25,12 @@ local UiHaptics = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiHapti
 local UiViewportTags = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiViewportTags"))
 
 local RelocateController = require(script.Parent:WaitForChild("RelocateController"))
+local PlacedCoralIndex = require(script.Parent:WaitForChild("PlacedCoralIndex"))
+local ClientPlot = require(script.Parent:WaitForChild("ClientPlot"))
 local CoralRangeRings = require(script.Parent:WaitForChild("CoralRangeRings"))
 local CoralVisual = require(oceanRoot:WaitForChild("Shared"):WaitForChild("CoralVisual"))
 local ColorUnlocks = require(oceanRoot:WaitForChild("Shared"):WaitForChild("ColorUnlocks"))
+local HueSeeds = require(oceanRoot:WaitForChild("Shared"):WaitForChild("HueSeeds"))
 local CoralColorUnlockState = require(script.Parent:WaitForChild("CoralColorUnlockState"))
 local InventoryState = require(script.Parent:WaitForChild("InventoryState"))
 
@@ -46,6 +49,12 @@ local REC_GREEN = Color3.fromRGB(48, 145, 70)
 local RECYCLE_ICON_IMAGE = "rbxassetid://75091344292202"
 local GROW_SOUND_ID = "rbxassetid://134057288"
 local DICE_SPIN_SOUND_ID = "rbxassetid://130406186928352"
+local DEFAULT_PALETTE_SOUND_ID = "rbxassetid://130119587466421"
+local PAINTBRUSH_ICON = "rbxassetid://139313922398517"
+local DEFAULT_PALETTE_SWATCH = 0
+local DEFAULT_SWATCH_STROKE = Color3.fromRGB(220, 45, 45)
+local defaultStrokeFlashUntil = 0
+local defaultStrokeFlashTween: Tween? = nil
 
 local function pulseWave(): number
 	return (math.sin(os.clock() * math.pi * 2) + 1) * 0.5
@@ -65,13 +74,14 @@ local colorScroll: ScrollingFrame? = nil
 local colorSwatchBtns: { [number]: GuiButton } = {}
 local colorSwatchStrokes: { [number]: UIStroke } = {}
 local colorSwatchLocks: { [number]: ImageLabel } = {}
-local colorDice: ImageLabel? = nil
+local colorSwatchCounts: { [number]: TextLabel } = {}
+local colorDice: ImageButton? = nil
 local fedLbl: TextLabel? = nil
 local wavesLbl: TextLabel? = nil
 local lifePad: UIPadding? = nil
 local diceSpinToken = 0
 local activeColorIndex: number? = nil
-local focusColorIndex: number = PlotOutlineColors.DEFAULT_INDEX
+local focusColorIndex: number = DEFAULT_PALETTE_SWATCH
 local colorSendToken = 0
 local DICE_ICON = "rbxassetid://77867192113507"
 local COLOR_FOCUS = Color3.fromRGB(255, 220, 40)
@@ -97,6 +107,7 @@ local lifePart: BasePart? = nil
 
 local sizeRf = Remotes.getFunction("RequestCoralSize")
 local colorRf = Remotes.getFunction("RequestCoralColor")
+local clearHueRf = Remotes.getFunction("RequestClearCoralHue")
 local unlockColorRf = Remotes.getFunction("RequestUnlockCoralColor")
 
 local function isGamepad(): boolean
@@ -480,6 +491,47 @@ local function playDiceSpinSound()
 	end)
 end
 
+local function playDefaultPaletteSound()
+	local s = Instance.new("Sound")
+	s.SoundId = DEFAULT_PALETTE_SOUND_ID
+	s.Volume = 0.85
+	s.Parent = SoundService
+	s:Play()
+	s.Ended:Connect(function()
+		s:Destroy()
+	end)
+	task.delay(4, function()
+		if s.Parent then
+			s:Destroy()
+		end
+	end)
+end
+
+local function flashDefaultSwatchStroke()
+	local stroke = colorSwatchStrokes[DEFAULT_PALETTE_SWATCH]
+	if not stroke then
+		return
+	end
+	if defaultStrokeFlashTween then
+		defaultStrokeFlashTween:Cancel()
+		defaultStrokeFlashTween = nil
+	end
+	defaultStrokeFlashUntil = os.clock() + 0.28
+	stroke.Color = GREEN
+	defaultStrokeFlashTween = TweenService:Create(
+		stroke,
+		TweenInfo.new(0.22, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+		{ Color = DEFAULT_SWATCH_STROKE }
+	)
+	defaultStrokeFlashTween:Play()
+	defaultStrokeFlashTween.Completed:Connect(function()
+		defaultStrokeFlashTween = nil
+		if stroke.Parent then
+			stroke.Color = DEFAULT_SWATCH_STROKE
+		end
+	end)
+end
+
 local function zoomToward(part: BasePart, fromCf: CFrame, closer: boolean): CFrame
 	local look = part.Position
 	local origin = fromCf.Position
@@ -856,15 +908,49 @@ local function selectedItemId(): string?
 	return if typeof(itemId) == "string" and itemId ~= "" then itemId else nil
 end
 
-local function refreshColorLockOverlays()
+local function seedCountLabelColor(swatchIndex: number): Color3
+	-- White swatch: grey count so "N" stays readable on a light fill.
+	if swatchIndex == 14 then
+		return Color3.fromRGB(120, 128, 136)
+	end
+	return WHITE
+end
+
+local function getHueAvailableSlots(itemId: string, hue: number, excludePlaceId: string?): number
+	local owned = InventoryState.getHueSeedCount(itemId, hue)
+	local plot = ClientPlot.get()
+	if not plot then
+		return owned
+	end
+	local generic = PlacedCoralIndex.countGenericHue(plot.plotId, itemId, hue, excludePlaceId)
+	local painted = PlacedCoralIndex.countPaintedHue(plot.plotId, itemId, hue, excludePlaceId)
+	return math.max(0, owned + generic - painted)
+end
+
+local function refreshColorSeedLabels()
 	local itemId = selectedItemId()
 	for idx, lock in pairs(colorSwatchLocks) do
+		if idx == DEFAULT_PALETTE_SWATCH then
+			continue
+		end
 		local btn = colorSwatchBtns[idx]
-		local locked = itemId ~= nil and not CoralColorUnlockState.isUnlocked(itemId, idx)
-		lock.Visible = locked
-		lock.ImageTransparency = 0
+		local countLbl = colorSwatchCounts[idx]
+		local isActive = activeColorIndex ~= nil and idx == activeColorIndex
+		local available = if typeof(itemId) == "string" then getHueAvailableSlots(itemId, idx) else 0
+		if lock then
+			lock.Visible = false
+		end
+		if countLbl then
+			if isActive then
+				countLbl.Visible = false
+			else
+				countLbl.Visible = true
+				countLbl.Text = tostring(available)
+				countLbl.TextColor3 = seedCountLabelColor(idx)
+			end
+		end
 		if btn then
-			btn.BackgroundTransparency = if locked then 0.35 else 0
+			btn.BackgroundTransparency = if available <= 0 and not isActive then 0.35 else 0
 		end
 	end
 end
@@ -1037,7 +1123,7 @@ local function tryUnlockColorConfirm()
 	if typeof(itemId) ~= "string" or typeof(idx) ~= "number" then
 		return
 	end
-	local cost = ColorUnlocks.UNLOCK_COST
+	local cost = HueSeeds.SEED_COST
 	local cash = tonumber(player:GetAttribute(Constants.SAND_DOLLARS_ATTR)) or 0
 	if cash < cost then
 		showToast("Collect More $D")
@@ -1065,7 +1151,7 @@ local function showConfirmColorUnlock(itemId: string, colorIndex: number)
 	confirmUnlockTarget = nil
 	confirmColorItemId = itemId
 	confirmColorIndex = PlotOutlineColors.clampCoralIndex(colorIndex)
-	local cost = ColorUnlocks.UNLOCK_COST
+	local cost = HueSeeds.SEED_COST
 	hideConfirm()
 	RelocateController.setInspectModal(true)
 	local sg = Instance.new("ScreenGui")
@@ -1115,7 +1201,7 @@ local function showConfirmColorUnlock(itemId: string, colorIndex: number)
 	title.Font = UiTheme.Font
 	title.TextSize = 24
 	title.TextColor3 = Color3.fromRGB(240, 248, 255)
-	title.Text = "Unlock " .. ColorUnlocks.displayName(confirmColorIndex)
+	title.Text = "Buy 1 " .. ColorUnlocks.displayName(confirmColorIndex) .. " seed"
 	title.ZIndex = 3
 	title.Parent = panel
 
@@ -1132,7 +1218,7 @@ local function showConfirmColorUnlock(itemId: string, colorIndex: number)
 
 	local unlock = Instance.new("TextButton")
 	unlock.Name = "UNLOCK"
-	unlock.Text = "UNLOCK"
+	unlock.Text = "BUY"
 	unlock.Font = UiTheme.Font
 	unlock.TextSize = 20
 	unlock.TextColor3 = WHITE
@@ -1240,7 +1326,28 @@ local function refreshColorSwatches()
 	local showFocus = isGamepad()
 	local dice = colorDice
 	local activeBtn: GuiButton? = nil
+	local defaultStroke = colorSwatchStrokes[DEFAULT_PALETTE_SWATCH]
+	if defaultStroke then
+		local defaultActive = activeColorIndex == nil
+		local defaultFocus = showFocus and focusColorIndex == DEFAULT_PALETTE_SWATCH
+		defaultStroke.Enabled = true
+		if os.clock() >= defaultStrokeFlashUntil then
+			defaultStroke.Color = DEFAULT_SWATCH_STROKE
+		end
+		defaultStroke.Thickness = if defaultActive or defaultFocus then 3 else 2.5
+		if defaultActive then
+			activeBtn = nil
+		end
+	end
+	local defaultBtn = colorSwatchBtns[DEFAULT_PALETTE_SWATCH]
+	if defaultBtn then
+		defaultBtn.BackgroundColor3 = Color3.new(0, 0, 0)
+		defaultBtn.BackgroundTransparency = 0
+	end
 	for idx, stroke in pairs(colorSwatchStrokes) do
+		if idx == DEFAULT_PALETTE_SWATCH then
+			continue
+		end
 		local isActive = activeColorIndex ~= nil and idx == activeColorIndex
 		local isFocus = showFocus and idx == focusColorIndex
 		if isActive then
@@ -1265,7 +1372,7 @@ local function refreshColorSwatches()
 			dice.Visible = false
 		end
 	end
-	refreshColorLockOverlays()
+	refreshColorSeedLabels()
 end
 
 local function scrollFocusIntoView()
@@ -1297,10 +1404,10 @@ local function nudgeColorFocus(delta: number)
 	end
 	local maxI = PlotOutlineColors.CORAL_MAX_INDEX
 	local next = focusColorIndex + delta
-	if next < 1 then
+	if next < DEFAULT_PALETTE_SWATCH then
 		next = maxI
 	elseif next > maxI then
-		next = 1
+		next = DEFAULT_PALETTE_SWATCH
 	end
 	focusColorIndex = next
 	refreshColorSwatches()
@@ -1315,7 +1422,7 @@ local function syncColorFromPart(part: BasePart)
 		focusColorIndex = activeColorIndex
 	else
 		activeColorIndex = nil
-		focusColorIndex = PlotOutlineColors.DEFAULT_INDEX
+		focusColorIndex = DEFAULT_PALETTE_SWATCH
 	end
 	refreshColorSwatches()
 	task.defer(scrollFocusIntoView)
@@ -1388,6 +1495,9 @@ local function applyCoralPaint(part: BasePart, idx: number, paint: Color3, place
 			return
 		end
 		if not ok or typeof(result) ~= "table" or result.ok ~= true then
+			if typeof(result) == "table" and result.errorCode == "HueCap" then
+				showToast("All slots in use")
+			end
 			syncColorFromPart(part)
 			return
 		end
@@ -1420,10 +1530,21 @@ local function selectCoralColor(index: number)
 	end
 	local idx = PlotOutlineColors.clampCoralIndex(index)
 	focusColorIndex = idx
+	RelocateController.setHueColorEditing(true)
 	local itemId = part:GetAttribute("OceanTD_ItemId")
 	if typeof(itemId) == "string" and itemId ~= "" and not CoralColorUnlockState.isUnlocked(itemId, idx) then
 		if activeColorIndex ~= idx then
 			showConfirmColorUnlock(itemId, idx)
+			return true
+		end
+	end
+	if activeColorIndex ~= idx and typeof(itemId) == "string" and itemId ~= "" then
+		local partSeedHue = part:GetAttribute("OceanTD_SeedHue")
+		local canUseOwnSeed = activeColorIndex == nil
+			and typeof(partSeedHue) == "number"
+			and PlotOutlineColors.clampCoralIndex(partSeedHue) == idx
+		if not canUseOwnSeed and getHueAvailableSlots(itemId, idx, placeId) <= 0 then
+			showToast("All slots in use")
 			return true
 		end
 	end
@@ -1436,6 +1557,59 @@ local function selectCoralColor(index: number)
 	-- New swatch: paint the palette base color.
 	applyCoralPaint(part, idx, PlotOutlineColors.coralColor(idx), placeId)
 	return true
+end
+
+local function selectDefaultPalette(): boolean
+	local part = selectedPart()
+	if not part then
+		return false
+	end
+	local placeId = part:GetAttribute("OceanTD_PlaceId")
+	if typeof(placeId) ~= "string" or placeId == "" then
+		return false
+	end
+	focusColorIndex = DEFAULT_PALETTE_SWATCH
+	RelocateController.setHueColorEditing(true)
+	activeColorIndex = nil
+	CoralVisual.clearPalettePaint(part)
+	RelocateController.syncSelectedRestColor()
+	refreshColorSwatches()
+	playDefaultPaletteSound()
+	flashDefaultSwatchStroke()
+	UiHaptics.pulseShort()
+	colorSendToken += 1
+	local myToken = colorSendToken
+	task.spawn(function()
+		local ok, result = pcall(function()
+			return clearHueRf:InvokeServer(placeId)
+		end)
+		if myToken ~= colorSendToken then
+			return
+		end
+		local still = selectedPart()
+		if still ~= part then
+			return
+		end
+		if not ok or typeof(result) ~= "table" or result.ok ~= true then
+			warn("[CoralInspect] Clear hue failed", result)
+		end
+	end)
+	return true
+end
+
+local function rollActiveHueShade()
+	local part = selectedPart()
+	if not part or activeColorIndex == nil then
+		return
+	end
+	local placeId = part:GetAttribute("OceanTD_PlaceId")
+	if typeof(placeId) ~= "string" or placeId == "" then
+		return
+	end
+	local idx = activeColorIndex
+	RelocateController.setHueColorEditing(true)
+	spinColorDice()
+	applyCoralPaint(part, idx, PlotOutlineColors.randomHueVariant(idx), placeId)
 end
 
 local function refreshHeaderSeedBadge()
@@ -1805,7 +1979,46 @@ function CoralInspectPanel.bind(panel: GuiObject, catalogFrame: GuiObject)
 
 	table.clear(colorSwatchBtns)
 	table.clear(colorSwatchStrokes)
+	table.clear(colorSwatchCounts)
 	local colorDragMoved = false
+
+	local defaultBtn = Instance.new("TextButton")
+	defaultBtn.Name = "Color_Default"
+	defaultBtn.Text = ""
+	defaultBtn.AutoButtonColor = false
+	defaultBtn.BackgroundColor3 = Color3.new(0, 0, 0)
+	defaultBtn.BorderSizePixel = 0
+	defaultBtn.Size = UDim2.fromOffset(36, 36)
+	defaultBtn.LayoutOrder = DEFAULT_PALETTE_SWATCH
+	defaultBtn.Parent = scroll
+	UiCircles.ensure(defaultBtn)
+	local defaultStroke = Instance.new("UIStroke")
+	defaultStroke.Name = "_OceanTD_DefaultPaletteStroke"
+	defaultStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+	defaultStroke.Thickness = 2.5
+	defaultStroke.Color = DEFAULT_SWATCH_STROKE
+	defaultStroke.Enabled = true
+	defaultStroke.Parent = defaultBtn
+	colorSwatchBtns[DEFAULT_PALETTE_SWATCH] = defaultBtn
+	colorSwatchStrokes[DEFAULT_PALETTE_SWATCH] = defaultStroke
+	local brush = Instance.new("ImageLabel")
+	brush.Name = "Paintbrush"
+	brush.BackgroundTransparency = 1
+	brush.Image = PAINTBRUSH_ICON
+	brush.AnchorPoint = Vector2.new(0.5, 0.5)
+	brush.Position = UDim2.fromScale(0.5, 0.5)
+	brush.Size = UDim2.fromScale(0.62, 0.62)
+	brush.ScaleType = Enum.ScaleType.Fit
+	brush.ZIndex = 2
+	brush.Active = false
+	brush.Parent = defaultBtn
+	defaultBtn.Activated:Connect(function()
+		if colorDragMoved then
+			return
+		end
+		selectDefaultPalette()
+	end)
+
 	for _, sw in ipairs(PlotOutlineColors.coralSwatches()) do
 		local btn = Instance.new("TextButton")
 		btn.Name = "Color_" .. tostring(sw.index)
@@ -1829,6 +2042,28 @@ function CoralInspectPanel.bind(panel: GuiObject, catalogFrame: GuiObject)
 		local lock = CoralColorUnlockState.createLockOverlay(btn, 6)
 		lock.Visible = false
 		colorSwatchLocks[sw.index] = lock
+		local countLbl = Instance.new("TextLabel")
+		countLbl.Name = "SeedCount"
+		countLbl.BackgroundTransparency = 1
+		countLbl.Size = UDim2.fromScale(1, 1)
+		countLbl.Font = UiTheme.Font
+		countLbl.TextColor3 = seedCountLabelColor(sw.index)
+		countLbl.TextScaled = true
+		countLbl.Text = "0"
+		countLbl.ZIndex = 4
+		countLbl.Active = false
+		countLbl.Parent = btn
+		local countSizeLimit = Instance.new("UITextSizeConstraint")
+		countSizeLimit.MaxTextSize = 12
+		countSizeLimit.MinTextSize = 8
+		countSizeLimit.Parent = countLbl
+		local countPad = Instance.new("UIPadding")
+		countPad.PaddingTop = UDim.new(0.16, 0)
+		countPad.PaddingBottom = UDim.new(0.16, 0)
+		countPad.PaddingLeft = UDim.new(0.1, 0)
+		countPad.PaddingRight = UDim.new(0.1, 0)
+		countPad.Parent = countLbl
+		colorSwatchCounts[sw.index] = countLbl
 		local idx = sw.index
 		btn.Activated:Connect(function()
 			if colorDragMoved then
@@ -1909,7 +2144,7 @@ function CoralInspectPanel.bind(panel: GuiObject, catalogFrame: GuiObject)
 	colorRow:GetPropertyChangedSignal("AbsoluteSize"):Connect(refreshColorSwatchSizes)
 	task.defer(refreshColorSwatchSizes)
 
-	local dice = Instance.new("ImageLabel")
+	local dice = Instance.new("ImageButton")
 	dice.Name = "ColorDice"
 	dice.BackgroundTransparency = 1
 	dice.Image = DICE_ICON
@@ -1917,10 +2152,13 @@ function CoralInspectPanel.bind(panel: GuiObject, catalogFrame: GuiObject)
 	dice.Position = UDim2.fromScale(0.5, 0.5)
 	dice.Size = UDim2.fromScale(0.58, 0.58)
 	dice.ScaleType = Enum.ScaleType.Fit
-	dice.ZIndex = 5
+	dice.ZIndex = 6
 	dice.Visible = false
-	dice.Active = false
+	dice.AutoButtonColor = false
 	dice.Parent = scroll
+	dice.Activated:Connect(function()
+		rollActiveHueShade()
+	end)
 	colorDice = dice
 
 	local row3 = Instance.new("Frame")
@@ -2244,6 +2482,14 @@ function CoralInspectPanel.bind(panel: GuiObject, catalogFrame: GuiObject)
 	end)
 	InventoryState.onCountsChanged(function()
 		refreshHeaderSeedBadge()
+		if root and root.Visible then
+			refreshColorSwatches()
+		end
+	end)
+	PlacedCoralIndex.onChanged(function()
+		if root and root.Visible then
+			refreshColorSeedLabels()
+		end
 	end)
 	RelocateController.setR1WhileActiveHandler(function(): boolean
 		if confirmGui then
@@ -2258,6 +2504,9 @@ function CoralInspectPanel.bind(panel: GuiObject, catalogFrame: GuiObject)
 		end
 		if confirmGui then
 			return false
+		end
+		if focusColorIndex == DEFAULT_PALETTE_SWATCH then
+			return selectDefaultPalette()
 		end
 		return selectCoralColor(focusColorIndex)
 	end)

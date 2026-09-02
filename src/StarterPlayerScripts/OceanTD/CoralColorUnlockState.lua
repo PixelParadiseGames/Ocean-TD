@@ -18,14 +18,15 @@ function CoralColorUnlockState.setAll(raw: any)
 end
 
 function CoralColorUnlockState.isUnlocked(itemId: string, colorIndex: number): boolean
-	return ColorUnlocks.isUnlocked(unlocks, itemId, colorIndex)
+	local InventoryState = require(script.Parent:WaitForChild("InventoryState"))
+	return InventoryState.getHueSeedCount(itemId, colorIndex) > 0
 end
 
 function CoralColorUnlockState.markUnlocked(itemId: string, colorIndex: number)
+	-- Inventory sync is authoritative after $D seed purchase.
 	if typeof(itemId) ~= "string" or itemId == "" then
 		return
 	end
-	unlocks = ColorUnlocks.markUnlocked(unlocks, itemId, colorIndex)
 	changed:Fire()
 end
 

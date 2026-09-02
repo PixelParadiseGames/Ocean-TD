@@ -24,7 +24,7 @@ local Constants = {
 	PREVIEW_BOX_PREFIX = "PreviewBox_",
 
 	DATASTORE_NAME = "OceanTD_Player_v1",
-	PROFILE_VERSION = 7,
+	PROFILE_VERSION = 8,
 
 	AUTOSAVE_INTERVAL_SEC = 60,
 
