@@ -1448,7 +1448,7 @@ end
 
 local function userCamCycleBusy(): boolean
 	local m = deps.playerGui:GetAttribute("OceanTD_CamCycleMode")
-	return m == "freecam" or m == "fishcam"
+	return m == "plotcam" or m == "fishcam" or m == "dronecam" or m == "freecam"
 end
 
 local function syncWaveCamera(snap: WaveSim.HudSnapshot)

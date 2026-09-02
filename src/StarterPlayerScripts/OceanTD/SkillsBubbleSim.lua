@@ -20,6 +20,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local oceanShared = ReplicatedStorage:WaitForChild("OceanTD"):WaitForChild("Shared")
 local SkillStages = require(oceanShared:WaitForChild("SkillStages"))
+local UiIdleCycle = require(oceanShared:WaitForChild("UiIdleCycle"))
 local UiPopupScale = require(oceanShared:WaitForChild("UiPopupScale"))
 
 local SkillsBubbleSim = {}
@@ -43,8 +44,12 @@ local OTHER_POP_IN_DELAY_MIN = 0.22
 local OTHER_POP_IN_DELAY_MAX = 0.82
 local UNLOCK_SETTLE_SEC = 1
 local UNLOCK_SETTLE_INFO = TweenInfo.new(UNLOCK_SETTLE_SEC, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
--- Extra label size on 720p+ (on top of HUD scale baked into bubble Size).
+-- Extra bubble + label size on 720p+ (on top of HUD scale baked into bubble Size).
 local HUD_BUBBLE_TEXT_BOOST = 1.5
+local HUD_BUBBLE_SIZE_MULT = 1.3
+-- Small stages can't fit icon + text; alternate every 2s (half bubbles offset).
+local COMPACT_ICON_TEXT_PERIOD = 2
+local COMPACT_ICON_SIZE = UDim2.fromScale(0.62, 0.62)
 
 type Bubble = {
 	btn: GuiButton,
@@ -149,6 +154,11 @@ type OrbitLock = {
 }
 
 local orbitLocks: { OrbitLock } = {}
+
+-- Small-stage bubbles: cycle Icon vs labels (shared 2s clock; alternate invert for ~half/half).
+local compactCycleBtns: { [GuiButton]: boolean } = {}
+local compactCycleStops: { UiIdleCycle.StopFn } = {}
+local rejectFlashBtn: GuiButton? = nil
 
 -- Purchase progress (gates / lock icons). Active stage can be dialed below this.
 -- Must be defined before syncOrbitLocks (local function scope).
@@ -306,6 +316,7 @@ end
 
 -- Global ZIndex: ImageButton art draws at btn.ZIndex; children with lower Z sit behind it.
 local function setBubbleZ(btn: GuiButton, z: number)
+	local compact = compactCycleBtns[btn] == true
 	btn.ZIndex = z
 	for _, d in ipairs(btn:GetDescendants()) do
 		if not d:IsA("GuiObject") then
@@ -313,12 +324,17 @@ local function setBubbleZ(btn: GuiButton, z: number)
 		end
 		if d:IsA("TextLabel") then
 			d.ZIndex = z + 40
-			d.Visible = true
+			-- Compact mode owns label visibility (icon ↔ text cycle).
+			if not compact then
+				d.Visible = true
+			end
 			d.Active = false
 			d.TextTransparency = 0
 		elseif d:IsA("TextButton") then
 			d.ZIndex = z + 40
-			d.Visible = true
+			if not compact then
+				d.Visible = true
+			end
 			d.Active = false
 			d.TextTransparency = 0
 		else
@@ -547,13 +563,60 @@ local function scaleSnapUdim(u: UDim2, hud: number): UDim2
 	return UDim2.new(u.X.Scale, xOff, u.Y.Scale, yOff)
 end
 
+local function applyCompactIconTextFrame(btn: GuiButton, showText: boolean)
+	if rejectFlashBtn == btn then
+		showText = true
+	end
+	local icon = findBubbleIcon(btn)
+	for _, lbl in ipairs(collectBubbleLabels(btn)) do
+		lbl.Visible = showText
+	end
+	if icon then
+		icon.Visible = not showText
+	end
+end
+
+local function stopCompactIconTextCycles()
+	for _, stop in ipairs(compactCycleStops) do
+		stop()
+	end
+	table.clear(compactCycleStops)
+end
+
+local function syncCompactIconTextCycles()
+	stopCompactIconTextCycles()
+	if not running or closing then
+		return
+	end
+	local idx = 0
+	for _, b in ipairs(bubbles) do
+		local btn = b.btn
+		if not btn.Parent or not compactCycleBtns[btn] then
+			continue
+		end
+		idx += 1
+		-- Even indices invert so ~half show graphic while the rest show text.
+		local invert = (idx % 2) == 0
+		local stop = UiIdleCycle.subscribeSharedToggle(COMPACT_ICON_TEXT_PERIOD, function(showText)
+			if not btn.Parent or not compactCycleBtns[btn] then
+				return
+			end
+			applyCompactIconTextFrame(btn, showText)
+		end, function()
+			return running and not closing and btn.Parent ~= nil and compactCycleBtns[btn] == true
+		end, invert)
+		table.insert(compactCycleStops, stop)
+	end
+end
+
 local function applyBubbleLayoutSnap(btn: GuiButton, snap: BubbleLayoutSnap, skillId: string?)
 	local hud = UiPopupScale.getHud()
+	local sizeMult = if hud > 1.01 then hud * HUD_BUBBLE_SIZE_MULT else 1
 	local w = snap.sizeOffset.X
 	local h = snap.sizeOffset.Y
-	if hud > 1.01 then
-		w = math.max(1, math.floor(w * hud + 0.5))
-		h = math.max(1, math.floor(h * hud + 0.5))
+	if sizeMult > 1.01 then
+		w = math.max(1, math.floor(w * sizeMult + 0.5))
+		h = math.max(1, math.floor(h * sizeMult + 0.5))
 	end
 	btn.Size = UDim2.fromOffset(w, h)
 	local dstLabels = collectBubbleLabels(btn)
@@ -562,12 +625,12 @@ local function applyBubbleLayoutSnap(btn: GuiButton, snap: BubbleLayoutSnap, ski
 		if not src then
 			break
 		end
-		if hud > 1.01 then
-			dst.Position = scaleSnapUdim(src.position, hud)
-			dst.Size = scaleSnapUdim(src.size, hud)
+		if sizeMult > 1.01 then
+			dst.Position = scaleSnapUdim(src.position, sizeMult)
+			dst.Size = scaleSnapUdim(src.size, sizeMult)
 			dst.AnchorPoint = src.anchor
 			dst.TextScaled = true
-			dst.TextSize = math.max(8, math.floor(src.textSize * hud * HUD_BUBBLE_TEXT_BOOST + 0.5))
+			dst.TextSize = math.max(8, math.floor(src.textSize * sizeMult * HUD_BUBBLE_TEXT_BOOST + 0.5))
 			dst.TextXAlignment = src.textX
 			dst.TextYAlignment = src.textY
 		else
@@ -581,14 +644,16 @@ local function applyBubbleLayoutSnap(btn: GuiButton, snap: BubbleLayoutSnap, ski
 		end
 	end
 
-	-- Larger stage templates (5–8) include Icon; smaller stages hide it.
+	-- Larger stage templates (5–8) include Icon + labels together.
+	-- Smaller stages can't fit both: place a centered icon and cycle with text.
 	local iconSnap = snap.icon
 	local iconImage = if skillId then SkillStages.iconImageFor(skillId) else nil
+	compactCycleBtns[btn] = false
 	if iconSnap and iconImage then
 		local icon = ensureBubbleIcon(btn)
-		if hud > 1.01 then
-			icon.Position = scaleSnapUdim(iconSnap.position, hud)
-			icon.Size = scaleSnapUdim(iconSnap.size, hud)
+		if sizeMult > 1.01 then
+			icon.Position = scaleSnapUdim(iconSnap.position, sizeMult)
+			icon.Size = scaleSnapUdim(iconSnap.size, sizeMult)
 		else
 			icon.Position = iconSnap.position
 			icon.Size = iconSnap.size
@@ -599,11 +664,28 @@ local function applyBubbleLayoutSnap(btn: GuiButton, snap: BubbleLayoutSnap, ski
 		icon.ScaleType = iconSnap.scaleType
 		icon.Image = iconImage
 		icon.Visible = true
+		for _, lbl in ipairs(dstLabels) do
+			lbl.Visible = true
+		end
+	elseif iconImage then
+		local icon = ensureBubbleIcon(btn)
+		icon.Position = UDim2.fromScale(0.5, 0.5)
+		icon.Size = COMPACT_ICON_SIZE
+		icon.AnchorPoint = Vector2.new(0.5, 0.5)
+		icon.ZIndex = btn.ZIndex + 2
+		icon.ImageTransparency = 0
+		icon.ScaleType = Enum.ScaleType.Fit
+		icon.Image = iconImage
+		icon.Visible = false
+		compactCycleBtns[btn] = true
 	else
 		local existing = findBubbleIcon(btn)
 		if existing then
 			existing.Visible = false
 			existing.Image = ""
+		end
+		for _, lbl in ipairs(dstLabels) do
+			lbl.Visible = true
 		end
 	end
 end
@@ -1253,6 +1335,9 @@ local function disconnectInputs()
 end
 
 local function restoreBubbles()
+	stopCompactIconTextCycles()
+	table.clear(compactCycleBtns)
+	rejectFlashBtn = nil
 	for _, b in ipairs(bubbles) do
 		local btn = b.btn
 		local sc = btn:FindFirstChild("_OceanTD_BubbleScale")
@@ -1417,6 +1502,8 @@ function SkillsBubbleSim.stop(onDone: (() -> ())?)
 	stopToken += 1
 	rejectFxToken += 1
 	suppressed = false
+	stopCompactIconTextCycles()
+	rejectFlashBtn = nil
 	local my = stopToken
 	local function finish()
 		if my ~= stopToken then
@@ -1501,7 +1588,21 @@ function SkillsBubbleSim.start(panel: Instance)
 	hostPanel = panel
 	-- Do NOT toggle IgnoreGuiInset — keeps AbsolutePosition consistent with other UI
 	-- and avoids fighting PlacementController / HUD inset assumptions.
+	-- Keep under MobileLeftUI so the Skills close button (on left HUD) stays clickable.
+	-- Stay above the seed wheel (which uses left.DisplayOrder - 1 when skills are closed).
+	local pg = sg.Parent
+	local left = pg and pg:FindFirstChild("MobileLeftUI")
 	sg.DisplayOrder = math.max(sg.DisplayOrder, 50)
+	if left and left:IsA("ScreenGui") then
+		-- Never climb above left HUD; sit just under it.
+		if sg.DisplayOrder >= left.DisplayOrder then
+			sg.DisplayOrder = math.max(0, left.DisplayOrder - 1)
+		end
+		local wheel = pg:FindFirstChild("OceanTD_SeedWheel")
+		if wheel and wheel:IsA("ScreenGui") then
+			wheel.DisplayOrder = math.min(wheel.DisplayOrder, sg.DisplayOrder - 1)
+		end
+	end
 
 	local bubbleLayer = ensureLayer(sg)
 	layer = bubbleLayer
@@ -1710,6 +1811,7 @@ function SkillsBubbleSim.start(panel: Instance)
 	end)
 
 	syncOrbitLocks()
+	syncCompactIconTextCycles()
 	playPopIn()
 	print("[SkillsBubbles] Started", #bubbles, "bubbles")
 end
@@ -1785,6 +1887,7 @@ function SkillsBubbleSim.refreshStageLayouts()
 		writeBubble(b)
 	end
 	syncOrbitLocks()
+	syncCompactIconTextCycles()
 end
 
 local function applyGamepadFocusVisual()
@@ -1916,6 +2019,9 @@ function SkillsBubbleSim.playLockedRejectFx(skillId: string)
 	type SavedColor = { lbl: TextLabel, color: Color3 }
 	local saved: { SavedColor } = {}
 	if locked then
+		rejectFlashBtn = locked.btn
+		-- Keep skill name readable during the red flash (don't leave icon-only mode).
+		applyCompactIconTextFrame(locked.btn, true)
 		for _, lbl in ipairs(collectBubbleLabels(locked.btn)) do
 			table.insert(saved, { lbl = lbl, color = lbl.TextColor3 })
 		end
@@ -1955,6 +2061,9 @@ function SkillsBubbleSim.playLockedRejectFx(skillId: string)
 		if token ~= rejectFxToken then
 			return
 		end
+		if rejectFlashBtn == (if locked then locked.btn else nil) then
+			rejectFlashBtn = nil
+		end
 		for _, s in ipairs(saved) do
 			if s.lbl.Parent then
 				s.lbl.TextColor3 = s.color
@@ -1964,6 +2073,10 @@ function SkillsBubbleSim.playLockedRejectFx(skillId: string)
 			if b.scale.Parent then
 				b.scale.Scale = b.settledScale
 			end
+		end
+		-- Resume compact icon/text phase for the locked bubble.
+		if locked and locked.btn.Parent and compactCycleBtns[locked.btn] then
+			syncCompactIconTextCycles()
 		end
 	end)
 end

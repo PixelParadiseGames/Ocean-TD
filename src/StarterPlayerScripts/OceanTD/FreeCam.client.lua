@@ -1,12 +1,19 @@
 --!strict
 --[[
-	Cam cycle (FreeCam button / DPadDown):
-	  1) FreeCam  — fly inside plot SkyCam volume, always looking at SkyCamFocus
-	  2) FishCam  — waves on: focus lead hungry fish; waves off: free-look drone
-	  3) Off      — Roblox default / game start camera
+	Cam cycle (DPadDown / revolver icons):
+	  Off → PlotCam → FishCam → DroneCam → Off
+
+	  Off       — Roblox default / player follow cam
+	  PlotCam   — fly inside plot SkyCam volume, always looking at SkyCamFocus
+	                (formerly called FreeCam / attr "freecam")
+	  FishCam   — always orbit furthest unfed fish; if none during waves, orbit W1;
+	                idle (no waves): orbit while focus patrols W1→W2→…→Wn then reverses
+	  DroneCam  — free-look fly (old FishCam-idle). Studio instance stays named FreeCam.
+	                Attr value is "dronecam" (say "drone" if you mean this; "freecam" = old PlotCam).
 
 	Plot1: Workspace.MasterPlotDecor.SkyCam (+ .SkyCamFocus)
 	PlotN: Workspace.StaticPlot_N.SkyCam (cloned by DecorReplicator)
+	Fish idle focus: Workspace.WaveRoute.A.Waypoints.W1..Wn (remapped per plot)
 ]]
 
 local ContextActionService = game:GetService("ContextActionService")
@@ -34,6 +41,7 @@ local Wave1FishCam = require(script.Parent:WaitForChild("Wave1FishCam"))
 local RED = Color3.fromRGB(255, 40, 40)
 local GREEN = Color3.fromRGB(40, 255, 70)
 local FISH_CYAN = Color3.fromRGB(40, 200, 220)
+local DRONE_AMBER = Color3.fromRGB(255, 190, 60)
 local STROKE_NAME = "_OceanTD_FreeCamStroke"
 local STROKE_THICK = 3
 local MOVE_SPEED = 48 * 1.3 -- +30%
@@ -58,7 +66,17 @@ local LOOK_SENS_TOUCH = 0.008
 local LOOK_SENS_KEYS = 1.8
 local ATTR_MODE = "OceanTD_CamCycleMode"
 
-type CamMode = "off" | "freecam" | "fishcam"
+-- Studio FreeCam button = DroneCam mode. PlotCam = old SkyCam free-fly.
+type CamMode = "off" | "plotcam" | "fishcam" | "dronecam"
+
+local MODE_ORDER: { CamMode } = { "off", "plotcam", "fishcam", "dronecam" }
+
+local MODE_GRAPHICS: { [CamMode]: string } = {
+	off = "rbxassetid://134790293447492",
+	plotcam = "rbxassetid://94733908820021",
+	fishcam = "rbxassetid://116935661186483",
+	dronecam = "rbxassetid://130482731463043",
+}
 
 local mode: CamMode = "off"
 local camPos = Vector3.zero
@@ -87,7 +105,8 @@ local COLLAPSE_INFO = TweenInfo.new(0.4, Enum.EasingStyle.Quad, Enum.EasingDirec
 local COLLAPSE_WAIT_SEC = 2
 local ACTIVE_SCALE = 1
 local NEXT_SCALE = 0.82
-local NEXT_NEXT_SCALE = 0.72
+local BOTTOM_SCALE = 0.76
+local LAST_SCALE = 0.68
 local COLLAPSED_SCALE = 0.08
 
 type ModeIcon = {
@@ -100,10 +119,12 @@ type ModeIcon = {
 }
 
 local camIcons: { ModeIcon } = {}
+-- 1 top (active), 2 left (next), 3 bottom, 4 right (last) — Positions read from Studio.
 local slotPos = {
 	active = UDim2.fromScale(0.5, 0.2),
 	next = UDim2.fromScale(0.28, 0.72),
-	nextNext = UDim2.fromScale(0.72, 0.72),
+	bottom = UDim2.fromScale(0.5, 0.88),
+	last = UDim2.fromScale(0.72, 0.72),
 }
 local carouselToken = 0
 local carouselReady = false
@@ -125,7 +146,7 @@ local cachedSkyCam: BasePart? = nil
 local cachedFocus: BasePart? = nil
 local cachedPlotId: string? = nil
 
--- FishCam follow (waves on)
+-- FishCam follow (always; idle patrols W1..Wn when no waves / no fish)
 local fishTargetId: number? = nil
 local fishFocusPos = Vector3.zero
 local fishDampPos = Vector3.zero
@@ -133,10 +154,14 @@ local fishSwitchFrom = Vector3.zero
 local fishSwitchTo = Vector3.zero
 local fishSwitchT0 = 0
 local fishSwitching = false
-local lastFishWavesOn = false
 local fishOrbitT0 = 0
 local fishOrbitAngle = 0
 local fishOrbitElev = 0 -- extra elevation around the fish (user orbit steer)
+local routeWaypoints: { Vector3 } = {}
+local routeSegIndex = 1 -- start waypoint index of current segment (1 .. n-1)
+local routeSegAlpha = 0 -- 0..1 along current segment
+local routePatrolDir = 1 -- +1 toward higher W#, -1 reverse
+local ROUTE_PATROL_SEC = 9 -- seconds to travel each waypoint segment
 
 local function getCamera(): Camera?
 	return Workspace.CurrentCamera
@@ -255,30 +280,43 @@ local function strokeTarget(btn: GuiObject): GuiObject
 end
 
 local function modeBrand(m: CamMode): Color3
-	if m == "freecam" then
+	if m == "plotcam" then
 		return GREEN
 	elseif m == "fishcam" then
 		return FISH_CYAN
+	elseif m == "dronecam" then
+		return DRONE_AMBER
 	end
 	return RED
 end
 
-local function nextCamMode(m: CamMode): CamMode
-	if m == "off" then
-		return "freecam"
-	elseif m == "freecam" then
-		return "fishcam"
+local function modeIndex(m: CamMode): number
+	for i, name in ipairs(MODE_ORDER) do
+		if name == m then
+			return i
+		end
 	end
-	return "off"
+	return 1
+end
+
+local function nextCamMode(m: CamMode): CamMode
+	local i = modeIndex(m)
+	return MODE_ORDER[(i % #MODE_ORDER) + 1]
 end
 
 local function slotForIconMode(iconMode: CamMode, relativeTo: CamMode): (string, number, number)
 	if iconMode == relativeTo then
-		return "active", ACTIVE_SCALE, 30
-	elseif iconMode == nextCamMode(relativeTo) then
-		return "next", NEXT_SCALE, 20
+		return "active", ACTIVE_SCALE, 40
 	end
-	return "nextNext", NEXT_NEXT_SCALE, 10
+	local n1 = nextCamMode(relativeTo)
+	if iconMode == n1 then
+		return "next", NEXT_SCALE, 30
+	end
+	local n2 = nextCamMode(n1)
+	if iconMode == n2 then
+		return "bottom", BOTTOM_SCALE, 20
+	end
+	return "last", LAST_SCALE, 10
 end
 
 local function iconSlotGoals(iconMode: CamMode, relativeTo: CamMode, collapsed: boolean): (UDim2, number, number)
@@ -286,7 +324,8 @@ local function iconSlotGoals(iconMode: CamMode, relativeTo: CamMode, collapsed: 
 	local posGoal = if slotName == "active"
 		then slotPos.active
 		elseif slotName == "next" then slotPos.next
-		else slotPos.nextNext
+		elseif slotName == "bottom" then slotPos.bottom
+		else slotPos.last
 	if collapsed and slotName ~= "active" then
 		return slotPos.active, COLLAPSED_SCALE, z
 	end
@@ -631,12 +670,12 @@ local function clearTouchLook()
 	lookTouchLast = Vector2.zero
 end
 
-local function isFishDroneLook(): boolean
-	return mode == "fishcam" and not WaveSim.isRunning()
+local function isDroneCamLook(): boolean
+	return mode == "dronecam"
 end
 
 local function isFishCamLook(): boolean
-	return mode == "fishcam"
+	return mode == "fishcam" or mode == "dronecam"
 end
 
 local function isMouseLookHeld(): boolean
@@ -649,6 +688,9 @@ local function isMouseLookHeld(): boolean
 end
 
 local function isUserSteeringOrbit(): boolean
+	if mode ~= "fishcam" then
+		return false
+	end
 	if isMouseLookHeld() then
 		return true
 	end
@@ -841,8 +883,8 @@ local function applyLookDelta(dx: number, dy: number)
 	if math.abs(dx) > 1.2 or math.abs(dy) > 1.2 then
 		return
 	end
-	if mode == "fishcam" and WaveSim.isRunning() then
-		-- Steer around the fish; auto orbit continues from this heading.
+	if mode == "fishcam" then
+		-- Steer around the fish / W1; auto orbit continues from this heading.
 		fishOrbitAngle -= dx
 		fishOrbitElev = math.clamp(fishOrbitElev - dy, -0.7, 0.85)
 		return
@@ -955,9 +997,104 @@ local function lockAvatarForMode()
 	setControlsEnabled(false)
 end
 
+local function loadRouteWaypoints(): { Vector3 }
+	table.clear(routeWaypoints)
+	local root = Workspace:FindFirstChild("WaveRoute")
+	local route = root and root:FindFirstChild("A")
+	local wpFolder = route and route:FindFirstChild("Waypoints")
+	if not wpFolder then
+		return routeWaypoints
+	end
+	local i = 1
+	while true do
+		local w = wpFolder:FindFirstChild("W" .. tostring(i))
+		if not (w and w:IsA("BasePart")) then
+			break
+		end
+		table.insert(routeWaypoints, ClientPlot.remapFromPlot1(w.Position))
+		i += 1
+	end
+	return routeWaypoints
+end
+
+local function resolveFishSpawnFocus(): Vector3?
+	local pts = routeWaypoints
+	if #pts == 0 then
+		pts = loadRouteWaypoints()
+	end
+	if #pts > 0 then
+		return pts[1]
+	end
+	return nil
+end
+
+local function resetRoutePatrol(seedPos: Vector3?)
+	loadRouteWaypoints()
+	routeSegIndex = 1
+	routeSegAlpha = 0
+	routePatrolDir = 1
+	if seedPos and #routeWaypoints >= 2 then
+		local bestI, bestA, bestD = 1, 0, math.huge
+		for i = 1, #routeWaypoints - 1 do
+			local a = routeWaypoints[i]
+			local b = routeWaypoints[i + 1]
+			local ab = b - a
+			local len2 = ab:Dot(ab)
+			local t = if len2 > 1e-4 then math.clamp((seedPos - a):Dot(ab) / len2, 0, 1) else 0
+			local closest = a:Lerp(b, t)
+			local d = (seedPos - closest).Magnitude
+			if d < bestD then
+				bestD = d
+				bestI = i
+				bestA = t
+			end
+		end
+		routeSegIndex = bestI
+		routeSegAlpha = bestA
+	end
+end
+
+local function tickRoutePatrol(dt: number): Vector3
+	if #routeWaypoints == 0 then
+		loadRouteWaypoints()
+	end
+	local n = #routeWaypoints
+	if n == 0 then
+		return fishFocusPos
+	end
+	if n == 1 then
+		return routeWaypoints[1]
+	end
+
+	routeSegAlpha += (dt / ROUTE_PATROL_SEC) * routePatrolDir
+	if routePatrolDir > 0 and routeSegAlpha >= 1 then
+		if routeSegIndex >= n - 1 then
+			routePatrolDir = -1
+			routeSegAlpha = 1 - (routeSegAlpha - 1)
+		else
+			routeSegIndex += 1
+			routeSegAlpha -= 1
+		end
+	elseif routePatrolDir < 0 and routeSegAlpha <= 0 then
+		if routeSegIndex <= 1 then
+			routePatrolDir = 1
+			routeSegAlpha = -routeSegAlpha
+		else
+			routeSegIndex -= 1
+			routeSegAlpha += 1
+		end
+	end
+	routeSegIndex = math.clamp(routeSegIndex, 1, n - 1)
+	routeSegAlpha = math.clamp(routeSegAlpha, 0, 1)
+
+	local a = routeWaypoints[routeSegIndex]
+	local b = routeWaypoints[routeSegIndex + 1]
+	return a:Lerp(b, routeSegAlpha)
+end
+
 local setMode: (CamMode) -> ()
 
-local function tickFreeCam(dt: number)
+local function tickPlotCam(dt: number)
 	local cam = getCamera()
 	local box, focusPart = resolveSkyParts()
 	if not cam or not box or not focusPart then
@@ -992,15 +1129,25 @@ local function tickFishFollow(dt: number)
 			fishSwitchTo = goal
 		end
 	else
-		-- Last hungry just fed: stay on them until the next wave's fish spawn.
 		local held = if fishTargetId then WaveSim.getFishPosition(fishTargetId) else nil
 		if held then
 			goal = held
 			if fishSwitching then
 				fishSwitchTo = goal
 			end
+		elseif not WaveSim.isRunning() then
+			-- Idle: keep orbiting while focus slowly patrols W1→Wn→W1…
+			fishTargetId = nil
+			fishSwitching = false
+			goal = tickRoutePatrol(dt)
 		else
-			goal = fishFocusPos
+			-- Waves on but no hungry fish: hold W1 until the school appears.
+			fishTargetId = nil
+			local spawnFocus = resolveFishSpawnFocus()
+			goal = spawnFocus or fishFocusPos
+			if spawnFocus and not fishSwitching and (fishFocusPos - spawnFocus).Magnitude > 2 then
+				beginFishSwitch(spawnFocus)
+			end
 		end
 	end
 
@@ -1030,7 +1177,7 @@ local function tickFishFollow(dt: number)
 	syncLookFromCFrame(cam.CFrame)
 end
 
-local function tickFishDrone(dt: number)
+local function tickDroneCam(dt: number)
 	local cam = getCamera()
 	if not cam then
 		setMode("off")
@@ -1052,6 +1199,9 @@ local function startRenderLoop()
 		if mode == "off" then
 			return
 		end
+		if skillsBubblesOpen() then
+			return
+		end
 		if playerGui:GetAttribute("OceanTD_PlotSizeCinematicBusy") == true then
 			return
 		end
@@ -1060,32 +1210,18 @@ local function startRenderLoop()
 			return
 		end
 
-		if mode == "freecam" then
+		if mode == "plotcam" then
 			setDroneLookCapture(false)
-			tickFreeCam(dt)
+			tickPlotCam(dt)
 			return
 		end
-
-		-- FishCam: waves → lead hungry fish; idle → free-look drone.
-		local wavesOn = WaveSim.isRunning()
-		if wavesOn ~= lastFishWavesOn then
-			if wavesOn then
-				resetFishFollowState(camPos)
-				setDroneLookCapture(false)
-			else
-				local cam = getCamera()
-				if cam then
-					syncLookFromCFrame(cam.CFrame)
-				end
-			end
-			lastFishWavesOn = wavesOn
-		end
-		if wavesOn then
+		if mode == "fishcam" then
 			setDroneLookCapture(false)
 			tickFishFollow(dt)
-		else
-			tickFishDrone(dt)
+			return
 		end
+		-- DroneCam: free-look fly (old FishCam-idle).
+		tickDroneCam(dt)
 	end)
 end
 
@@ -1100,10 +1236,10 @@ setMode = function(nextMode: CamMode)
 		if PlacementController.isActive() or RelocateController.isActive() then
 			return
 		end
-		if nextMode == "freecam" then
+		if nextMode == "plotcam" then
 			local sky, focus = resolveSkyParts()
 			if not sky or not focus then
-				warn("[FreeCam] SkyCam / SkyCamFocus missing for local plot — freecam unavailable")
+				warn("[CamCycle] SkyCam / SkyCamFocus missing for local plot — PlotCam unavailable")
 				return
 			end
 		end
@@ -1131,7 +1267,7 @@ setMode = function(nextMode: CamMode)
 			playCamCarousel(nextMode, "off", false)
 			return
 		end
-		if nextMode == "freecam" then
+		if nextMode == "plotcam" then
 			local sky = resolveSkyParts()
 			if sky then
 				camPos = clampToSkyCam(camPos, sky)
@@ -1140,7 +1276,7 @@ setMode = function(nextMode: CamMode)
 		lockAvatarForMode()
 	end
 
-	if nextMode == "freecam" then
+	if nextMode == "plotcam" then
 		local sky, focus = resolveSkyParts()
 		local cam = getCamera()
 		if sky and focus and cam then
@@ -1148,30 +1284,36 @@ setMode = function(nextMode: CamMode)
 			cam.CameraType = Enum.CameraType.Scriptable
 			cam.CFrame = lookAtFocus(focus.Position)
 		end
+		setDroneLookCapture(false)
 	elseif nextMode == "fishcam" then
-		lastFishWavesOn = WaveSim.isRunning()
-		resetFishFollowState(camPos)
+		resetRoutePatrol(camPos)
+		local spawnFocus = resolveFishSpawnFocus()
+		resetFishFollowState(spawnFocus or camPos)
 		local cam = getCamera()
 		if cam then
 			cam.CameraType = Enum.CameraType.Scriptable
-			if WaveSim.isRunning() then
-				local fish = WaveSim.getFurthestUnfedFish()
-				if fish then
-					fishFocusPos = fish.position
-					fishDampPos = fish.position
-					fishTargetId = fish.id
-					camPos = fish.position + fishChaseOffset(0)
-					cam.CFrame = lookAtFocus(fishFocusPos)
-					syncLookFromCFrame(cam.CFrame)
-				else
-					syncLookFromCFrame(cam.CFrame)
-					cam.CFrame = droneLookCFrame()
-				end
-			else
-				syncLookFromCFrame(cam.CFrame)
-				cam.CFrame = droneLookCFrame()
-				setDroneLookCapture(true)
+			local fish = WaveSim.getFurthestUnfedFish()
+			if fish then
+				fishFocusPos = fish.position
+				fishDampPos = fish.position
+				fishTargetId = fish.id
+			elseif spawnFocus then
+				fishFocusPos = spawnFocus
+				fishDampPos = spawnFocus
+				fishTargetId = nil
 			end
+			camPos = fishFocusPos + fishChaseOffset(0)
+			cam.CFrame = lookAtFocus(fishFocusPos)
+			syncLookFromCFrame(cam.CFrame)
+		end
+		setDroneLookCapture(false)
+	elseif nextMode == "dronecam" then
+		local cam = getCamera()
+		if cam then
+			cam.CameraType = Enum.CameraType.Scriptable
+			syncLookFromCFrame(cam.CFrame)
+			cam.CFrame = droneLookCFrame()
+			setDroneLookCapture(true)
 		end
 	end
 
@@ -1179,13 +1321,7 @@ setMode = function(nextMode: CamMode)
 end
 
 local function cycleMode()
-	if mode == "off" then
-		setMode("freecam")
-	elseif mode == "freecam" then
-		setMode("fishcam")
-	else
-		setMode("off")
-	end
+	setMode(nextCamMode(mode))
 end
 
 -- D-pad Down cycles cam modes while backpack / build UI is closed.
@@ -1391,13 +1527,16 @@ ClientPlot.onChanged(function()
 	cachedSkyCam = nil
 	cachedFocus = nil
 	cachedPlotId = nil
-	if mode == "freecam" then
+	table.clear(routeWaypoints)
+	if mode == "plotcam" then
 		local sky, focus = resolveSkyParts()
 		if not sky or not focus then
 			setMode("off")
 		else
 			camPos = clampToSkyCam(camPos, sky)
 		end
+	elseif mode == "fishcam" then
+		resetRoutePatrol(fishFocusPos)
 	end
 end)
 
@@ -1445,8 +1584,22 @@ local function centerGuiPivot(gui: GuiObject)
 	gui:SetAttribute("_OceanTD_CamIconCentered", true)
 end
 
+local function applyModeGraphic(gui: GuiObject, camMode: CamMode)
+	local id = MODE_GRAPHICS[camMode]
+	if gui:IsA("ImageButton") or gui:IsA("ImageLabel") then
+		(gui :: ImageLabel).Image = id
+	end
+	for _, name in ipairs({ "Icon", "Circle", "Image", "icon", "circle" }) do
+		local ch = gui:FindFirstChild(name)
+		if ch and (ch:IsA("ImageLabel") or ch:IsA("ImageButton")) then
+			(ch :: ImageLabel).Image = id
+		end
+	end
+end
+
 local function wireModeIcon(btn: GuiObject, camMode: CamMode)
 	centerGuiPivot(btn)
+	applyModeGraphic(btn, camMode)
 	local hit = ensureHitButton(btn)
 	local stroke = ensureStroke(strokeTarget(btn))
 	local scale = ensureIconScale(btn)
@@ -1465,7 +1618,7 @@ local function wireModeIcon(btn: GuiObject, camMode: CamMode)
 			cycleMode()
 		end)
 	end
-	if camMode == "freecam" then
+	if camMode == "dronecam" then
 		freeCamButton = hit
 		btnStroke = stroke
 	end
@@ -1474,35 +1627,44 @@ end
 local function wireCamCarousel(dPad: Instance)
 	table.clear(camIcons)
 	carouselReady = false
-	local freeGui = dPad:FindFirstChild("FreeCam")
+	-- Studio: FreeCam button = DroneCam mode; PlotCam = SkyCam plot fly.
+	local droneGui = dPad:FindFirstChild("FreeCam")
+	local plotGui = dPad:FindFirstChild("PlotCam")
 	local fishGui = dPad:FindFirstChild("FishCam")
 	local offGui = dPad:FindFirstChild("OffCam")
-	if not (freeGui and freeGui:IsA("GuiObject")) then
-		warn("[FreeCam] MobileLeftUI.dPad.FreeCam missing")
+	if not (droneGui and droneGui:IsA("GuiObject")) then
+		warn("[CamCycle] MobileLeftUI.dPad.FreeCam (DroneCam) missing")
+		return
+	end
+	if not (plotGui and plotGui:IsA("GuiObject")) then
+		warn("[CamCycle] MobileLeftUI.dPad.PlotCam missing")
 		return
 	end
 	if not (fishGui and fishGui:IsA("GuiObject")) then
-		warn("[FreeCam] MobileLeftUI.dPad.FishCam missing")
+		warn("[CamCycle] MobileLeftUI.dPad.FishCam missing")
 		return
 	end
 	if not (offGui and offGui:IsA("GuiObject")) then
-		warn("[FreeCam] MobileLeftUI.dPad.OffCam missing")
+		warn("[CamCycle] MobileLeftUI.dPad.OffCam missing")
 		return
 	end
 
-	-- Authored triangle: FreeCam = active (top), FishCam = next (BL), OffCam = next-next (BR).
-	centerGuiPivot(freeGui)
+	-- Authored diamond positions: FreeCam top, FishCam left, PlotCam bottom, OffCam right.
+	centerGuiPivot(droneGui)
 	centerGuiPivot(fishGui)
+	centerGuiPivot(plotGui)
 	centerGuiPivot(offGui)
-	slotPos.active = freeGui.Position
+	slotPos.active = droneGui.Position
 	slotPos.next = fishGui.Position
-	slotPos.nextNext = offGui.Position
+	slotPos.bottom = plotGui.Position
+	slotPos.last = offGui.Position
 
-	wireModeIcon(freeGui, "freecam")
-	wireModeIcon(fishGui, "fishcam")
 	wireModeIcon(offGui, "off")
+	wireModeIcon(plotGui, "plotcam")
+	wireModeIcon(fishGui, "fishcam")
+	wireModeIcon(droneGui, "dronecam")
 	carouselReady = true
-	-- Default Off: OffCam on top, FreeCam next, FishCam next-next.
+	-- Default Off on top; PlotCam left; FishCam bottom; DroneCam right.
 	playCamCarousel("off", "off", false)
 end
 
@@ -1576,7 +1738,7 @@ local leftHudListenersBound = false
 local boundLeftUi: Instance? = nil
 
 local function camIconsStillLive(): boolean
-	if not carouselReady or #camIcons == 0 then
+	if not carouselReady or #camIcons < 4 then
 		return false
 	end
 	for _, icon in ipairs(camIcons) do
@@ -1630,6 +1792,16 @@ local function bindMobileLeftUi(left: Instance)
 			syncCamModeIconsForHud()
 		end)
 
+		playerGui:GetAttributeChangedSignal("OceanTD_SyncCamCycleFromView"):Connect(function()
+			if mode ~= "off" then
+				local cam = getCamera()
+				if cam then
+					camPos = cam.CFrame.Position
+					syncLookFromCFrame(cam.CFrame)
+				end
+			end
+		end)
+
 		playerGui:GetAttributeChangedSignal("OceanTD_ForceCloseFreeCam"):Connect(function()
 			if mode ~= "off" then
 				setMode("off")
@@ -1639,7 +1811,7 @@ local function bindMobileLeftUi(left: Instance)
 
 	syncDPadIcon()
 	syncCamModeIconsForHud()
-	print("[FreeCam] Bound MobileLeftUI — cycle FreeCam → FishCam → Off")
+	print("[CamCycle] Bound MobileLeftUI — Off → PlotCam → FishCam → DroneCam")
 end
 
 task.spawn(function()

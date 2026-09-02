@@ -1,35 +1,87 @@
 --!strict
 --[[
-	Torso-locked ✓/X (+ optional SeaFan rotate) layout helpers for PlacementController.
+	Feet-locked ✓/X (+ optional SeaFan rotate) layout helpers for PlacementController.
 	Extracted so PlacementController stays under Luau's 200-local limit.
 ]]
 
 local Players = game:GetService("Players")
-local GuiService = game:GetService("GuiService")
 local TweenService = game:GetService("TweenService")
 local SoundService = game:GetService("SoundService")
 local Workspace = game:GetService("Workspace")
 local RunService = game:GetService("RunService")
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local UiCircles = require(ReplicatedStorage:WaitForChild("OceanTD"):WaitForChild("Shared"):WaitForChild("UiCircles"))
+local oceanRoot = ReplicatedStorage:WaitForChild("OceanTD")
+local UiCircles = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiCircles"))
+local UiViewportTags = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiViewportTags"))
 
 local player = Players.LocalPlayer
 
 local PlaceConfirmChrome = {}
 
 local BTN_FALLBACK_BOTTOM_PAD = 28
--- HRP is at the waist; keep ✓/X on the belt line (was 1.35 ≈ chest/head).
-local BELT_OFFSET = CFrame.new(0, -0.35, 0)
--- Never smaller than this on screen (freecam / zoomed-out cameras).
-local MIN_BTN_PX = 52
--- Beyond this distance, pin to screen space so Offset billboards can't go unreadably small.
-local SCREEN_LAYOUT_DIST = 28
+-- Small lift so chrome sits at the ankles, not buried in the floor.
+local FEET_LIFT = 0.45
+-- Base chrome diameter before viewport scale (PlacementController default).
+local BASE_BTN_PX = 52
+-- ≤720p class (mobile): 30% smaller. 720p+: 20% larger.
+local MOBILE_BTN_SCALE = 0.7
+local DESKTOP_BTN_SCALE = 1.2
 
 local ROT_BG = Color3.fromRGB(0, 162, 237) -- #00a2ed
 local ROT_SOUND_ID = "rbxassetid://139911414972673"
 local ROT_LEFT_ICON = "rbxassetid://96091927054382"
 local ROT_RIGHT_ICON = "rbxassetid://98172417849326"
+
+function PlaceConfirmChrome.chromeBtnSize(basePx: number?): number
+	local base = if typeof(basePx) == "number" and basePx > 0 then basePx else BASE_BTN_PX
+	local scale = if UiViewportTags.is720p() then DESKTOP_BTN_SCALE else MOBILE_BTN_SCALE
+	return math.max(math.floor(base * scale + 0.5), 28)
+end
+
+-- Fixed px for the word "CONFIRM" inside the circle (TextScaled wraps it on mobile).
+function PlaceConfirmChrome.confirmLabelTextSize(): number
+	return if UiViewportTags.is720p() then 11 else 8
+end
+
+-- Centered on the character (root XZ), Y at average foot height.
+local function feetOffsetFromRoot(char: Model, root: BasePart): CFrame
+	local left = char:FindFirstChild("LeftFoot") or char:FindFirstChild("Left Leg")
+	local right = char:FindFirstChild("RightFoot") or char:FindFirstChild("Right Leg")
+	local feetY: number? = nil
+	if left and left:IsA("BasePart") and right and right:IsA("BasePart") then
+		local mid = (left.Position + right.Position) * 0.5
+		if left.Name == "Left Leg" or right.Name == "Right Leg" then
+			-- R6 legs are mid-shin; drop to the sole.
+			mid = mid - Vector3.new(0, (left.Size.Y + right.Size.Y) * 0.25, 0)
+		end
+		feetY = mid.Y + FEET_LIFT
+	elseif left and left:IsA("BasePart") then
+		local y = left.Position.Y
+		if left.Name == "Left Leg" or left.Name == "Right Leg" then
+			y -= left.Size.Y * 0.5
+		end
+		feetY = y + FEET_LIFT
+	elseif right and right:IsA("BasePart") then
+		local y = right.Position.Y
+		if right.Name == "Left Leg" or right.Name == "Right Leg" then
+			y -= right.Size.Y * 0.5
+		end
+		feetY = y + FEET_LIFT
+	end
+	if typeof(feetY) == "number" then
+		-- Root-local Y only — keeps chrome centered under the avatar, not on one foot.
+		local localY = root.CFrame:PointToObjectSpace(Vector3.new(root.Position.X, feetY, root.Position.Z)).Y
+		return CFrame.new(0, localY, 0)
+	end
+	local humanoid = char:FindFirstChildOfClass("Humanoid")
+	local hip = if humanoid and humanoid.HipHeight > 0.5 then humanoid.HipHeight else 2
+	return CFrame.new(0, -hip + FEET_LIFT, 0)
+end
+
+local function feetWorldCFrame(char: Model, root: BasePart): CFrame
+	return root.CFrame * feetOffsetFromRoot(char, root)
+end
 
 function PlaceConfirmChrome.ensureAdornee(existing: BasePart?): BasePart?
 	local char = player.Character
@@ -40,11 +92,12 @@ function PlaceConfirmChrome.ensureAdornee(existing: BasePart?): BasePart?
 	if not (root and root:IsA("BasePart")) then
 		return nil
 	end
+	local offset = feetOffsetFromRoot(char, root)
 	local part = existing
 	if part and part.Parent == char then
 		local weld = part:FindFirstChildOfClass("Weld")
 		if weld and weld:IsA("Weld") and weld.Part0 == root and weld.Part1 == part then
-			weld.C0 = BELT_OFFSET
+			weld.C0 = offset
 			weld.C1 = CFrame.new()
 			return part
 		end
@@ -68,42 +121,58 @@ function PlaceConfirmChrome.ensureAdornee(existing: BasePart?): BasePart?
 	local weld = Instance.new("Weld")
 	weld.Part0 = root
 	weld.Part1 = part
-	weld.C0 = BELT_OFFSET
+	weld.C0 = offset
 	weld.C1 = CFrame.new()
 	weld.Parent = part
 	return part
 end
 
-function PlaceConfirmChrome.screenPos(adornee: BasePart?): Vector2
-	local cam = Workspace.CurrentCamera
-	local vp = if cam then cam.ViewportSize else Vector2.new(800, 600)
-	local inset = GuiService:GetGuiInset()
-	local fallback = Vector2.new(vp.X * 0.5 + inset.X, vp.Y - BTN_FALLBACK_BOTTOM_PAD)
-	if not cam then
-		return fallback
-	end
-	local world: Vector3? = if adornee then adornee.Position else nil
-	if not world then
-		local char = player.Character
-		local root = char and char:FindFirstChild("HumanoidRootPart")
-		if root and root:IsA("BasePart") then
-			world = (root.CFrame * BELT_OFFSET).Position
-		else
-			return fallback
-		end
-	end
-	local sp, onScreen = cam:WorldToScreenPoint(world)
-	if not onScreen or sp.Z <= 0 then
-		return fallback
+-- IgnoreGuiInset + ScreenInsets.None → Position matches WorldToViewportPoint (viewport origin).
+-- Do NOT use WorldToScreenPoint / TopbarInset here — that overshoots right on phones.
+local function projectToGuiPos(cam: Camera, world: Vector3): Vector2?
+	local sp, _onScreen = cam:WorldToViewportPoint(world)
+	if sp.Z <= 0 then
+		return nil
 	end
 	return Vector2.new(sp.X, sp.Y)
 end
 
+function PlaceConfirmChrome.screenPos(adornee: BasePart?): Vector2
+	local cam = Workspace.CurrentCamera
+	local vp = if cam then cam.ViewportSize else Vector2.new(800, 600)
+	local fallback = Vector2.new(vp.X * 0.5, vp.Y - BTN_FALLBACK_BOTTOM_PAD)
+	if not cam then
+		return fallback
+	end
+
+	local char = player.Character
+	local root = char and char:FindFirstChild("HumanoidRootPart")
+	if root and root:IsA("BasePart") and char then
+		-- X from HRP (body center). Y from feet. Mixing them avoids perspective skew.
+		local feetWorld = feetWorldCFrame(char, root).Position
+		local rootPos = projectToGuiPos(cam, root.Position)
+		local feetPos = projectToGuiPos(cam, Vector3.new(root.Position.X, feetWorld.Y, root.Position.Z))
+		if rootPos and feetPos then
+			return Vector2.new(rootPos.X, feetPos.Y)
+		end
+		if rootPos then
+			return rootPos
+		end
+	end
+
+	local world: Vector3? = if adornee then adornee.Position else nil
+	if not world then
+		return fallback
+	end
+	return projectToGuiPos(cam, world) or fallback
+end
+
 -- Cyan circle + provided rotate icons (left 96091927054382 / right 98172417849326).
 function PlaceConfirmChrome.createRotateButton(parent: Instance, imageId: string, name: string): ImageButton
+	local s = PlaceConfirmChrome.chromeBtnSize(BASE_BTN_PX)
 	local b = Instance.new("ImageButton")
 	b.Name = name
-	b.Size = UDim2.fromOffset(MIN_BTN_PX, MIN_BTN_PX)
+	b.Size = UDim2.fromOffset(s, s)
 	b.BackgroundColor3 = ROT_BG
 	b.BackgroundTransparency = 0
 	b.Image = imageId
@@ -307,9 +376,46 @@ function PlaceConfirmChrome.layoutAt(
 	placeChrome(chrome, s, gap, showCheck, doRot, checkBtn, rotLeftBtn, cancelBtn, rotRightBtn, false)
 end
 
+local function ensureChromeBillboard(
+	existing: BillboardGui?,
+	playerGui: PlayerGui,
+	adornee: BasePart,
+	btnSize: number,
+	showRot: boolean
+): BillboardGui
+	local s = btnSize
+	local gap = 6
+	local rowGap = math.max(math.floor(s * 0.35 + 0.5), 10)
+	local pad = 16
+	local width = if showRot then (3 * s + 2 * gap + pad) else (s + pad)
+	local height = 2 * s + rowGap + pad
+
+	local bb = existing
+	if bb and bb.Parent then
+		bb.Enabled = true
+		bb.Adornee = adornee
+		bb.Size = UDim2.fromOffset(width, height)
+		return bb
+	end
+	if bb then
+		bb:Destroy()
+	end
+	bb = Instance.new("BillboardGui")
+	bb.Name = "OceanTD_PlaceChromeBillboard"
+	bb.AlwaysOnTop = true
+	bb.Active = true -- must receive taps on ✓/X/rot
+	bb.LightInfluence = 0
+	bb.Size = UDim2.fromOffset(width, height)
+	bb.StudsOffset = Vector3.zero
+	bb.MaxDistance = 2000
+	bb.Adornee = adornee
+	bb.Parent = playerGui
+	return bb
+end
+
 function PlaceConfirmChrome.layoutOnTorso(
 	btnSize: number,
-	_playerGui: PlayerGui,
+	playerGui: PlayerGui,
 	confirmGui: ScreenGui?,
 	chromeBillboard: BillboardGui?,
 	chromeAdornee: BasePart?,
@@ -319,12 +425,35 @@ function PlaceConfirmChrome.layoutOnTorso(
 	rotRightBtn: GuiObject?,
 	showRot: boolean?
 ): (BillboardGui?, BasePart?)
-	local s = math.max(btnSize, MIN_BTN_PX)
+	local s = PlaceConfirmChrome.chromeBtnSize(btnSize)
 	local doRot = showRot == true and rotLeftBtn ~= nil and rotRightBtn ~= nil
 	local adornee = PlaceConfirmChrome.ensureAdornee(chromeAdornee)
 
-	-- One stable path: always screen-space at the waist. Never swap Billboard↔Screen
-	-- when Enter appears (that jump moved Close/rot). Enter is only Visibility.
+	-- Under-720p / touch class: world-anchor chrome on the feet adornee (same idea as
+	-- the touch move-icon billboard). Screen-space projection drifts left on phones.
+	if not UiViewportTags.is720p() then
+		if not adornee or not confirmGui then
+			if chromeBillboard then
+				chromeBillboard.Enabled = false
+			end
+			return chromeBillboard, adornee
+		end
+		local bb = ensureChromeBillboard(chromeBillboard, playerGui, adornee, s, doRot)
+		local showCheck = checkBtn ~= nil and checkBtn.Visible
+		local function parentToBb(btn: GuiObject?)
+			if btn and btn.Parent ~= bb then
+				btn.Parent = bb
+			end
+		end
+		parentToBb(checkBtn)
+		parentToBb(cancelBtn)
+		parentToBb(rotLeftBtn)
+		parentToBb(rotRightBtn)
+		placeChrome(Vector2.zero, s, 6, showCheck, doRot, checkBtn, rotLeftBtn, cancelBtn, rotRightBtn, true)
+		return bb, adornee
+	end
+
+	-- 720p+: screen-space at feet (stable size when zoomed out).
 	if chromeBillboard then
 		chromeBillboard.Enabled = false
 	end
@@ -344,5 +473,6 @@ end
 
 PlaceConfirmChrome.ROT_LEFT_ICON = ROT_LEFT_ICON
 PlaceConfirmChrome.ROT_RIGHT_ICON = ROT_RIGHT_ICON
+PlaceConfirmChrome.BASE_BTN_PX = BASE_BTN_PX
 
 return PlaceConfirmChrome

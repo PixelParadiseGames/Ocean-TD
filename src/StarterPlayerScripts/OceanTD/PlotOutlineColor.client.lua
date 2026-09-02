@@ -25,6 +25,7 @@ local ClientPlot = require(script.Parent:WaitForChild("ClientPlot"))
 local InventoryState = require(script.Parent:WaitForChild("InventoryState"))
 local PlacementController = require(script.Parent:WaitForChild("PlacementController"))
 local RelocateController = require(script.Parent:WaitForChild("RelocateController"))
+local HideUiState = require(script.Parent:WaitForChild("HideUiState"))
 
 local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
@@ -109,6 +110,9 @@ local function readColorIndex(): number
 end
 
 local function outlineHidden(): boolean
+	if HideUiState.isActive() then
+		return true
+	end
 	if player:GetAttribute(SESSION_HIDE_ATTR) == true then
 		return true
 	end
@@ -151,7 +155,7 @@ end
 local function rebuildOutline()
 	local plot = ClientPlot.get()
 	local folder = ensureFolder()
-	if not plot then
+	if not plot or outlineHidden() then
 		PlotOutlineWire.clear(folder)
 		return
 	end
@@ -648,7 +652,7 @@ local function syncFromAttribute()
 		previewIndex = colorIndex
 	end
 	ensureGuiValue().Value = colorIndex
-	applyIndexToWire(colorIndex)
+	rebuildOutline()
 	if hintShowing and hintBar then
 		hintBar.BackgroundColor3 = hintTintColor()
 	end
@@ -681,6 +685,17 @@ end)
 
 player:GetAttributeChangedSignal(ATTR):Connect(syncFromAttribute)
 player:GetAttributeChangedSignal(SESSION_HIDE_ATTR):Connect(function()
+	rebuildOutline()
+	if outlineHidden() then
+		hideHintImmediate()
+		if pickerOpen then
+			closePicker(false)
+		end
+	end
+end)
+
+HideUiState.onChanged(function()
+	rebuildOutline()
 	if outlineHidden() then
 		hideHintImmediate()
 		if pickerOpen then

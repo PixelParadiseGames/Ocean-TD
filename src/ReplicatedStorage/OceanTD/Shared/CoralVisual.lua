@@ -29,8 +29,10 @@ local MESH_VARIANT_COUNT = 5
 local MESH_SCALE_MIN = 0.88
 local MESH_SCALE_MAX = 1.12
 -- Fire Coral: wider per-place / per-size-upgrade jitter (±15%).
+-- Large may roll up to +20% above that max so big colonies can tower over med.
 local FIRE_CORAL_SCALE_MIN = 0.85
 local FIRE_CORAL_SCALE_MAX = 1.15
+local FIRE_CORAL_LARGE_SCALE_MAX = FIRE_CORAL_SCALE_MAX * 1.20
 -- Zoas: 20% narrower scale spread than Fire Coral (±12%).
 local ZOAS_SCALE_HALF_SPREAD = (FIRE_CORAL_SCALE_MAX - FIRE_CORAL_SCALE_MIN) * 0.5 * 0.8
 local ZOAS_SCALE_MIN = 1 - ZOAS_SCALE_HALF_SPREAD
@@ -149,7 +151,11 @@ end
 
 function CoralVisual.randomMeshScale(speciesId: string?, sizeClass: number?): number
 	if speciesId == "FireCoral" then
-		return FIRE_CORAL_SCALE_MIN + math.random() * (FIRE_CORAL_SCALE_MAX - FIRE_CORAL_SCALE_MIN)
+		local maxS = FIRE_CORAL_SCALE_MAX
+		if typeof(sizeClass) == "number" and CoralSize.clampTier(sizeClass) >= CoralSize.LARGE then
+			maxS = FIRE_CORAL_LARGE_SCALE_MAX
+		end
+		return FIRE_CORAL_SCALE_MIN + math.random() * (maxS - FIRE_CORAL_SCALE_MIN)
 	end
 	if speciesId == "Zoas" or speciesId == "TreeCoral" then
 		return ZOAS_SCALE_MIN + math.random() * (ZOAS_SCALE_MAX - ZOAS_SCALE_MIN)
@@ -169,7 +175,12 @@ function CoralVisual.sanitizeMeshScale(raw: any, speciesId: string?): number
 	if typeof(n) ~= "number" or n ~= n then
 		return CoralVisual.randomMeshScale(speciesId)
 	end
-	local maxClamp = if speciesId == "LeatherCoral" then LEATHER_CORAL_LARGE_SCALE_MAX else 1.35
+	local maxClamp = 1.35
+	if speciesId == "LeatherCoral" then
+		maxClamp = LEATHER_CORAL_LARGE_SCALE_MAX
+	elseif speciesId == "FireCoral" then
+		maxClamp = FIRE_CORAL_LARGE_SCALE_MAX
+	end
 	return math.clamp(n, 0.7, maxClamp)
 end
 
@@ -291,9 +302,9 @@ local TREE_CORAL_MODEL_NAMES = {
 }
 
 local TREE_CORAL_TIER_SCALE = {
-	[1] = 1.20, -- small +20%
-	[2] = 1.70, -- medium +70%
-	[3] = 1.40, -- large +40%
+	[1] = 1.40, -- small +40%
+	[2] = 1.90, -- medium +90%
+	[3] = 1.60, -- large +60%
 }
 
 -- Studio Leather Coral layout (one Model per size — combined Main + Accent FBX):
@@ -767,6 +778,22 @@ local function prepareMeshClone(template: MeshPart, name: string, size: Vector3)
 	part.Size = size
 	part.CFrame = CFrame.new()
 	return part
+end
+
+-- Fire Coral Studio templates often share one authored Size box; MeshSize tracks the real FBX bounds (S < M < L).
+local function meshNativeSize(template: MeshPart): Vector3
+	local ok, ms = pcall(function()
+		return template.MeshSize
+	end)
+	if ok and typeof(ms) == "Vector3" and ms.X > 1e-3 and ms.Y > 1e-3 and ms.Z > 1e-3 then
+		return ms
+	end
+	return template.Size
+end
+
+local function meshPlaceSize(template: MeshPart, speciesId: string?, scale: number, baseScale: number): Vector3
+	local base = if speciesId == "FireCoral" then meshNativeSize(template) else template.Size
+	return base * scale * baseScale
 end
 
 local function finishLook(part: BasePart, def: any, opts: VisualOptions, color: Color3)
@@ -1324,7 +1351,7 @@ local function createMeshSpecies(def: any, worldPos: Vector3, opts: VisualOption
 		return nil
 	end
 	local baseScale = if def.speciesId == "SeaGrass" then SEA_GRASS_BASE_SCALE else 1
-	local part = prepareMeshClone(template, def.speciesId, template.Size * scaleMult * baseScale)
+	local part = prepareMeshClone(template, def.speciesId, meshPlaceSize(template, def.speciesId, scaleMult, baseScale))
 	-- Stamp SpeciesId before plant so yaw path is unambiguous.
 	part:SetAttribute("OceanTD_SpeciesId", def.speciesId)
 	local facingYaw: number? = nil
@@ -1515,7 +1542,7 @@ function CoralVisual.restyleSponge(
 	end
 
 	local baseScale = if speciesId == "SeaGrass" then SEA_GRASS_BASE_SCALE else 1
-	local newSize = template.Size * scale * baseScale
+	local newSize = meshPlaceSize(template, if typeof(speciesId) == "string" then speciesId else nil, scale, baseScale)
 	local castShadow = if def then def.castShadow else false
 	local canCollide = if def then def.canCollide else true
 

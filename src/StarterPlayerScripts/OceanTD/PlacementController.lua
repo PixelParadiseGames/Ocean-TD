@@ -78,7 +78,7 @@ local aimFingerDown = false -- world drag after tap-select (mobile/PC)
 local placePointerHeld = false
 local confirmDragging = false
 local confirmPressOrigin: Vector2? = nil -- nil while pressing ✓/X
-local chromeScreenPos: Vector2? = nil -- move-icon aim freeze; ✓/X sit on torso
+local chromeScreenPos: Vector2? = nil -- move-icon aim freeze; ✓/X sit at feet
 local aimPinnedToCenter = false
 local aimPinnedToHand = false -- ghost starts in the right hand until the player aims
 local aimPinOrigin: Vector2? = nil
@@ -161,7 +161,7 @@ local DEFAULT_WALK_SPEED = 16
 local DEFAULT_JUMP_POWER = 75
 local DEFAULT_JUMP_HEIGHT = 10.8 -- StarterPlayer default 7.2 × 1.5
 local CONFIRM_DRAG_PX = 28 -- ignore tiny finger jitter before moving parked ghost
-local BTN_SIZE = 52 -- min tappable chrome; PlaceConfirmChrome also floors at 52px
+local BTN_SIZE = PlaceConfirmChrome.BASE_BTN_PX -- viewport-scaled via PlaceConfirmChrome.chromeBtnSize
 
 local function log(...: any)
 	print("[PLACE]", ...)
@@ -545,9 +545,10 @@ local function setCheckLabel(text: string)
 	checkBtn.TextStrokeTransparency = 0
 	checkBtn.ZIndex = 20
 	-- CONFIRM needs fixed size; TextScaled crushes long words in the circle.
+	-- Mobile chrome is ~30% smaller — keep text small enough for one line.
 	if text == "CONFIRM" then
 		checkBtn.TextScaled = false
-		checkBtn.TextSize = 11
+		checkBtn.TextSize = PlaceConfirmChrome.confirmLabelTextSize()
 	else
 		checkBtn.TextScaled = true
 	end
@@ -946,7 +947,7 @@ local function syncConfirmButtonsImpl()
 		attachMoveHintToGhost()
 	end
 
-	-- Visibility first so torso layout can center X-only vs ✓+X pair.
+	-- Visibility first so feet layout can center X-only vs ✓+X pair.
 	checkBtn.Visible = validSpot and (mode == MODE_CONFIRM or gamepadPlacement)
 	cancelBtn.Visible = true
 	local showRot = armedItemId == "SeaFan"
@@ -966,6 +967,7 @@ local function syncConfirmButtonsImpl()
 	)
 	chromeBillboard = bb
 	chromeAdorneePart = adornee
+	local btnPx = PlaceConfirmChrome.chromeBtnSize(BTN_SIZE)
 	local showWord = (math.floor(os.clock()) % 2) == 1
 	cancelBtn.Text = if showWord then "CANCEL" else "X"
 	cancelBtn.TextStrokeColor3 = if showWord then Color3.fromRGB(60, 15, 18) else Color3.new(1, 1, 1)
@@ -986,7 +988,7 @@ local function syncConfirmButtonsImpl()
 		then
 			confirmWord = "Enter"
 		end
-		checkBtn.Size = UDim2.fromOffset(BTN_SIZE, BTN_SIZE)
+		checkBtn.Size = UDim2.fromOffset(btnPx, btnPx)
 		setCheckLabel(confirmWord)
 	end
 end
@@ -1061,8 +1063,9 @@ local function makeConfirmUiImpl()
 	moveHintImage = move
 
 	local function roundBtn(text: string, color: Color3): TextButton
+		local btnPx = PlaceConfirmChrome.chromeBtnSize(BTN_SIZE)
 		local b = Instance.new("TextButton")
-		b.Size = UDim2.fromOffset(BTN_SIZE, BTN_SIZE)
+		b.Size = UDim2.fromOffset(btnPx, btnPx)
 		b.BackgroundColor3 = color
 		b.BackgroundTransparency = 0 -- opaque so touch reliably hits the button
 		b.Font = UiTheme.Font
@@ -1862,7 +1865,7 @@ function PlacementController.beginForItem(itemId: string)
 		chromeBtnPointerDown = false
 		postPlaceWaiting = false
 
-		-- Keep the same X at torso; only ghost + move icon crossfade.
+		-- Keep the same X at feet; only ghost + move icon crossfade.
 		beginAim(nextId, nil, true)
 		return
 	end

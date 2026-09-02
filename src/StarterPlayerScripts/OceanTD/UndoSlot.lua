@@ -234,6 +234,11 @@ function UndoSlot.requestUndo()
 		return
 	end
 	undoBusy = true
+	if RelocateController.tryRestoreSelectionUndo() then
+		undoBusy = false
+		deps.log("Undo", "selection")
+		return
+	end
 	if RelocateController.isActive() then
 		RelocateController.cancel(true)
 	end

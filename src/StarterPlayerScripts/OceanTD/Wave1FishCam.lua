@@ -242,7 +242,7 @@ function Wave1FishCam.setActive(on: boolean)
 				return
 			end
 			local cycle = busy:GetAttribute("OceanTD_CamCycleMode")
-			if cycle == "freecam" or cycle == "fishcam" then
+			if cycle == "plotcam" or cycle == "fishcam" or cycle == "dronecam" or cycle == "freecam" then
 				return
 			end
 		end

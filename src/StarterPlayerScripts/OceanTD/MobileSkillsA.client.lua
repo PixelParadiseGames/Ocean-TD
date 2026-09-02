@@ -21,6 +21,7 @@ local playerGui = player:WaitForChild("PlayerGui")
 local SkillsBubbleSim = require(script.Parent:WaitForChild("SkillsBubbleSim"))
 local SkillPowerUpUI = require(script.Parent:WaitForChild("SkillPowerUpUI"))
 local InventoryState = require(script.Parent:WaitForChild("InventoryState"))
+local SkillsAvatarCam = require(script.Parent:WaitForChild("SkillsAvatarCam"))
 
 local oceanRoot = game:GetService("ReplicatedStorage"):WaitForChild("OceanTD")
 local LeftHudLayout = require(oceanRoot:WaitForChild("Shared"):WaitForChild("LeftHudLayout"))
@@ -370,6 +371,7 @@ local function syncMovementFreeze(skillsOpen: boolean)
 		lockForeignSelectables(true)
 		bindLeftUiDPadSink(true)
 		setSkillsOpenHud(true)
+		SkillsAvatarCam.start()
 		clearGuiSelection()
 		if isGamepadMode() then
 			setMovementEnabled(false)
@@ -383,6 +385,7 @@ local function syncMovementFreeze(skillsOpen: boolean)
 		bindLeftUiDPadSink(false)
 		lockForeignSelectables(false)
 		setSkillsOpenHud(false)
+		SkillsAvatarCam.stop()
 		bindMoveSink(false)
 		clearGuiSelection()
 		setBubbleModeGuiNav(false)
@@ -584,7 +587,18 @@ task.spawn(function()
 		chrome.Position = UDim2.fromScale(0, 0)
 		chrome.ZIndex = skillsBtn.ZIndex + 15
 		chrome.Active = false
+		pcall(function()
+			(chrome :: any).Interactable = false
+		end)
 		chrome.Parent = skillsBtn
+		local hitBtn = skillsBtn:FindFirstChild("_OceanTD_SkillsHit")
+		if hitBtn and hitBtn:IsA("GuiObject") then
+			hitBtn.ZIndex = chrome.ZIndex + 5
+			hitBtn.Active = true
+			pcall(function()
+				(hitBtn :: any).Interactable = true
+			end)
+		end
 		local corner = Instance.new("UICorner")
 		corner.CornerRadius = UDim.new(1, 0)
 		corner.Parent = chrome
@@ -629,10 +643,19 @@ task.spawn(function()
 
 		if leftGui and panelGui then
 			if want then
+				-- Bubbles under left HUD (Skills close must stay clickable), above seed wheel.
 				panelGui.DisplayOrder = math.max(panelGui.DisplayOrder, 50)
 				leftGui.DisplayOrder = math.max(leftOrderBase, panelGui.DisplayOrder + 10)
+				local wheel = playerGui:FindFirstChild("OceanTD_SeedWheel")
+				if wheel and wheel:IsA("ScreenGui") then
+					wheel.DisplayOrder = math.min(wheel.DisplayOrder, panelGui.DisplayOrder - 1)
+				end
 			else
 				leftGui.DisplayOrder = leftOrderBase
+				local wheel = playerGui:FindFirstChild("OceanTD_SeedWheel")
+				if wheel and wheel:IsA("ScreenGui") then
+					wheel.DisplayOrder = math.max(0, leftOrderBase - 1)
+				end
 			end
 		end
 

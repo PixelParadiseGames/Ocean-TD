@@ -1,10 +1,10 @@
 --!strict
 --[[
 	Plot Size unlock cinematic:
-	1) Close skills bubbles
+	1) Release skills avatar cam + close skills HUD / FreeCam cycle
 	2) Camera → ChangeSizeCam looking at ChangeSizeCamFocus, hold 1s
 	3) Tween translucent plot footprint old→new size (reef heart moves with it)
-	4) Camera restore over 1s
+	4) Camera restore, then reopen skills on PlotSize power-up
 
 	Also hides Studio PlotSizes template boxes (keep cams).
 ]]
@@ -43,6 +43,20 @@ end
 local function forceCloseFreeCam()
 	-- FreeCam RenderStepped owns Scriptable cam — must release before cinematic tweens.
 	playerGui:SetAttribute("OceanTD_ForceCloseFreeCam", os.clock())
+end
+
+local function releaseSkillsAvatarCam()
+	local ok, SkillsAvatarCam = pcall(function()
+		return require(script.Parent:WaitForChild("SkillsAvatarCam"))
+	end)
+	if ok and SkillsAvatarCam and typeof(SkillsAvatarCam.releaseForCinematic) == "function" then
+		SkillsAvatarCam.releaseForCinematic()
+	end
+end
+
+local function reopenPlotSizeSkills()
+	playerGui:SetAttribute("OceanTD_ForceOpenSkillId", "PlotSize")
+	playerGui:SetAttribute("OceanTD_ForceOpenSkills", os.clock())
 end
 
 local function getPlotSizesFolder(): Instance?
@@ -231,7 +245,7 @@ export type PlayPoses = {
 function PlotSizeCinematic.play(
 	prevStage: number,
 	newStage: number,
-	opts: { skipCamera: boolean?, keepSkillsOpen: boolean?, dial: boolean?, poses: PlayPoses? }?
+	opts: { skipCamera: boolean?, keepSkillsOpen: boolean?, dial: boolean?, reopenPlotSizeSkills: boolean?, poses: PlayPoses? }?
 )
 	if busy then
 		if not (opts and opts.dial == true) then
@@ -245,6 +259,7 @@ function PlotSizeCinematic.play(
 	local skipCam = opts ~= nil and opts.skipCamera == true
 	local keepSkillsOpen = opts ~= nil and opts.keepSkillsOpen == true
 	local isDial = opts ~= nil and opts.dial == true
+	local shouldReopenPlotSize = opts ~= nil and opts.reopenPlotSizeSkills == true
 	local poses = if opts then opts.poses else nil
 	local growSec = if isDial then DIAL_GROW_SEC else GROW_SEC
 
@@ -256,8 +271,13 @@ function PlotSizeCinematic.play(
 	end
 
 	playerGui:SetAttribute("OceanTD_PlotSizeCinematicBusy", true)
+	-- Always drop avatar-cam override so the wide plot shot can play.
+	releaseSkillsAvatarCam()
 	if not keepSkillsOpen then
 		forceCloseSkills()
+		forceCloseFreeCam()
+		task.wait(0.05)
+	else
 		forceCloseFreeCam()
 		task.wait(0.05)
 	end
@@ -343,7 +363,10 @@ function PlotSizeCinematic.play(
 			busy = false
 		end
 		playerGui:SetAttribute("OceanTD_PlotSizeCinematicBusy", false)
-		if not keepSkillsOpen then
+		if shouldReopenPlotSize then
+			-- Return to skills + Plot Size power-up after the wide shot.
+			task.defer(reopenPlotSizeSkills)
+		elseif not keepSkillsOpen then
 			playerGui:SetAttribute("OceanTD_SkillsUiRestore", os.clock())
 		elseif okCommit then
 			pcall(function()
@@ -485,10 +508,13 @@ Remotes.get("PlotSizeChanged").OnClientEvent:Connect(function(payload: any)
 		return
 	end
 	task.spawn(function()
+		-- Always run the wide ChangeSizeCam shot for plot grow/shrink so players see the footprint.
+		-- Then reopen skills on PlotSize (avatar cam resumes via OceanTD_SkillsBubblesOpen).
 		PlotSizeCinematic.play(prev, stage, {
-			skipCamera = isDial,
-			keepSkillsOpen = isDial,
+			skipCamera = false,
+			keepSkillsOpen = false,
 			dial = isDial,
+			reopenPlotSizeSkills = true,
 			poses = {
 				prevCFrame = if typeof(payload.prevCFrame) == "CFrame" then payload.prevCFrame else nil,
 				prevSize = if typeof(payload.prevSize) == "Vector3" then payload.prevSize else nil,

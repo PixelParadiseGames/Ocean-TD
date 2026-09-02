@@ -28,7 +28,7 @@ local DISARM_SCALE_SEC = 1
 local ARM_INTRO_SEC = 0.38
 local ARM_INTRO_START_SCALE = 0.22
 local MOVE_ICON_SIZE = 48
-local BTN_SIZE = 52
+local BTN_SIZE = PlaceConfirmChrome.BASE_BTN_PX
 local CANCEL_FLASH_RED = Color3.fromRGB(255, 70, 70)
 
 export type Env = {
@@ -593,7 +593,8 @@ function PlaceArmDisarmAnim.playArmIntroFromSlot(
 			end
 		else
 			local btnTravel = slotScreen:Lerp(chromePos, a)
-			local bsize = BTN_SIZE * math.max(scale, 0.35)
+			local fullBtn = PlaceConfirmChrome.chromeBtnSize(BTN_SIZE)
+			local bsize = fullBtn * math.max(scale, 0.35)
 			local rotL = if env.getRotLeftBtn then env.getRotLeftBtn() else nil
 			local rotR = if env.getRotRightBtn then env.getRotRightBtn() else nil
 			local showRot = env.getArmedItemId() == "SeaFan"

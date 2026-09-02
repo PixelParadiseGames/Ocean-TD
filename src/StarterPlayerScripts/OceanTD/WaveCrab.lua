@@ -456,16 +456,23 @@ function WaveCrab.findShell(model: Instance): BasePart?
 	return nil
 end
 
-function WaveCrab.shellOverlapsCoral(shell: BasePart, coral: BasePart): boolean
-	local r = math.max(coral.Size.X, coral.Size.Y, coral.Size.Z) * 0.5
-	local localPos = shell.CFrame:PointToObjectSpace(coral.Position)
-	local half = shell.Size * 0.5
-	local closest = shell.CFrame:PointToWorldSpace(Vector3.new(
+local function closestPointOnPart(part: BasePart, worldPt: Vector3): Vector3
+	local localPos = part.CFrame:PointToObjectSpace(worldPt)
+	local half = part.Size * 0.5
+	return part.CFrame:PointToWorldSpace(Vector3.new(
 		math.clamp(localPos.X, -half.X, half.X),
 		math.clamp(localPos.Y, -half.Y, half.Y),
 		math.clamp(localPos.Z, -half.Z, half.Z)
 	))
-	return (closest - coral.Position).Magnitude <= r
+end
+
+-- OBB vs OBB via closest-point pair (not a sphere from max(Size) — tall SeaGrass
+-- was stunning crabs many studs away horizontally).
+function WaveCrab.shellOverlapsCoral(shell: BasePart, coral: BasePart): boolean
+	local onCoral = closestPointOnPart(coral, shell.Position)
+	local onShell = closestPointOnPart(shell, onCoral)
+	onCoral = closestPointOnPart(coral, onShell)
+	return (onShell - onCoral).Magnitude <= 0.05
 end
 
 function WaveCrab.stunCoralPart(part: BasePart)

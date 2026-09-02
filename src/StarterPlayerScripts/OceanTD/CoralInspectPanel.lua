@@ -25,6 +25,7 @@ local UiHaptics = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiHapti
 local UiViewportTags = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiViewportTags"))
 
 local RelocateController = require(script.Parent:WaitForChild("RelocateController"))
+local RelocateMultiSelect = require(script.Parent:WaitForChild("RelocateMultiSelect"))
 local PlacedCoralIndex = require(script.Parent:WaitForChild("PlacedCoralIndex"))
 local ClientPlot = require(script.Parent:WaitForChild("ClientPlot"))
 local CoralRangeRings = require(script.Parent:WaitForChild("CoralRangeRings"))
@@ -58,6 +59,22 @@ local defaultStrokeFlashTween: Tween? = nil
 
 local function pulseWave(): number
 	return (math.sin(os.clock() * math.pi * 2) + 1) * 0.5
+end
+
+-- Size-change cinematics: 25% faster than original 0.5s shrink / 0.9s grow.
+local CINE_TIME_SCALE = 0.75
+local CINE_SHRINK_SEC = 0.5 * CINE_TIME_SCALE
+local CINE_GROW_SEC = 0.9 * CINE_TIME_SCALE
+local CINE_CAM_SEC = 0.5 * CINE_TIME_SCALE
+local CINE_CAM_BACK_SEC = 0.45 * CINE_TIME_SCALE
+local CINE_UNLOCK_GROW_SEC = 0.7 * CINE_TIME_SCALE
+local CINE_BRAIN_RESIZE_SEC = 0.28 * CINE_TIME_SCALE
+
+local function easeQuad(u: number, easeIn: boolean): number
+	if easeIn then
+		return u * u
+	end
+	return 1 - (1 - u) * (1 - u)
 end
 
 local LETTERS = { "S", "M", "L" }
@@ -145,6 +162,22 @@ end
 
 local function selectedPart(): BasePart?
 	return RelocateController.getSelectedPart()
+end
+
+local function selectedParts(): { BasePart }
+	return RelocateController.getSelectedParts()
+end
+
+local function placeIdOf(p: BasePart): string?
+	local id = p:GetAttribute("OceanTD_PlaceId")
+	return if typeof(id) == "string" and id ~= "" then id else nil
+end
+
+local function shuffleInPlace(list: { any }, rng: Random)
+	for i = #list, 2, -1 do
+		local j = rng:NextInteger(1, i)
+		list[i], list[j] = list[j], list[i]
+	end
 end
 
 local function hideRangeRing()
@@ -322,12 +355,18 @@ local function paintStatColumn(i: number, asDelta: boolean, fromClass: number?, 
 	end
 end
 
-local function refreshSizeColors()
-	local part = selectedPart()
+local function refreshSizeColors(fromPart: BasePart?, previewClass: number?, previewTier: number?)
+	local part = fromPart or selectedPart()
 	if not part then
 		return
 	end
 	local _d, class, tier = CoralSize.readFromPart(part)
+	if typeof(previewClass) == "number" then
+		class = CoralSize.clampTier(previewClass)
+	end
+	if typeof(previewTier) == "number" then
+		tier = CoralSize.clampTier(previewTier)
+	end
 	local nxt = CoralSize.nextUnlock(tier)
 	stopSizeFlash()
 	for i = 1, 3 do
@@ -375,22 +414,49 @@ local function refreshSizeColors()
 	showRangeRing(part)
 end
 
-local function tweenSize(part: BasePart, fromD: number, toD: number, sec: number)
+local function applySizePreview(targetClass: number, unlockNext: boolean)
+	local part = selectedPart()
+	if not part then
+		return
+	end
+	local want = CoralSize.clampTier(targetClass)
+	local _d, _class, tier = CoralSize.readFromPart(part)
+	if unlockNext then
+		refreshSizeColors(part, want, math.max(tier, want))
+	elseif want <= tier then
+		refreshSizeColors(part, want, nil)
+	end
+end
+
+local function revertSizeColors()
+	refreshSizeColors()
+end
+
+local function tweenSize(part: BasePart, fromD: number, toD: number, sec: number, easeIn: boolean?)
 	part.Size = Vector3.new(fromD, fromD, fromD)
+	local dir = if easeIn == true then Enum.EasingDirection.In else Enum.EasingDirection.Out
 	local tw = TweenService:Create(
 		part,
-		TweenInfo.new(sec, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+		TweenInfo.new(sec, Enum.EasingStyle.Quad, dir),
 		{ Size = Vector3.new(toD, toD, toD) }
 	)
 	tw:Play()
 	tw.Completed:Wait()
 end
 
-local function tweenMeshScale(part: BasePart, fullSize: Vector3, fromMult: number, toMult: number, sec: number)
+local function tweenMeshScale(
+	part: BasePart,
+	fullSize: Vector3,
+	fromMult: number,
+	toMult: number,
+	sec: number,
+	easeIn: boolean?
+)
 	part.Size = fullSize * fromMult
+	local dir = if easeIn == true then Enum.EasingDirection.In else Enum.EasingDirection.Out
 	local tw = TweenService:Create(
 		part,
-		TweenInfo.new(sec, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+		TweenInfo.new(sec, Enum.EasingStyle.Quad, dir),
 		{ Size = fullSize * toMult }
 	)
 	tw:Play()
@@ -403,8 +469,10 @@ local function tweenSpongeScale(
 	surfaceAnchor: Vector3,
 	fromMult: number,
 	toMult: number,
-	sec: number
+	sec: number,
+	easeIn: boolean?
 )
+	local useEaseIn = easeIn == true
 	local isDualPart = CoralVisual.isDualColorMesh(part:GetAttribute("OceanTD_SpeciesId"))
 	if isDualPart then
 		CoralVisual.applySeaFanScaleMult(part, fullSize, fromMult, surfaceAnchor)
@@ -415,7 +483,7 @@ local function tweenSpongeScale(
 	local t0 = os.clock()
 	while true do
 		local u = math.clamp((os.clock() - t0) / sec, 0, 1)
-		local ease = 1 - (1 - u) * (1 - u)
+		local ease = easeQuad(u, useEaseIn)
 		local mult = fromMult + (toMult - fromMult) * ease
 		if isDualPart then
 			CoralVisual.applySeaFanScaleMult(part, fullSize, mult, surfaceAnchor)
@@ -435,14 +503,93 @@ local function findPlacedByPlaceId(id: string, exclude: BasePart?): BasePart?
 	if not root then
 		return nil
 	end
-	for _, folder in ipairs(root:GetChildren()) do
-		for _, child in ipairs(folder:GetChildren()) do
-			if child:IsA("BasePart") and child ~= exclude and child:GetAttribute("OceanTD_PlaceId") == id then
-				return child
+	for _, desc in ipairs(root:GetDescendants()) do
+		if desc:IsA("BasePart") and desc ~= exclude and desc.Name ~= "OceanTD_Climb" then
+			if desc:GetAttribute("OceanTD_PlaceId") == id then
+				return desc
 			end
 		end
 	end
 	return nil
+end
+
+local function readCineFullSize(part: BasePart): Vector3?
+	local fx = tonumber(part:GetAttribute("OceanTD_CineFullX"))
+	local fy = tonumber(part:GetAttribute("OceanTD_CineFullY"))
+	local fz = tonumber(part:GetAttribute("OceanTD_CineFullZ"))
+	if typeof(fx) == "number" and typeof(fy) == "number" and typeof(fz) == "number" then
+		return Vector3.new(fx, fy, fz)
+	end
+	return nil
+end
+
+local function clearCinePrepAttrs(part: BasePart)
+	part:SetAttribute("OceanTD_CinePrep", nil)
+	part:SetAttribute("OceanTD_CineFullX", nil)
+	part:SetAttribute("OceanTD_CineFullY", nil)
+	part:SetAttribute("OceanTD_CineFullZ", nil)
+end
+
+local function revealCinePart(part: BasePart, surfaceAnchor: Vector3?)
+	local full = readCineFullSize(part) or part.Size
+	clearCinePrepAttrs(part)
+	part.Size = full
+	part.Transparency = 0
+	part.LocalTransparencyModifier = 0
+	if CoralVisual.isDualColorMesh(part:GetAttribute("OceanTD_SpeciesId")) then
+		CoralVisual.clearSeaFanClientHide(part)
+	else
+		for _, ch in ipairs(part:GetChildren()) do
+			if ch:IsA("BasePart") then
+				ch.LocalTransparencyModifier = 0
+			end
+		end
+	end
+	local anchor = surfaceAnchor or CoralVisual.readGridAnchor(part)
+	if anchor then
+		CoralVisual.alignMeshToSurface(part, anchor, nil, part.CFrame)
+	end
+end
+
+local function prepReplacementForCine(desc: BasePart, placeId: string): boolean
+	if desc:GetAttribute("OceanTD_PlaceId") ~= placeId then
+		return false
+	end
+	if desc:GetAttribute("OceanTD_CinePrep") == true then
+		return false
+	end
+	local full = desc.Size
+	desc:SetAttribute("OceanTD_CinePrep", true)
+	desc:SetAttribute("OceanTD_CineFullX", full.X)
+	desc:SetAttribute("OceanTD_CineFullY", full.Y)
+	desc:SetAttribute("OceanTD_CineFullZ", full.Z)
+	desc.LocalTransparencyModifier = 1
+	local speciesId = desc:GetAttribute("OceanTD_SpeciesId")
+	local anchor = CoralVisual.readGridAnchor(desc)
+	if CoralVisual.isDualColorMesh(speciesId) then
+		CoralVisual.applySeaFanScaleMult(desc, full, 0.05, anchor)
+		for _, ch in ipairs(desc:GetChildren()) do
+			if ch:IsA("BasePart") then
+				ch.LocalTransparencyModifier = 1
+			end
+		end
+	else
+		desc.Size = full * 0.05
+		if anchor then
+			CoralVisual.alignMeshToSurface(desc, anchor, nil, desc.CFrame)
+		end
+		for _, ch in ipairs(desc:GetChildren()) do
+			if ch:IsA("BasePart") and (ch.Name == "Web" or string.sub(ch.Name, 1, 4) == "Food") then
+				ch.LocalTransparencyModifier = 1
+			end
+		end
+	end
+	return true
+end
+
+-- SeaGrass / SeaFan / TreeCoral rebuild a new instance; Sponge ApplyMesh-es in place (same part).
+local function meshReplacesInstanceOnRestyle(speciesId: any): boolean
+	return speciesId == "SeaGrass" or speciesId == "SeaFan" or CoralVisual.isMainAccentMesh(speciesId)
 end
 
 local function waitForPlacedByPlaceId(id: string, timeoutSec: number, exclude: BasePart?): BasePart?
@@ -452,9 +599,57 @@ local function waitForPlacedByPlaceId(id: string, timeoutSec: number, exclude: B
 		if p then
 			return p
 		end
-		task.wait(0.05)
+		RunService.RenderStepped:Wait()
 	end
 	return nil
+end
+
+local function waitForRestyledPart(placeId: string, oldPart: BasePart, result: any, replacesInstance: boolean): BasePart?
+	if not replacesInstance then
+		if not oldPart.Parent then
+			return waitForPlacedByPlaceId(placeId, 2.5, oldPart)
+		end
+		-- Sponge / FireCoral ApplyMesh in place — wait for replicated attrs, not Size.Y (client shrink stale).
+		local part = oldPart
+		local expectedClass = tonumber(result.sizeClass)
+		local expectedD = tonumber(result.diameter)
+		local deadline = os.clock() + 2.5
+		while os.clock() < deadline do
+			if typeof(expectedClass) == "number" and part:GetAttribute("OceanTD_SizeClass") == expectedClass then
+				if typeof(expectedD) ~= "number" or expectedD <= 0 or part.Size.Y >= expectedD * 0.5 then
+					break
+				end
+			end
+			local attrD = part:GetAttribute("OceanTD_Diameter")
+			if typeof(expectedD) == "number" and typeof(attrD) == "number" and expectedD > 0 then
+				if math.abs(attrD - expectedD) / expectedD < 0.08 and part.Size.Y >= expectedD * 0.5 then
+					break
+				end
+			end
+			RunService.RenderStepped:Wait()
+		end
+		return part
+	end
+	RunService.RenderStepped:Wait()
+	local expectedClass = tonumber(result.sizeClass)
+	local deadline = os.clock() + 2.5
+	while os.clock() < deadline do
+		local p = findPlacedByPlaceId(placeId, oldPart)
+		if p then
+			if p:GetAttribute("OceanTD_CinePrep") == true then
+				return p
+			end
+			if typeof(expectedClass) == "number" and p:GetAttribute("OceanTD_SizeClass") == expectedClass then
+				return p
+			end
+		end
+		RunService.RenderStepped:Wait()
+	end
+	local part = findPlacedByPlaceId(placeId, oldPart)
+	if not part and oldPart.Parent then
+		part = oldPart
+	end
+	return part
 end
 
 local function playGrowSound()
@@ -569,11 +764,11 @@ local function runUnlockCinematic(part: BasePart, newDiam: number)
 
 	local camTw = TweenService:Create(
 		cam,
-		TweenInfo.new(0.5, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+		TweenInfo.new(CINE_CAM_SEC, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
 		{ CFrame = zoomCf }
 	)
 	camTw:Play()
-	tweenSize(part, fromD, fromD * 0.1, 0.5)
+	tweenSize(part, fromD, fromD * 0.1, CINE_SHRINK_SEC, true)
 	if token ~= cineToken or not part.Parent then
 		RelocateController.setCinematicHold(false)
 		if saved then
@@ -582,7 +777,7 @@ local function runUnlockCinematic(part: BasePart, newDiam: number)
 		return
 	end
 	playGrowSound()
-	tweenSize(part, fromD * 0.1, newDiam, 0.7)
+	tweenSize(part, fromD * 0.1, newDiam, CINE_UNLOCK_GROW_SEC, false)
 	if token ~= cineToken or not part.Parent then
 		RelocateController.setCinematicHold(false)
 		return
@@ -591,7 +786,7 @@ local function runUnlockCinematic(part: BasePart, newDiam: number)
 	if backCam then
 		local backTw = TweenService:Create(
 			backCam,
-			TweenInfo.new(0.45, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+			TweenInfo.new(CINE_CAM_BACK_SEC, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
 			{ CFrame = startCf }
 		)
 		backTw:Play()
@@ -611,12 +806,56 @@ applyServerSize = function(result: any, unlock: boolean, partOverride: BasePart?
 	if typeof(result) ~= "table" or result.ok ~= true then
 		return
 	end
-	local part = partOverride or selectedPart()
+	local staleRef = partOverride
+	local pid = if typeof(result.placeId) == "string"
+		then result.placeId
+		elseif staleRef then staleRef:GetAttribute("OceanTD_PlaceId")
+		else nil
+	local part: BasePart? = staleRef
+	if not part or not part.Parent then
+		if typeof(pid) == "string" then
+			part = findPlacedByPlaceId(pid, nil)
+		end
+	end
+	if not part then
+		part = selectedPart()
+	end
 	if not part then
 		return
 	end
+	if part:GetAttribute("OceanTD_CinePrep") == true then
+		revealCinePart(part, CoralVisual.readGridAnchor(part))
+	end
+	local function resolveRebindFrom(newPart: BasePart, staleRef: BasePart?): BasePart?
+		if staleRef and staleRef ~= newPart then
+			return staleRef
+		end
+		local cur = RelocateController.getSelectedPart()
+		if not cur or cur == newPart then
+			return nil
+		end
+		local newPid = newPart:GetAttribute("OceanTD_PlaceId")
+		local curPid = cur:GetAttribute("OceanTD_PlaceId")
+		if typeof(newPid) == "string" and newPid ~= "" and newPid == curPid then
+			return cur
+		end
+		return nil
+	end
+	local rebindFrom = resolveRebindFrom(part, staleRef)
+
+	local function finishSizeApply(updatedPart: BasePart)
+		local pid = updatedPart:GetAttribute("OceanTD_PlaceId")
+		if typeof(pid) == "string" and pid ~= "" and RelocateController.isActive() then
+			RelocateController.restoreSelectionByPlaceIds({ pid })
+			updatedPart = RelocateController.getSelectedPart() or updatedPart
+		end
+		refreshSizeColors(updatedPart)
+		if RelocateController.isMultiSelect() then
+			RelocateMultiSelect.refreshSummary()
+		end
+	end
 	local BrainStackClient = require(script.Parent:WaitForChild("BrainStackClient"))
-	BrainStackClient.applyStackMoves(result.stackMoves, if unlock then 0.55 else 0.28)
+	BrainStackClient.applyStackMoves(result.stackMoves, if unlock then 0.55 * CINE_TIME_SCALE else CINE_BRAIN_RESIZE_SEC)
 	local d = tonumber(result.diameter)
 	local class = tonumber(result.sizeClass)
 	local tier = tonumber(result.sizeTier)
@@ -656,32 +895,39 @@ applyServerSize = function(result: any, unlock: boolean, partOverride: BasePart?
 			part.Transparency = 0
 			part.LocalTransparencyModifier = 0
 		end
-		if fromCinematic then
+		if RelocateController.isActive() then
+			RelocateController.refreshSizedPart(part, rebindFrom)
+		elseif fromCinematic then
 			RelocateController.swapSelectedPart(part)
 		else
-			local pid = part:GetAttribute("OceanTD_PlaceId")
-			if typeof(pid) == "string" and RelocateController.getSelectedPart() ~= part then
+			local partPid = part:GetAttribute("OceanTD_PlaceId")
+			if typeof(partPid) == "string" and RelocateController.getSelectedPart() ~= part then
 				RelocateController.begin(part)
 			end
 		end
 		RelocateController.refreshSelectRing()
-		refreshSizeColors()
+		finishSizeApply(part)
 		return
 	end
 
 	if unlock then
 		task.spawn(function()
 			runUnlockCinematic(part, d)
-			refreshSizeColors()
+			finishSizeApply(part)
 		end)
 	else
+		local sizedPart = part
 		local fromD = math.max(part.Size.X, 0.05)
 		task.spawn(function()
-			tweenSize(part, fromD, d, 0.28)
-			CoralSize.applyToPart(part, d, class or CoralSize.classFromDiameter(d), tier or (class or 1))
-			RelocateController.syncHomeToPart(part)
+			tweenSize(sizedPart, fromD, d, CINE_BRAIN_RESIZE_SEC)
+			CoralSize.applyToPart(sizedPart, d, class or CoralSize.classFromDiameter(d), tier or (class or 1))
+			if RelocateController.isActive() then
+				RelocateController.refreshSizedPart(sizedPart, rebindFrom)
+			else
+				RelocateController.syncHomeToPart(sizedPart)
+			end
 			RelocateController.refreshSelectRing()
-			refreshSizeColors()
+			finishSizeApply(sizedPart)
 		end)
 	end
 end
@@ -692,52 +938,60 @@ local function armHideReplacement(placeId: string): () -> ()
 	if not root then
 		return function() end
 	end
+	for _, desc in ipairs(root:GetDescendants()) do
+		if desc:IsA("BasePart") then
+			prepReplacementForCine(desc, placeId)
+		end
+	end
 	local conn = root.DescendantAdded:Connect(function(desc: Instance)
 		if not desc:IsA("BasePart") then
 			return
 		end
-		if desc:GetAttribute("OceanTD_PlaceId") ~= placeId then
+		if prepReplacementForCine(desc, placeId) then
 			return
 		end
-		if desc:GetAttribute("OceanTD_CinePrep") == true then
+		if desc:GetAttribute("OceanTD_PlaceId") ~= nil then
 			return
 		end
-		local full = desc.Size
-		desc:SetAttribute("OceanTD_CinePrep", true)
-		desc:SetAttribute("OceanTD_CineFullX", full.X)
-		desc:SetAttribute("OceanTD_CineFullY", full.Y)
-		desc:SetAttribute("OceanTD_CineFullZ", full.Z)
-		desc.LocalTransparencyModifier = 1
-		if CoralVisual.isDualColorMesh(desc:GetAttribute("OceanTD_SpeciesId")) then
-			CoralVisual.applySeaFanScaleMult(desc, full, 0.05, CoralVisual.readGridAnchor(desc))
-			for _, ch in ipairs(desc:GetChildren()) do
-				if ch:IsA("BasePart") then
-					ch.LocalTransparencyModifier = 1
+		local placeAttrConn: RBXScriptConnection? = nil
+		placeAttrConn = desc:GetAttributeChangedSignal("OceanTD_PlaceId"):Connect(function()
+			if not desc.Parent then
+				if placeAttrConn then
+					placeAttrConn:Disconnect()
 				end
+				return
 			end
-		else
-			desc.Size = full * 0.05
-			for _, ch in ipairs(desc:GetChildren()) do
-				if ch:IsA("BasePart") and (ch.Name == "Web" or string.sub(ch.Name, 1, 4) == "Food") then
-					ch.LocalTransparencyModifier = 1
-				end
+			if prepReplacementForCine(desc, placeId) and placeAttrConn then
+				placeAttrConn:Disconnect()
 			end
-		end
+		end)
 	end)
 	return function()
 		conn:Disconnect()
 	end
 end
 
-local function runSpongeSizeCinematic(oldPart: BasePart, placeId: string, targetClass: number, unlockNext: boolean)
-	cineToken += 1
-	local token = cineToken
+local function runSpongeSizeCinematic(
+	oldPart: BasePart,
+	placeId: string,
+	targetClass: number,
+	unlockNext: boolean,
+	parallel: boolean?
+)
+	local token: number? = nil
+	if not parallel then
+		cineToken += 1
+		token = cineToken
+	end
+	local useCamera = unlockNext and not parallel
+	local speciesId = oldPart:GetAttribute("OceanTD_SpeciesId")
+	local replacesInstance = meshReplacesInstanceOnRestyle(speciesId)
 	local fullSize = oldPart.Size
 	local anchor = CoralVisual.readGridAnchor(oldPart)
-	local saved = if unlockNext then RelocateController.getSavedCameraCFrame() else nil
+	local saved = if useCamera then RelocateController.getSavedCameraCFrame() else nil
 	local startCf = saved or (workspace.CurrentCamera and workspace.CurrentCamera.CFrame)
 
-	if unlockNext and startCf and workspace.CurrentCamera then
+	if useCamera and startCf and workspace.CurrentCamera then
 		local cam = workspace.CurrentCamera
 		-- SeaGrass Large is huge — zoom out so the grow stays on screen.
 		local zoomCloser = not (
@@ -747,46 +1001,74 @@ local function runSpongeSizeCinematic(oldPart: BasePart, placeId: string, target
 		RelocateController.setCinematicHold(true)
 		local camTw = TweenService:Create(
 			cam,
-			TweenInfo.new(0.5, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+			TweenInfo.new(CINE_CAM_SEC, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
 			{ CFrame = zoomCf }
 		)
 		camTw:Play()
 		camTw.Completed:Wait()
 	end
 
+	local disarmHide = armHideReplacement(placeId)
+	local serverReady = false
+	local serverOk = false
+	local serverResult: any = nil
+	-- Replace-instance species can restyle during shrink; in-place ApplyMesh fights client Size tweens.
+	if replacesInstance then
+		task.spawn(function()
+			local ok, result = pcall(function()
+				return sizeRf:InvokeServer(placeId, targetClass, unlockNext)
+			end)
+			serverOk = ok
+			serverResult = result
+			serverReady = true
+		end)
+	end
+
 	if oldPart.Parent then
 		if anchor then
-			tweenSpongeScale(oldPart, fullSize, anchor, 1, 0.05, 0.5)
+			tweenSpongeScale(oldPart, fullSize, anchor, 1, 0.05, CINE_SHRINK_SEC, true)
 		else
-			tweenMeshScale(oldPart, fullSize, 1, 0.05, 0.5)
+			tweenMeshScale(oldPart, fullSize, 1, 0.05, CINE_SHRINK_SEC, true)
 		end
 	end
-	if token ~= cineToken or not oldPart.Parent then
+	if token ~= nil and token ~= cineToken then
+		disarmHide()
 		if oldPart.Parent then
 			oldPart.LocalTransparencyModifier = 0
-			if CoralVisual.isDualColorMesh(oldPart:GetAttribute("OceanTD_SpeciesId")) then
+			if CoralVisual.isDualColorMesh(speciesId) then
 				CoralVisual.clearSeaFanClientHide(oldPart)
 			end
 		end
-		if unlockNext then
+		if useCamera then
 			RelocateController.setCinematicHold(false)
 		end
 		return
 	end
 
-	oldPart.LocalTransparencyModifier = 1
-	if CoralVisual.isDualColorMesh(oldPart:GetAttribute("OceanTD_SpeciesId")) then
-		for _, ch in ipairs(oldPart:GetChildren()) do
-			if ch:IsA("BasePart") then
-				ch.LocalTransparencyModifier = 1
+	if oldPart.Parent then
+		oldPart.LocalTransparencyModifier = 1
+		if CoralVisual.isDualColorMesh(speciesId) then
+			for _, ch in ipairs(oldPart:GetChildren()) do
+				if ch:IsA("BasePart") then
+					ch.LocalTransparencyModifier = 1
+				end
 			end
 		end
 	end
-	local disarmHide = armHideReplacement(placeId)
 
-	local ok, result = pcall(function()
-		return sizeRf:InvokeServer(placeId, targetClass, unlockNext)
-	end)
+	if not replacesInstance then
+		local ok, result = pcall(function()
+			return sizeRf:InvokeServer(placeId, targetClass, unlockNext)
+		end)
+		serverOk = ok
+		serverResult = result
+		serverReady = true
+	elseif not serverReady then
+		while not serverReady do
+			RunService.RenderStepped:Wait()
+		end
+	end
+	local ok, result = serverOk, serverResult
 	if not ok or typeof(result) ~= "table" or result.ok ~= true then
 		disarmHide()
 		if oldPart.Parent then
@@ -795,39 +1077,65 @@ local function runSpongeSizeCinematic(oldPart: BasePart, placeId: string, target
 				CoralVisual.clearSeaFanClientHide(oldPart)
 			end
 		end
-		if unlockNext then
+		if useCamera then
 			RelocateController.setCinematicHold(false)
 		end
 		handleSizeResult(result, unlockNext)
+		revertSizeColors()
 		return
 	end
 
 	-- Server rebuilds mesh species (TreeCoral, SeaFan, …) — wait for the new instance.
-	-- oldPart.Parent can still be set for a frame after Destroy replicates; using it skips the grow.
-	task.wait(0.05)
-	local part: BasePart? = waitForPlacedByPlaceId(placeId, 2.5, oldPart)
-	if not part and oldPart.Parent then
-		part = oldPart
-	end
-	disarmHide()
+	-- Sponge ApplyMesh-es in place: same part, same placeId — do not poll for a replacement.
+	local part = waitForRestyledPart(placeId, oldPart, result, replacesInstance)
 	if not part then
-		applyServerSize(result, unlockNext, nil, true)
-		if unlockNext then
+		part = findPlacedByPlaceId(placeId, oldPart)
+	end
+	if not part then
+		part = waitForPlacedByPlaceId(placeId, 1.5, oldPart)
+	end
+	if not part then
+		disarmHide()
+		part = findPlacedByPlaceId(placeId, oldPart)
+		if part then
+			revealCinePart(part, anchor)
+		end
+		applyServerSize(result, useCamera, part, true)
+		if useCamera then
 			RelocateController.setCinematicHold(false)
 		end
+		revertSizeColors()
 		return
 	end
 
-	local fx = tonumber(part:GetAttribute("OceanTD_CineFullX"))
-	local fy = tonumber(part:GetAttribute("OceanTD_CineFullY"))
-	local fz = tonumber(part:GetAttribute("OceanTD_CineFullZ"))
-	local newFull = if typeof(fx) == "number" and typeof(fy) == "number" and typeof(fz) == "number"
-		then Vector3.new(fx, fy, fz)
-		else part.Size
-	part:SetAttribute("OceanTD_CinePrep", nil)
-	part:SetAttribute("OceanTD_CineFullX", nil)
-	part:SetAttribute("OceanTD_CineFullY", nil)
-	part:SetAttribute("OceanTD_CineFullZ", nil)
+	local cineFull = readCineFullSize(part)
+	disarmHide()
+	local newFull = cineFull or part.Size
+	if not replacesInstance then
+		-- FireCoral ApplyMesh: prefer MeshSize × scale when Size is still the old/shrunk box.
+		local sm = tonumber(result.scaleMult) or tonumber(part:GetAttribute("OceanTD_ScaleMult"))
+		if speciesId == "FireCoral" and part:IsA("MeshPart") and typeof(sm) == "number" and sm > 0 then
+			local okMs, ms = pcall(function()
+				return (part :: MeshPart).MeshSize
+			end)
+			if okMs and typeof(ms) == "Vector3" and ms.Y > 1e-3 then
+				local fromMesh = ms * sm
+				local stillOld = math.abs(newFull.Y - fullSize.Y) / math.max(fullSize.Y, 0.01) < 0.1
+				local stillTiny = newFull.Y < fromMesh.Y * 0.75
+				if stillOld or stillTiny then
+					newFull = fromMesh
+				end
+			end
+		end
+		local expectedD = tonumber(result.diameter)
+		if typeof(expectedD) == "number" and expectedD > 0 and newFull.Y < expectedD * 0.5 then
+			newFull = Vector3.new(math.max(newFull.X, expectedD * 0.5), expectedD, math.max(newFull.Z, expectedD * 0.5))
+		end
+	elseif typeof(result.diameter) == "number" and result.diameter > 0 and newFull.Y < result.diameter * 0.5 then
+		local expectedD = result.diameter
+		newFull = Vector3.new(math.max(newFull.X, expectedD * 0.5), expectedD, math.max(newFull.Z, expectedD * 0.5))
+	end
+	clearCinePrepAttrs(part)
 
 	local growAnchor = anchor or CoralVisual.readGridAnchor(part)
 	if CoralVisual.isDualColorMesh(part:GetAttribute("OceanTD_SpeciesId")) then
@@ -845,58 +1153,259 @@ local function runSpongeSizeCinematic(oldPart: BasePart, placeId: string, target
 
 	playGrowSound()
 	if growAnchor then
-		tweenSpongeScale(part, newFull, growAnchor, 0.05, 1, 0.9)
+		tweenSpongeScale(part, newFull, growAnchor, 0.05, 1, CINE_GROW_SEC, false)
 	else
-		tweenMeshScale(part, newFull, 0.05, 1, 0.9)
+		tweenMeshScale(part, newFull, 0.05, 1, CINE_GROW_SEC, false)
 	end
 	if CoralVisual.isDualColorMesh(part:GetAttribute("OceanTD_SpeciesId")) then
 		CoralVisual.clearSeaFanClientHide(part)
 	end
 
-	if unlockNext and startCf and workspace.CurrentCamera then
+	if useCamera and startCf and workspace.CurrentCamera then
 		local backCam = workspace.CurrentCamera
 		if backCam then
 			local backTw = TweenService:Create(
 				backCam,
-				TweenInfo.new(0.45, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+				TweenInfo.new(CINE_CAM_BACK_SEC, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
 				{ CFrame = startCf }
 			)
 			backTw:Play()
 			backTw.Completed:Wait()
 		end
 	end
-	RelocateController.setCinematicHold(false)
-	if saved then
-		RelocateController.setLiveCameraCFrame(saved)
+	if useCamera then
+		RelocateController.setCinematicHold(false)
+		if saved then
+			RelocateController.setLiveCameraCFrame(saved)
+		end
 	end
 
-	applyServerSize(result, unlockNext, part, true)
+	applyServerSize(result, useCamera, part, true)
 end
 
-local function invokeSize(targetClass: number, unlockNext: boolean)
-	local part = selectedPart()
-	if not part then
+type SizeJob = { part: BasePart, placeId: string, cost: number, targetClass: number }
+
+local function planSizeJobs(parts: { BasePart }, targetClass: number, unlockNext: boolean): ({ SizeJob }, number)
+	local want = CoralSize.clampTier(targetClass)
+	type RawJob = { part: BasePart, placeId: string, cost: number }
+	local jobs: { RawJob } = {}
+	local seen: { [string]: boolean } = {}
+	for _, p in ipairs(parts) do
+		local pid = placeIdOf(p)
+		if not pid or seen[pid] then
+			continue
+		end
+		seen[pid] = true
+		local _d, _c, tier = CoralSize.readFromPart(p)
+		if unlockNext then
+			if tier < want then
+				table.insert(jobs, {
+					part = p,
+					placeId = pid,
+					cost = CoralSize.unlockCostRange(tier, want),
+				})
+			end
+		elseif want <= tier then
+			table.insert(jobs, { part = p, placeId = pid, cost = 0 })
+		end
+	end
+	table.sort(jobs, function(a, b)
+		if a.cost == b.cost then
+			return a.placeId < b.placeId
+		end
+		return a.cost < b.cost
+	end)
+	local cash = tonumber(player:GetAttribute(Constants.SAND_DOLLARS_ATTR)) or 0
+	local chosen: { SizeJob } = {}
+	local spent = 0
+	for _, j in ipairs(jobs) do
+		if spent + j.cost <= cash then
+			spent += j.cost
+			table.insert(chosen, {
+				part = j.part,
+				placeId = j.placeId,
+				cost = j.cost,
+				targetClass = want,
+			})
+		end
+	end
+	return chosen, #jobs
+end
+
+local function runSizeJobsWithCinematic(jobs: { SizeJob }, unlockNext: boolean, keepIds: { string }, jobCount: number)
+	if #jobs == 0 then
 		return
 	end
-	local placeId = part:GetAttribute("OceanTD_PlaceId")
-	if typeof(placeId) ~= "string" then
+	local parallel = #jobs > 1
+	local pending = #jobs
+	local function onJobDone()
+		pending -= 1
+		if pending <= 0 then
+			refreshSizeColors()
+			if RelocateController.isMultiSelect() then
+				RelocateMultiSelect.refreshSummary()
+			end
+			RelocateController.restoreSelectionByPlaceIds(keepIds)
+		end
+	end
+	for _, j in ipairs(jobs) do
+		local speciesId = j.part:GetAttribute("OceanTD_SpeciesId")
+		if CoralVisual.isMeshSpecies(speciesId) then
+			task.spawn(function()
+				runSpongeSizeCinematic(j.part, j.placeId, j.targetClass, unlockNext, parallel)
+				onJobDone()
+			end)
+		else
+			task.spawn(function()
+				local ok, result = pcall(function()
+					return sizeRf:InvokeServer(j.placeId, j.targetClass, unlockNext)
+				end)
+				if ok and handleSizeResult(result, unlockNext) then
+					applyServerSize(result, unlockNext and not parallel, j.part, true)
+				else
+					revertSizeColors()
+				end
+				onJobDone()
+			end)
+		end
+	end
+	if unlockNext and jobCount > #jobs then
+		showToast("Upgraded " .. tostring(#jobs) .. " of " .. tostring(jobCount) .. " (not enough $D)")
+	end
+end
+
+local function invokeUpgradeNextOneTier()
+	local parts = selectedParts()
+	local keepIds = RelocateController.snapshotSelectionPlaceIds()
+	type Job = { part: BasePart, placeId: string, want: number, cost: number }
+	local jobs: { Job } = {}
+	for _, p in ipairs(parts) do
+		local pid = placeIdOf(p)
+		if not pid then
+			continue
+		end
+		local _d, _c, tier = CoralSize.readFromPart(p)
+		local nxt = CoralSize.nextUnlock(tier)
+		if nxt then
+			table.insert(jobs, {
+				part = p,
+				placeId = pid,
+				want = nxt,
+				cost = CoralSize.unlockCost(nxt),
+			})
+		end
+	end
+	table.sort(jobs, function(a, b)
+		if a.cost == b.cost then
+			return a.placeId < b.placeId
+		end
+		return a.cost < b.cost
+	end)
+	local cash = tonumber(player:GetAttribute(Constants.SAND_DOLLARS_ATTR)) or 0
+	local chosen: { Job } = {}
+	local spent = 0
+	for _, j in ipairs(jobs) do
+		if spent + j.cost <= cash then
+			spent += j.cost
+			table.insert(chosen, j)
+		end
+	end
+	if #jobs > 0 and #chosen == 0 then
+		showToast("Collect More $D")
 		return
 	end
 	UiHaptics.pulseShort()
-	local speciesId = part:GetAttribute("OceanTD_SpeciesId")
-	if CoralVisual.isMeshSpecies(speciesId) then
-		task.spawn(function()
-			runSpongeSizeCinematic(part, placeId, targetClass, unlockNext)
-		end)
+	local sizeJobs: { SizeJob } = {}
+	for _, j in ipairs(chosen) do
+		table.insert(sizeJobs, {
+			part = j.part,
+			placeId = j.placeId,
+			cost = j.cost,
+			targetClass = j.want,
+		})
+	end
+	runSizeJobsWithCinematic(sizeJobs, true, keepIds, #jobs)
+end
+
+local function invokeSize(targetClass: number, unlockNext: boolean)
+	local parts = selectedParts()
+	if #parts == 0 then
 		return
 	end
-	local ok, result = pcall(function()
-		return sizeRf:InvokeServer(placeId, targetClass, unlockNext)
-	end)
-	if ok and handleSizeResult(result, unlockNext) then
-		applyServerSize(result, unlockNext)
+	applySizePreview(targetClass, unlockNext)
+	local keepIds = RelocateController.snapshotSelectionPlaceIds()
+	UiHaptics.pulseShort()
+	if #parts == 1 and not RelocateController.isMultiSelect() then
+		local part = parts[1]
+		local placeId = placeIdOf(part)
+		if not placeId then
+			return
+		end
+		local speciesId = part:GetAttribute("OceanTD_SpeciesId")
+		if CoralVisual.isMeshSpecies(speciesId) then
+			task.spawn(function()
+				runSpongeSizeCinematic(part, placeId, targetClass, unlockNext)
+			end)
+			return
+		end
+		local ok, result = pcall(function()
+			return sizeRf:InvokeServer(placeId, targetClass, unlockNext)
+		end)
+		if ok and handleSizeResult(result, unlockNext) then
+			applyServerSize(result, unlockNext)
+		else
+			revertSizeColors()
+		end
+		return
 	end
-	refreshSizeColors()
+
+	local chosen, jobCount = planSizeJobs(parts, targetClass, unlockNext)
+	if jobCount == 0 then
+		revertSizeColors()
+		return
+	end
+	if #chosen == 0 then
+		if unlockNext then
+			showToast("Collect More $D")
+		end
+		revertSizeColors()
+		return
+	end
+	runSizeJobsWithCinematic(chosen, unlockNext, keepIds, jobCount)
+end
+
+local function planBulkUnlock(targetClass: number?): (number, number, number, boolean)
+	-- returns unlockTo, totalCost, upgradeCount, oneTierEach (UPGRADE button)
+	local parts = selectedParts()
+	if typeof(targetClass) == "number" then
+		local unlockTo = CoralSize.clampTier(targetClass)
+		local total = 0
+		local count = 0
+		for _, p in ipairs(parts) do
+			local _d, _c, tier = CoralSize.readFromPart(p)
+			if tier < unlockTo then
+				total += CoralSize.unlockCostRange(tier, unlockTo)
+				count += 1
+			end
+		end
+		return unlockTo, total, count, false
+	end
+	-- UPGRADE: each coral advances one tier.
+	local total = 0
+	local count = 0
+	local labelTier: number? = nil
+	for _, p in ipairs(parts) do
+		local _d, _c, tier = CoralSize.readFromPart(p)
+		local nxt = CoralSize.nextUnlock(tier)
+		if nxt then
+			total += CoralSize.unlockCost(nxt)
+			count += 1
+			if labelTier == nil then
+				labelTier = nxt
+			end
+		end
+	end
+	return labelTier or CoralSize.MEDIUM, total, count, true
 end
 
 local function selectedItemId(): string?
@@ -937,12 +1446,7 @@ end
 local function getHueAvailableSlots(itemId: string, hue: number, excludePlaceId: string?): number
 	local owned = InventoryState.getHueSeedCount(itemId, hue)
 	local plot = ClientPlot.get()
-	if not plot then
-		return owned
-	end
-	local generic = PlacedCoralIndex.countGenericHue(plot.plotId, itemId, hue, excludePlaceId)
-	local painted = PlacedCoralIndex.countPaintedHue(plot.plotId, itemId, hue, excludePlaceId)
-	return math.max(0, owned + generic - painted)
+	return PlacedCoralIndex.hueAvailableSlots(if plot then plot.plotId else nil, itemId, hue, owned, excludePlaceId)
 end
 
 local function refreshColorSeedLabels()
@@ -977,26 +1481,13 @@ end
 local function showConfirmUnlock(targetClass: number?)
 	confirmColorItemId = nil
 	confirmColorIndex = nil
-	local part = selectedPart()
-	if not part then
+	local unlockTo, cost, count, oneTierEach = planBulkUnlock(targetClass)
+	if count <= 0 then
 		return
 	end
-	local _d, _class, tier = CoralSize.readFromPart(part)
-	local nxt = CoralSize.nextUnlock(tier)
-	if not nxt then
-		return
-	end
-	local unlockTo = nxt
-	if typeof(targetClass) == "number" then
-		local want = CoralSize.clampTier(targetClass)
-		if want > tier then
-			unlockTo = want
-		end
-	end
-	local cost = CoralSize.unlockCostRange(tier, unlockTo)
 	hideConfirm()
 	RelocateController.setInspectModal(true)
-	confirmUnlockTarget = unlockTo
+	confirmUnlockTarget = if oneTierEach then -1 else unlockTo -- -1 = one-tier UPGRADE path
 	local sg = Instance.new("ScreenGui")
 	sg.Name = "OceanTD_CoralSizeConfirm"
 	sg.ResetOnSpawn = false
@@ -1020,7 +1511,7 @@ local function showConfirmUnlock(targetClass: number?)
 	local panel = Instance.new("Frame")
 	panel.AnchorPoint = Vector2.new(0.5, 0.5)
 	panel.Position = UDim2.fromScale(0.5, 0.5)
-	panel.Size = UDim2.fromOffset(320, 240)
+	panel.Size = UDim2.fromOffset(320, 260)
 	panel.BackgroundColor3 = PANEL_BG
 	panel.BorderSizePixel = 0
 	panel.ZIndex = 2
@@ -1037,25 +1528,32 @@ local function showConfirmUnlock(targetClass: number?)
 	panelStroke.Color = STROKE_DARK
 	panelStroke.Parent = panel
 
-	local unlockNames: { string } = {}
-	for t = tier + 1, unlockTo do
-		table.insert(unlockNames, CoralSize.labelFor(t))
-	end
 	local title = Instance.new("TextLabel")
 	title.BackgroundTransparency = 1
 	title.Size = UDim2.new(1, -24, 0, 44)
 	title.Position = UDim2.fromOffset(12, 16)
 	title.Font = UiTheme.Font
-	title.TextSize = if #unlockNames > 1 then 24 else 26
+	title.TextSize = 24
 	title.TextColor3 = Color3.fromRGB(240, 248, 255)
-	title.Text = "Unlock " .. table.concat(unlockNames, " + ")
+	title.Text = if oneTierEach then "Unlock next size" else ("Unlock " .. CoralSize.labelFor(unlockTo))
 	title.ZIndex = 3
 	title.Parent = panel
+
+	local countLbl = Instance.new("TextLabel")
+	countLbl.BackgroundTransparency = 1
+	countLbl.Size = UDim2.new(1, -24, 0, 28)
+	countLbl.Position = UDim2.fromOffset(12, 58)
+	countLbl.Font = UiTheme.Font
+	countLbl.TextSize = 18
+	countLbl.TextColor3 = Color3.fromRGB(200, 220, 235)
+	countLbl.Text = if count == 1 then "1 coral" else (tostring(count) .. " corals")
+	countLbl.ZIndex = 3
+	countLbl.Parent = panel
 
 	local costLbl = Instance.new("TextLabel")
 	costLbl.BackgroundTransparency = 1
 	costLbl.Size = UDim2.new(1, -24, 0, 28)
-	costLbl.Position = UDim2.fromOffset(12, 58)
+	costLbl.Position = UDim2.fromOffset(12, 88)
 	costLbl.Font = UiTheme.Font
 	costLbl.TextSize = 22
 	costLbl.TextColor3 = Color3.fromRGB(255, 220, 120)
@@ -1073,7 +1571,7 @@ local function showConfirmUnlock(targetClass: number?)
 	unlock.BorderSizePixel = 0
 	unlock.Size = UDim2.fromOffset(200, 48)
 	unlock.AnchorPoint = Vector2.new(0.5, 0)
-	unlock.Position = UDim2.new(0.5, 0, 0, 100)
+	unlock.Position = UDim2.new(0.5, 0, 0, 124)
 	unlock.ZIndex = 3
 	unlock.Parent = panel
 	local uc = Instance.new("UICorner")
@@ -1100,13 +1598,18 @@ local function showConfirmUnlock(targetClass: number?)
 	end)
 	unlock.Activated:Connect(function()
 		local cash = tonumber(player:GetAttribute(Constants.SAND_DOLLARS_ATTR)) or 0
-		if cash < cost then
+		if cash <= 0 and cost > 0 then
 			showToast("Collect More $D")
 			return
 		end
-		local n = unlockTo
+		local oneTier = confirmUnlockTarget == -1
+		local n = confirmUnlockTarget
 		hideConfirm()
-		invokeSize(n, true)
+		if oneTier then
+			invokeUpgradeNextOneTier()
+		elseif typeof(n) == "number" then
+			invokeSize(n, true)
+		end
 	end)
 
 	local cancel = Instance.new("TextButton")
@@ -1119,7 +1622,7 @@ local function showConfirmUnlock(targetClass: number?)
 	cancel.BorderSizePixel = 0
 	cancel.Size = UDim2.fromOffset(200, 44)
 	cancel.AnchorPoint = Vector2.new(0.5, 0)
-	cancel.Position = UDim2.new(0.5, 0, 0, 160)
+	cancel.Position = UDim2.new(0.5, 0, 0, 184)
 	cancel.ZIndex = 3
 	cancel.Parent = panel
 	local cc = Instance.new("UICorner")
@@ -1167,11 +1670,11 @@ local function tryUnlockColorConfirm()
 end
 
 local function showConfirmColorUnlock(itemId: string, colorIndex: number)
+	local cost = HueSeeds.SEED_COST
+	hideConfirm()
 	confirmUnlockTarget = nil
 	confirmColorItemId = itemId
 	confirmColorIndex = PlotOutlineColors.clampCoralIndex(colorIndex)
-	local cost = HueSeeds.SEED_COST
-	hideConfirm()
 	RelocateController.setInspectModal(true)
 	local sg = Instance.new("ScreenGui")
 	sg.Name = "OceanTD_CoralColorConfirm"
@@ -1300,19 +1803,42 @@ local function showConfirmColorUnlock(itemId: string, colorIndex: number)
 end
 
 local function onLetter(i: number)
-	local part = selectedPart()
-	if not part then
+	local parts = selectedParts()
+	if #parts == 0 then
 		return
 	end
-	local _d, class, tier = CoralSize.readFromPart(part)
-	if i == class then
+	if #parts == 1 then
+		local part = parts[1]
+		local _d, class, tier = CoralSize.readFromPart(part)
+		if i == class then
+			return
+		end
+		if i <= tier then
+			invokeSize(i, false)
+			return
+		end
+		showConfirmUnlock(i)
 		return
 	end
-	if i <= tier then
+	local anyNeedUnlock = false
+	local anyCanResize = false
+	for _, p in ipairs(parts) do
+		local _d, class, tier = CoralSize.readFromPart(p)
+		if class == i then
+			continue
+		end
+		if tier < i then
+			anyNeedUnlock = true
+		else
+			anyCanResize = true
+		end
+	end
+	if anyCanResize then
 		invokeSize(i, false)
-		return
 	end
-	showConfirmUnlock(i)
+	if anyNeedUnlock then
+		showConfirmUnlock(i)
+	end
 end
 
 local function startUpgradeFx()
@@ -1473,7 +1999,7 @@ local function spinColorDice()
 	end)
 end
 
-local function applyCoralPaint(part: BasePart, idx: number, paint: Color3, placeId: string)
+local function applyCoralPaint(part: BasePart, idx: number, paint: Color3, placeId: string, skipHaptic: boolean?)
 	activeColorIndex = idx
 	focusColorIndex = idx
 	local webPaint: Color3? = nil
@@ -1487,9 +2013,11 @@ local function applyCoralPaint(part: BasePart, idx: number, paint: Color3, place
 	end
 	part:SetAttribute("OceanTD_ColorIndex", idx)
 	CoralVisual.setRestColor(part, paint, webPaint, webIdx)
-	RelocateController.syncSelectedRestColor()
+	RelocateController.syncPartRestColor(part)
 	refreshColorSwatches()
-	UiHaptics.pulseShort()
+	if not skipHaptic then
+		UiHaptics.pulseShort()
+	end
 	colorSendToken += 1
 	local myToken = colorSendToken
 	task.spawn(function()
@@ -1509,8 +2037,7 @@ local function applyCoralPaint(part: BasePart, idx: number, paint: Color3, place
 		if myToken ~= colorSendToken then
 			return
 		end
-		local still = selectedPart()
-		if still ~= part then
+		if not RelocateController.isPartSelected(part) then
 			return
 		end
 		if not ok or typeof(result) ~= "table" or result.ok ~= true then
@@ -1533,102 +2060,234 @@ local function applyCoralPaint(part: BasePart, idx: number, paint: Color3, place
 			confirmedWebIdx = result.webColorIndex
 		end
 		CoralVisual.setRestColor(part, confirmedPaint, confirmedWeb, confirmedWebIdx)
-		RelocateController.syncSelectedRestColor()
+		RelocateController.syncPartRestColor(part)
 		refreshColorSwatches()
 	end)
 end
 
-local function selectCoralColor(index: number)
-	local part = selectedPart()
-	if not part then
-		return false
+local function pickBulkHueTargets(parts: { BasePart }, itemId: string, hue: number, maxCount: number): { BasePart }
+	if maxCount <= 0 then
+		return {}
 	end
-	local placeId = part:GetAttribute("OceanTD_PlaceId")
-	if typeof(placeId) ~= "string" or placeId == "" then
+	local defaults: { BasePart } = {}
+	local others: { BasePart } = {}
+	for _, p in ipairs(parts) do
+		if p:GetAttribute("OceanTD_ItemId") ~= itemId then
+			continue
+		end
+		local cur = p:GetAttribute("OceanTD_ColorIndex")
+		if typeof(cur) == "number" and PlotOutlineColors.clampCoralIndex(cur) == hue then
+			continue -- already this hue
+		end
+		if typeof(cur) ~= "number" then
+			table.insert(defaults, p)
+		else
+			table.insert(others, p)
+		end
+	end
+	local rng = Random.new()
+	shuffleInPlace(defaults, rng)
+	shuffleInPlace(others, rng)
+	local out: { BasePart } = {}
+	for _, p in ipairs(defaults) do
+		if #out >= maxCount then
+			break
+		end
+		table.insert(out, p)
+	end
+	for _, p in ipairs(others) do
+		if #out >= maxCount then
+			break
+		end
+		table.insert(out, p)
+	end
+	return out
+end
+
+local function shuffleSelectedHueShades(idx: number, parts: { BasePart }): number
+	spinColorDice()
+	local applied = 0
+	for _, p in ipairs(parts) do
+		local placeId = placeIdOf(p)
+		if placeId then
+			applyCoralPaint(p, idx, PlotOutlineColors.randomHueVariant(idx), placeId, true)
+			applied += 1
+		end
+	end
+	return applied
+end
+
+local function selectCoralColor(index: number)
+	local parts = selectedParts()
+	if #parts == 0 then
 		return false
 	end
 	local idx = PlotOutlineColors.clampCoralIndex(index)
 	focusColorIndex = idx
 	RelocateController.setHueColorEditing(true)
-	local itemId = part:GetAttribute("OceanTD_ItemId")
-	if typeof(itemId) == "string" and itemId ~= "" and not CoralColorUnlockState.isUnlocked(itemId, idx) then
-		if activeColorIndex ~= idx then
-			showConfirmColorUnlock(itemId, idx)
-			return true
+
+	if #parts == 1 then
+		local part = parts[1]
+		local placeId = placeIdOf(part)
+		if not placeId then
+			return false
 		end
-	end
-	if activeColorIndex ~= idx and typeof(itemId) == "string" and itemId ~= "" then
+		local itemId = part:GetAttribute("OceanTD_ItemId")
 		local partSeedHue = part:GetAttribute("OceanTD_SeedHue")
 		local canUseOwnSeed = activeColorIndex == nil
 			and typeof(partSeedHue) == "number"
 			and PlotOutlineColors.clampCoralIndex(partSeedHue) == idx
-		if not canUseOwnSeed and getHueAvailableSlots(itemId, idx, placeId) <= 0 then
+		local available = if typeof(itemId) == "string" and itemId ~= ""
+			then getHueAvailableSlots(itemId, idx, placeId)
+			else 0
+		if typeof(itemId) == "string" and itemId ~= "" and not canUseOwnSeed and available <= 0 then
+			if activeColorIndex ~= idx then
+				showConfirmColorUnlock(itemId, idx)
+				return true
+			end
 			showToast("All slots in use")
 			return true
 		end
-	end
-	if activeColorIndex == idx then
-		-- Re-tap active swatch: spin dice and roll a new shade in that hue.
-		spinColorDice()
-		applyCoralPaint(part, idx, PlotOutlineColors.randomHueVariant(idx), placeId)
+		if activeColorIndex == idx then
+			spinColorDice()
+			applyCoralPaint(part, idx, PlotOutlineColors.randomHueVariant(idx), placeId)
+			return true
+		end
+		applyCoralPaint(part, idx, PlotOutlineColors.coralColor(idx), placeId)
 		return true
 	end
-	-- New swatch: paint the palette base color.
-	applyCoralPaint(part, idx, PlotOutlineColors.coralColor(idx), placeId)
+
+	if activeColorIndex == idx then
+		local applied = shuffleSelectedHueShades(idx, parts)
+		if applied > 0 then
+			UiHaptics.pulseShort()
+		end
+		return true
+	end
+
+	-- Multi: apply hue to as many as slots allow; prefer default-painted corals.
+	-- Group by itemId — each species has its own hue seed pool.
+	local byItem: { [string]: { BasePart } } = {}
+	for _, p in ipairs(parts) do
+		local itemId = p:GetAttribute("OceanTD_ItemId")
+		if typeof(itemId) == "string" and itemId ~= "" then
+			if not byItem[itemId] then
+				byItem[itemId] = {}
+			end
+			table.insert(byItem[itemId], p)
+		end
+	end
+	local totalCandidates = 0
+	local totalApplied = 0
+	local anyLocked = false
+	for itemId, group in pairs(byItem) do
+		local slots = getHueAvailableSlots(itemId, idx)
+		local candidates = pickBulkHueTargets(group, itemId, idx, math.max(slots, 0))
+		-- If slots are 0 but some can use own seed / already painted path — still count candidates wanting paint
+		local wanting = 0
+		for _, p in ipairs(group) do
+			local cur = p:GetAttribute("OceanTD_ColorIndex")
+			if not (typeof(cur) == "number" and PlotOutlineColors.clampCoralIndex(cur) == idx) then
+				wanting += 1
+			end
+		end
+		totalCandidates += wanting
+		if slots <= 0 and wanting > 0 then
+			anyLocked = true
+		end
+		for _, p in ipairs(candidates) do
+			local placeId = placeIdOf(p)
+			if placeId then
+				applyCoralPaint(p, idx, PlotOutlineColors.coralColor(idx), placeId)
+				totalApplied += 1
+			end
+		end
+	end
+	if totalApplied == 0 and anyLocked then
+		-- Offer buy for the primary's item if possible
+		local primary = selectedPart()
+		local itemId = if primary then primary:GetAttribute("OceanTD_ItemId") else nil
+		if typeof(itemId) == "string" then
+			showConfirmColorUnlock(itemId, idx)
+			return true
+		end
+		showToast("All slots in use")
+		return true
+	end
+	if totalApplied > 0 and totalApplied < totalCandidates then
+		showToast("Only some corals got this color")
+	end
+	UiHaptics.pulseShort()
 	return true
 end
 
 local function selectDefaultPalette(): boolean
-	local part = selectedPart()
-	if not part then
-		return false
-	end
-	local placeId = part:GetAttribute("OceanTD_PlaceId")
-	if typeof(placeId) ~= "string" or placeId == "" then
+	local parts = selectedParts()
+	if #parts == 0 then
 		return false
 	end
 	focusColorIndex = DEFAULT_PALETTE_SWATCH
 	RelocateController.setHueColorEditing(true)
 	activeColorIndex = nil
-	CoralVisual.clearPalettePaint(part)
-	RelocateController.syncSelectedRestColor()
+	local cleared = 0
+	local targets: { { part: BasePart, placeId: string } } = {}
+	for _, part in ipairs(parts) do
+		local placeId = placeIdOf(part)
+		if not placeId then
+			continue
+		end
+		if typeof(part:GetAttribute("OceanTD_ColorIndex")) ~= "number" then
+			continue
+		end
+		CoralVisual.clearPalettePaint(part)
+		table.insert(targets, { part = part, placeId = placeId })
+		cleared += 1
+	end
+	for _, t in ipairs(targets) do
+		RelocateController.syncPartRestColor(t.part)
+	end
 	refreshColorSwatches()
-	playDefaultPaletteSound()
-	flashDefaultSwatchStroke()
-	UiHaptics.pulseShort()
+	if cleared > 0 then
+		playDefaultPaletteSound()
+		flashDefaultSwatchStroke()
+		UiHaptics.pulseShort()
+	end
 	colorSendToken += 1
 	local myToken = colorSendToken
 	task.spawn(function()
-		local ok, result = pcall(function()
-			return clearHueRf:InvokeServer(placeId)
-		end)
-		if myToken ~= colorSendToken then
-			return
+		local failed = 0
+		for _, t in ipairs(targets) do
+			if myToken ~= colorSendToken then
+				return
+			end
+			local ok, result = pcall(function()
+				return clearHueRf:InvokeServer(t.placeId)
+			end)
+			if not ok or typeof(result) ~= "table" or result.ok ~= true then
+				failed += 1
+			end
 		end
-		local still = selectedPart()
-		if still ~= part then
-			return
-		end
-		if not ok or typeof(result) ~= "table" or result.ok ~= true then
-			warn("[CoralInspect] Clear hue failed", result)
+		if failed > 0 and cleared > failed then
+			showToast("Only some corals reset to default")
+		elseif failed > 0 and cleared == failed then
+			showToast("Default paint failed")
 		end
 	end)
 	return true
 end
 
 local function rollActiveHueShade()
-	local part = selectedPart()
-	if not part or activeColorIndex == nil then
-		return
-	end
-	local placeId = part:GetAttribute("OceanTD_PlaceId")
-	if typeof(placeId) ~= "string" or placeId == "" then
+	local parts = selectedParts()
+	if #parts == 0 or activeColorIndex == nil then
 		return
 	end
 	local idx = activeColorIndex
 	RelocateController.setHueColorEditing(true)
-	spinColorDice()
-	applyCoralPaint(part, idx, PlotOutlineColors.randomHueVariant(idx), placeId)
+	local applied = shuffleSelectedHueShades(idx, parts)
+	if applied == 0 then
+		return
+	end
+	UiHaptics.pulseShort()
 end
 
 local function refreshHeaderSeedBadge()
@@ -2551,7 +3210,10 @@ function CoralInspectPanel.bind(panel: GuiObject, catalogFrame: GuiObject)
 					tryUnlockColorConfirm()
 				else
 					local n = confirmUnlockTarget
-					if n then
+					if n == -1 then
+						hideConfirm()
+						invokeUpgradeNextOneTier()
+					elseif typeof(n) == "number" and n > 0 then
 						hideConfirm()
 						invokeSize(n, true)
 					end
@@ -2570,7 +3232,10 @@ function CoralInspectPanel.bind(panel: GuiObject, catalogFrame: GuiObject)
 					tryUnlockColorConfirm()
 				else
 					local n = confirmUnlockTarget
-					if n then
+					if n == -1 then
+						hideConfirm()
+						invokeUpgradeNextOneTier()
+					elseif typeof(n) == "number" and n > 0 then
 						hideConfirm()
 						invokeSize(n, true)
 					end

@@ -121,6 +121,10 @@ local function isGamepad(): boolean
 		or t == Enum.UserInputType.Gamepad4
 end
 
+local function isKeyboard(): boolean
+	return UserInputService:GetLastInputType() == Enum.UserInputType.Keyboard
+end
+
 local function applyUnlockStroke(btn: GuiObject)
 	local stroke = btn:FindFirstChild("_OceanTD_UnlockStroke")
 	if not (stroke and stroke:IsA("UIStroke")) then
@@ -1003,7 +1007,7 @@ local function showConfirmUnlock()
 		linkTwoWay(unlock, cancel)
 		GuiService.AutoSelectGuiEnabled = true
 		GuiService.SelectedObject = unlock
-	else
+	elseif isKeyboard() then
 		local tipT0 = os.clock()
 		local tipConn: RBXScriptConnection? = nil
 		tipConn = RunService.Heartbeat:Connect(function()

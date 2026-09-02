@@ -211,7 +211,12 @@ local function playTick()
 end
 
 local function applySeedWheelDisplayOrder(gui: ScreenGui)
-	-- Stay under MobileLeftUI.dPad.Settings (♪ volume button).
+	-- Under skills bubbles while open; otherwise under MobileLeftUI (♪ / dPad).
+	local skills = playerGui:FindFirstChild("MobileSkillsA")
+	if playerGui:GetAttribute("OceanTD_SkillsBubblesOpen") == true and skills and skills:IsA("ScreenGui") then
+		gui.DisplayOrder = math.max(0, skills.DisplayOrder - 1)
+		return
+	end
 	local left = playerGui:FindFirstChild("MobileLeftUI")
 	if left and left:IsA("ScreenGui") then
 		gui.DisplayOrder = left.DisplayOrder - 1
@@ -1252,6 +1257,13 @@ SeedWheelRevealApi.abortActiveReveal = abortActiveReveal
 SeedWheelRevealApi.isBusy = function(): boolean
 	return busy
 end
+
+playerGui:GetAttributeChangedSignal("OceanTD_SkillsBubblesOpen"):Connect(function()
+	local overlay = playerGui:FindFirstChild("OceanTD_SeedWheel")
+	if overlay and overlay:IsA("ScreenGui") then
+		applySeedWheelDisplayOrder(overlay)
+	end
+end)
 
 task.spawn(preloadWheelIcons)
 

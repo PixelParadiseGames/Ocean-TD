@@ -349,6 +349,59 @@ function PlacedCoralIndex.countGenericHue(
 	return n
 end
 
+-- Painted corals that already consumed a placement seed for this hue (avoid double-counting vs owned).
+function PlacedCoralIndex.countSeedBackedPaintedHue(
+	plotId: string,
+	itemId: string,
+	colorIndex: number,
+	excludePlaceId: string?
+): number
+	PlacedCoralIndex.ensure()
+	local bucket = buckets[plotId]
+	if not bucket then
+		return 0
+	end
+	local hue = PlotOutlineColors.clampCoralIndex(colorIndex)
+	local n = 0
+	for _, part in ipairs(bucket.parts) do
+		if not part.Parent then
+			continue
+		end
+		if part:GetAttribute("OceanTD_ItemId") ~= itemId then
+			continue
+		end
+		local pid = part:GetAttribute("OceanTD_PlaceId")
+		if typeof(excludePlaceId) == "string" and excludePlaceId ~= "" and pid == excludePlaceId then
+			continue
+		end
+		local attr = part:GetAttribute("OceanTD_ColorIndex")
+		if typeof(attr) ~= "number" or PlotOutlineColors.clampCoralIndex(attr) ~= hue then
+			continue
+		end
+		local seedHue = part:GetAttribute("OceanTD_SeedHue")
+		if typeof(seedHue) == "number" and PlotOutlineColors.clampCoralIndex(seedHue) == hue then
+			n += 1
+		end
+	end
+	return n
+end
+
+function PlacedCoralIndex.hueAvailableSlots(
+	plotId: string?,
+	itemId: string,
+	colorIndex: number,
+	owned: number,
+	excludePlaceId: string?
+): number
+	if not plotId then
+		return math.max(0, owned)
+	end
+	local generic = PlacedCoralIndex.countGenericHue(plotId, itemId, colorIndex, excludePlaceId)
+	local painted = PlacedCoralIndex.countPaintedHue(plotId, itemId, colorIndex, excludePlaceId)
+	local backed = PlacedCoralIndex.countSeedBackedPaintedHue(plotId, itemId, colorIndex, excludePlaceId)
+	return math.max(0, owned + generic - painted + backed)
+end
+
 function PlacedCoralIndex.onChanged(cb: () -> ()): RBXScriptConnection
 	return changedEvent.Event:Connect(cb)
 end

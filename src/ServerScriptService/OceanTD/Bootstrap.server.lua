@@ -474,6 +474,24 @@ requestCoralSize.OnServerInvoke = function(player: Player, placeId: any, targetC
 	return PlacementService.setCoralSize(player, placeId, want, unlockNext == true)
 end
 
+local requestCoralSizeBulk = Remotes.getFunction("RequestCoralSizeBulk")
+requestCoralSizeBulk.OnServerInvoke = function(player: Player, placeIds: any, targetClass: any, unlockNext: any)
+	if typeof(placeIds) ~= "table" then
+		return { ok = false, errorCode = "BadRequest", upgraded = {} }
+	end
+	local ids: { string } = {}
+	for _, id in ipairs(placeIds) do
+		if typeof(id) == "string" and id ~= "" then
+			table.insert(ids, id)
+		end
+	end
+	local want = tonumber(targetClass)
+	if typeof(want) ~= "number" then
+		return { ok = false, errorCode = "BadRequest", upgraded = {} }
+	end
+	return PlacementService.setCoralSizeBulk(player, ids, want, unlockNext == true)
+end
+
 local requestCoralColor = Remotes.getFunction("RequestCoralColor")
 requestCoralColor.OnServerInvoke = function(
 	player: Player,

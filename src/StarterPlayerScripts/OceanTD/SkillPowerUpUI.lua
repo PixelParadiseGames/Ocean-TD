@@ -1060,6 +1060,10 @@ local function doUnlockRemote()
 			WaveSim.clampSpeedToMaxStep(SkillStages.waveSpeedMaxStep(newStage))
 		end
 		if skillId == "PlotSize" then
+			-- Drop avatar-cam ownership before ForceClose so its restore tween can't fight the cinematic.
+			pcall(function()
+				require(script.Parent:WaitForChild("SkillsAvatarCam")).releaseForCinematic()
+			end)
 			-- ForceClose always tears down skills + powerup; avoid close() while open
 			-- so onClosed cannot race HUD restore mid-cinematic.
 			playerGui:SetAttribute("OceanTD_ForceCloseSkills", os.clock())

@@ -50,6 +50,7 @@ local REMOTE_FUNCTIONS = {
 	"RequestSetSkillActiveStage",
 	"RequestResetSkillStages",
 	"RequestCoralSize",
+	"RequestCoralSizeBulk",
 	"RequestCoralColor",
 	"RequestClearCoralHue",
 	"RequestUnlockCoralColor",

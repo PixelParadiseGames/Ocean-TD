@@ -38,6 +38,8 @@ local PlaceConfirmHitTest = require(script.Parent:WaitForChild("PlaceConfirmHitT
 local RelocateConsts = require(script.Parent:WaitForChild("RelocateConsts"))
 local RelocateHitTest = require(script.Parent:WaitForChild("RelocateHitTest"))
 local BrainSnapPreview = require(script.Parent:WaitForChild("BrainSnapPreview"))
+local RelocateMultiSelect = require(script.Parent:WaitForChild("RelocateMultiSelect"))
+local RelocatePickHover = require(script.Parent:WaitForChild("RelocatePickHover"))
 
 local RelocateController = {}
 
@@ -50,6 +52,7 @@ local activeChanged = Instance.new("BindableEvent")
 local r1WhileActive: (() -> boolean)? = nil
 local aWhileIdle: (() -> boolean)? = nil
 local busy = false
+local active = false
 local introAnimating = false
 local gamepadRelocate = false
 local gamepadCursor: Vector2? = nil
@@ -120,17 +123,7 @@ local savedCameraCFrame: CFrame? = nil
 local savedTouchControlsEnabled: boolean? = nil
 local jumpUnlockConn: RBXScriptConnection? = nil
 local loopConn: RBXScriptConnection? = nil
-local hoverConn: RBXScriptConnection? = nil
 local inputConns: { RBXScriptConnection } = {}
-
--- Hover neon flash (backpack open, not relocating).
-local hoverPart: BasePart? = nil
-local hoverBaseMaterial: Enum.Material? = nil
-local hoverBaseColor: Color3? = nil
-local hoverHintBb: BillboardGui? = nil
-local hoverHintBadge: Frame? = nil
-local hoverHintMove: Frame? = nil
-local hoverHintT0 = 0
 
 -- White grow/shrink ring so players can see the interactive coral (hover + move tool).
 local selectRing = SelectRing.new()
@@ -141,6 +134,10 @@ local pendingPickScreen: Vector2? = nil
 -- While relocating: tap another coral to switch (deferred to release so drag still works).
 local pendingCoralSwitch: BasePart? = nil
 local pendingCoralSwitchScreen: Vector2? = nil
+
+local function clearHover()
+	RelocatePickHover.clearHover()
+end
 
 local function chromeRefs(): RelocateHitTest.ChromeRefs
 	return {
@@ -192,21 +189,7 @@ local function clampGamepadCursor(pos: Vector2): Vector2
 	return Vector2.new(math.clamp(pos.X, 8, vp.X - 8), math.clamp(pos.Y, 8, vp.Y - 8))
 end
 
-local function hoverPickScreenPos(): Vector2
-	-- Gamepad: highlight coral near viewport center (look / walk aim).
-	if isUsingGamepad() then
-		local cam = Workspace.CurrentCamera
-		if cam then
-			local vp = cam.ViewportSize
-			-- Same space as GetMouseLocation / ViewportPointToRay (no top-bar inset).
-			return Vector2.new(vp.X * 0.5, vp.Y * 0.5)
-		end
-	end
-	return UserInputService:GetMouseLocation()
-end
-
 -- GetMouseLocation is viewport space. Pair with ViewportPointToRay / WorldToViewportPoint.
--- ScreenPoint* APIs add GuiInset and park the hit ~36px above the cursor.
 local function viewportRay(cam: Camera, vp: Vector2): Ray
 	return cam:ViewportPointToRay(vp.X, vp.Y)
 end
@@ -917,7 +900,7 @@ local function setBlockHighlight(target: BasePart?)
 		return
 	end
 	-- If hover neon is on this coral, restore first so we don't save Neon as the base.
-	if hoverPart == target then
+	if RelocatePickHover.getHoverPart() == target then
 		clearHover()
 	end
 	local restMat, restColor = CoralVisual.readRestLook(target)
@@ -1003,365 +986,20 @@ local function raycastTerrain(screenPos: Vector2): Vector3?
 	return nil
 end
 
-local function isPlacedCoralPart(inst: Instance): BasePart?
-	if not inst:IsA("BasePart") then
-		return nil
-	end
-	-- Ignore local wave FX (food orbs / ammo) if they ever share a folder.
-	local n = inst.Name
-	if n == "OceanTD_CoralAmmo" or n == "OceanTD_FoodOrb" or string.find(n, "Tang_", 1, true) == 1 then
-		return nil
-	end
-	if typeof(inst:GetAttribute("OceanTD_GhostBaseR")) == "number" then
-		return nil
-	end
-	if typeof(inst:GetAttribute("OceanTD_ItemId")) == "string" or typeof(inst:GetAttribute("OceanTD_SpeciesId")) == "string" then
-		return inst
-	end
-	return nil
-end
-
-local function getPlotFolder(): Folder?
-	local plot = ClientPlot.get()
-	if not plot then
-		return nil
-	end
-	local root = Workspace:FindFirstChild("OceanTD_Placed")
-	local folder = root and root:FindFirstChild(plot.plotId)
-	if folder and folder:IsA("Folder") then
-		return folder
-	end
-	return nil
-end
-
--- Prefer a real physics hit on the coral. Fallback: coral center near the tap in screen space
--- (NOT along-ray 3D proximity — that grabbed distant corals when tapping empty ground).
--- Occlusion: never pick a coral behind terrain / other world geometry.
 local function pickPlacedCoral(screenPos: Vector2): BasePart?
-	local folder = getPlotFolder()
-	local cam = Workspace.CurrentCamera
-	if not folder or not cam then
-		return nil
-	end
-
-	-- World pick must hit terrain first if it blocks — do NOT Include-only the coral folder
-	-- (that passes through terrain and selects the far side).
-	local exclude: { Instance } = {}
-	if player.Character then
-		table.insert(exclude, player.Character)
-	end
-	if part then
-		table.insert(exclude, part)
-	end
-
-	local worldParams = RaycastParams.new()
-	worldParams.FilterType = Enum.RaycastFilterType.Exclude
-	worldParams.FilterDescendantsInstances = exclude
-
-	local function coralFromHit(inst: Instance): BasePart?
-		local cur: Instance? = inst
-		while cur and cur ~= folder.Parent do
-			if cur == folder then
-				break
-			end
-			if cur:IsA("BasePart") and cur:IsDescendantOf(folder) then
-				local coral = isPlacedCoralPart(cur)
-				if coral then
-					return coral
-				end
-			end
-			cur = cur.Parent
-		end
-		return nil
-	end
-
-	local ray = viewportRay(cam, screenPos)
-	local result = Workspace:Raycast(ray.Origin, ray.Direction * 800, worldParams)
-	if result then
-		local hit = coralFromHit(result.Instance)
-		if hit then
-			return hit
-		end
-	end
-
-	-- Near-miss fallback: closest on-screen coral that still has clear LOS from camera.
-	local losParams = RaycastParams.new()
-	losParams.FilterType = Enum.RaycastFilterType.Exclude
-
-	local function hasLineOfSight(coral: BasePart): boolean
-		local origin = cam.CFrame.Position
-		local target = coral.Position
-		local delta = target - origin
-		local dist = delta.Magnitude
-		if dist < 0.25 then
-			return true
-		end
-		local list: { Instance } = { coral }
-		if player.Character then
-			table.insert(list, player.Character)
-		end
-		losParams.FilterDescendantsInstances = list
-		-- Ray only as far as the coral so we can't "hit" geometry behind it.
-		local losHit = Workspace:Raycast(origin, delta.Unit * dist, losParams)
-		if not losHit then
-			return true
-		end
-		return losHit.Distance >= dist - 0.35
-	end
-
-	local radius = if isUsingGamepad() then math.max(C.PICK_SCREEN_PX, 72) else C.PICK_SCREEN_PX
-	-- Top-3 nearest on screen, then LOS-test in order (at most 3 occlusion rays).
-	local c1: BasePart? = nil
-	local c2: BasePart? = nil
-	local c3: BasePart? = nil
-	local d1, d2, d3 = radius + 1, radius + 1, radius + 1
-	for _, inst in ipairs(folder:GetChildren()) do
-		local coral = isPlacedCoralPart(inst)
-		if coral and coral ~= part then
-			local sp = worldToViewport(cam, coral.Position)
-			if sp then
-				local d = (sp - screenPos).Magnitude
-				if d <= radius then
-					if d < d1 then
-						c3, d3 = c2, d2
-						c2, d2 = c1, d1
-						c1, d1 = coral, d
-					elseif d < d2 then
-						c3, d3 = c2, d2
-						c2, d2 = coral, d
-					elseif d < d3 then
-						c3, d3 = coral, d
-					end
-				end
-			end
-		end
-	end
-
-	if c1 and hasLineOfSight(c1) then
-		return c1
-	end
-	if c2 and hasLineOfSight(c2) then
-		return c2
-	end
-	if c3 and hasLineOfSight(c3) then
-		return c3
-	end
-	return nil
+	return RelocatePickHover.pick(screenPos)
 end
 
--- True when the pointer is on the already-selected coral.
--- pickPlacedCoral excludes `part`, so a press on the selected ball can otherwise
--- fall through and falsely hit a neighbor — which stole the drag gesture.
 local function pointerHitsSelectedCoral(screenPos: Vector2): boolean
-	if not part or not part.Parent then
-		return false
-	end
-	local cam = Workspace.CurrentCamera
-	if not cam then
-		return false
-	end
-	local ray = viewportRay(cam, screenPos)
-	local params = RaycastParams.new()
-	params.FilterType = Enum.RaycastFilterType.Exclude
-	local exclude: { Instance } = {}
-	if player.Character then
-		table.insert(exclude, player.Character)
-	end
-	params.FilterDescendantsInstances = exclude
-	local result = Workspace:Raycast(ray.Origin, ray.Direction * 800, params)
-	if result then
-		local cur: Instance? = result.Instance
-		while cur do
-			if cur == part then
-				return true
-			end
-			cur = cur.Parent
-		end
-	end
-	local sp = worldToViewport(cam, part.Position)
-	if sp then
-		local radius = if isUsingGamepad() then math.max(C.PICK_SCREEN_PX, 72) else C.PICK_SCREEN_PX
-		if (sp - screenPos).Magnitude <= radius then
-			return true
-		end
-	end
-	return false
-end
-
-local function destroyHoverHint()
-	if hoverHintBb then
-		hoverHintBb:Destroy()
-		hoverHintBb = nil
-	end
-	hoverHintBadge = nil
-	hoverHintMove = nil
-end
-
-local function ensureHoverHint(adornee: BasePart)
-	if hoverHintBb and hoverHintBb.Parent and hoverHintBb.Adornee == adornee then
-		return
-	end
-	destroyHoverHint()
-	local bb = Instance.new("BillboardGui")
-	bb.Name = "OceanTD_RelocateHoverHint"
-	bb.AlwaysOnTop = true
-	bb.Active = false
-	bb.LightInfluence = 0
-	bb.Size = UDim2.fromOffset(C.HOVER_HINT_SIZE, C.HOVER_HINT_SIZE)
-	bb.StudsOffset = Vector3.new(0, 2.6, 0)
-	bb.MaxDistance = 2000
-	bb.Adornee = adornee
-	bb.Parent = playerGui
-
-	local badge = Instance.new("Frame")
-	badge.Name = "R1Badge"
-	badge.BackgroundColor3 = Color3.new(0, 0, 0)
-	badge.BackgroundTransparency = 0.15
-	badge.BorderSizePixel = 0
-	badge.Size = UDim2.fromScale(1, 1)
-	badge.Parent = bb
-	UiCircles.ensure(badge)
-	local lbl = Instance.new("TextLabel")
-	lbl.BackgroundTransparency = 1
-	lbl.Size = UDim2.fromScale(1, 1)
-	lbl.Font = UiTheme.Font
-	lbl.Text = "R1"
-	lbl.TextColor3 = Color3.new(1, 1, 1)
-	lbl.TextScaled = true
-	lbl.Parent = badge
-
-	local moveBg = Instance.new("Frame")
-	moveBg.Name = "MoveHint"
-	moveBg.BackgroundColor3 = Color3.new(0, 0, 0)
-	moveBg.BackgroundTransparency = 0.15
-	moveBg.BorderSizePixel = 0
-	moveBg.Size = UDim2.fromScale(1, 1)
-	moveBg.Visible = false
-	moveBg.Parent = bb
-	UiCircles.ensure(moveBg)
-	local move = Instance.new("ImageLabel")
-	move.BackgroundTransparency = 1
-	move.AnchorPoint = Vector2.new(0.5, 0.5)
-	move.Position = UDim2.fromScale(0.5, 0.5)
-	move.Size = UDim2.fromScale(0.7, 0.7)
-	move.Image = C.MOVE_ICON_IMAGE
-	move.ScaleType = Enum.ScaleType.Fit
-	move.Parent = moveBg
-
-	hoverHintBb = bb
-	hoverHintBadge = badge
-	hoverHintMove = moveBg
-	hoverHintT0 = os.clock()
-end
-
-local function updateHoverHint()
-	if not isUsingGamepad() or not hoverPart or not hoverPart.Parent then
-		destroyHoverHint()
-		return
-	end
-	ensureHoverHint(hoverPart)
-	local showMove = (math.floor((os.clock() - hoverHintT0) / C.HOVER_HINT_PERIOD) % 2) == 1
-	if hoverHintBadge then
-		hoverHintBadge.Visible = not showMove
-	end
-	if hoverHintMove then
-		hoverHintMove.Visible = showMove
-	end
-end
-
-local function clearHover()
-	destroyHoverHint()
-	-- Don't tear down the relocate ring while the move tool owns the coral.
-	if SelectRing.getAdornee(selectRing) == hoverPart then
-		SelectRing.destroy(selectRing)
-	end
-	if hoverPart and hoverPart.Parent then
-		-- Prefer stored rest look so a failed prior capture can't leave Neon stuck.
-		if hoverBaseMaterial and hoverBaseColor then
-			hoverPart.Material = hoverBaseMaterial
-			hoverPart.Color = hoverBaseColor
-		else
-			CoralVisual.applyRestLook(hoverPart)
-		end
-	elseif hoverPart then
-		-- Part was destroyed while highlighted — still drop SelectRing if needed.
-		SelectRing.destroy(selectRing)
-	end
-	hoverPart = nil
-	hoverBaseMaterial = nil
-	hoverBaseColor = nil
-end
-
-local function setHover(target: BasePart?)
-	if hoverPart == target then
-		return
-	end
-	clearHover()
-	if not target or not target.Parent then
-		return
-	end
-	-- Don't hover-paint a coral that's already in spot-taken neon.
-	if blockPart == target then
-		return
-	end
-	-- Skip wave ammo / food if mis-picked.
-	if not isPlacedCoralPart(target) then
-		return
-	end
-	hoverPart = target
-	-- Always restore from rest attributes (never capture mid-pulse Neon as base).
-	local restMat, restColor = CoralVisual.readRestLook(target)
-	hoverBaseMaterial = restMat
-	hoverBaseColor = restColor
-	target.Material = Enum.Material.Neon
-	SelectRing.ensure(selectRing, target, playerGui)
-end
-
-local function updateHoverFlash()
-	if not hoverPart or not hoverPart.Parent or not hoverBaseColor then
-		return
-	end
-	-- Pulse bright neon in the coral's own color.
-	local pulse = 0.5 + 0.5 * math.sin(os.clock() * 9)
-	hoverPart.Material = Enum.Material.Neon
-	hoverPart.Color = hoverBaseColor:Lerp(Color3.new(1, 1, 1), 0.12 + 0.28 * pulse)
-	SelectRing.pulse(selectRing)
+	return RelocatePickHover.pointerHitsSelected(screenPos)
 end
 
 local function stopHoverLoop()
-	if hoverConn then
-		hoverConn:Disconnect()
-		hoverConn = nil
-	end
-	clearHover()
+	RelocatePickHover.stopLoop()
 end
 
 local function startHoverLoop()
-	if hoverConn then
-		return
-	end
-	hoverConn = RunService.RenderStepped:Connect(function()
-		if active or busy or not InventoryState.isOpen() or PlacementController.isActive()
-			or InventoryState.isBuildModalBlocking()
-		then
-			clearHover()
-			return
-		end
-		-- Waves run local neon ammo FX; still allow pick, but always clear cleanly when nothing hit.
-		local screenPos = hoverPickScreenPos()
-		if not isUsingGamepad() and InventoryState.isPointerOverBackpack(screenPos) then
-			clearHover()
-			return
-		end
-		local hit = pickPlacedCoral(screenPos)
-		if hit then
-			setHover(hit)
-			updateHoverFlash()
-			updateHoverHint()
-		else
-			clearHover()
-		end
-	end)
+	RelocatePickHover.startLoop()
 end
 
 local function syncChrome()
@@ -1436,7 +1074,7 @@ local function syncChrome()
 		checkBtn.Text = confirmWord
 		if confirmWord == "CONFIRM" then
 			checkBtn.TextScaled = false
-			checkBtn.TextSize = 11
+			checkBtn.TextSize = PlaceConfirmChrome.confirmLabelTextSize()
 		else
 			checkBtn.TextScaled = true
 		end
@@ -1459,12 +1097,13 @@ local function syncChrome()
 		if showRecycle then
 			recycleBtn.AnchorPoint = Vector2.new(0.5, 1)
 			recycleBtn.Size = UDim2.fromOffset(C.REC_BTN_SIZE, C.REC_BTN_SIZE)
-			-- Park recycle above waist chrome (avatar), not coral tip.
+			-- Park recycle above feet chrome (avatar), not coral tip.
 			local waistScreen = PlaceConfirmChrome.screenPos(waistAdornee)
+			local chromePx = PlaceConfirmChrome.chromeBtnSize(C.BTN_SIZE)
 			local recCx = waistScreen.X
-			local recCy = waistScreen.Y - C.BTN_SIZE - C.REC_GAP_PX
+			local recCy = waistScreen.Y - chromePx - C.REC_GAP_PX
 			-- Idle (not moved): sit near where X will appear. Recycle confirm: above ✓/X pair.
-			local aboveX = recCx + 6 + C.BTN_SIZE * 0.5
+			local aboveX = recCx + 6 + chromePx * 0.5
 			local abovePair = recCx
 			local idleRecX = aboveX
 			local idleRecY = waistScreen.Y
@@ -1473,9 +1112,9 @@ local function syncChrome()
 			local recX = if recyclePending then movedRecX else idleRecX
 			local recY = if recyclePending then movedRecY else idleRecY
 			-- When idle with inspect hidden, tip-aligned recycle is owned by older path —
-			-- keep tip coords for idle non-inspect so existing feel stays; waist only for confirm.
+			-- keep tip coords for idle non-inspect so existing feel stays; feet only for confirm.
 			if not recyclePending then
-				recX = cx + 6 + C.BTN_SIZE * 0.5
+				recX = cx + 6 + chromePx * 0.5
 				recY = cy
 			end
 			recycleBtn.Position = UDim2.fromOffset(recX, recY)
@@ -1613,7 +1252,13 @@ local function restorePartLook(p: BasePart?)
 	if not p or not p.Parent then
 		return
 	end
-	if baseMaterial and baseColor then
+	local look = RelocateMultiSelect.getLook(p)
+	if look then
+		p.Material = look.material
+		p.Color = look.color
+		return
+	end
+	if p == part and baseMaterial and baseColor then
 		p.Material = baseMaterial
 		p.Color = baseColor
 	else
@@ -1650,6 +1295,7 @@ local function updateRelocateFlash()
 	end
 	SelectRing.ensure(selectRing, part, playerGui)
 	SelectRing.pulse(selectRing)
+	RelocateMultiSelect.pulse()
 end
 
 local function stopLoop()
@@ -1746,7 +1392,7 @@ local function playIntro(fromScreen: Vector2)
 			local lift = if part then coralChromeScreenLift(part) else 52
 			local cy = screen.Y - lift
 			-- End: recycle where X will sit (right of coral).
-			local recEnd = Vector2.new(cx + 6 + C.BTN_SIZE * 0.5, cy - C.REC_BTN_SIZE * 0.5)
+			local recEnd = Vector2.new(cx + 6 + PlaceConfirmChrome.chromeBtnSize(C.BTN_SIZE) * 0.5, cy - C.REC_BTN_SIZE * 0.5)
 			local rpos = fromScreen:Lerp(recEnd, a)
 			recycleBtn.AnchorPoint = Vector2.new(0.5, 0.5)
 			recycleBtn.Position = UDim2.fromOffset(rpos.X, rpos.Y)
@@ -1769,7 +1415,8 @@ local function clearState()
 	BrainSnapPreview.hide()
 	clearBlockHighlight()
 	ClientPlot.setOutOfPlotFlash(false)
-	restorePartLook(part)
+	RelocateMultiSelect.clear(true)
+	RelocateMultiSelect.clearPendingInput()
 	SelectRing.destroy(selectRing)
 	if warnLabel then
 		local bb = warnLabel.Parent
@@ -1811,6 +1458,7 @@ local function clearState()
 	pressOrigin = nil
 	dragging = false
 	grabFromMoveIcon = false
+	RelocateMultiSelect.clearPendingInput()
 	cinematicHold = false
 	stopMoveIconDropTween()
 	moveIconInspectBlend = 0
@@ -1825,6 +1473,22 @@ end
 
 function RelocateController.getSelectedPart(): BasePart?
 	return part
+end
+
+function RelocateController.getSelectedParts(): { BasePart }
+	return RelocateMultiSelect.getParts(part)
+end
+
+function RelocateController.isMultiSelect(): boolean
+	return RelocateMultiSelect.isMulti()
+end
+
+function RelocateController.isPartSelected(p: BasePart): boolean
+	return RelocateMultiSelect.isSelected(p, part)
+end
+
+function RelocateController.tryRestoreSelectionUndo(): boolean
+	return RelocateMultiSelect.tryRestoreUndo()
 end
 
 function RelocateController.onActiveChanged(cb: (boolean, BasePart?) -> ()): RBXScriptConnection
@@ -1876,15 +1540,34 @@ function RelocateController.setAWhileIdleHandler(cb: (() -> boolean)?)
 end
 
 -- After inspect paints a new rest color, drop white neon and show the real paint.
-function RelocateController.syncSelectedRestColor()
-	if not part or not part.Parent then
+function RelocateController.syncPartRestColor(p: BasePart)
+	if not p or not p.Parent then
 		return
 	end
-	showPaintSolid = true
-	CoralVisual.applyRestLook(part)
-	local restMat, restColor = CoralVisual.readRestLook(part)
-	baseColor = restColor
-	baseMaterial = restMat
+	CoralVisual.applyRestLook(p)
+	local restMat, restColor = CoralVisual.readRestLook(p)
+	RelocateMultiSelect.noteLook(p)
+	RelocateMultiSelect.setPaintSolid(p, true)
+	if p == part then
+		showPaintSolid = true
+		baseMaterial = restMat
+		baseColor = restColor
+	end
+end
+
+function RelocateController.syncSelectedRestColor()
+	if part then
+		RelocateController.syncPartRestColor(part)
+	end
+end
+
+function RelocateController.notePartRestLook(p: BasePart)
+	RelocateMultiSelect.noteLook(p)
+	if p == part then
+		local restMat, restColor = CoralVisual.readRestLook(p)
+		baseMaterial = restMat
+		baseColor = restColor
+	end
 end
 
 function RelocateController.isMoveConfirmUp(): boolean
@@ -1901,6 +1584,168 @@ function RelocateController.setLiveCameraCFrame(cf: CFrame)
 		cam.CameraType = Enum.CameraType.Scriptable
 		cam.CFrame = cf
 	end
+end
+
+function RelocateController.refreshSizedPart(newPart: BasePart, oldPart: BasePart?)
+	if not active or not newPart.Parent then
+		return
+	end
+	local priorPart = part
+	local newPid = newPart:GetAttribute("OceanTD_PlaceId")
+	local rebindOld = oldPart
+	if not rebindOld and newPart ~= priorPart and priorPart then
+		local curPid = priorPart:GetAttribute("OceanTD_PlaceId")
+		if typeof(newPid) == "string" and newPid ~= "" and newPid == curPid then
+			rebindOld = priorPart
+		end
+	end
+	if typeof(newPid) == "string" and newPid ~= "" and newPid == placeId then
+		part = newPart
+	end
+	if rebindOld and rebindOld ~= newPart then
+		RelocateMultiSelect.rebindPart(rebindOld, newPart)
+	end
+	local restMat, restColor = CoralVisual.readRestLook(newPart)
+	if newPart == part then
+		gridAnchorPos = CoralVisual.readGridAnchor(newPart) or newPart.Position
+		originPos = gridAnchorPos
+		moveGridAnchor = gridAnchorPos
+		baseMaterial = restMat
+		baseColor = restColor
+		SelectRing.ensure(selectRing, newPart, playerGui)
+		attachMoveIcon(newPart)
+		ensureWarnBillboard(newPart)
+		syncWarnLabel()
+		hasMoved = false
+		hasRotated = false
+		validSpot = true
+		rejectReason = nil
+		syncChrome()
+	elseif RelocateMultiSelect.isSelected(newPart, part) then
+		RelocateMultiSelect.noteLook(newPart)
+	end
+end
+
+function RelocateController.restoreSelectionByPlaceIds(ids: { string })
+	if not active or #ids == 0 then
+		return
+	end
+	local seen: { [string]: boolean } = {}
+	local found: { BasePart } = {}
+	for _, pid in ipairs(ids) do
+		if typeof(pid) == "string" and pid ~= "" and not seen[pid] then
+			seen[pid] = true
+			local p = RelocatePickHover.findByPlaceId(pid)
+			if p then
+				table.insert(found, p)
+			end
+		end
+	end
+	if #found == 0 then
+		return
+	end
+	local newPrimary = part
+	if newPrimary and newPrimary.Parent then
+		local pid = newPrimary:GetAttribute("OceanTD_PlaceId")
+		if typeof(pid) ~= "string" or not seen[pid] then
+			newPrimary = nil
+		end
+	else
+		newPrimary = nil
+	end
+	if not newPrimary then
+		for _, p in ipairs(found) do
+			local pid = p:GetAttribute("OceanTD_PlaceId")
+			if typeof(pid) == "string" and pid == placeId then
+				newPrimary = p
+				break
+			end
+		end
+	end
+	if not newPrimary then
+		newPrimary = found[1]
+	end
+	part = newPrimary
+	local pid = newPrimary:GetAttribute("OceanTD_PlaceId")
+	if typeof(pid) == "string" then
+		placeId = pid
+	end
+	gridAnchorPos = CoralVisual.readGridAnchor(newPrimary) or newPrimary.Position
+	originPos = gridAnchorPos
+	moveGridAnchor = gridAnchorPos
+	local iid = newPrimary:GetAttribute("OceanTD_ItemId")
+	if typeof(iid) ~= "string" then
+		iid = newPrimary:GetAttribute("OceanTD_SpeciesId")
+	end
+	if typeof(iid) == "string" then
+		itemId = iid
+	end
+	local restMat, restColor = CoralVisual.readRestLook(newPrimary)
+	baseMaterial = restMat
+	baseColor = restColor
+	RelocateMultiSelect.resyncFromParts(newPrimary, found)
+	showPaintSolid = RelocateMultiSelect.isPaintSolid(newPrimary)
+	SelectRing.ensure(selectRing, newPrimary, playerGui)
+	attachMoveIcon(newPrimary)
+	ensureWarnBillboard(newPrimary)
+	syncWarnLabel()
+	syncChrome()
+	activeChanged:Fire(true, newPrimary)
+end
+
+local function applySelectionSnapshot(ids: { string }): boolean
+	if #ids == 0 then
+		if active then
+			RelocateController.cancel(true)
+			return true
+		end
+		return false
+	end
+	local seen: { [string]: boolean } = {}
+	local found: { BasePart } = {}
+	for _, pid in ipairs(ids) do
+		if typeof(pid) == "string" and pid ~= "" and not seen[pid] then
+			seen[pid] = true
+			local p = RelocatePickHover.findByPlaceId(pid)
+			if p then
+				table.insert(found, p)
+			end
+		end
+	end
+	if #found == 0 then
+		return false
+	end
+	if not active then
+		RelocateController.begin(found[1])
+		if not active then
+			return false
+		end
+		for i = 2, #found do
+			local p = found[i]
+			if p.Parent and not RelocateMultiSelect.isSelected(p, part) then
+				CoralVisual.applyRestLook(p)
+				local m, c = CoralVisual.readRestLook(p)
+				RelocateMultiSelect.ensureMembership(p, m, c)
+			end
+		end
+		activeChanged:Fire(true, part)
+		return true
+	end
+	RelocateController.restoreSelectionByPlaceIds(ids)
+	return true
+end
+
+function RelocateController.snapshotSelectionPlaceIds(): { string }
+	local seen: { [string]: boolean } = {}
+	local ids: { string } = {}
+	for _, p in ipairs(RelocateMultiSelect.getParts(part)) do
+		local pid = p:GetAttribute("OceanTD_PlaceId")
+		if typeof(pid) == "string" and pid ~= "" and not seen[pid] then
+			seen[pid] = true
+			table.insert(ids, pid)
+		end
+	end
+	return ids
 end
 
 -- After server mesh swap (sponge upgrade), rebind selection without replaying intro chrome.
@@ -1975,6 +1820,10 @@ function RelocateController.cancel(instant: boolean?)
 	local moved = hasMoved
 	local rotated = hasRotated
 	local color = baseColor
+
+	if not moved and not rotated and not recyclePending then
+		RelocateMultiSelect.pushUndo()
+	end
 
 	local function snapHome()
 		if p and p.Parent then
@@ -2275,6 +2124,45 @@ function RelocateController.commit()
 	end
 end
 
+local function promotePrimary(nextPart: BasePart)
+	if not nextPart.Parent then
+		return
+	end
+	local look = RelocateMultiSelect.getLook(nextPart)
+	part = nextPart
+	gridAnchorPos = CoralVisual.readGridAnchor(nextPart) or nextPart.Position
+	originPos = gridAnchorPos
+	moveGridAnchor = gridAnchorPos
+	local iid = nextPart:GetAttribute("OceanTD_ItemId")
+	if typeof(iid) ~= "string" then
+		iid = nextPart:GetAttribute("OceanTD_SpeciesId")
+	end
+	itemId = if typeof(iid) == "string" then iid else itemId
+	if look then
+		baseColor = look.color
+		baseMaterial = look.material
+	else
+		local m, c = CoralVisual.readRestLook(nextPart)
+		baseMaterial = m
+		baseColor = c
+	end
+	showPaintSolid = false
+	hasMoved = false
+	hasRotated = false
+	originFacingYaw = CoralVisual.readFacingYaw(nextPart)
+	relocateFacingYaw = originFacingYaw
+	local existingId = nextPart:GetAttribute("OceanTD_PlaceId")
+	placeId = if typeof(existingId) == "string" then existingId else ""
+	RelocateMultiSelect.stripSecondaryRing(nextPart)
+	SelectRing.ensure(selectRing, nextPart, playerGui)
+	nextPart.Material = Enum.Material.Neon
+	attachMoveIcon(nextPart)
+	ensureWarnBillboard(nextPart)
+	syncWarnLabel()
+	syncChrome()
+	activeChanged:Fire(true, nextPart)
+end
+
 function RelocateController.begin(target: BasePart)
 	-- Recover from stuck recycle-fly / intro so mid-wave picks always get chrome.
 	if recycleFlying or introAnimating then
@@ -2369,6 +2257,8 @@ function RelocateController.begin(target: BasePart)
 
 	target.Material = Enum.Material.Neon
 	SelectRing.ensure(selectRing, target, playerGui)
+	RelocateMultiSelect.clear(false)
+	RelocateMultiSelect.ensureMembership(target, restMat, restColor)
 	freeze()
 	makeUi()
 	if cancelBtn then
@@ -2511,10 +2401,32 @@ table.insert(inputConns, UserInputService.InputBegan:Connect(function(input, _pr
 		-- a neighbor — defer switch to a clean tap on release instead.
 		pendingCoralSwitch = nil
 		pendingCoralSwitchScreen = nil
+		RelocateMultiSelect.clearPendingInput()
+		if RelocateMultiSelect.isShiftHeld() then
+			-- Additive toggle: hit primary via pointerHits, others via pick.
+			local hit: BasePart? = nil
+			if pointerHitsSelectedCoral(pickPos) then
+				hit = part
+			else
+				hit = pickPlacedCoral(pickPos)
+			end
+			if hit then
+				RelocateMultiSelect.setPendingShift(hit, pickPos)
+			end
+			return
+		end
 		local other = pickPlacedCoral(pickPos)
 		if other and other ~= part and not grabHandle and not pointerHitsSelectedCoral(pickPos) then
 			pendingCoralSwitch = other
 			pendingCoralSwitchScreen = pickPos
+			return
+		end
+		if not other and not grabHandle and not pointerHitsSelectedCoral(pickPos) then
+			-- Empty ground: clear multi-select on release (Windows Explorer).
+			RelocateMultiSelect.setPendingClear(true)
+			fingerDown = true
+			pressOrigin = pickPos
+			dragging = false
 			return
 		end
 		fingerDown = true
@@ -2529,6 +2441,7 @@ table.insert(inputConns, UserInputService.InputBegan:Connect(function(input, _pr
 		if PlacementController.isActive() or not InventoryState.isOpen() then
 			return
 		end
+		local hoverPart = RelocatePickHover.getHoverPart()
 		if hoverPart and hoverPart.Parent then
 			RelocateController.begin(hoverPart)
 		end
@@ -2580,6 +2493,7 @@ table.insert(inputConns, UserInputService.InputChanged:Connect(function(input, _
 		-- Sliding = move, not a switch-tap.
 		pendingCoralSwitch = nil
 		pendingCoralSwitchScreen = nil
+		RelocateMultiSelect.clearPendingInput()
 	end
 	if not dragging and not fingerDown then
 		return
@@ -2611,6 +2525,9 @@ table.insert(inputConns, UserInputService.InputEnded:Connect(function(input, _pr
 		else UserInputService:GetMouseLocation()
 	local switchTarget = pendingCoralSwitch
 	local switchOrigin = pendingCoralSwitchScreen
+	local shiftTarget, shiftOrigin = RelocateMultiSelect.getPendingShift()
+	local clearSel = RelocateMultiSelect.getPendingClear()
+	local wasDragging = dragging
 	local chromeTarget = chromePressTarget
 	local wasChrome = chromeBtnDown
 	chromeBtnDown = false
@@ -2621,6 +2538,7 @@ table.insert(inputConns, UserInputService.InputEnded:Connect(function(input, _pr
 	grabFromMoveIcon = false
 	pendingCoralSwitch = nil
 	pendingCoralSwitchScreen = nil
+	RelocateMultiSelect.clearPendingInput()
 
 	-- BillboardGui Click is flaky — fire chrome actions on release from the press target.
 	if active and wasChrome and chromeTarget then
@@ -2639,6 +2557,20 @@ table.insert(inputConns, UserInputService.InputEnded:Connect(function(input, _pr
 			RelocateController.beginRecycleConfirm()
 			return
 		end
+	end
+
+	-- Shift+click toggle add/remove.
+	if active and shiftTarget and shiftTarget.Parent and shiftOrigin and not wasDragging then
+		if (pickPos - shiftOrigin).Magnitude <= C.PICK_TAP_PX then
+			RelocateMultiSelect.toggle(shiftTarget)
+			return
+		end
+	end
+
+	-- Empty ground tap clears selection (cancel snapshots undo).
+	if active and clearSel and not wasDragging and not hasMoved and not hasRotated and not recyclePending then
+		RelocateController.cancel(true)
+		return
 	end
 
 	-- Tap another coral while one is selected → switch (no drag happened).
@@ -2690,6 +2622,64 @@ player.CharacterAdded:Connect(function()
 		RelocateController.cancel()
 	end
 end)
+
+RelocateMultiSelect.mount({
+	getPrimary = function(): BasePart?
+		return part
+	end,
+	promotePrimary = promotePrimary,
+	isActive = function(): boolean
+		return active
+	end,
+	isBusy = function(): boolean
+		return busy
+	end,
+	getRecyclePending = function(): boolean
+		return recyclePending
+	end,
+	getHasMoved = function(): boolean
+		return hasMoved
+	end,
+	getHasRotated = function(): boolean
+		return hasRotated
+	end,
+	beginCoral = function(p: BasePart)
+		RelocateController.begin(p)
+	end,
+	cancelCoral = function(skipHome: boolean?)
+		RelocateController.cancel(skipHome)
+	end,
+	applySelectionSnapshot = applySelectionSnapshot,
+	clearHover = clearHover,
+	restorePartLook = restorePartLook,
+	findByPlaceId = RelocatePickHover.findByPlaceId,
+	playerGui = playerGui,
+	getSelectRing = function()
+		return selectRing
+	end,
+	fireActiveChanged = function(p: BasePart)
+		activeChanged:Fire(true, p)
+	end,
+})
+
+RelocatePickHover.mount({
+	getPrimary = function(): BasePart?
+		return part
+	end,
+	getBlockPart = function(): BasePart?
+		return blockPart
+	end,
+	getSelectRing = function()
+		return selectRing
+	end,
+	isActive = function(): boolean
+		return active
+	end,
+	isBusy = function(): boolean
+		return busy
+	end,
+	playerGui = playerGui,
+})
 
 log("Ready")
 

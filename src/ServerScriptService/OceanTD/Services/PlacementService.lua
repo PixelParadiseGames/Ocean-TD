@@ -279,6 +279,33 @@ local function countHueGenericOnPlot(
 	return generic
 end
 
+local function countHueSeedBackedPainted(
+	plotId: string,
+	itemId: string,
+	hue: number,
+	excludePlaceId: string?
+): number
+	local backed = 0
+	GridService.forEachCell(plotId, function(cell)
+		if cell.id ~= itemId then
+			return
+		end
+		if excludePlaceId and cell.placeId == excludePlaceId then
+			return
+		end
+		if typeof(cell.colorIndex) ~= "number" then
+			return
+		end
+		if PlotOutlineColors.clampCoralIndex(cell.colorIndex) ~= PlotOutlineColors.clampCoralIndex(hue) then
+			return
+		end
+		if typeof(cell.seedHue) == "number" and PlotOutlineColors.clampCoralIndex(cell.seedHue) == PlotOutlineColors.clampCoralIndex(hue) then
+			backed += 1
+		end
+	end)
+	return backed
+end
+
 local function canAssignHue(
 	player: Player,
 	plotId: string,
@@ -307,7 +334,8 @@ local function canAssignHue(
 	local owned = PersistenceService.getHueSeedCount(player, itemId, hue)
 	local paintedExcl = countHuePaintedOnPlot(plotId, itemId, hue, placeId)
 	local genericTotal = countHueGenericOnPlot(plotId, itemId, hue, nil)
-	return paintedExcl + 1 <= owned + genericTotal
+	local backedExcl = countHueSeedBackedPainted(plotId, itemId, hue, placeId)
+	return paintedExcl + 1 <= owned + genericTotal + backedExcl
 end
 
 local function stampSeedHue(plotId: string, gx: number, gy: number, gz: number, visual: BasePart, seedHue: number)
@@ -647,6 +675,17 @@ function PlacementService.hydrateVisuals(plotId: string, boundsCFrame: CFrame)
 			end
 			if typeof(cell.parentPlaceId) == "string" and cell.parentPlaceId ~= "" then
 				visual:SetAttribute("OceanTD_ParentPlaceId", cell.parentPlaceId)
+			end
+			local seedHue: number? = if typeof(cell.seedHue) == "number"
+				then PlotOutlineColors.clampCoralIndex(cell.seedHue)
+				else nil
+			if not seedHue and paintIdx then
+				-- Legacy saves: painted corals consumed a seed at placement before seedHue was persisted.
+				seedHue = paintIdx
+				cell.seedHue = paintIdx
+			end
+			if seedHue then
+				stampSeedHue(plotId, cell.gx, cell.gy, cell.gz, visual, seedHue)
 			end
 		end
 	end)
@@ -2218,7 +2257,8 @@ function PlacementService.setCoralSize(
 	player: Player,
 	placeId: string,
 	targetClass: number,
-	unlockNext: boolean
+	unlockNext: boolean,
+	opts: { skipSpend: boolean?, skipSave: boolean? }?
 ): {
 	ok: boolean,
 	errorCode: string?,
@@ -2228,7 +2268,10 @@ function PlacementService.setCoralSize(
 	variantIndex: number?,
 	scaleMult: number?,
 	stackMoves: { StackMove }?,
+	placeId: string?,
 }
+	local skipSpend = opts ~= nil and opts.skipSpend == true
+	local skipSave = opts ~= nil and opts.skipSave == true
 	if typeof(placeId) ~= "string" or placeId == "" then
 		return { ok = false, errorCode = "BadRequest" }
 	end
@@ -2250,13 +2293,16 @@ function PlacementService.setCoralSize(
 	if unlockNext then
 		local nxt = CoralSize.nextUnlock(tier)
 		if not nxt then
-			return { ok = false, errorCode = "Maxed" }
+			return { ok = false, errorCode = "Maxed", placeId = placeId }
 		end
 		if want < nxt then
 			want = nxt
 		end
+		if want <= tier then
+			return { ok = true, sizeClass = tier, sizeTier = tier, placeId = placeId, diameter = curD }
+		end
 		unlockCost = CoralSize.unlockCostRange(tier, want)
-		if unlockCost > PersistenceService.getSandDollars(player) then
+		if not skipSpend and unlockCost > PersistenceService.getSandDollars(player) then
 			return { ok = false, errorCode = "CantAfford" }
 		end
 		newTier = want
@@ -2353,13 +2399,15 @@ function PlacementService.setCoralSize(
 		stackMoves = reflowBrainStackAfterSize(plotId, placeId, oldDiam, newDiam)
 	end
 
-	if unlockCost > 0 then
+	if unlockCost > 0 and not skipSpend then
 		local spent, _balance, spendErr = PersistenceService.trySpendSandDollars(player, unlockCost)
 		if not spent then
 			return { ok = false, errorCode = spendErr or "CantAfford" }
 		end
 	end
-	PersistenceService.save(player, PlacementService.snapshotLayout(plotId))
+	if not skipSave then
+		PersistenceService.save(player, PlacementService.snapshotLayout(plotId))
+	end
 	log("Size", placeId, "class", want, "tier", newTier, "d", newDiam, "moves", if stackMoves then #stackMoves else 0)
 	return {
 		ok = true,
@@ -2369,6 +2417,114 @@ function PlacementService.setCoralSize(
 		variantIndex = variant,
 		scaleMult = scale,
 		stackMoves = stackMoves,
+		placeId = placeId,
+	}
+end
+
+type BulkSizeJob = { placeId: string, tier: number, cost: number }
+
+function PlacementService.setCoralSizeBulk(
+	player: Player,
+	placeIds: { string },
+	targetClass: number,
+	unlockNext: boolean
+): {
+	ok: boolean,
+	errorCode: string?,
+	upgraded: { any },
+	partial: boolean?,
+	upgradedCount: number?,
+	neededCount: number?,
+	totalCost: number?,
+	sandDollars: number?,
+}
+	if typeof(placeIds) ~= "table" or #placeIds == 0 then
+		return { ok = false, errorCode = "BadRequest", upgraded = {} }
+	end
+	if not PlayerSession.canSave(player) then
+		return { ok = false, errorCode = "NotReady", upgraded = {} }
+	end
+	local plotId = PlotService.getOwnerPlotId(player)
+	if not plotId then
+		return { ok = false, errorCode = "NoPlot", upgraded = {} }
+	end
+	local want = CoralSize.clampTier(targetClass)
+	local jobs: { BulkSizeJob } = {}
+	local seen: { [string]: boolean } = {}
+	for _, rawId in ipairs(placeIds) do
+		if typeof(rawId) ~= "string" or rawId == "" or seen[rawId] then
+			continue
+		end
+		seen[rawId] = true
+		local visual = findVisualByPlaceId(plotId, rawId)
+		if not visual then
+			continue
+		end
+		local _d, _c, tier = CoralSize.readFromPart(visual)
+		if unlockNext then
+			if tier < want then
+				table.insert(jobs, {
+					placeId = rawId,
+					tier = tier,
+					cost = CoralSize.unlockCostRange(tier, want),
+				})
+			end
+		elseif want <= tier then
+			table.insert(jobs, { placeId = rawId, tier = tier, cost = 0 })
+		end
+	end
+	table.sort(jobs, function(a, b)
+		if a.cost == b.cost then
+			return a.placeId < b.placeId
+		end
+		return a.cost < b.cost
+	end)
+	local cash = PersistenceService.getSandDollars(player)
+	local chosen: { BulkSizeJob } = {}
+	local spent = 0
+	for _, j in ipairs(jobs) do
+		if spent + j.cost <= cash then
+			spent += j.cost
+			table.insert(chosen, j)
+		end
+	end
+	if #jobs > 0 and #chosen == 0 and unlockNext then
+		return {
+			ok = false,
+			errorCode = "CantAfford",
+			upgraded = {},
+			neededCount = #jobs,
+			totalCost = jobs[1].cost,
+			sandDollars = cash,
+		}
+	end
+	if spent > 0 then
+		local okSpend, _bal, spendErr = PersistenceService.trySpendSandDollars(player, spent)
+		if not okSpend then
+			return { ok = false, errorCode = spendErr or "CantAfford", upgraded = {}, sandDollars = cash }
+		end
+	end
+	local upgraded: { any } = {}
+	for _, j in ipairs(chosen) do
+		local result = PlacementService.setCoralSize(player, j.placeId, want, unlockNext, {
+			skipSpend = true,
+			skipSave = true,
+		})
+		if result.ok then
+			table.insert(upgraded, result)
+		end
+	end
+	PersistenceService.save(player, PlacementService.snapshotLayout(plotId))
+	local partial = #chosen < #jobs
+	log("SizeBulk", #upgraded, "/", #jobs, "cost", spent, "partial", partial)
+	return {
+		ok = true,
+		upgraded = upgraded,
+		partial = partial,
+		upgradedCount = #upgraded,
+		neededCount = #jobs,
+		totalCost = spent,
+		sandDollars = PersistenceService.getSandDollars(player),
 	}
 end
 
