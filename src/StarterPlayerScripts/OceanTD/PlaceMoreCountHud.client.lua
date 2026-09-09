@@ -2,6 +2,7 @@
 --[[
 	While build mode (backpack) is open: bottom-center "N Of N Max" + green +
 	that opens skills bubbles and the Place More power-up.
+	Only the + button captures clicks; the count text passes through to corals.
 ]]
 
 local Players = game:GetService("Players")
@@ -27,34 +28,22 @@ local PLUS_CIRCLE = math.floor(ROW_H * 0.6 + 0.5) -- 40% smaller green circle
 local PLUS_TEXT_SIZE = 30 -- keep glyph size when circle shrinks
 local GREEN = Color3.fromRGB(45, 190, 75)
 
-local sg = Instance.new("ScreenGui")
-sg.Name = "OceanTD_PlaceMoreCountHud"
-sg.ResetOnSpawn = false
-sg.IgnoreGuiInset = true
-sg.DisplayOrder = 45
-sg.Enabled = false
-sg.Parent = playerGui
-
-local row = Instance.new("Frame")
-row.Name = "Row"
-row.AnchorPoint = Vector2.new(0.5, 1)
-row.Position = UDim2.new(0.5, 0, 1, -28)
-row.Size = UDim2.fromOffset(320, ROW_H)
-row.BackgroundTransparency = 1
-row.Parent = sg
-
-local layout = Instance.new("UIListLayout")
-layout.FillDirection = Enum.FillDirection.Horizontal
-layout.HorizontalAlignment = Enum.HorizontalAlignment.Center
-layout.VerticalAlignment = Enum.VerticalAlignment.Center
-layout.Padding = UDim.new(0, 12)
-layout.SortOrder = Enum.SortOrder.LayoutOrder
-layout.Parent = row
+-- Text lives in its own ScreenGui so it never participates in button hit-tests.
+local textSg = Instance.new("ScreenGui")
+textSg.Name = "OceanTD_PlaceMoreCountText"
+textSg.ResetOnSpawn = false
+textSg.IgnoreGuiInset = true
+textSg.DisplayOrder = 44
+textSg.Enabled = false
+textSg.Parent = playerGui
 
 local countLabel = Instance.new("TextLabel")
 countLabel.Name = "Count"
+countLabel.AnchorPoint = Vector2.new(1, 1)
+countLabel.Position = UDim2.new(0.5, -6, 1, -28)
+countLabel.Size = UDim2.fromOffset(0, ROW_H)
+countLabel.AutomaticSize = Enum.AutomaticSize.X
 countLabel.BackgroundTransparency = 1
-countLabel.Size = UDim2.fromOffset(220, ROW_H)
 countLabel.Font = UiTheme.Font
 countLabel.TextSize = 26
 countLabel.TextColor3 = Color3.new(1, 1, 1)
@@ -62,18 +51,31 @@ countLabel.TextStrokeTransparency = 0.45
 countLabel.TextStrokeColor3 = Color3.new(0, 0, 0)
 countLabel.TextXAlignment = Enum.TextXAlignment.Right
 countLabel.Text = "0 Of 30 Max"
-countLabel.LayoutOrder = 1
-countLabel.Parent = row
+countLabel.Active = false
+countLabel.Interactable = false
+countLabel.Parent = textSg
+
+-- + button alone — only clickable surface.
+local btnSg = Instance.new("ScreenGui")
+btnSg.Name = "OceanTD_PlaceMoreCountHud"
+btnSg.ResetOnSpawn = false
+btnSg.IgnoreGuiInset = true
+btnSg.DisplayOrder = 45
+btnSg.Enabled = false
+btnSg.Parent = playerGui
 
 local plusBtn = Instance.new("TextButton")
 plusBtn.Name = "PlaceMorePlus"
+plusBtn.AnchorPoint = Vector2.new(0, 1)
+plusBtn.Position = UDim2.new(0.5, 6, 1, -28 - math.floor((ROW_H - PLUS_CIRCLE) * 0.5))
 plusBtn.Size = UDim2.fromOffset(PLUS_CIRCLE, PLUS_CIRCLE)
 plusBtn.BackgroundColor3 = GREEN
 plusBtn.BorderSizePixel = 0
 plusBtn.Text = ""
 plusBtn.AutoButtonColor = true
-plusBtn.LayoutOrder = 2
-plusBtn.Parent = row
+plusBtn.Active = true
+plusBtn.Interactable = true
+plusBtn.Parent = btnSg
 local plusCorner = Instance.new("UICorner")
 plusCorner.CornerRadius = UDim.new(1, 0)
 plusCorner.Parent = plusBtn
@@ -83,7 +85,6 @@ plusStroke.Color = Color3.fromRGB(120, 255, 90)
 plusStroke.Transparency = 0
 plusStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
 plusStroke.Parent = plusBtn
--- Separate glyph so TextSize stays 30 while the circle shrinks; nudge up for optical center.
 local plusGlyph = Instance.new("TextLabel")
 plusGlyph.Name = "Glyph"
 plusGlyph.BackgroundTransparency = 1
@@ -95,6 +96,8 @@ plusGlyph.TextSize = PLUS_TEXT_SIZE
 plusGlyph.TextColor3 = Color3.new(1, 1, 1)
 plusGlyph.Text = "+"
 plusGlyph.ZIndex = 2
+plusGlyph.Active = false
+plusGlyph.Interactable = false
 plusGlyph.Parent = plusBtn
 
 local function placeMax(): number
@@ -122,7 +125,8 @@ end
 
 local function refreshVisible()
 	local show = shouldShow()
-	sg.Enabled = show
+	textSg.Enabled = show
+	btnSg.Enabled = show
 	if show then
 		refreshCount()
 	end
@@ -136,12 +140,12 @@ end)
 
 PlacedCoralIndex.ensure()
 PlacedCoralIndex.onChanged(function()
-	if sg.Enabled then
+	if textSg.Enabled then
 		refreshCount()
 	end
 end)
 ClientPlot.onChanged(function()
-	if sg.Enabled then
+	if textSg.Enabled then
 		refreshCount()
 	end
 end)
@@ -153,13 +157,11 @@ playerGui:GetAttributeChangedSignal(SKILLS_OPEN_ATTR):Connect(function()
 end)
 
 task.spawn(function()
-	-- Stages may load after this script; keep max text fresh while open.
 	while true do
 		task.wait(0.5)
-		if sg.Enabled then
+		if textSg.Enabled then
 			refreshCount()
 		end
-		-- Summary open can change without InventoryState events.
 		if InventoryState.isOpen() then
 			refreshVisible()
 		end

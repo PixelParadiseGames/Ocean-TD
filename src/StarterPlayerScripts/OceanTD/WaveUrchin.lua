@@ -1,6 +1,6 @@
 --!strict
 --[[
-	GroundA hungry urchins on waves 10, 20, 30… (count = wave / 10).
+	GroundA/GroundB hungry urchins on waves 5, 10, 15… (count scales; +extra past W100); 50/50 route.
 	Template: ReplicatedStorage.Fish.Urchin.UrchinMesh (RootPart + ShellHitbox).
 	Coral pause = defenseSec / 3.
 ]]
@@ -13,6 +13,7 @@ local WaveUrchin = {}
 
 local spawnedThisWave = 0
 local expectedThisWave = 0
+local countRng = Random.new()
 
 function WaveUrchin.shouldSpawn(wave: number): boolean
 	local w = math.max(1, math.floor(wave))
@@ -21,15 +22,28 @@ function WaveUrchin.shouldSpawn(wave: number): boolean
 		and WaveEntityPool.hasFishKind(WaveEntityPool.FISH_URCHIN)
 end
 
+-- Formula max for this ×5 wave (before the −0%…−40% roll).
 function WaveUrchin.countForWave(wave: number): number
 	if not WaveUrchin.shouldSpawn(wave) then
 		return 0
 	end
-	return math.floor(wave / C.URCHIN_EVERY_WAVES)
+	return C.urchinCountForWave(wave)
 end
 
+function WaveUrchin.countRangeForWave(wave: number): (number, number)
+	if not WaveUrchin.shouldSpawn(wave) then
+		return 0, 0
+	end
+	return C.urchinCountRangeForWave(wave)
+end
+
+-- Uniform roll between max and ~40% fewer (inclusive).
 function WaveUrchin.rollCount(wave: number): number
-	return WaveUrchin.countForWave(wave)
+	local lo, hi = WaveUrchin.countRangeForWave(wave)
+	if hi <= 0 then
+		return 0
+	end
+	return countRng:NextInteger(lo, hi)
 end
 
 function WaveUrchin.hungerForWave(wave: number): number
@@ -38,6 +52,27 @@ end
 
 function WaveUrchin.speedNow(): number
 	return WaveCrab.baseSpeed() * C.URCHIN_SPEED_MULT
+end
+
+-- First urchin delay after wave start (seconds).
+function WaveUrchin.rollFirstDelay(rng: Random): number
+	return rng:NextNumber(C.URCHIN_FIRST_DELAY_MIN, C.URCHIN_FIRST_DELAY_MAX)
+end
+
+-- Gap before the next urchin. Mostly wide/random; sometimes a short cluster gap.
+function WaveUrchin.rollSpawnGap(rng: Random): number
+	local lo = C.URCHIN_STAGGER_MIN
+	local hi = C.URCHIN_STAGGER_MAX
+	if rng:NextNumber() < C.URCHIN_CLUSTER_CHANCE then
+		hi = lo + (hi - lo) * C.URCHIN_CLUSTER_SPAN
+	end
+	return rng:NextNumber(lo, hi)
+end
+
+-- Per-urchin walk mult so equally-timed spawns still drift apart.
+function WaveUrchin.rollSpeedMult(rng: Random): number
+	local v = C.URCHIN_SPEED_VAR
+	return 1 + rng:NextNumber(-v, v)
 end
 
 function WaveUrchin.coralPauseSec(defenseSec: number): number
@@ -61,7 +96,7 @@ function WaveUrchin.spawnedCount(): number
 	return spawnedThisWave
 end
 
--- Path + combat VFX (shared with crabs on GroundA).
+-- Path + combat VFX (shared with crabs on GroundA/GroundB).
 WaveUrchin.buildLocal = WaveCrab.buildLocal
 WaveUrchin.buildOn = WaveCrab.buildOn
 WaveUrchin.sample = WaveCrab.sample

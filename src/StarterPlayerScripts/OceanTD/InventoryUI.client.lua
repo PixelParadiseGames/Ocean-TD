@@ -1814,23 +1814,106 @@ InventoryState.setBackpackButtonScreenPosProvider(function(): Vector2?
 	return Vector2.new(pos.X + size.X * 0.5, pos.Y + size.Y * 0.5)
 end)
 
--- Placement ignores world-aim when the finger is on the open backpack panel.
+-- Placement / relocate ignore world picks when the finger is on build HUD or the backpack.
 InventoryState.setBackpackHitTest(function(screenPos: Vector2): boolean
-	if not host.Visible or not panel.Parent then
-		return false
-	end
-	local function inPanel(pos: Vector2): boolean
-		local p = panel.AbsolutePosition
-		local s = panel.AbsoluteSize
+	local function inRect(obj: GuiObject?, pos: Vector2): boolean
+		if not obj or not obj.Visible then
+			return false
+		end
+		local p = obj.AbsolutePosition
+		local s = obj.AbsoluteSize
+		if s.X < 1 or s.Y < 1 then
+			return false
+		end
 		return pos.X >= p.X and pos.X <= p.X + s.X and pos.Y >= p.Y and pos.Y <= p.Y + s.Y
 	end
-	if inPanel(screenPos) then
+
+	local function overHudSlots(pos: Vector2): boolean
+		local qb = mainHUD:FindFirstChild("Quickbar")
+		if qb then
+			for _, name in ipairs({ "Slot1", "Slot2", "Slot3", "Slot4" }) do
+				local slot = qb:FindFirstChild(name)
+				if slot and slot:IsA("GuiObject") and inRect(slot, pos) then
+					return true
+				end
+			end
+		end
+		local qh = mainHUD:FindFirstChild("QuickbarHelp")
+		if qh then
+			for _, name in ipairs({ "Slot1", "Slot2", "Slot3", "Slot4" }) do
+				local badge = qh:FindFirstChild(name)
+				if badge and badge:IsA("GuiObject") and inRect(badge, pos) then
+					return true
+				end
+			end
+		end
+		return false
+	end
+
+	local function overActiveScreenButton(pos: Vector2): boolean
+		local ok, objs = pcall(function()
+			return playerGui:GetGuiObjectsAtPosition(pos.X, pos.Y)
+		end)
+		if not ok or typeof(objs) ~= "table" then
+			return false
+		end
+		for _, obj in ipairs(objs) do
+			if obj:IsA("GuiButton") and obj.Active and obj.Visible then
+				-- Place-more count text HUD must never block coral picks; only its + button.
+				if obj:FindFirstAncestor("OceanTD_PlaceMoreCountText") then
+					continue
+				end
+				-- World billboards (move icon / inspect) must not swallow plot picks.
+				if not obj:FindFirstAncestorOfClass("BillboardGui") then
+					return true
+				end
+			end
+		end
+		return false
+	end
+
+	local function overPlaceMoreCountText(pos: Vector2): boolean
+		local textHud = playerGui:FindFirstChild("OceanTD_PlaceMoreCountText")
+		if not textHud or not textHud:IsA("ScreenGui") or not textHud.Enabled then
+			return false
+		end
+		local count = textHud:FindFirstChild("Count")
+		if not count or not count:IsA("GuiObject") then
+			return false
+		end
+		-- Explicitly allow coral picks through the count label rect.
+		return inRect(count, pos)
+	end
+
+	local function testAt(pos: Vector2): boolean
+		-- Count label is decorative — never treat that rect as backpack chrome.
+		if overPlaceMoreCountText(pos) then
+			local plusHud = playerGui:FindFirstChild("OceanTD_PlaceMoreCountHud")
+			local plus = plusHud and plusHud:FindFirstChild("PlaceMorePlus")
+			if plus and plus:IsA("GuiObject") and inRect(plus, pos) then
+				return true
+			end
+			return false
+		end
+		if host.Visible and panel.Parent and inRect(panel, pos) then
+			return true
+		end
+		if overHudSlots(pos) then
+			return true
+		end
+		if closeX and closeX.Visible and inRect(closeX, pos) then
+			return true
+		end
+		return overActiveScreenButton(pos)
+	end
+
+	if testAt(screenPos) then
 		return true
 	end
-	-- GetMouseLocation is inset-inclusive; AbsolutePosition often is not.
+	-- GetMouseLocation is inset-inclusive; AbsolutePosition / GetGuiObjectsAtPosition often are not.
 	local inset = GuiService:GetGuiInset()
 	if inset.X ~= 0 or inset.Y ~= 0 then
-		if inPanel(Vector2.new(screenPos.X - inset.X, screenPos.Y - inset.Y)) then
+		if testAt(Vector2.new(screenPos.X - inset.X, screenPos.Y - inset.Y)) then
 			return true
 		end
 	end
@@ -2098,7 +2181,7 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
 		toggleFromUser(true)
 		return
 	end
-	-- Wave summary: A / Enter activates selected (default CONTINUE); B / Esc = FINISH.
+	-- Wave summary: A / Enter activates selected (default CONTINUE/RETRY); B / Esc = FINISH.
 	if WaveSlot.isSummaryOpen() then
 		if input.KeyCode == Enum.KeyCode.ButtonA
 			or input.KeyCode == Enum.KeyCode.Return

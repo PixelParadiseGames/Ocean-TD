@@ -55,6 +55,7 @@ local function buildPayload(kind: string): any?
 		fishTotal = snap.fishTotal,
 		crabTotal = snap.crabTotal,
 		urchinTotal = snap.urchinTotal,
+		sharkTotal = snap.sharkTotal,
 		elapsedSec = snap.elapsedSec,
 		running = snap.running,
 		hungerDanger = snap.hungerDanger,

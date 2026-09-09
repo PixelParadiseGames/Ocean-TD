@@ -793,7 +793,9 @@ function PlacementService.placeFromSave(
 	elseif CoralVisual.isMeshSpecies(species.speciesId) then
 		scale = CoralVisual.sanitizeMeshScale(scaleMult, species.speciesId)
 		if CoralVisual.needsFacingYaw(species.speciesId) then
-			facingYaw = if typeof(extras.facingYaw) == "number" then extras.facingYaw else CoralVisual.randomFacingYaw()
+			facingYaw = if typeof(extras.facingYaw) == "number" then extras.facingYaw
+				elseif CoralVisual.hasYawRotateChrome(species.speciesId) then 0
+				else CoralVisual.randomFacingYaw()
 		end
 		if CoralVisual.isMainAccentMesh(species.speciesId)
 			and typeof(extras.webColorR) == "number"
@@ -1128,6 +1130,7 @@ function PlacementService.place(
 			if CoralVisual.needsFacingYaw(species.speciesId) then
 				facingYaw = if typeof(opts.facingYaw) == "number" and opts.facingYaw == opts.facingYaw
 					then opts.facingYaw
+					elseif CoralVisual.hasYawRotateChrome(species.speciesId) then 0
 					else CoralVisual.randomFacingYaw()
 			end
 		end

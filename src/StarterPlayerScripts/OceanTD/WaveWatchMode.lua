@@ -17,6 +17,7 @@ export type WatchSnap = {
 	fishTotal: number,
 	crabTotal: number?,
 	urchinTotal: number?,
+	sharkTotal: number?,
 	speedMult: number,
 	plotId: string,
 	hostUserId: number,

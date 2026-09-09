@@ -127,6 +127,12 @@ local colorRf = Remotes.getFunction("RequestCoralColor")
 local clearHueRf = Remotes.getFunction("RequestClearCoralHue")
 local unlockColorRf = Remotes.getFunction("RequestUnlockCoralColor")
 
+local function waitBarrier(remaining: () -> number)
+	while remaining() > 0 do
+		RunService.RenderStepped:Wait()
+	end
+end
+
 local function isGamepad(): boolean
 	local t = UserInputService:GetLastInputType()
 	return t == Enum.UserInputType.Gamepad1
@@ -551,6 +557,26 @@ local function revealCinePart(part: BasePart, surfaceAnchor: Vector3?)
 	end
 end
 
+-- Cancel / close inspect can leave OceanTD_CinePrep + LTM=1 on the new mesh (client-only hide).
+local function revealAllCinePrepParts(placeId: string?)
+	local root = workspace:FindFirstChild("OceanTD_Placed")
+	if not root then
+		return
+	end
+	for _, desc in ipairs(root:GetDescendants()) do
+		if not desc:IsA("BasePart") then
+			continue
+		end
+		if desc:GetAttribute("OceanTD_CinePrep") ~= true then
+			continue
+		end
+		if typeof(placeId) == "string" and placeId ~= "" and desc:GetAttribute("OceanTD_PlaceId") ~= placeId then
+			continue
+		end
+		revealCinePart(desc, CoralVisual.readGridAnchor(desc))
+	end
+end
+
 local function prepReplacementForCine(desc: BasePart, placeId: string): boolean
 	if desc:GetAttribute("OceanTD_PlaceId") ~= placeId then
 		return false
@@ -894,6 +920,24 @@ applyServerSize = function(result: any, unlock: boolean, partOverride: BasePart?
 		else
 			part.Transparency = 0
 			part.LocalTransparencyModifier = 0
+			-- ApplyMesh in-place species: Size can stay Large after a Small mesh swap.
+			if typeof(d) == "number" and d > 0 and math.abs(part.Size.Y - d) / d > 0.15 then
+				if part:IsA("MeshPart") then
+					local okMs, ms = pcall(function()
+						return (part :: MeshPart).MeshSize
+					end)
+					if okMs and typeof(ms) == "Vector3" and ms.Y > 1e-3 then
+						part.Size = Vector3.new(ms.X / ms.Y * d, d, ms.Z / ms.Y * d)
+					else
+						local sy = math.max(part.Size.Y, 1e-3)
+						part.Size = Vector3.new(part.Size.X / sy * d, d, part.Size.Z / sy * d)
+					end
+				end
+				local anchor = CoralVisual.readGridAnchor(part)
+				if anchor then
+					CoralVisual.alignMeshToSurface(part, anchor, nil, part.CFrame)
+				end
+			end
 		end
 		if RelocateController.isActive() then
 			RelocateController.refreshSizedPart(part, rebindFrom)
@@ -976,18 +1020,35 @@ local function runSpongeSizeCinematic(
 	placeId: string,
 	targetClass: number,
 	unlockNext: boolean,
-	parallel: boolean?
+	parallel: boolean?,
+	phase: ("full" | "shrink" | "grow")?,
+	prefetchedResult: any?,
+	shrinkCtx: {
+		oldPart: BasePart,
+		placeId: string,
+		targetClass: number,
+		unlockNext: boolean,
+		fullSize: Vector3,
+		anchor: Vector3?,
+		speciesId: any,
+		replacesInstance: boolean,
+		disarmHide: () -> (),
+	}?
 )
+	local mode = phase or "full"
 	local token: number? = nil
-	if not parallel then
+	if not parallel and mode == "full" then
 		cineToken += 1
 		token = cineToken
 	end
-	local useCamera = unlockNext and not parallel
-	local speciesId = oldPart:GetAttribute("OceanTD_SpeciesId")
-	local replacesInstance = meshReplacesInstanceOnRestyle(speciesId)
-	local fullSize = oldPart.Size
-	local anchor = CoralVisual.readGridAnchor(oldPart)
+	local useCamera = unlockNext and not parallel and mode == "full"
+	local speciesId = if shrinkCtx then shrinkCtx.speciesId else oldPart:GetAttribute("OceanTD_SpeciesId")
+	local replacesInstance = if shrinkCtx
+		then shrinkCtx.replacesInstance
+		else meshReplacesInstanceOnRestyle(speciesId)
+	local fullSize = if shrinkCtx then shrinkCtx.fullSize else oldPart.Size
+	local anchor = if shrinkCtx then shrinkCtx.anchor else CoralVisual.readGridAnchor(oldPart)
+	local disarmHide: () -> () = if shrinkCtx then shrinkCtx.disarmHide else function() end
 	local saved = if useCamera then RelocateController.getSavedCameraCFrame() else nil
 	local startCf = saved or (workspace.CurrentCamera and workspace.CurrentCamera.CFrame)
 
@@ -1008,69 +1069,126 @@ local function runSpongeSizeCinematic(
 		camTw.Completed:Wait()
 	end
 
-	local disarmHide = armHideReplacement(placeId)
-	local serverReady = false
-	local serverOk = false
-	local serverResult: any = nil
-	-- Replace-instance species can restyle during shrink; in-place ApplyMesh fights client Size tweens.
-	if replacesInstance then
-		task.spawn(function()
+	local disarmHideInit = disarmHide
+	if mode ~= "grow" then
+		disarmHide = armHideReplacement(placeId)
+		local serverReady = false
+		local serverOk = false
+		local serverResult: any = nil
+		-- Replace-instance species can restyle during shrink; in-place ApplyMesh fights client Size tweens.
+		-- In multi parallel mode, server is deferred to a shared barrier (mode "shrink" then "grow").
+		local deferServer = mode == "shrink"
+		if replacesInstance and not deferServer then
+			task.spawn(function()
+				local ok, result = pcall(function()
+					return sizeRf:InvokeServer(placeId, targetClass, unlockNext)
+				end)
+				serverOk = ok
+				serverResult = result
+				serverReady = true
+			end)
+		end
+
+		if oldPart.Parent then
+			if anchor then
+				tweenSpongeScale(oldPart, fullSize, anchor, 1, 0.05, CINE_SHRINK_SEC, true)
+			else
+				tweenMeshScale(oldPart, fullSize, 1, 0.05, CINE_SHRINK_SEC, true)
+			end
+		end
+		if token ~= nil and token ~= cineToken then
+			disarmHide()
+			revealAllCinePrepParts(placeId)
+			if oldPart.Parent then
+				oldPart.LocalTransparencyModifier = 0
+				if CoralVisual.isDualColorMesh(speciesId) then
+					CoralVisual.clearSeaFanClientHide(oldPart)
+				end
+			end
+			if useCamera then
+				RelocateController.setCinematicHold(false)
+			end
+			return
+		end
+
+		if oldPart.Parent then
+			oldPart.LocalTransparencyModifier = 1
+			if CoralVisual.isDualColorMesh(speciesId) then
+				for _, ch in ipairs(oldPart:GetChildren()) do
+					if ch:IsA("BasePart") then
+						ch.LocalTransparencyModifier = 1
+					end
+				end
+			end
+		end
+
+		if mode == "shrink" then
+			-- Caller runs server + grow for all jobs together.
+			return {
+				oldPart = oldPart,
+				placeId = placeId,
+				targetClass = targetClass,
+				unlockNext = unlockNext,
+				fullSize = fullSize,
+				anchor = anchor,
+				speciesId = speciesId,
+				replacesInstance = replacesInstance,
+				disarmHide = disarmHide,
+			}
+		end
+
+		if not replacesInstance then
 			local ok, result = pcall(function()
 				return sizeRf:InvokeServer(placeId, targetClass, unlockNext)
 			end)
 			serverOk = ok
 			serverResult = result
 			serverReady = true
-		end)
-	end
-
-	if oldPart.Parent then
-		if anchor then
-			tweenSpongeScale(oldPart, fullSize, anchor, 1, 0.05, CINE_SHRINK_SEC, true)
-		else
-			tweenMeshScale(oldPart, fullSize, 1, 0.05, CINE_SHRINK_SEC, true)
-		end
-	end
-	if token ~= nil and token ~= cineToken then
-		disarmHide()
-		if oldPart.Parent then
-			oldPart.LocalTransparencyModifier = 0
-			if CoralVisual.isDualColorMesh(speciesId) then
-				CoralVisual.clearSeaFanClientHide(oldPart)
+		elseif not serverReady then
+			while not serverReady do
+				RunService.RenderStepped:Wait()
 			end
 		end
-		if useCamera then
-			RelocateController.setCinematicHold(false)
-		end
-		return
-	end
-
-	if oldPart.Parent then
-		oldPart.LocalTransparencyModifier = 1
-		if CoralVisual.isDualColorMesh(speciesId) then
-			for _, ch in ipairs(oldPart:GetChildren()) do
-				if ch:IsA("BasePart") then
-					ch.LocalTransparencyModifier = 1
+		local ok, result = serverOk, serverResult
+		if not ok or typeof(result) ~= "table" or result.ok ~= true then
+			disarmHide()
+			revealAllCinePrepParts(placeId)
+			if oldPart.Parent then
+				oldPart.LocalTransparencyModifier = 0
+				if CoralVisual.isDualColorMesh(oldPart:GetAttribute("OceanTD_SpeciesId")) then
+					CoralVisual.clearSeaFanClientHide(oldPart)
 				end
 			end
+			if useCamera then
+				RelocateController.setCinematicHold(false)
+			end
+			handleSizeResult(result, unlockNext)
+			revertSizeColors()
+			return
+		end
+		prefetchedResult = result
+	else
+		-- grow phase: use shrink ctx (fullSize / disarmHide already applied above).
+		disarmHide = disarmHideInit
+		if typeof(prefetchedResult) ~= "table" or prefetchedResult.ok ~= true then
+			disarmHide()
+			revealAllCinePrepParts(placeId)
+			if oldPart.Parent then
+				oldPart.LocalTransparencyModifier = 0
+				if CoralVisual.isDualColorMesh(speciesId) then
+					CoralVisual.clearSeaFanClientHide(oldPart)
+				end
+			end
+			handleSizeResult(prefetchedResult, unlockNext)
+			revertSizeColors()
+			return
 		end
 	end
 
-	if not replacesInstance then
-		local ok, result = pcall(function()
-			return sizeRf:InvokeServer(placeId, targetClass, unlockNext)
-		end)
-		serverOk = ok
-		serverResult = result
-		serverReady = true
-	elseif not serverReady then
-		while not serverReady do
-			RunService.RenderStepped:Wait()
-		end
-	end
-	local ok, result = serverOk, serverResult
-	if not ok or typeof(result) ~= "table" or result.ok ~= true then
+	local result = prefetchedResult
+	if typeof(result) ~= "table" or result.ok ~= true then
 		disarmHide()
+		revealAllCinePrepParts(placeId)
 		if oldPart.Parent then
 			oldPart.LocalTransparencyModifier = 0
 			if CoralVisual.isDualColorMesh(oldPart:GetAttribute("OceanTD_SpeciesId")) then
@@ -1112,23 +1230,30 @@ local function runSpongeSizeCinematic(
 	disarmHide()
 	local newFull = cineFull or part.Size
 	if not replacesInstance then
-		-- FireCoral ApplyMesh: prefer MeshSize × scale when Size is still the old/shrunk box.
+		-- ApplyMesh in place (Sponge / FireCoral): client Size tween often keeps the pre-restyle
+		-- box, so Small mesh can stay at Large Size. Prefer MeshSize proportions × server diameter.
+		local expectedD = tonumber(result.diameter)
 		local sm = tonumber(result.scaleMult) or tonumber(part:GetAttribute("OceanTD_ScaleMult"))
-		if speciesId == "FireCoral" and part:IsA("MeshPart") and typeof(sm) == "number" and sm > 0 then
+		local stillOld = math.abs(newFull.Y - fullSize.Y) / math.max(fullSize.Y, 0.01) < 0.12
+		local mismatchD = typeof(expectedD) == "number"
+			and expectedD > 0
+			and math.abs(newFull.Y - expectedD) / expectedD > 0.15
+		local stillTiny = typeof(expectedD) == "number" and expectedD > 0 and newFull.Y < expectedD * 0.5
+		if (stillOld or mismatchD or stillTiny) and part:IsA("MeshPart") then
 			local okMs, ms = pcall(function()
 				return (part :: MeshPart).MeshSize
 			end)
 			if okMs and typeof(ms) == "Vector3" and ms.Y > 1e-3 then
-				local fromMesh = ms * sm
-				local stillOld = math.abs(newFull.Y - fullSize.Y) / math.max(fullSize.Y, 0.01) < 0.1
-				local stillTiny = newFull.Y < fromMesh.Y * 0.75
-				if stillOld or stillTiny then
-					newFull = fromMesh
+				if typeof(expectedD) == "number" and expectedD > 0 then
+					newFull = Vector3.new(ms.X / ms.Y * expectedD, expectedD, ms.Z / ms.Y * expectedD)
+				elseif typeof(sm) == "number" and sm > 0 then
+					newFull = ms * sm
 				end
+			elseif typeof(expectedD) == "number" and expectedD > 0 then
+				local sy = math.max(newFull.Y, 1e-3)
+				newFull = Vector3.new(newFull.X / sy * expectedD, expectedD, newFull.Z / sy * expectedD)
 			end
-		end
-		local expectedD = tonumber(result.diameter)
-		if typeof(expectedD) == "number" and expectedD > 0 and newFull.Y < expectedD * 0.5 then
+		elseif typeof(expectedD) == "number" and expectedD > 0 and newFull.Y < expectedD * 0.5 then
 			newFull = Vector3.new(math.max(newFull.X, expectedD * 0.5), expectedD, math.max(newFull.Z, expectedD * 0.5))
 		end
 	elseif typeof(result.diameter) == "number" and result.diameter > 0 and newFull.Y < result.diameter * 0.5 then
@@ -1156,6 +1281,17 @@ local function runSpongeSizeCinematic(
 		tweenSpongeScale(part, newFull, growAnchor, 0.05, 1, CINE_GROW_SEC, false)
 	else
 		tweenMeshScale(part, newFull, 0.05, 1, CINE_GROW_SEC, false)
+	end
+	-- Lock final Size to the recovered target (replication can leave a stale Large box).
+	if not CoralVisual.isDualColorMesh(part:GetAttribute("OceanTD_SpeciesId")) then
+		part.Size = newFull
+		if growAnchor then
+			CoralVisual.alignMeshToSurface(part, growAnchor, nil, part.CFrame)
+		end
+	end
+	local expectedDFinal = tonumber(result.diameter)
+	if typeof(expectedDFinal) == "number" and expectedDFinal > 0 then
+		part:SetAttribute("OceanTD_Diameter", expectedDFinal)
 	end
 	if CoralVisual.isDualColorMesh(part:GetAttribute("OceanTD_SpeciesId")) then
 		CoralVisual.clearSeaFanClientHide(part)
@@ -1236,24 +1372,22 @@ local function runSizeJobsWithCinematic(jobs: { SizeJob }, unlockNext: boolean, 
 	if #jobs == 0 then
 		return
 	end
-	local parallel = #jobs > 1
-	local pending = #jobs
-	local function onJobDone()
-		pending -= 1
-		if pending <= 0 then
-			refreshSizeColors()
-			if RelocateController.isMultiSelect() then
-				RelocateMultiSelect.refreshSummary()
-			end
-			RelocateController.restoreSelectionByPlaceIds(keepIds)
+	local function finishAll()
+		refreshSizeColors()
+		if RelocateController.isMultiSelect() then
+			RelocateMultiSelect.refreshSummary()
 		end
+		RelocateController.restoreSelectionByPlaceIds(keepIds)
 	end
-	for _, j in ipairs(jobs) do
+
+	-- Single coral: full cinematic (may include camera on unlock).
+	if #jobs == 1 then
+		local j = jobs[1]
 		local speciesId = j.part:GetAttribute("OceanTD_SpeciesId")
 		if CoralVisual.isMeshSpecies(speciesId) then
 			task.spawn(function()
-				runSpongeSizeCinematic(j.part, j.placeId, j.targetClass, unlockNext, parallel)
-				onJobDone()
+				runSpongeSizeCinematic(j.part, j.placeId, j.targetClass, unlockNext, false)
+				finishAll()
 			end)
 		else
 			task.spawn(function()
@@ -1261,13 +1395,119 @@ local function runSizeJobsWithCinematic(jobs: { SizeJob }, unlockNext: boolean, 
 					return sizeRf:InvokeServer(j.placeId, j.targetClass, unlockNext)
 				end)
 				if ok and handleSizeResult(result, unlockNext) then
-					applyServerSize(result, unlockNext and not parallel, j.part, true)
+					applyServerSize(result, unlockNext, j.part, true)
 				else
 					revertSizeColors()
 				end
-				onJobDone()
+				finishAll()
 			end)
 		end
+		if unlockNext and jobCount > #jobs then
+			showToast("Upgraded " .. tostring(#jobs) .. " of " .. tostring(jobCount) .. " (not enough $D)")
+		end
+		return
+	end
+
+	-- Multi: shrink all together → server all together → grow/apply all together.
+	type MeshShrinkCtx = {
+		oldPart: BasePart,
+		placeId: string,
+		targetClass: number,
+		unlockNext: boolean,
+		fullSize: Vector3,
+		anchor: Vector3?,
+		speciesId: any,
+		replacesInstance: boolean,
+		disarmHide: () -> (),
+	}
+	local shrinkCtx: { [number]: MeshShrinkCtx? } = {}
+	local serverOk: { [number]: boolean } = {}
+	local serverResult: { [number]: any } = {}
+
+	local left = 0
+	for i, j in ipairs(jobs) do
+		local speciesId = j.part:GetAttribute("OceanTD_SpeciesId")
+		if CoralVisual.isMeshSpecies(speciesId) then
+			left += 1
+			local idx = i
+			task.spawn(function()
+				local ctx = runSpongeSizeCinematic(
+					j.part,
+					j.placeId,
+					j.targetClass,
+					unlockNext,
+					true,
+					"shrink"
+				)
+				shrinkCtx[idx] = if typeof(ctx) == "table" then ctx :: MeshShrinkCtx else nil
+				left -= 1
+			end)
+		end
+	end
+	waitBarrier(function()
+		return left
+	end)
+
+	left = #jobs
+	for i, j in ipairs(jobs) do
+		local idx = i
+		task.spawn(function()
+			local ok, result = pcall(function()
+				return sizeRf:InvokeServer(j.placeId, j.targetClass, unlockNext)
+			end)
+			serverOk[idx] = ok
+			serverResult[idx] = result
+			left -= 1
+		end)
+	end
+	waitBarrier(function()
+		return left
+	end)
+
+	left = #jobs
+	local function onJobDone()
+		left -= 1
+		if left <= 0 then
+			finishAll()
+		end
+	end
+	for i, j in ipairs(jobs) do
+		local idx = i
+		task.spawn(function()
+			local ok = serverOk[idx] == true
+			local result = serverResult[idx]
+			local ctx = shrinkCtx[idx]
+			if not ok or not handleSizeResult(result, unlockNext) then
+				if ctx then
+					ctx.disarmHide()
+					revealAllCinePrepParts(ctx.placeId)
+					if ctx.oldPart.Parent then
+						ctx.oldPart.LocalTransparencyModifier = 0
+						if CoralVisual.isDualColorMesh(ctx.speciesId) then
+							CoralVisual.clearSeaFanClientHide(ctx.oldPart)
+						end
+					end
+				end
+				revertSizeColors()
+				onJobDone()
+				return
+			end
+			if ctx then
+				runSpongeSizeCinematic(
+					ctx.oldPart,
+					ctx.placeId,
+					ctx.targetClass,
+					unlockNext,
+					true,
+					"grow",
+					result,
+					ctx
+				)
+			else
+				applyServerSize(result, false, j.part, true)
+			end
+			onJobDone()
+		end)
 	end
 	if unlockNext and jobCount > #jobs then
 		showToast("Upgraded " .. tostring(#jobs) .. " of " .. tostring(jobCount) .. " (not enough $D)")
@@ -2405,6 +2645,8 @@ local function setVisible(on: boolean)
 		RelocateController.setInspectPanelVisible(false)
 		clearLifeConns()
 		cineToken += 1
+		-- In-flight size cine may have left the new mesh LTM-hidden; unhide on close.
+		revealAllCinePrepParts(nil)
 	end
 end
 

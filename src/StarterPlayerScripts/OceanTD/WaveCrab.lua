@@ -1,6 +1,6 @@
 --!strict
 --[[
-	GroundA hungry crabs (wave 5+): hunger 10× fish, sprint bursts on GroundA.
+	GroundA/GroundB hungry crabs (wave 5+): hunger 10× fish, sprint bursts; 50/50 route.
 	Counts: W5–10 0–1, W11–20 1–3, W21–40 2–4, W41+ 3–6.
 	Weld tripod walk (not IK). Path is never trimmed by Plot Size.
 ]]
@@ -54,7 +54,6 @@ local GROUP2: { [string]: boolean } = { LLeg2Weld = true, RLeg1Weld = true, RLeg
 
 local spawnedThisWave = 0
 local expectedThisWave = 0
-local pathWarned = false
 local sprintRng = Random.new()
 
 local function findIndexedPart(folder: Instance, prefix: string, index: number): BasePart?
@@ -99,25 +98,28 @@ local function estimateSegLength(w0: Vector3, c: Vector3, w1: Vector3): number
 	return math.max(len, 0.01)
 end
 
-local function buildFromRemap(remap: (BasePart) -> Vector3): PathData?
+local warnedRoutes: { [string]: boolean } = {}
+
+local function buildFromRemap(remap: (BasePart) -> Vector3, routeName: string?): PathData?
+	local name = routeName or C.CRAB_ROUTE_NAME
 	local root = Workspace:FindFirstChild("WaveRoute")
 	if not root then
 		return nil
 	end
-	local route = root:FindFirstChild(C.CRAB_ROUTE_NAME)
+	local route = root:FindFirstChild(name)
 	if not route then
-		if not pathWarned then
-			pathWarned = true
-			warn("[WAVE] WaveRoute." .. C.CRAB_ROUTE_NAME .. " missing")
+		if not warnedRoutes[name] then
+			warnedRoutes[name] = true
+			warn("[WAVE] WaveRoute." .. name .. " missing")
 		end
 		return nil
 	end
 	local wpFolder = route:FindFirstChild("Waypoints")
 	local ctrlFolder = route:FindFirstChild("Controls")
 	if not wpFolder or not ctrlFolder then
-		if not pathWarned then
-			pathWarned = true
-			warn("[WAVE] " .. C.CRAB_ROUTE_NAME .. " Waypoints/Controls missing")
+		if not warnedRoutes[name] then
+			warnedRoutes[name] = true
+			warn("[WAVE] " .. name .. " Waypoints/Controls missing")
 		end
 		return nil
 	end
@@ -132,9 +134,9 @@ local function buildFromRemap(remap: (BasePart) -> Vector3): PathData?
 		i += 1
 	end
 	if #waypoints < 2 then
-		if not pathWarned then
-			pathWarned = true
-			warn("[WAVE] " .. C.CRAB_ROUTE_NAME .. " needs W1..Wn (at least 2); found", #waypoints)
+		if not warnedRoutes[name] then
+			warnedRoutes[name] = true
+			warn("[WAVE] " .. name .. " needs W1..Wn (at least 2); found", #waypoints)
 		end
 		return nil
 	end
@@ -144,9 +146,9 @@ local function buildFromRemap(remap: (BasePart) -> Vector3): PathData?
 	for s = 1, #waypoints - 1 do
 		local ctrl = findIndexedPart(ctrlFolder, "C", s)
 		if not ctrl then
-			if not pathWarned then
-				pathWarned = true
-				warn("[WAVE] " .. C.CRAB_ROUTE_NAME .. " missing control C" .. tostring(s))
+			if not warnedRoutes[name] then
+				warnedRoutes[name] = true
+				warn("[WAVE] " .. name .. " missing control C" .. tostring(s))
 			end
 			return nil
 		end
@@ -257,13 +259,69 @@ end
 function WaveCrab.buildLocal(): PathData?
 	return buildFromRemap(function(part: BasePart): Vector3
 		return ClientPlot.remapFromPlot1(part.Position)
-	end)
+	end, C.CRAB_ROUTE_NAME)
 end
 
 function WaveCrab.buildOn(targetPlotId: string, targetCf: CFrame, targetSize: Vector3, targetRingCf: CFrame?): PathData?
 	return buildFromRemap(function(part: BasePart): Vector3
 		return ClientPlot.remapFromPlot1To(part.Position, targetPlotId, targetCf, targetSize, targetRingCf)
-	end)
+	end, C.CRAB_ROUTE_NAME)
+end
+
+function WaveCrab.buildNamedLocal(routeName: string): PathData?
+	return buildFromRemap(function(part: BasePart): Vector3
+		return ClientPlot.remapFromPlot1(part.Position)
+	end, routeName)
+end
+
+function WaveCrab.buildNamedOn(
+	routeName: string,
+	targetPlotId: string,
+	targetCf: CFrame,
+	targetSize: Vector3,
+	targetRingCf: CFrame?
+): PathData?
+	return buildFromRemap(function(part: BasePart): Vector3
+		return ClientPlot.remapFromPlot1To(part.Position, targetPlotId, targetCf, targetSize, targetRingCf)
+	end, routeName)
+end
+
+-- Prefer both GroundA + GroundB; either alone is fine if the other is missing.
+function WaveCrab.buildBothLocal(): (PathData?, PathData?)
+	return WaveCrab.buildNamedLocal(C.CRAB_ROUTE_NAME), WaveCrab.buildNamedLocal(C.CRAB_ROUTE_B_NAME)
+end
+
+function WaveCrab.buildBothOn(
+	targetPlotId: string,
+	targetCf: CFrame,
+	targetSize: Vector3,
+	targetRingCf: CFrame?
+): (PathData?, PathData?)
+	return WaveCrab.buildNamedOn(C.CRAB_ROUTE_NAME, targetPlotId, targetCf, targetSize, targetRingCf),
+		WaveCrab.buildNamedOn(C.CRAB_ROUTE_B_NAME, targetPlotId, targetCf, targetSize, targetRingCf)
+end
+
+-- 50/50 GroundA vs GroundB when both exist; otherwise the one that built.
+function WaveCrab.pickGroundPath(pathA: PathData?, pathB: PathData?, rng: Random): PathData?
+	if pathA and pathB then
+		return if rng:NextNumber() < 0.5 then pathA else pathB
+	end
+	return pathA or pathB
+end
+
+function WaveCrab.anyGroundPath(pathA: PathData?, pathB: PathData?): PathData?
+	return pathA or pathB
+end
+
+function WaveCrab.listGroundPaths(pathA: PathData?, pathB: PathData?): { PathData }
+	local out: { PathData } = {}
+	if pathA then
+		table.insert(out, pathA)
+	end
+	if pathB then
+		table.insert(out, pathB)
+	end
+	return out
 end
 
 function WaveCrab.sample(path: PathData, dist: number): (Vector3, Vector3)
@@ -475,9 +533,83 @@ function WaveCrab.shellOverlapsCoral(shell: BasePart, coral: BasePart): boolean
 	return (onShell - onCoral).Magnitude <= 0.05
 end
 
+-- XZ spatial hash for coral stun queries (HASH_CELL). Avoids O(critters × all corals).
+export type SpatialHash = { [number]: { any } }
+
+function WaveCrab.spatialKey(ix: number, iz: number): number
+	return ix * 73856093 + iz * 19349663
+end
+
+function WaveCrab.spatialKeyWorld(x: number, z: number, cell: number): number
+	return WaveCrab.spatialKey(math.floor(x / cell), math.floor(z / cell))
+end
+
+function WaveCrab.spatialClear(hash: SpatialHash)
+	table.clear(hash)
+end
+
+function WaveCrab.spatialInsert(hash: SpatialHash, cell: number, x: number, z: number, item: any)
+	local key = WaveCrab.spatialKeyWorld(x, z, cell)
+	local bucket = hash[key]
+	if not bucket then
+		bucket = {}
+		hash[key] = bucket
+	end
+	table.insert(bucket, item)
+end
+
+--[[
+	Call fn(item) for each hash entry whose cell may overlap a circle on XZ.
+	If fn returns true, iteration stops and this returns true.
+]]
+function WaveCrab.spatialForEachNear(
+	hash: SpatialHash,
+	cell: number,
+	pos: Vector3,
+	radius: number,
+	fn: (any) -> boolean?
+): boolean
+	local r = math.max(0, radius)
+	local minIx = math.floor((pos.X - r) / cell)
+	local maxIx = math.floor((pos.X + r) / cell)
+	local minIz = math.floor((pos.Z - r) / cell)
+	local maxIz = math.floor((pos.Z + r) / cell)
+	for ix = minIx, maxIx do
+		for iz = minIz, maxIz do
+			local bucket = hash[WaveCrab.spatialKey(ix, iz)]
+			if bucket then
+				for _, item in ipairs(bucket) do
+					if fn(item) then
+						return true
+					end
+				end
+			end
+		end
+	end
+	return false
+end
+
+-- Half-extent pad so center-hashed corals near cell edges are still found.
+function WaveCrab.stunQueryRadius(shell: BasePart): number
+	local shellR = math.max(shell.Size.X, shell.Size.Y, shell.Size.Z) * 0.5
+	return shellR + 8
+end
+
+local function paintStunWhitePlastic(p: BasePart)
+	if p:IsA("MeshPart") then
+		p.TextureID = ""
+	end
+	p.Material = Enum.Material.Plastic
+	p.Color = Color3.new(1, 1, 1)
+end
+
 function WaveCrab.stunCoralPart(part: BasePart)
 	part:SetAttribute("OceanTD_CrabStunned", true)
-	part.Color = Color3.new(1, 1, 1)
+	paintStunWhitePlastic(part)
+	local accent = CoralVisual.getAccentPart(part)
+	if accent then
+		paintStunWhitePlastic(accent)
+	end
 end
 
 function WaveCrab.playDeathSkullFromCoral(part: BasePart)
@@ -548,13 +680,33 @@ end
 
 function WaveCrab.clearCoralStun(part: BasePart, fade: boolean)
 	part:SetAttribute("OceanTD_CrabStunned", nil)
-	local _, color = CoralVisual.readRestLook(part)
+	local mat, color = CoralVisual.readRestLook(part)
+	local accent = CoralVisual.getAccentPart(part)
+	local webColor = part:GetAttribute("OceanTD_WebRestR")
+	local webG = part:GetAttribute("OceanTD_WebRestG")
+	local webB = part:GetAttribute("OceanTD_WebRestB")
+	local accentColor = if typeof(webColor) == "number" and typeof(webG) == "number" and typeof(webB) == "number"
+		then Color3.new(webColor, webG, webB)
+		else color
+	-- Restore authored materials immediately; fade only color so Plastic doesn't linger.
+	part.Material = mat
+	if accent then
+		accent.Material = mat
+	end
 	if fade then
 		TweenService:Create(part, TweenInfo.new(C.CRAB_STUN_FADE_SEC, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
 			Color = color,
 		}):Play()
+		if accent then
+			TweenService:Create(accent, TweenInfo.new(C.CRAB_STUN_FADE_SEC, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+				Color = accentColor,
+			}):Play()
+		end
 	else
-		part.Color = color
+		CoralVisual.applyRestLook(part)
+		if accent then
+			accent.Material = mat
+		end
 	end
 end
 
@@ -576,8 +728,14 @@ function WaveCrab.playZapBurst(parent: Instance, follow: () -> Vector3, pauseDur
 	}
 	local zaps: { Zap } = {}
 	local origin0 = follow()
+	local bubblesSpawned = 0
+	local bubbleMax = C.CRAB_ZAP_BUBBLE_COUNT
 
 	local function spawnBubble(at: Vector3)
+		if bubblesSpawned >= bubbleMax then
+			return
+		end
+		bubblesSpawned += 1
 		local size = rng:NextNumber(C.CRAB_ZAP_BUBBLE_SIZE_MIN, C.CRAB_ZAP_BUBBLE_SIZE_MAX)
 		local p = Instance.new("Part")
 		p.Name = "OceanTD_CrabBubble"
@@ -666,13 +824,14 @@ function WaveCrab.playZapBurst(parent: Instance, follow: () -> Vector3, pauseDur
 		})
 	end
 
-	for _ = 1, C.CRAB_ZAP_BUBBLE_COUNT do
+	-- Initial burst fills up to bubbleMax; Heartbeat stream only if any budget remains.
+	for _ = 1, bubbleMax do
 		spawnBubble(origin0)
 	end
 
 	local t0 = os.clock()
 	local nextBubbleAt = t0 + rng:NextNumber(0.08, 0.18)
-	local bubblesDone = false
+	local bubblesDone = bubblesSpawned >= bubbleMax
 	local conn: RBXScriptConnection
 	conn = RunService.Heartbeat:Connect(function(dt)
 		local now = os.clock()
@@ -680,11 +839,14 @@ function WaveCrab.playZapBurst(parent: Instance, follow: () -> Vector3, pauseDur
 		local origin = follow()
 		local fighting = if stillFighting then stillFighting() else true
 		if not bubblesDone then
-			if not fighting then
+			if not fighting or bubblesSpawned >= bubbleMax then
 				bubblesDone = true
 			elseif u < 0.78 and now >= nextBubbleAt then
 				spawnBubble(origin)
 				nextBubbleAt = now + rng:NextNumber(0.07, 0.2)
+				if bubblesSpawned >= bubbleMax then
+					bubblesDone = true
+				end
 			end
 		end
 		for _, z in ipairs(zaps) do

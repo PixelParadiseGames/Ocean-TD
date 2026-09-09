@@ -40,6 +40,39 @@ local C = {
 	FISH_MIN_PATH_Y = -8.5, -- allow deeper swim lanes
 	COMBAT_HZ = COMBAT_HZ,
 	COMBAT_DT = 1 / COMBAT_HZ,
+	-- Max corals that call findClosestHungryFish / fireShot per combat tick (10 Hz).
+	-- Prefer corals near the hungry fish front; rotate within the near-front pool for fairness.
+	COMBAT_FIRE_BUDGET = 96,
+	-- Feed mode: "volleys" | "lane_stock" | "path_fields"
+	-- lane_stock = Option 2 contested path capacity (perf + lane pressure).
+	FEED_MODE = "lane_stock",
+	-- Wave-start nest food: wait, then spawn orbs randomly across this window (avoids one-frame hitch).
+	AMMO_ARM_DELAY_SEC = 2,
+	AMMO_ARM_SPREAD_SEC = 3,
+	AMMO_ARM_PER_FRAME = 6,
+	AMMO_FADE_IN_SEC = 0.35, -- transparency fade when nest orbs appear (lighter than scale)
+	-- Session-start coral→path stamps spread across frames (main CPU hitch otherwise).
+	PATH_STAMP_PER_FRAME = 10,
+	-- Wave 1: wait until nest arm window finishes before first fish (smooth boot).
+	WAVE1_SPAWN_LEAD_SEC = 5,
+	-- Option 2: max food a fish drinks per second while stock lasts.
+	LANE_DRINK_PER_SEC = 5,
+	-- Nest food stays parked; on feed pulse a copy may fly to the fish.
+	-- Rise share ramps from wave LANE_RISE_RAMP_START → LANE_RISE_RAMP_END (50/50 at end).
+	LANE_RISE_RAMP_START = 20,
+	LANE_RISE_RAMP_END = 50,
+	LANE_FISH_AIM_FRAC_END = 0.5, -- fish-aim share at/after ramp end (rest = nest rise)
+	LANE_NEST_RISE_STUDS = 40,
+	LANE_NEST_RISE_SEC = 2,
+	LANE_NEST_HOLD_SEC = 0.08, -- 60% shorter (was 0.2)
+	LANE_NEST_SLOT_STAGGER = 0.28, -- delay between slots starting (visual stagger)
+	LANE_NEST_FADE_START = 0.28, -- fade ~twice as early (was 0.55)
+	LANE_NEST_FADE_END = 0.48, -- fully faded mid-rise (was 0.92)
+	-- 4b: wake corals near hungry crabs/urchins/sharks using each coral's feed range.
+	GROUND_FEED_ACTIVATE_RANGE = 100, -- legacy pad; wake uses coral.rangeSq
+	-- 8b: keep nest ammo Parts; only this many flying food Parts at once (near camera preferred).
+	FOOD_VISIBLE_MAX = 48,
+	FOOD_VISIBLE_DIST = 220, -- studs from camera to start / mid / meet
 	PATH_SAMPLE_STEP = 1.5,
 	STAGGER_SEC = 0.4,
 	STAGGER_MIN_SEC = 0.16, -- cap so late waves still read as separate fish
@@ -52,12 +85,12 @@ local C = {
 	WANDER_AMP_MAX = 7.25,
 	HASH_CELL = 30,
 	DEFAULT_FOOD_FILL = 1,
-	WAVE1_COUNT = 3,
+	WAVE1_COUNT = 3, -- base before /2 in waveFishCount
 	WAVE_COUNT_STEP = 2,
 	REEF_START_HEALTH = 10,
-	TANG_HUNGER_BASE = 2, -- waves 1–10
-	HUNGER_EVERY_WAVES = 10,
-	HUNGER_PER_TIER = 2, -- +2 food to fill the bar every 10 waves
+	TANG_HUNGER_BASE = 4, -- doubled (was 2); half as many tangs, same total hunger demand
+	HUNGER_EVERY_WAVES = 5, -- +6 food every 5 waves
+	HUNGER_PER_TIER = 6,
 	FOOD_RADIUS = 0.52, -- was 0.65 (−20%)
 	AMMO_RADIUS = 0.6, -- was 0.75 (−20%)
 	HUNGER_BAR_PX_W = 28 * 0.8, -- fill strip (was 40 * 0.8)
@@ -87,7 +120,7 @@ local C = {
 	ARROW_PATH_SPACING = 16, -- studs along path between arrow sets (full route)
 	ARROW_LABEL_EVERY = 4, -- "Wave N" on every Nth arrow set
 	ARROW_SPIN_RAD_PER_SEC = 2.2, -- slow corkscrew roll
-	-- Crab GroundA preview: red arrows; fixed short train.
+	-- Crab GroundA/B preview: red arrows; fixed short train.
 	CRAB_ARROW_COUNT = 8,
 	CRAB_ARROW_PATH_SPACING = 32, -- studs between crab arrow sets
 	CRAB_ARROW_COLOR = Color3.fromRGB(230, 45, 55),
@@ -102,9 +135,14 @@ local C = {
 	TANG_YAW = math.rad(-90),
 	TANG_PITCH = 0,
 	TANG_ROLL = 0,
-	-- Hungry crabs on WaveRoute.GroundA (wave 5+).
+	-- After wave 20: random 20–40% of Tang use WaveRoute.A2 instead of A.
+	FISH_A2_AFTER_WAVE = 20,
+	FISH_A2_FRAC_MIN = 0.20,
+	FISH_A2_FRAC_MAX = 0.40,
+	FISH_ROUTE_A2_NAME = "A2",
+	-- Hungry crabs on WaveRoute.GroundA / GroundB (wave 5+); 50/50 per crab.
 	CRAB_FIRST_WAVE = 5,
-	CRAB_HUNGER_MULT = 10, -- max hunger = fish hunger × this
+	CRAB_HUNGER_MULT = 0.84, -- × tang hunger (crabs + urchins); −50% from 1.68
 	CRAB_SPEED_MULT = 0.75, -- 25% slower than Tang (between sprints)
 	CRAB_SPRINT_MULT_MIN = 1.55,
 	CRAB_SPRINT_MULT_MAX = 2.7,
@@ -113,6 +151,7 @@ local C = {
 	CRAB_SPRINT_REST_MIN = 0.3,
 	CRAB_SPRINT_REST_MAX = 1.25,
 	CRAB_ROUTE_NAME = "GroundA",
+	CRAB_ROUTE_B_NAME = "GroundB",
 	-- Sideways scuttle: mesh forward (eyes/claws) faces across the path, not along it.
 	CRAB_YAW = math.rad(90),
 	CRAB_PITCH = 0,
@@ -143,7 +182,7 @@ local C = {
 	CRAB_ZAP_END_STUDS_MAX = 6.5,
 	CRAB_ZAP_TRANS_MIN = 0,
 	CRAB_ZAP_TRANS_MAX = 0.5,
-	CRAB_ZAP_BUBBLE_COUNT = 16,
+	CRAB_ZAP_BUBBLE_COUNT = 8, -- was 16; hard max rising glass spheres per zap (incl. stream)
 	CRAB_ZAP_BUBBLE_SIZE_MIN = 0.2,
 	CRAB_ZAP_BUBBLE_SIZE_MAX = 3.40, -- 2× previous 1.70
 	CRAB_ZAP_BUBBLE_LIFE = 8,
@@ -163,14 +202,58 @@ local C = {
 	CRAB_FIGHT_SPIN = math.rad(155), -- rad/sec while zapping a coral
 	CRAB_FIGHT_YAW_WOBBLE = math.rad(32),
 	CRAB_FIGHT_PITCH = math.rad(14),
-	-- Urchins: waves 10/20/30… count = wave/10; spawn before fish; half crab base speed.
-	URCHIN_FIRST_WAVE = 10,
-	URCHIN_EVERY_WAVES = 10,
-	URCHIN_SPEED_MULT = 0.5, -- × crab base (crab base = FISH_SPEED × CRAB_SPEED_MULT)
-	URCHIN_STAGGER_MIN = 0.45,
-	URCHIN_STAGGER_MAX = 2.8,
-	URCHIN_FIRST_DELAY_MIN = 0.08,
-	URCHIN_FIRST_DELAY_MAX = 0.65,
+	-- Shark: waves 10/20/30… only; 1 per wave; swim route WaveRoute.Shark.
+	SHARK_FIRST_WAVE = 10,
+	SHARK_EVERY_WAVES = 10,
+	SHARK_ROUTE_NAME = "Shark",
+	SHARK_SPEED_MULT = 1.2, -- bit faster than Tang
+	SHARK_HUNGER_BASE = 50, -- first shark tier hunger
+	SHARK_HUNGER_PER_TIER = 10, -- +10 each ×10 wave
+	SHARK_YAW = 0, -- was -90 (left flank led); +90° so nose leads
+	SHARK_PITCH = 0,
+	SHARK_ROLL = 0,
+	SHARK_SWAY_YAW = math.rad(5.5), -- light client swim sway
+	SHARK_SWAY_FREQ = 1.35,
+	SHARK_MUSIC_ID = "rbxassetid://131430400979893",
+	SHARK_MUSIC_FADE_SEC = 2,
+	SHARK_CAM_ZOOM_IN_SEC = 1,
+	SHARK_CAM_HOLD_SEC = 3,
+	SHARK_CAM_ZOOM_OUT_SEC = 3,
+	SHARK_CAM_DIST = 42,
+	SHARK_CAM_HEIGHT = 14,
+	TANG_FIRST_WAVE = 1, -- overview cam: full path + heart until fish fed
+	TANG_CAM_OVERVIEW_ZOOM_SEC = 1.6,
+	TANG_CAM_OVERVIEW_RESTORE_SEC = 1.4,
+	TANG_CAM_OVERVIEW_SAMPLE_STEP = 16, -- match arrow spacing-ish along path
+	TANG_CAM_OVERVIEW_PAD = 1.35,
+	TANG_CAM_OVERVIEW_MIN_DIST = 80,
+	TANG_CAM_OVERVIEW_HEIGHT = 42,
+	TANG_CAM_OVERVIEW_FISH_ZOOM_SEC = 1.6,
+	-- Start fish-focus cam this many seconds before first spawn.
+	TANG_CAM_FISH_TRANSITION_LEAD_SEC = 1,
+	TANG_CAM_OVERVIEW_FISH_PAD_MULT = 1.28,
+	TANG_CAM_OVERVIEW_FISH_HEIGHT_MULT = 1.22,
+	TANG_CAM_FISH_FOCUS_MIN_DIST = 36,
+	TANG_CAM_FISH_FOCUS_MIN_HOLD_SEC = 3, -- extra hold on fish after they are fed, before restore
+	TANG_CAM_FISH_FOCUS_HEIGHT = 18,
+	TANG_CAM_FISH_FOCUS_BACK_MIN = 22,
+	TANG_CAM_FISH_FOCUS_BACK_MAX = 70,
+	TANG_CAM_FISH_FOCUS_LOOK_BLEND = 0.04, -- keep look on fish so they sit mid-frame (not bottom)
+	TANG_CAM_FISH_FOCUS_LOOK_Y = -1.2, -- aim slightly below fish → fish higher toward mid-screen
+	TANG_CAM_FISH_FOCUS_FOLLOW_RATE = 3.2, -- softer track; reduces fight/shake with moving school
+
+	-- Urchins: waves 5/10/15…; count = W/5 (doubles growth past wave 100); half crab base speed.
+	URCHIN_FIRST_WAVE = 5,
+	URCHIN_EVERY_WAVES = 5,
+	URCHIN_SPEED_MULT = 0.6, -- × crab base; +20% from 0.5
+	-- Spawn gaps ~2× prior; wide range so packs clump or stretch naturally.
+	URCHIN_STAGGER_MIN = 0.9,
+	URCHIN_STAGGER_MAX = 5.6,
+	URCHIN_FIRST_DELAY_MIN = 0.16,
+	URCHIN_FIRST_DELAY_MAX = 1.3,
+	URCHIN_SPEED_VAR = 0.16, -- ±16% walk speed so they don't lock in a band
+	URCHIN_CLUSTER_CHANCE = 0.28, -- roll a short gap (near neighbor) this often
+	URCHIN_CLUSTER_SPAN = 0.22, -- cluster gaps use this fraction of the stagger range
 	-- Player sting: knockback + red flash + $D steal/orbs.
 	URCHIN_STING_COOLDOWN_SEC = 3,
 	URCHIN_STING_STEAL_MAX = 30,
@@ -188,6 +271,8 @@ local C = {
 	URCHIN_ORB_SPREAD_SPAN = 5.1, -- 50% further than 3.4
 	URCHIN_ORB_COLOR = Color3.fromRGB(40, 255, 90),
 	URCHIN_ORB_PICKUP_SOUND = "rbxassetid://139487580236703", -- reuse feed ping (valid Sound)
+	-- Rolled count: uniform from max down to 40% fewer (min fraction of max).
+	URCHIN_COUNT_MIN_FRAC = 0.6,
 	TURN_RATE = 14, -- legacy; fish facing uses PATH_TANG_SMOOTH_RATE
 	-- Smooth path heading so school lateral offsets don't snap at waypoint joins.
 	PATH_TANG_SMOOTH_RATE = 11,
@@ -205,22 +290,57 @@ function C.crabHungerForWave(wave: number): number
 	return C.tangHungerForWave(wave) * C.CRAB_HUNGER_MULT
 end
 
+-- Wave 10 → 50, 20 → 60, 30 → 70…
+function C.sharkHungerForWave(wave: number): number
+	local w = math.max(1, math.floor(wave))
+	local tier = math.max(1, math.floor(w / C.SHARK_EVERY_WAVES))
+	return C.SHARK_HUNGER_BASE + (tier - 1) * (C.SHARK_HUNGER_PER_TIER or 10)
+end
+
+function C.sharkSpeed(): number
+	return C.FISH_SPEED * C.SHARK_SPEED_MULT
+end
+
 -- Inclusive min/max crabs rolled for this wave.
+-- Brackets: ≤10 → 0–1; 20–40 → 1–3; 41–60 → 2–4; 61–80 → 3–5; 81–100 → 4–6; then +1/+1 per +20 waves.
+-- Waves 11–19 stay at 0–1 until the wave-20 band.
 function C.crabCountRangeForWave(wave: number): (number, number)
 	local w = math.max(1, math.floor(wave))
 	if w < C.CRAB_FIRST_WAVE then
 		return 0, 0
 	end
-	if w <= 10 then
+	if w < 20 then
 		return 0, 1
 	end
-	if w <= 20 then
-		return 1, 3
+	local band = if w <= 40 then 0 else math.ceil((w - 40) / 20)
+	return 1 + band, 3 + band
+end
+
+-- Urchins on ×5 waves: floor(W/5) through wave 100; past 100 growth doubles (+1 per extra ×5 wave).
+-- This is the max; actual spawn rolls down toward 40% fewer (see urchinCountRangeForWave).
+function C.urchinCountForWave(wave: number): number
+	local w = math.max(1, math.floor(wave))
+	if w < C.URCHIN_FIRST_WAVE or w % C.URCHIN_EVERY_WAVES ~= 0 then
+		return 0
 	end
-	if w <= 40 then
-		return 2, 4
+	local n = math.floor(w / C.URCHIN_EVERY_WAVES)
+	if w > 100 then
+		n += math.floor((w - 100) / C.URCHIN_EVERY_WAVES)
 	end
-	return 3, 6 -- 41+
+	return n
+end
+
+-- Inclusive min/max urchins rolled for this wave (hi = formula max, lo ≈ 60% of max).
+function C.urchinCountRangeForWave(wave: number): (number, number)
+	local hi = C.urchinCountForWave(wave)
+	if hi <= 0 then
+		return 0, 0
+	end
+	local lo = math.max(1, math.floor(hi * C.URCHIN_COUNT_MIN_FRAC))
+	if lo > hi then
+		lo = hi
+	end
+	return lo, hi
 end
 
 function C.crabSlotForWave(wave: number): number

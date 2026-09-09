@@ -230,7 +230,13 @@ local function layout()
 	if own and own:IsA("GuiObject") and own.Visible then
 		w = math.max(220, own.AbsoluteSize.X)
 		x = own.AbsolutePosition.X - parent.AbsolutePosition.X
-		y = (own.AbsolutePosition.Y - parent.AbsolutePosition.Y) + own.AbsoluteSize.Y + GAP_BELOW_OWN
+		local below = (own.AbsolutePosition.Y - parent.AbsolutePosition.Y) + own.AbsoluteSize.Y + GAP_BELOW_OWN
+		-- Bottom-center own HUD: sit above it so we don't push off-screen.
+		if below + h > parent.AbsoluteSize.Y - 8 then
+			y = (own.AbsolutePosition.Y - parent.AbsolutePosition.Y) - h - GAP_BELOW_OWN
+		else
+			y = below
+		end
 	else
 		local quickbar = parent:FindFirstChild("Quickbar")
 		local slot5 = quickbar and quickbar:FindFirstChild("Slot5")
@@ -261,8 +267,8 @@ local function applySnap(snap: WaveWatchMode.WatchSnap)
 	if nameLabel then
 		nameLabel.Text = "👁 " .. hostDisplayName(snap.hostUserId)
 	end
-	local reefMax = math.max(1, snap.reefMax or 10)
-	local reefH = math.clamp(snap.reefHealth or 0, 0, reefMax)
+	local reefMax = math.max(1, math.floor((snap.reefMax or 10) + 1e-6))
+	local reefH = math.clamp(math.floor((snap.reefHealth or 0) + 1e-6), 0, reefMax)
 	if reefFill then
 		reefFill.Size = UDim2.fromScale(reefH / reefMax, 1)
 	end

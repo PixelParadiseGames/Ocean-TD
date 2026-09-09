@@ -4,6 +4,7 @@
 	Shuffle, skip, play/pause; volume via AudioSettings BGM group.
 ]]
 
+local RunService = game:GetService("RunService")
 local SoundService = game:GetService("SoundService")
 local Workspace = game:GetService("Workspace")
 
@@ -16,12 +17,18 @@ local BG_FOLDER_PATH = { "Audio", "BG Music" }
 local FADE_SEC = 0.35
 
 local bgmSound: Sound? = nil
+local overlaySound: Sound? = nil
 local trackIds: { string } = {}
 local playOrder: { number } = {}
 local orderIndex = 1
 local shuffleOn = false
 local started = false
 local paused = false
+local overlayToken = 0
+local duckActive = false
+local savedBgmVolume = 1
+local savedBgmTime = 0
+local overlayEndedConn: RBXScriptConnection? = nil
 
 local stateChanged = Instance.new("BindableEvent")
 BgmController.StateChanged = stateChanged.Event
@@ -261,6 +268,173 @@ end
 
 function BgmController.getFadeSeconds(): number
 	return FADE_SEC
+end
+
+local function tweenVolume(sound: Sound, toVol: number, fadeSec: number, token: number, onDone: (() -> ())?)
+	local from = sound.Volume
+	if fadeSec <= 0 or math.abs(from - toVol) < 1e-4 then
+		sound.Volume = toVol
+		if onDone then
+			onDone()
+		end
+		return
+	end
+	local t0 = os.clock()
+	local conn: RBXScriptConnection? = nil
+	conn = RunService.Heartbeat:Connect(function()
+		if token ~= overlayToken then
+			if conn then
+				conn:Disconnect()
+			end
+			return
+		end
+		if not sound.Parent then
+			if conn then
+				conn:Disconnect()
+			end
+			if onDone then
+				onDone()
+			end
+			return
+		end
+		local u = math.clamp((os.clock() - t0) / fadeSec, 0, 1)
+		sound.Volume = from + (toVol - from) * u
+		if u >= 1 then
+			if conn then
+				conn:Disconnect()
+			end
+			if onDone then
+				onDone()
+			end
+		end
+	end)
+end
+
+local function ensureOverlay(): Sound
+	local existing = overlaySound
+	if existing and existing.Parent then
+		return existing
+	end
+	AudioSettings.init()
+	local s = Instance.new("Sound")
+	s.Name = "OceanTD_SharkTheme"
+	s.Looped = false
+	s.Volume = 0
+	s.RollOffMaxDistance = 10000
+	s.Parent = SoundService
+	AudioSettings.markBgmSound(s)
+	overlaySound = s
+	return s
+end
+
+-- Fade BGM out and play a one-shot overlay at the same mixer volume.
+-- No-op when BGM is paused in settings. onEnded fires when the overlay finishes naturally.
+function BgmController.playOverlay(soundId: string, fadeSec: number?, onEnded: (() -> ())?)
+	if paused or BgmController.isPaused() then
+		return
+	end
+	local fade = if typeof(fadeSec) == "number" then math.max(0, fadeSec) else FADE_SEC
+	overlayToken += 1
+	local my = overlayToken
+
+	if overlayEndedConn then
+		overlayEndedConn:Disconnect()
+		overlayEndedConn = nil
+	end
+
+	local bgm = bgmSound
+	if bgm then
+		if not duckActive then
+			savedBgmVolume = bgm.Volume
+			savedBgmTime = bgm.TimePosition
+		end
+		duckActive = true
+		tweenVolume(bgm, 0, fade, my, function()
+			if my ~= overlayToken then
+				return
+			end
+			if bgm.IsPlaying then
+				bgm:Pause()
+			end
+		end)
+	else
+		duckActive = true
+		if savedBgmVolume <= 0 then
+			savedBgmVolume = 1
+		end
+		savedBgmTime = 0
+	end
+
+	local ov = ensureOverlay()
+	ov:Stop()
+	ov.SoundId = soundId
+	ov.TimePosition = 0
+	ov.Volume = 0
+	ov:Play()
+	tweenVolume(ov, 1, fade, my, nil)
+
+	overlayEndedConn = ov.Ended:Connect(function()
+		if my ~= overlayToken then
+			return
+		end
+		if onEnded then
+			onEnded()
+		end
+	end)
+end
+
+-- Fade overlay out and resume the same BGM track/position (if it was ducked).
+function BgmController.stopOverlay(fadeSec: number?)
+	local fade = if typeof(fadeSec) == "number" then math.max(0, fadeSec) else FADE_SEC
+	overlayToken += 1
+	local my = overlayToken
+
+	if overlayEndedConn then
+		overlayEndedConn:Disconnect()
+		overlayEndedConn = nil
+	end
+
+	local ov = overlaySound
+	if ov and ov.Parent then
+		tweenVolume(ov, 0, fade, my, function()
+			if my ~= overlayToken then
+				return
+			end
+			if ov.Parent then
+				ov:Stop()
+			end
+		end)
+	end
+
+	if not duckActive then
+		return
+	end
+	duckActive = false
+
+	-- Respect player pause: don't force BGM back on.
+	if paused then
+		return
+	end
+
+	local bgm = bgmSound
+	if not bgm then
+		return
+	end
+	if bgm.SoundId == "" then
+		return
+	end
+	bgm.Volume = 0
+	if bgm.IsPaused or not bgm.IsPlaying then
+		-- Resume same track from saved position when possible.
+		local ok = pcall(function()
+			bgm.TimePosition = savedBgmTime
+		end)
+		if not ok then
+			bgm.TimePosition = 0
+		end
+		bgm:Play()
+	end
+	tweenVolume(bgm, savedBgmVolume > 0 and savedBgmVolume or 1, fade, my, nil)
 end
 
 return BgmController

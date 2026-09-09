@@ -2,6 +2,7 @@
 --[[
 	Slot5 Start / Stop waves — always visible quickbar control.
 	Shortcuts: R (keyboard) / ButtonX (gamepad). Help badge green; hidden on touch.
+	Wave HUD layouts (WAVE_HUD_LAYOUT): "right" (saved Slot5 stack) | "bottomRight" (active).
 ]]
 
 local Players = game:GetService("Players")
@@ -23,7 +24,7 @@ local UiViewportTags = require(oceanRoot:WaitForChild("Shared"):WaitForChild("Ui
 local InventoryState = require(script.Parent:WaitForChild("InventoryState"))
 local WaveSim = require(script.Parent:WaitForChild("WaveSim"))
 local WaveSimConsts = require(script.Parent:WaitForChild("WaveSimConsts"))
-local WaveSummaryUi = require(script.Parent:WaitForChild("WaveSummaryUi"))
+local WaveSlotSummary = require(script.Parent:WaitForChild("WaveSlotSummary"))
 
 local WaveSlot = {}
 
@@ -31,9 +32,6 @@ local START_ICON = "rbxassetid://74802566438233"
 local STOP_ICON = "rbxassetid://96580667427806"
 local HELP_GREEN = Color3.fromRGB(40, 180, 80)
 local HELP_RED = Color3.fromRGB(200, 45, 50)
-local CONTINUE_HEARTS = 5
-local CONFETTI_COUNT = 40
-local CONFETTI_LIFE = 2.4
 -- Shift camera subject up so the avatar sits ~20% lower on screen during waves.
 local WAVE_CAM_SCREEN_SHIFT = 0.2
 local STOP_PANEL_W = 420
@@ -88,9 +86,12 @@ local lastFishFull = 0
 local lastFishTotal = 0
 local lastCrabTotal = 0
 local lastUrchinTotal = 0
+local lastSharkTotal = 0
 local lastWaveIndex = 0
 local lastReefHealth = -1
 local lastReefMax = 10
+-- TEMP debug skip-to-wave control (bottom-right while waves run).
+local tempW100Btn: TextButton? = nil
 
 local BAR_BG = Color3.fromRGB(0x9e, 0x0b, 0x00)
 local BAR_FILL = Color3.fromRGB(0x12, 0xd9, 0x00)
@@ -100,10 +101,15 @@ local REEF_BAR_FILL = Color3.fromRGB(0xff, 0x18, 0x14)
 local REEF_PLUS_GREEN = Color3.fromRGB(50, 230, 100)
 local REEF_PLUS_DARK = Color3.fromRGB(0, 110, 35)
 local REEF_PLUS_STROKE = Color3.fromRGB(12, 70, 28)
-local FLASH_BRIGHT = Color3.fromRGB(90, 255, 90)
+local REEF_PLUS_TEXT = Color3.fromRGB(0, 40, 14) -- dark dark green on the + button
+local FLASH_GREEN = Color3.fromRGB(40, 180, 80) -- Next Wave outer stroke (not neon)
 local FLASH_DARK = Color3.fromRGB(0, 110, 35)
 local LINE_H = 28
 local BAR_H = 26
+local WAVE_NEXT_HEIGHT_MULT = 1.4 -- Next Wave bar height vs normal
+local WAVE_NEXT_OVERSHOOT_MULT = 1.58 -- grow past target, then settle
+local waveBarAnimH = BAR_H
+local waveBarAnimToken = 0
 local REEF_PLUS_SIZE = 26
 local REEF_ROW_GAP = 6
 local LABEL_TEXT_SIZE = math.floor(15 * 1.25 + 0.5) -- 25% bigger
@@ -114,38 +120,18 @@ local BAR_TOP_GAP = 20
 local WAVE_HUD_WIDTH_MULT = 1.25 * 1.25 -- +25%, then another +25%
 local WAVE_HUD_SIZE_MULT = 1.25 -- extra UIScale on top of UiPopupScale (taller + larger text)
 local WAVE_HUD_SCALE_NAME = "_OceanTD_WaveHudScale"
+-- Wave HUD chrome placement. "right" is the saved Slot5 stack; "bottomRight" is active.
+local WAVE_HUD_LAYOUT: "right" | "bottomRight" = "bottomRight"
+local WAVE_HUD_BOTTOM_PAD = 10
+local WAVE_HUD_RIGHT_PAD = 10
+local WAVE_HUD_SIDE_GAP = 10 -- gap between reef + wave bars in bottomRight
+local WAVE_HUD_BOTTOM_BAR_W = 260 -- design width for reef bar (before UIScale)
+local WAVE_HUD_BOTTOM_WAVE_BAR_W = math.floor(260 * 1.2 + 0.5) -- wave bar +20%
 local REEF_PANEL_W = 360
 local REEF_PANEL_H = 200
 local REEF_SCALE_IN = TweenInfo.new(0.28, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 local REEF_SCALE_OUT = TweenInfo.new(0.22, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
-local SUMMARY_SCALE_IN = TweenInfo.new(0.32, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
-local SUMMARY_SCALE_OUT = TweenInfo.new(0.22, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
 
-local summaryGui: ScreenGui? = nil
-local summaryOpen = false
-local summaryPausedForSkills = false
-local finishBtn: TextButton? = nil
-local continueBtn: TextButton? = nil
-local prevGuiSelected: GuiObject? = nil
-local summarySelectableRestore: { [GuiObject]: boolean } = {}
-local confettiConn: RBXScriptConnection? = nil
-local confettiToken = 0
-local summaryStroke: UIStroke? = nil
-local summaryTitleStroke: UIStroke? = nil
-local summaryStrokeConn: RBXScriptConnection? = nil
-local summaryScaleToken = 0
-local SUMMARY_CORNER = 32
-local SUMMARY_STROKE_THICKNESS = 3.5
--- Pull stroke inward so top/bottom aren't clipped by safe-area / scale.
-local SUMMARY_STROKE_INSET = SUMMARY_STROKE_THICKNESS
-local SUMMARY_PANEL_W = 540
-local SUMMARY_PANEL_H = 380
--- Full rainbow once every ~12s.
-local SUMMARY_RGB_HUE_PER_SEC = 1 / 12
--- Title outline: slow bright↔dark red pulse (~4s full cycle).
-local TITLE_STROKE_BRIGHT = Color3.fromRGB(255, 70, 70)
-local TITLE_STROKE_DARK = Color3.fromRGB(95, 12, 18)
-local TITLE_STROKE_PERIOD_SEC = 4
 local waveCamConn: RBXScriptConnection? = nil
 local waveCamCharConn: RBXScriptConnection? = nil
 -- Fixed offset baked when waves start — must NOT track live zoom or pinch fights CameraOffset.
@@ -374,6 +360,7 @@ local function restoreBarChrome()
 		hudWaveStroke.Thickness = 1.5
 	end
 	if hudWaveLabel then
+		hudWaveLabel.TextColor3 = Color3.new(1, 1, 1)
 		hudWaveLabel.TextStrokeColor3 = Color3.new(0, 0, 0)
 		hudWaveLabel.TextStrokeTransparency = 0.35
 	end
@@ -415,22 +402,59 @@ local function startFinishFlash()
 	task.spawn(function()
 		while my == finishFlashToken and feedCompleteUi do
 			if hudWaveLabel then
-				hudWaveLabel.TextStrokeColor3 = FLASH_BRIGHT
+				hudWaveLabel.TextColor3 = Color3.new(1, 1, 1)
+				hudWaveLabel.TextStrokeColor3 = FLASH_GREEN
 			end
 			if hudWaveStroke then
-				hudWaveStroke.Color = FLASH_BRIGHT
+				hudWaveStroke.Color = FLASH_GREEN
 			end
 			task.wait(0.35)
 			if my ~= finishFlashToken or not feedCompleteUi then
 				break
 			end
 			if hudWaveLabel then
+				hudWaveLabel.TextColor3 = FLASH_DARK
 				hudWaveLabel.TextStrokeColor3 = FLASH_DARK
 			end
 			if hudWaveStroke then
 				hudWaveStroke.Color = FLASH_DARK
 			end
 			task.wait(0.35)
+		end
+	end)
+end
+
+local function waveBarHeight(): number
+	return math.max(BAR_H, math.floor(waveBarAnimH + 0.5))
+end
+
+local function animateWaveBarHeight(targetH: number, withOvershoot: boolean)
+	waveBarAnimToken += 1
+	local my = waveBarAnimToken
+	task.spawn(function()
+		local function tweenTo(dest: number, dur: number)
+			local t0 = os.clock()
+			local from = waveBarAnimH
+			while my == waveBarAnimToken do
+				local u = math.clamp((os.clock() - t0) / math.max(dur, 1e-3), 0, 1)
+				-- Smoothstep
+				local e = u * u * (3 - 2 * u)
+				waveBarAnimH = from + (dest - from) * e
+				if u >= 1 then
+					waveBarAnimH = dest
+					break
+				end
+				RunService.Heartbeat:Wait()
+			end
+		end
+		if withOvershoot and targetH > waveBarAnimH + 0.5 then
+			tweenTo(BAR_H * WAVE_NEXT_OVERSHOOT_MULT, 0.16)
+			if my ~= waveBarAnimToken then
+				return
+			end
+			tweenTo(targetH, 0.28)
+		else
+			tweenTo(targetH, 0.22)
 		end
 	end)
 end
@@ -507,14 +531,37 @@ local function refreshForkLabel()
 	hudBarFork.Text = string.format("%d of %d", lastFishFull, lastFishTotal + lastCrabTotal + lastUrchinTotal)
 end
 
-local function refreshRightForkEmoji()
+local function formatCritterEmojis(fishTotal: number, crabs: number, urchins: number, sharks: number): string
+	local fishCount = math.max(fishTotal, 0)
+	local line = "🐟:" .. tostring(fishCount)
+	if crabs > 0 then
+		line ..= " 🦀:" .. tostring(crabs)
+	end
+	if urchins > 0 then
+		line ..= " ✴:" .. tostring(urchins)
+	end
+	if sharks > 0 then
+		line ..= " 🦈:" .. tostring(sharks)
+	end
+	return line
+end
+
+local function refreshCritterEmojisInWaveBar()
 	if not hudBarHeart then
 		return
 	end
-	-- Finish hint (ENTER / R2) owns the right slot when feed is complete.
-	hudBarHeart.Visible = not feedCompleteUi
-	hudBarHeart.Text = "🍴"
-	hudBarHeart.TextSize = LABEL_TEXT_SIZE
+	if feedCompleteUi then
+		hudBarHeart.Visible = false
+		return
+	end
+	local pg = Players.LocalPlayer:FindFirstChild("PlayerGui")
+	if pg and pg:GetAttribute("OceanTD_CritterIntroBusy") == true then
+		hudBarHeart.Visible = false
+		return
+	end
+	hudBarHeart.Visible = true
+	hudBarHeart.Text = formatCritterEmojis(lastFishTotal, lastCrabTotal, lastUrchinTotal, lastSharkTotal)
+	hudBarHeart.TextSize = FORK_COUNT_TEXT_SIZE
 end
 
 local function refreshCritterBarsEye()
@@ -621,8 +668,8 @@ function WaveSlot.tryFinishFromShortcut(): boolean
 end
 
 local function refreshReefHudLabels()
-	local cur = math.max(0, lastReefHealth)
-	local maxHp = math.max(1, lastReefMax)
+	local cur = math.max(0, math.floor(lastReefHealth + 1e-6))
+	local maxHp = math.max(1, math.floor(lastReefMax + 1e-6))
 	local text = "🤍 Reef Health " .. tostring(cur) .. "/" .. tostring(maxHp)
 	if hudReefLabel then
 		hudReefLabel.Text = text
@@ -991,7 +1038,7 @@ function WaveSlot.tryOpenReefHealFromShortcut(): boolean
 	if not WaveSim.isRunning() or InventoryState.isOpen() or reefHealOpen then
 		return false
 	end
-	if WaveSlot.isStopConfirmActive() or summaryOpen then
+	if WaveSlot.isStopConfirmActive() or WaveSlotSummary.isOpen() then
 		return false
 	end
 	flashReefPlusThenOpen()
@@ -1061,7 +1108,7 @@ local function ensureHud()
 	f.Parent = deps.mainHUD
 	hudFrame = f
 
-	-- Reef health row (above wave bar): full-width bar, + overlays right end.
+	-- Reef health bar (+ overlays right end).
 	local reefBar = Instance.new("Frame")
 	reefBar.Name = "ReefProgress"
 	reefBar.BackgroundColor3 = REEF_BAR_BG
@@ -1126,7 +1173,7 @@ local function ensureHud()
 	plus.Text = "+"
 	plus.Font = Enum.Font.SourceSansBold
 	plus.TextSize = 22
-	plus.TextColor3 = Color3.new(1, 1, 1)
+	plus.TextColor3 = REEF_PLUS_TEXT
 	plus.TextStrokeColor3 = REEF_PLUS_STROKE
 	plus.TextStrokeTransparency = 0
 	plus.AutoButtonColor = false
@@ -1146,7 +1193,6 @@ local function ensureHud()
 		flashReefPlusThenOpen()
 	end)
 
-	local waveY = BAR_H + REEF_ROW_GAP
 	local bar = Instance.new("Frame")
 	bar.Name = "WaveProgress"
 	bar.BackgroundColor3 = BAR_BG
@@ -1154,7 +1200,7 @@ local function ensureHud()
 	bar.BorderSizePixel = 0
 	bar.Active = false
 	bar.Size = UDim2.new(1, -4, 0, BAR_H)
-	bar.Position = UDim2.fromOffset(0, waveY)
+	bar.Position = UDim2.fromOffset(0, BAR_H + REEF_ROW_GAP)
 	bar.ZIndex = 26
 	bar.ClipsDescendants = true
 	bar.Parent = f
@@ -1192,20 +1238,26 @@ local function ensureHud()
 	label.TextColor3 = Color3.new(1, 1, 1)
 	label.TextStrokeTransparency = 0.35
 	label.TextStrokeColor3 = Color3.new(0, 0, 0)
-	label.TextXAlignment = Enum.TextXAlignment.Center
+	label.TextXAlignment = Enum.TextXAlignment.Left
 	label.TextYAlignment = Enum.TextYAlignment.Center
 	label.ZIndex = 29
-	label.Text = "🌊 Wave 1"
+	label.Text = "🍴 Wave 1"
 	label.Parent = bar
 	hudWaveLabel = label
+	local wavePad = Instance.new("UIPadding")
+	wavePad.PaddingLeft = UDim.new(0, BAR_H + 6)
+	wavePad.PaddingRight = UDim.new(0, 8)
+	wavePad.Parent = label
 
 	local function mkSide(name: string, text: string, align: Enum.TextXAlignment): TextLabel
 		local t = Instance.new("TextLabel")
 		t.Name = name
 		t.BackgroundTransparency = 1
-		t.Size = UDim2.new(0.35, 0, 1, 0)
+		t.Size = if align == Enum.TextXAlignment.Left
+			then UDim2.new(0.35, 0, 1, 0)
+			else UDim2.new(0.48, 0, 1, 0)
 		t.Position = if align == Enum.TextXAlignment.Left
-			then UDim2.fromOffset(SIDE_ICON_PAD, 0)
+			then UDim2.fromOffset(SIDE_ICON_PAD + BAR_H, 0)
 			else UDim2.new(1, -SIDE_ICON_PAD, 0, 0)
 		t.AnchorPoint = if align == Enum.TextXAlignment.Left then Vector2.new(0, 0) else Vector2.new(1, 0)
 		t.Font = UiTheme.Font
@@ -1220,9 +1272,11 @@ local function ensureHud()
 		t.Parent = bar
 		return t
 	end
+	-- Fed count kept for finish/"100%" logic but hidden — title is left-aligned after the eye.
 	hudBarFork = mkSide("ForkCount", "0 of 0", Enum.TextXAlignment.Left)
 	hudBarFork.TextSize = FORK_COUNT_TEXT_SIZE
-	hudBarHeart = mkSide("ForkEmoji", "🍴", Enum.TextXAlignment.Right)
+	hudBarFork.Visible = false
+	hudBarHeart = mkSide("CritterEmojis", "🐟:0", Enum.TextXAlignment.Right)
 	local heartScale = Instance.new("UIScale")
 	heartScale.Scale = 1
 	heartScale.Parent = hudBarHeart
@@ -1262,11 +1316,42 @@ local function ensureHud()
 	end)
 	hudWaveHit = hit
 
+	-- Hunger-hide eye: nested left inside the wave bar (mirror of reef "+" on the right).
+	local eyeBtn = Instance.new("TextButton")
+	eyeBtn.Name = "CritterBarsEye"
+	eyeBtn.BackgroundTransparency = 0
+	eyeBtn.BackgroundColor3 = HELP_GREEN
+	eyeBtn.BorderSizePixel = 0
+	eyeBtn.AutoButtonColor = false
+	eyeBtn.Text = "👁️"
+	eyeBtn.AnchorPoint = Vector2.new(0, 0.5)
+	eyeBtn.Position = UDim2.new(0, 0, 0.5, 0)
+	eyeBtn.Size = UDim2.fromOffset(BAR_H, BAR_H)
+	eyeBtn.Font = UiTheme.Font
+	eyeBtn.TextSize = 15
+	eyeBtn.TextColor3 = Color3.new(1, 1, 1)
+	eyeBtn.TextStrokeTransparency = 0.35
+	eyeBtn.TextStrokeColor3 = Color3.new(0, 0, 0)
+	eyeBtn.ZIndex = 31
+	eyeBtn.Visible = false
+	eyeBtn.Active = false
+	eyeBtn.Parent = bar
+	UiCircles.ensure(eyeBtn)
+	eyeBtn.Activated:Connect(function()
+		if not WaveSim.isRunning() then
+			return
+		end
+		WaveSim.toggleCritterHungerBarsVisible()
+		UiHaptics.pulseShort()
+		refreshCritterBarsEye()
+	end)
+	hudCritterBarsEye = eyeBtn
+
 	local timeLabel = Instance.new("TextLabel")
 	timeLabel.Name = "Time"
 	timeLabel.BackgroundTransparency = 1
 	timeLabel.Size = UDim2.new(0.34, -4, 0, LINE_H)
-	timeLabel.Position = UDim2.new(1, 0, 0, waveY + BAR_H + 4)
+	timeLabel.Position = UDim2.new(1, 0, 0, BAR_H + REEF_ROW_GAP + BAR_H + 4)
 	timeLabel.AnchorPoint = Vector2.new(1, 0)
 	timeLabel.Font = UiTheme.Font
 	timeLabel.TextSize = 15
@@ -1280,40 +1365,11 @@ local function ensureHud()
 	timeLabel.Parent = f
 	hudTime = timeLabel
 
-	local eyeBtn = Instance.new("TextButton")
-	eyeBtn.Name = "CritterBarsEye"
-	eyeBtn.BackgroundTransparency = 0
-	eyeBtn.BackgroundColor3 = HELP_GREEN
-	eyeBtn.BorderSizePixel = 0
-	eyeBtn.AutoButtonColor = false
-	eyeBtn.Text = "👁️"
-	eyeBtn.Size = UDim2.fromOffset(LINE_H, LINE_H)
-	eyeBtn.Position = UDim2.new(0.62, 0, 0, waveY + BAR_H + 4)
-	eyeBtn.Font = UiTheme.Font
-	eyeBtn.TextSize = 15
-	eyeBtn.TextColor3 = Color3.new(1, 1, 1)
-	eyeBtn.TextStrokeTransparency = 0.35
-	eyeBtn.TextStrokeColor3 = Color3.new(0, 0, 0)
-	eyeBtn.ZIndex = 27
-	eyeBtn.Visible = false
-	eyeBtn.Active = false
-	eyeBtn.Parent = f
-	UiCircles.ensure(eyeBtn)
-	eyeBtn.Activated:Connect(function()
-		if not WaveSim.isRunning() then
-			return
-		end
-		WaveSim.toggleCritterHungerBarsVisible()
-		UiHaptics.pulseShort()
-		refreshCritterBarsEye()
-	end)
-	hudCritterBarsEye = eyeBtn
-
 	local fishNeed = Instance.new("TextLabel")
 	fishNeed.Name = "FishNeed"
 	fishNeed.BackgroundTransparency = 1
 	fishNeed.Size = UDim2.new(0.58, -4, 0, LINE_H)
-	fishNeed.Position = UDim2.fromOffset(0, waveY + BAR_H + 4)
+	fishNeed.Position = UDim2.fromOffset(0, BAR_H + REEF_ROW_GAP + BAR_H + 4)
 	fishNeed.Font = UiTheme.Font
 	fishNeed.TextSize = 15
 	fishNeed.TextColor3 = Color3.new(1, 1, 1)
@@ -1352,8 +1408,112 @@ local function applyWaveHudScale(root: GuiObject): number
 	return barScale
 end
 
-local function layoutHud()
-	syncWaveHudToActiveRightHud()
+-- Saved layout: reef stacked above wave/hunger, anchored to Slot5 on the right HUD.
+local function applyWaveHudBarsLayoutRight()
+	if not hudReefBar or not hudWaveBar then
+		return
+	end
+	local wh = waveBarHeight()
+	local waveY = BAR_H + REEF_ROW_GAP
+	local metaY = waveY + wh + 4
+	hudReefBar.Size = UDim2.new(1, -4, 0, BAR_H)
+	hudReefBar.Position = UDim2.fromOffset(0, 0)
+	hudReefBar.AnchorPoint = Vector2.new(0, 0)
+	hudWaveBar.Size = UDim2.new(1, -4, 0, wh)
+	hudWaveBar.Position = UDim2.fromOffset(0, waveY)
+	hudWaveBar.AnchorPoint = Vector2.new(0, 0)
+	if hudTime then
+		hudTime.Size = UDim2.new(0.34, -4, 0, LINE_H)
+		hudTime.Position = UDim2.new(1, 0, 0, metaY)
+		hudTime.AnchorPoint = Vector2.new(1, 0)
+		hudTime.TextXAlignment = Enum.TextXAlignment.Right
+	end
+	if hudFishNeed then
+		hudFishNeed.Size = UDim2.new(0.58, -4, 0, LINE_H)
+		hudFishNeed.Position = UDim2.fromOffset(0, metaY)
+		hudFishNeed.AnchorPoint = Vector2.new(0, 0)
+		hudFishNeed.TextXAlignment = Enum.TextXAlignment.Left
+		hudFishNeed.Visible = false -- critters live inside the wave bar
+	end
+	if hudCritterBarsEye and hudWaveBar then
+		hudCritterBarsEye.Parent = hudWaveBar
+		hudCritterBarsEye.Size = UDim2.fromOffset(wh, wh)
+		hudCritterBarsEye.AnchorPoint = Vector2.new(0, 0.5)
+		hudCritterBarsEye.Position = UDim2.new(0, 0, 0.5, 0)
+		hudCritterBarsEye.ZIndex = 31
+	end
+	if hudWaveLabel then
+		local pad = hudWaveLabel:FindFirstChildOfClass("UIPadding")
+		if pad then
+			-- NEXT WAVE is centered; clear insets so it isn't biased.
+			if feedCompleteUi then
+				pad.PaddingLeft = UDim.new(0, 0)
+				pad.PaddingRight = UDim.new(0, 0)
+			else
+				pad.PaddingLeft = UDim.new(0, wh + 6)
+				pad.PaddingRight = UDim.new(0, 8)
+			end
+		end
+	end
+end
+
+-- Active layout: reef + wave side-by-side, right-aligned at the bottom.
+-- Bars bottom-aligned so reef stays put while Next Wave height animates upward.
+local function applyWaveHudBarsLayoutBottomRight()
+	if not hudReefBar or not hudWaveBar then
+		return
+	end
+	local reefW = WAVE_HUD_BOTTOM_BAR_W
+	local waveW = WAVE_HUD_BOTTOM_WAVE_BAR_W
+	local gap = WAVE_HUD_SIDE_GAP
+	local total = reefW + gap + waveW
+	local wh = waveBarHeight()
+	hudReefBar.Size = UDim2.new(reefW / total, 0, 0, BAR_H)
+	hudReefBar.AnchorPoint = Vector2.new(0, 1)
+	hudReefBar.Position = UDim2.new(0, 0, 1, 0)
+	hudWaveBar.Size = UDim2.new(waveW / total, 0, 0, wh)
+	hudWaveBar.AnchorPoint = Vector2.new(0, 1)
+	hudWaveBar.Position = UDim2.new((reefW + gap) / total, 0, 1, 0)
+	if hudTime then
+		hudTime.Size = UDim2.new(0.34, -4, 0, LINE_H)
+		hudTime.AnchorPoint = Vector2.new(1, 1)
+		hudTime.Position = UDim2.new(1, 0, 1, -(wh + 4))
+		hudTime.TextXAlignment = Enum.TextXAlignment.Right
+	end
+	if hudFishNeed then
+		-- Critter counts live inside the wave bar now.
+		hudFishNeed.Visible = false
+	end
+	if hudCritterBarsEye then
+		hudCritterBarsEye.Parent = hudWaveBar
+		hudCritterBarsEye.Size = UDim2.fromOffset(wh, wh)
+		hudCritterBarsEye.AnchorPoint = Vector2.new(0, 0.5)
+		hudCritterBarsEye.Position = UDim2.new(0, 0, 0.5, 0)
+		hudCritterBarsEye.ZIndex = 31
+	end
+	if hudWaveLabel then
+		local pad = hudWaveLabel:FindFirstChildOfClass("UIPadding")
+		if pad then
+			if feedCompleteUi then
+				pad.PaddingLeft = UDim.new(0, 0)
+				pad.PaddingRight = UDim.new(0, 0)
+			else
+				pad.PaddingLeft = UDim.new(0, wh + 6)
+				pad.PaddingRight = UDim.new(0, 8)
+			end
+		end
+	end
+end
+
+local function applyWaveHudBarsLayout()
+	if WAVE_HUD_LAYOUT == "bottomRight" then
+		applyWaveHudBarsLayoutBottomRight()
+	else
+		applyWaveHudBarsLayoutRight()
+	end
+end
+
+local function layoutHudRight()
 	if not hudFrame or not slot5 then
 		return
 	end
@@ -1366,14 +1526,134 @@ local function layoutHud()
 	if scale > 1 then
 		designW = math.floor(designW * WAVE_HUD_WIDTH_MULT + 0.5)
 	end
-	local designH = BAR_H + REEF_ROW_GAP + BAR_H + 4 + LINE_H
+	local designH = BAR_H + REEF_ROW_GAP + waveBarHeight() + 4 + LINE_H
 	local w = math.floor(designW / scale + 0.5)
 	local h = designH
 	local gap = math.floor(BAR_TOP_GAP * scale + 0.5)
 	local x = (slotPos.X + slotSize.X) - parentPos.X - designW
 	local y = (slotPos.Y + slotSize.Y + gap) - parentPos.Y
+	hudFrame.AnchorPoint = Vector2.new(0, 0)
 	hudFrame.Size = UDim2.fromOffset(w, h)
 	hudFrame.Position = UDim2.fromOffset(math.floor(x + 0.5), math.floor(y + 0.5))
+end
+
+local function layoutHudBottomRight()
+	if not hudFrame then
+		return
+	end
+	local scale = applyWaveHudScale(hudFrame)
+	local designW = WAVE_HUD_BOTTOM_BAR_W + WAVE_HUD_SIDE_GAP + WAVE_HUD_BOTTOM_WAVE_BAR_W
+	if scale > 1 then
+		designW = math.floor(designW * WAVE_HUD_WIDTH_MULT + 0.5)
+	end
+	local designH = waveBarHeight() + 4 + LINE_H
+	local w = math.floor(designW / scale + 0.5)
+	hudFrame.AnchorPoint = Vector2.new(1, 1)
+	hudFrame.Size = UDim2.fromOffset(w, designH)
+	hudFrame.Position = UDim2.new(1, -WAVE_HUD_RIGHT_PAD, 1, -WAVE_HUD_BOTTOM_PAD)
+end
+
+local layoutTempW100Button: () -> ()
+
+local function layoutHud()
+	syncWaveHudToActiveRightHud()
+	if not hudFrame then
+		return
+	end
+	if WAVE_HUD_LAYOUT == "right" and not slot5 then
+		return
+	end
+	applyWaveHudBarsLayout()
+	if WAVE_HUD_LAYOUT == "bottomRight" then
+		layoutHudBottomRight()
+	else
+		layoutHudRight()
+	end
+	if tempW100Btn and tempW100Btn.Visible then
+		layoutTempW100Button()
+	end
+end
+
+local function ensureTempW100Button()
+	if tempW100Btn and tempW100Btn.Parent then
+		return
+	end
+	local btn = Instance.new("TextButton")
+	btn.Name = "TEMP_W100"
+	btn.AnchorPoint = Vector2.new(0.5, 0)
+	btn.Position = UDim2.fromOffset(0, 0)
+	btn.Size = UDim2.fromOffset(72, 40)
+	btn.BackgroundColor3 = Color3.fromRGB(40, 40, 48)
+	btn.BackgroundTransparency = 0.15
+	btn.BorderSizePixel = 0
+	btn.Font = UiTheme.Font
+	btn.Text = "W100"
+	btn.TextColor3 = Color3.new(1, 1, 1)
+	btn.TextSize = 18
+	btn.AutoButtonColor = true
+	btn.Visible = false
+	btn.ZIndex = 80
+	btn.Parent = deps.mainHUD
+	local corner = Instance.new("UICorner")
+	corner.CornerRadius = UDim.new(0, 8)
+	corner.Parent = btn
+	local stroke = Instance.new("UIStroke")
+	stroke.Color = Color3.fromRGB(255, 200, 60)
+	stroke.Thickness = 1.5
+	stroke.Parent = btn
+	btn.Activated:Connect(function()
+		if not WaveSim.isRunning() then
+			return
+		end
+		if WaveSim.skipToWave(100) then
+			deps.log("TEMP skip to wave 100")
+		end
+	end)
+	tempW100Btn = btn
+end
+
+-- Sit directly under Slot7 (wave speed).
+layoutTempW100Button = function()
+	ensureTempW100Button()
+	if not tempW100Btn or not deps then
+		return
+	end
+	local parent = deps.mainHUD
+	if tempW100Btn.Parent ~= parent then
+		tempW100Btn.Parent = parent
+	end
+	local quickbar = parent:FindFirstChild("Quickbar")
+	local slot7 = if quickbar then quickbar:FindFirstChild("Slot7") else nil
+	local anchor: GuiObject? = if slot7 and slot7:IsA("GuiObject") then slot7 else slot5
+	if not anchor then
+		return
+	end
+	local slotPos = anchor.AbsolutePosition
+	local slotSize = anchor.AbsoluteSize
+	local parentPos = parent.AbsolutePosition
+	local gap = 6
+	local bw = math.max(56, math.floor(slotSize.X + 0.5))
+	local bh = 36
+	local x = (slotPos.X + slotSize.X * 0.5) - parentPos.X
+	local y = (slotPos.Y + slotSize.Y + gap) - parentPos.Y
+	tempW100Btn.TextColor3 = Color3.new(1, 1, 1)
+	tempW100Btn.AnchorPoint = Vector2.new(0.5, 0)
+	tempW100Btn.Size = UDim2.fromOffset(bw, bh)
+	tempW100Btn.Position = UDim2.fromOffset(math.floor(x + 0.5), math.floor(y + 0.5))
+end
+
+local function syncTempW100Button(wavesOn: boolean)
+	ensureTempW100Button()
+	if not tempW100Btn then
+		return
+	end
+	local pg = Players.LocalPlayer:FindFirstChild("PlayerGui")
+	local skillsOpen = pg ~= nil and pg:GetAttribute("OceanTD_SkillsBubblesOpen") == true
+	local hideUiActive = pg ~= nil and pg:GetAttribute("OceanTD_HideUiActive") == true
+	tempW100Btn.Visible = wavesOn and not skillsOpen and not hideUiActive
+	if tempW100Btn.Visible then
+		layoutTempW100Button()
+	end
 end
 
 local function setHudVisible(on: boolean)
@@ -1386,11 +1666,12 @@ local function setHudVisible(on: boolean)
 		-- Keep wave sim running; suppress chrome while skills / Hide UI are on.
 		hudFrame.Visible = on and not skillsOpen and not hideUiActive
 	end
+	syncTempW100Button(on)
 	if on and not hideUiActive then
 		layoutHud()
 		if not wasVisible then
 			refreshForkLabel()
-			refreshRightForkEmoji()
+			refreshCritterEmojisInWaveBar()
 			startReefPlusIdle()
 		end
 		if not hudLayoutConn then
@@ -1407,6 +1688,8 @@ local function setHudVisible(on: boolean)
 		end
 		feedCompleteUi = false
 		hungerDangerUi = false
+		waveBarAnimToken += 1
+		waveBarAnimH = BAR_H
 		lastHungryMissToken = -1
 		fillHurtToken += 1
 		if reefHealOpen then
@@ -1423,11 +1706,11 @@ local function setHudVisible(on: boolean)
 			hudBarHeartScale.Scale = 1
 		end
 		if hudBarFork then
-			hudBarFork.Visible = true
+			hudBarFork.Visible = false
 		end
 		if hudBarHeart then
 			hudBarHeart.Visible = true
-			hudBarHeart.Text = "🍴"
+			hudBarHeart.Text = "🐟:0"
 		end
 		if hudFinishHint then
 			hudFinishHint.Visible = false
@@ -1480,14 +1763,28 @@ local function updateHud(snap: WaveSim.HudSnapshot)
 	lastFishTotal = snap.fishTotal or 0
 	lastCrabTotal = math.max(0, snap.crabTotal or 0)
 	lastUrchinTotal = math.max(0, snap.urchinTotal or 0)
+	lastSharkTotal = math.max(0, snap.sharkTotal or 0)
 	lastWaveIndex = snap.wave or 0
 	local complete = snap.feedComplete == true
 	local danger = snap.hungerDanger == true
 	if hudWaveLabel then
+		local pad = hudWaveLabel:FindFirstChildOfClass("UIPadding")
 		if complete then
+			hudWaveLabel.Font = UiTheme.Font
+			hudWaveLabel.TextXAlignment = Enum.TextXAlignment.Center
 			hudWaveLabel.Text = "NEXT WAVE"
+			if pad then
+				pad.PaddingLeft = UDim.new(0, 0)
+				pad.PaddingRight = UDim.new(0, 0)
+			end
 		else
-			hudWaveLabel.Text = "🌊 Wave " .. tostring(snap.wave)
+			hudWaveLabel.Font = UiTheme.Font
+			hudWaveLabel.TextXAlignment = Enum.TextXAlignment.Left
+			hudWaveLabel.Text = "🍴 Wave " .. tostring(snap.wave)
+			if pad then
+				pad.PaddingLeft = UDim.new(0, waveBarHeight() + 6)
+				pad.PaddingRight = UDim.new(0, 8)
+			end
 		end
 	end
 	if complete ~= feedCompleteUi then
@@ -1500,6 +1797,7 @@ local function updateHud(snap: WaveSim.HudSnapshot)
 				hudWaveHit.Active = true
 			end
 			startFinishFlash()
+			animateWaveBarHeight(BAR_H * WAVE_NEXT_HEIGHT_MULT, true)
 		else
 			if hudWaveHit then
 				hudWaveHit.Visible = false
@@ -1507,6 +1805,7 @@ local function updateHud(snap: WaveSim.HudSnapshot)
 			end
 			stopFinishFlash()
 			restoreBarChrome()
+			animateWaveBarHeight(BAR_H, false)
 			if danger then
 				hungerDangerUi = true
 				startDangerFlash()
@@ -1514,9 +1813,9 @@ local function updateHud(snap: WaveSim.HudSnapshot)
 		end
 	end
 	refreshForkLabel()
-	refreshRightForkEmoji()
+	refreshCritterEmojisInWaveBar()
 	if hudBarFork then
-		hudBarFork.Visible = true
+		hudBarFork.Visible = false
 	end
 	local missTok = snap.hungryMissToken or 0
 	if lastHungryMissToken < 0 then
@@ -1540,18 +1839,7 @@ local function updateHud(snap: WaveSim.HudSnapshot)
 		hudTime.Text = "⏱️" .. WaveSim.formatClock(snap.elapsedSec)
 	end
 	if hudFishNeed then
-		local need = WaveSimConsts.tangHungerForWave(snap.wave)
-		local fishCount = math.max(snap.fishTotal or 0, 0)
-		local line = "🍴:" .. tostring(need) .. "x 🐟:" .. tostring(fishCount)
-		local crabs = math.max(0, snap.crabTotal or 0)
-		local urchins = math.max(0, snap.urchinTotal or 0)
-		if urchins > 0 then
-			line ..= " ✴:" .. tostring(urchins)
-		end
-		if crabs > 0 then
-			line ..= " 🦀:" .. tostring(crabs)
-		end
-		hudFishNeed.Text = line
+		hudFishNeed.Visible = false
 	end
 	if hudCritterBarsEye then
 		hudCritterBarsEye.Visible = snap.running
@@ -1560,472 +1848,20 @@ local function updateHud(snap: WaveSim.HudSnapshot)
 	end
 end
 
-local function stopConfetti()
-	confettiToken += 1
-	if confettiConn then
-		confettiConn:Disconnect()
-		confettiConn = nil
-	end
-end
-
-local function playConfetti(parent: Frame)
-	stopConfetti()
-	local my = confettiToken
-	local layer = Instance.new("Frame")
-	layer.Name = "Confetti"
-	layer.BackgroundTransparency = 1
-	layer.Size = UDim2.fromScale(1, 1)
-	layer.ZIndex = 50
-	layer.Parent = parent
-
-	type P = { f: Frame, x: number, y: number, vx: number, vy: number, life: number }
-	local parts: { P } = {}
-	local rng = Random.new()
-	local colors = {
-		Color3.fromRGB(255, 80, 80),
-		Color3.fromRGB(255, 180, 40),
-		Color3.fromRGB(80, 220, 100),
-		Color3.fromRGB(60, 160, 255),
-		Color3.fromRGB(220, 100, 255),
-		Color3.fromRGB(255, 255, 80),
-		Color3.fromRGB(255, 120, 200),
-		Color3.fromRGB(100, 255, 220),
-	}
-	local cam = Workspace.CurrentCamera
-	local vp = if cam then cam.ViewportSize else Vector2.new(1280, 720)
-	for i = 1, CONFETTI_COUNT do
-		local sz = rng:NextNumber(6, 18)
-		local f = Instance.new("Frame")
-		f.BackgroundColor3 = colors[((i - 1) % #colors) + 1]
-		f.BorderSizePixel = 0
-		f.Size = UDim2.fromOffset(sz, sz)
-		f.AnchorPoint = Vector2.new(0.5, 0.5)
-		f.ZIndex = 51
-		f.Parent = layer
-		local corner = Instance.new("UICorner")
-		corner.CornerRadius = UDim.new(1, 0)
-		corner.Parent = f
-		local x = rng:NextNumber(vp.X * 0.15, vp.X * 0.85)
-		local y = vp.Y + rng:NextNumber(4, 40)
-		f.Position = UDim2.fromOffset(x, y)
-		table.insert(parts, {
-			f = f,
-			x = x,
-			y = y,
-			vx = rng:NextNumber(-90, 90),
-			vy = rng:NextNumber(-520, -280),
-			life = CONFETTI_LIFE + rng:NextNumber(-0.3, 0.4),
-		})
-	end
-
-	local t0 = os.clock()
-	local grav = 520
-	confettiConn = RunService.RenderStepped:Connect(function(dt)
-		if my ~= confettiToken then
-			return
-		end
-		local age = os.clock() - t0
-		local alive = false
-		for _, p in ipairs(parts) do
-			if age > p.life then
-				p.f.Visible = false
-				continue
-			end
-			alive = true
-			p.vy += grav * dt
-			p.x += p.vx * dt
-			p.y += p.vy * dt
-			p.f.Position = UDim2.fromOffset(p.x, p.y)
-			local fade = math.clamp(1 - (age / p.life), 0, 1)
-			p.f.BackgroundTransparency = 1 - fade
-		end
-		if not alive or age > CONFETTI_LIFE + 1 then
-			stopConfetti()
-			if layer.Parent then
-				layer:Destroy()
-			end
-		end
-	end)
-end
-
-local function styleSummaryEdge(edge: UIStroke)
-	edge.Name = "SummaryEdge"
-	edge.Thickness = SUMMARY_STROKE_THICKNESS
-	edge.BorderOffset = UDim.new(0, SUMMARY_STROKE_INSET)
-	edge.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
-	edge.LineJoinMode = Enum.LineJoinMode.Round
-end
-
-local function stopSummaryStrokeCycle()
-	if summaryStrokeConn then
-		summaryStrokeConn:Disconnect()
-		summaryStrokeConn = nil
-	end
-end
-
-local function endSummaryGamepadNav()
-	for obj, _ in pairs(summarySelectableRestore) do
-		if obj.Parent then
-			obj.Selectable = true
-		end
-	end
-	table.clear(summarySelectableRestore)
-	if continueBtn then
-		continueBtn.NextSelectionUp = nil
-		continueBtn.NextSelectionDown = nil
-		continueBtn.NextSelectionLeft = nil
-		continueBtn.NextSelectionRight = nil
-	end
-	if finishBtn then
-		finishBtn.NextSelectionUp = nil
-		finishBtn.NextSelectionDown = nil
-		finishBtn.NextSelectionLeft = nil
-		finishBtn.NextSelectionRight = nil
-	end
-end
-
-local function beginSummaryGamepadNav()
-	endSummaryGamepadNav()
-	if not continueBtn or not finishBtn then
-		return
-	end
-	GuiService.AutoSelectGuiEnabled = true
-	for _, layer in ipairs(deps.playerGui:GetChildren()) do
-		if not layer:IsA("LayerCollector") then
-			continue
-		end
-		local function consider(obj: Instance)
-			if obj:IsA("GuiObject") and obj.Selectable then
-				if obj ~= continueBtn and obj ~= finishBtn then
-					summarySelectableRestore[obj] = true
-					obj.Selectable = false
-				end
-			end
-		end
-		consider(layer)
-		for _, d in ipairs(layer:GetDescendants()) do
-			consider(d)
-		end
-	end
-	continueBtn.Selectable = true
-	finishBtn.Selectable = true
-	-- Stick / DPad can only bounce between CONTINUE and FINISH.
-	continueBtn.NextSelectionUp = finishBtn
-	continueBtn.NextSelectionDown = finishBtn
-	continueBtn.NextSelectionLeft = finishBtn
-	continueBtn.NextSelectionRight = finishBtn
-	finishBtn.NextSelectionUp = continueBtn
-	finishBtn.NextSelectionDown = continueBtn
-	finishBtn.NextSelectionLeft = continueBtn
-	finishBtn.NextSelectionRight = continueBtn
-	GuiService.SelectedObject = continueBtn
-end
-
-local function startSummaryStrokeCycle()
-	stopSummaryStrokeCycle()
-	if not summaryStroke and not summaryTitleStroke then
-		return
-	end
-	local t0 = os.clock()
-	summaryStrokeConn = RunService.RenderStepped:Connect(function()
-		if not summaryOpen then
-			return
-		end
-		if summaryStroke then
-			local hue = ((os.clock() - t0) * SUMMARY_RGB_HUE_PER_SEC) % 1
-			summaryStroke.Color = Color3.fromHSV(hue, 1, 1)
-		end
-		if summaryTitleStroke and summaryTitleStroke.Parent then
-			local phase = ((os.clock() - t0) / TITLE_STROKE_PERIOD_SEC) * math.pi * 2
-			local a = (math.sin(phase) + 1) * 0.5
-			summaryTitleStroke.Color = TITLE_STROKE_BRIGHT:Lerp(TITLE_STROKE_DARK, a)
-		end
-	end)
-end
-
-local function reefBarScreenCenter(): Vector2?
-	local bar = hudReefBar
-	if not (bar and bar.Parent) then
-		return nil
-	end
-	local p = bar.AbsolutePosition
-	local s = bar.AbsoluteSize
-	if s.X < 1 or s.Y < 1 then
-		return nil
-	end
-	return Vector2.new(p.X + s.X * 0.5, p.Y + s.Y * 0.5)
-end
-
-local function hideSummary()
-	if not summaryOpen and not (summaryGui and summaryGui.Enabled) and not summaryPausedForSkills then
-		return
-	end
-	summaryOpen = false
-	summaryPausedForSkills = false
-	stopConfetti()
-	stopSummaryStrokeCycle()
-	endSummaryGamepadNav()
-	summaryScaleToken += 1
-	local my = summaryScaleToken
-	local sel = GuiService.SelectedObject
-	if (finishBtn and sel == finishBtn) or (continueBtn and sel == continueBtn) then
-		GuiService.SelectedObject = prevGuiSelected
-	end
-	prevGuiSelected = nil
-
-	local g = summaryGui
-	local panel = g and g:FindFirstChild("Panel")
-	local dim = g and g:FindFirstChild("Dim")
-	if dim and dim:IsA("GuiObject") then
-		dim.Visible = false
-	end
-	if panel and panel:IsA("Frame") and panel.Visible and g and g.Enabled then
-		local cam = Workspace.CurrentCamera
-		local vp = if cam then cam.ViewportSize else Vector2.new(1920, 1080)
-		local origin = reefBarScreenCenter()
-		local endX = if origin then origin.X / vp.X else 0.92
-		local endY = if origin then origin.Y / vp.Y else 0.55
-		local tw = TweenService:Create(panel, SUMMARY_SCALE_OUT, {
-			Position = UDim2.fromScale(endX, endY),
-			Size = UDim2.fromOffset(48, 28),
-		})
-		tw:Play()
-		tw.Completed:Connect(function()
-			if my ~= summaryScaleToken then
-				return
-			end
-			if panel then
-				panel.Visible = false
-			end
-			if g then
-				g.Enabled = false
-			end
-		end)
-	elseif g then
-		g.Enabled = false
-		if panel and panel:IsA("Frame") then
-			panel.Visible = false
-		end
-	end
-end
-
-local function pauseSummaryForSkills()
-	if not summaryOpen or summaryPausedForSkills then
-		return
-	end
-	summaryPausedForSkills = true
-	endSummaryGamepadNav()
-	stopConfetti()
-	stopSummaryStrokeCycle()
-	local g = summaryGui
-	if g then
-		g.Enabled = false
-	end
-end
-
-local function resumeSummaryAfterSkills()
-	if not summaryPausedForSkills then
-		return
-	end
-	summaryPausedForSkills = false
-	if not summaryOpen then
-		return
-	end
-	local g = summaryGui
-	if not g then
-		return
-	end
-	g.Enabled = true
-	local dim = g:FindFirstChild("Dim")
-	if dim and dim:IsA("GuiObject") then
-		dim.Visible = true
-	end
-	local panel = g:FindFirstChild("Panel")
-	if panel and panel:IsA("Frame") then
-		panel.ClipsDescendants = false
-		panel.Visible = true
-		panel.Position = UDim2.fromScale(0.5, 0.5)
-		panel.Size = UDim2.fromOffset(SUMMARY_PANEL_W, SUMMARY_PANEL_H)
-		local edge = panel:FindFirstChild("SummaryEdge")
-		if edge and edge:IsA("UIStroke") then
-			styleSummaryEdge(edge)
-			summaryStroke = edge
-		end
-		startSummaryStrokeCycle()
-	end
-	if isUsingGamepad() and continueBtn and finishBtn then
-		prevGuiSelected = GuiService.SelectedObject
-		beginSummaryGamepadNav()
-	end
-end
-
-local function openReefHealthFromSummary()
-	if not summaryOpen or summaryPausedForSkills then
-		return
-	end
-	local pg = deps.playerGui
-	if not pg then
-		return
-	end
-	UiHaptics.pulseShort()
-	pauseSummaryForSkills()
-	pg:SetAttribute("OceanTD_ForceOpenSkillId", "RHealth")
-	pg:SetAttribute("OceanTD_ForceOpenSkills", os.clock())
-	deps.log("Summary — opened Skills / Reef Health")
-end
-
 function WaveSlot.dismissSummary()
-	if summaryOpen then
-		hideSummary()
-	end
-end
-
-local function continueFromSummary()
-	if not summaryOpen then
-		return
-	end
-	hideSummary()
-	if WaveSim.continueWithHearts(CONTINUE_HEARTS) then
-		applyIcon(true)
-		setHudVisible(true)
-		clearWaveCameraOffset()
-		deps.log("Waves continued (+" .. tostring(CONTINUE_HEARTS) .. " hearts)")
-	end
+	WaveSlotSummary.hide()
 end
 
 function WaveSlot.continueFromSummary()
-	continueFromSummary()
+	WaveSlotSummary.continueFromSummary()
 end
 
 function WaveSlot.handleSummaryPrimaryConfirm(): boolean
-	if not summaryOpen then
-		return false
-	end
-	local sel = GuiService.SelectedObject
-	if sel == finishBtn then
-		hideSummary()
-		return true
-	end
-	continueFromSummary()
-	return true
-end
-
-local function ensureSummaryPanelContent(panel: Frame)
-	local c, f, titleStroke = WaveSummaryUi.ensurePanelContent(
-		panel,
-		continueFromSummary,
-		hideSummary,
-		openReefHealthFromSummary
-	)
-	continueBtn = c
-	finishBtn = f
-	summaryTitleStroke = titleStroke
-end
-
-local function showSummary(summary: WaveSim.Summary)
-	summaryOpen = true
-	-- Capture reef bar screen center before HUD hides (summary scales out of it).
-	local origin = reefBarScreenCenter()
-	setHudVisible(false)
-	applyIcon(false)
-
-	local records = WaveSummaryUi.reportAndReadRecords(summary)
-
-	if not summaryGui then
-		local g = Instance.new("ScreenGui")
-		g.Name = "OceanTD_WaveSummary"
-		g.ResetOnSpawn = false
-		g.IgnoreGuiInset = true
-		g.ClipToDeviceSafeArea = false
-		g.DisplayOrder = 13000
-		g.Parent = deps.playerGui
-		summaryGui = g
-
-		local dim = Instance.new("Frame")
-		dim.Name = "Dim"
-		dim.BackgroundColor3 = Color3.new(0, 0, 0)
-		dim.BackgroundTransparency = 0.4
-		dim.Size = UDim2.fromScale(1, 1)
-		dim.BorderSizePixel = 0
-		dim.ZIndex = 1
-		dim.Parent = g
-
-		local panel = Instance.new("Frame")
-		panel.Name = "Panel"
-		panel.AnchorPoint = Vector2.new(0.5, 0.5)
-		panel.Position = UDim2.fromScale(0.5, 0.5)
-		panel.Size = UDim2.fromOffset(SUMMARY_PANEL_W, SUMMARY_PANEL_H)
-		panel.BackgroundColor3 = Color3.fromRGB(16, 26, 38)
-		panel.BorderSizePixel = 0
-		panel.ClipsDescendants = false
-		panel.ZIndex = 2
-		panel.Parent = g
-		UiPopupScale.attach(panel)
-		local pc = Instance.new("UICorner")
-		pc.CornerRadius = UDim.new(0, SUMMARY_CORNER)
-		pc.Parent = panel
-		local edge = Instance.new("UIStroke")
-		styleSummaryEdge(edge)
-		edge.Color = Color3.fromHSV(0, 1, 1)
-		edge.Parent = panel
-		summaryStroke = edge
-
-		ensureSummaryPanelContent(panel)
-	end
-
-	local g = summaryGui :: ScreenGui
-	g.Enabled = true
-	g.ClipToDeviceSafeArea = false
-	local dim = g:FindFirstChild("Dim")
-	if dim and dim:IsA("GuiObject") then
-		dim.Visible = true
-	end
-	local panel = g:FindFirstChild("Panel")
-	if panel and panel:IsA("Frame") then
-		panel.ClipsDescendants = false
-		UiPopupScale.attach(panel)
-		local corner = panel:FindFirstChildOfClass("UICorner")
-		if corner then
-			corner.CornerRadius = UDim.new(0, SUMMARY_CORNER)
-		end
-		local edge = panel:FindFirstChild("SummaryEdge")
-		if edge and edge:IsA("UIStroke") then
-			styleSummaryEdge(edge)
-			summaryStroke = edge
-		elseif not summaryStroke then
-			local stroke = Instance.new("UIStroke")
-			styleSummaryEdge(stroke)
-			stroke.Color = Color3.fromHSV(0, 1, 1)
-			stroke.Parent = panel
-			summaryStroke = stroke
-		end
-		ensureSummaryPanelContent(panel)
-		WaveSummaryUi.fillStats(panel, summary, records, openReefHealthFromSummary)
-		panel.Visible = true
-		summaryScaleToken += 1
-		local cam = Workspace.CurrentCamera
-		local vp = if cam then cam.ViewportSize else Vector2.new(1920, 1080)
-		local startX = if origin then origin.X / vp.X else 0.92
-		local startY = if origin then origin.Y / vp.Y else 0.55
-		panel.Position = UDim2.fromScale(startX, startY)
-		panel.Size = UDim2.fromOffset(48, 28)
-		TweenService:Create(panel, SUMMARY_SCALE_IN, {
-			Position = UDim2.fromScale(0.5, 0.5),
-			Size = UDim2.fromOffset(SUMMARY_PANEL_W, SUMMARY_PANEL_H),
-		}):Play()
-		playConfetti(panel)
-		startSummaryStrokeCycle()
-	end
-
-	-- Joystick: only CONTINUE ↔ FINISH (lock every other Selectable in PlayerGui).
-	if isUsingGamepad() and continueBtn and finishBtn then
-		prevGuiSelected = GuiService.SelectedObject
-		beginSummaryGamepadNav()
-	end
+	return WaveSlotSummary.handlePrimaryConfirm()
 end
 
 local function toggleWaves()
-	if summaryOpen then
+	if WaveSlotSummary.isOpen() then
 		return
 	end
 	if stopConfirmActive then
@@ -2268,7 +2104,7 @@ function WaveSlot.beginStopConfirm()
 	if not WaveSim.isRunning() then
 		return
 	end
-	if InventoryState.isOpen() or summaryOpen then
+	if InventoryState.isOpen() or WaveSlotSummary.isOpen() then
 		return
 	end
 	ensureStopConfirmUi()
@@ -2328,11 +2164,21 @@ function WaveSlot.toggle()
 end
 
 function WaveSlot.isSummaryOpen(): boolean
-	return summaryOpen
+	return WaveSlotSummary.isOpen()
 end
 
 function WaveSlot.mount(d: Deps)
 	deps = d
+	WaveSlotSummary.bind({
+		playerGui = d.playerGui,
+		log = d.log,
+		getReefBar = function()
+			return hudReefBar
+		end,
+		setHudVisible = setHudVisible,
+		applyIcon = applyIcon,
+		clearWaveCameraOffset = clearWaveCameraOffset,
+	})
 	syncWaveHudToActiveRightHud()
 	local quickbar = deps.mainHUD:FindFirstChild("Quickbar")
 	local found = if quickbar then quickbar:FindFirstChild("Slot5") else nil
@@ -2439,6 +2285,7 @@ function WaveSlot.mount(d: Deps)
 			if hudFrame then
 				hudFrame.Visible = false
 			end
+			syncTempW100Button(false)
 		else
 			if slot5 then
 				slot5.Visible = true
@@ -2447,7 +2294,7 @@ function WaveSlot.mount(d: Deps)
 			if WaveSim.isRunning() then
 				setHudVisible(true)
 			end
-			resumeSummaryAfterSkills()
+			WaveSlotSummary.resumeAfterSkills()
 		end
 	end)
 
@@ -2461,13 +2308,21 @@ function WaveSlot.mount(d: Deps)
 		if WaveSlot.isReefHealOpen() then
 			WaveSlot.hideReefHeal()
 		end
-		if not summaryOpen then
-			showSummary(summary)
+		if not WaveSlotSummary.isOpen() then
+			WaveSlotSummary.show(summary)
 		end
 	end)
 
 	deps.playerGui:GetAttributeChangedSignal("OceanTD_RestoreWaveCam"):Connect(function()
 		if userCamCycleBusy() then
+			return
+		end
+		-- Don't steal Scriptable from wave-1 TangCam (or other intro zooms).
+		if deps.playerGui:GetAttribute("OceanTD_TangCamBusy") == true
+			or deps.playerGui:GetAttribute("OceanTD_SharkCamBusy") == true
+			or deps.playerGui:GetAttribute("OceanTD_UrchinCamBusy") == true
+			or deps.playerGui:GetAttribute("OceanTD_ReefDefeatCamBusy") == true
+		then
 			return
 		end
 		local cam = Workspace.CurrentCamera
@@ -2499,6 +2354,10 @@ function WaveSlot.mount(d: Deps)
 		if waveCamConn then
 			setWaveCameraActive(false)
 		end
+	end)
+
+	deps.playerGui:GetAttributeChangedSignal("OceanTD_CritterIntroBusy"):Connect(function()
+		refreshCritterEmojisInWaveBar()
 	end)
 
 	UserInputService.LastInputTypeChanged:Connect(function()

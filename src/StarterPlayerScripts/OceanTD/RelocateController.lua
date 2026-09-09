@@ -493,8 +493,8 @@ local function hideWaistChrome()
 	end
 end
 
-local function isSelectedSeaFan(): boolean
-	return part ~= nil and CoralVisual.isSeaFan(part:GetAttribute("OceanTD_SpeciesId"))
+local function isSelectedYawRotate(): boolean
+	return part ~= nil and CoralVisual.hasYawRotateChrome(part:GetAttribute("OceanTD_SpeciesId"))
 end
 
 local function isSelectedBrain(): boolean
@@ -506,7 +506,7 @@ local function layoutWaistChrome(btnPx: number, showCheck: boolean): boolean
 		hideWaistChrome()
 		return false
 	end
-	local showRot = ((isSelectedSeaFan() or (isSelectedBrain() and BrainSnapPreview.isSnapped())) and not recyclePending)
+	local showRot = ((isSelectedYawRotate() or (isSelectedBrain() and BrainSnapPreview.isSnapped())) and not recyclePending)
 	local bb, adornee = PlaceConfirmChrome.layoutOnTorso(
 		btnPx,
 		playerGui,
@@ -642,21 +642,29 @@ local function makeUi()
 	plus.Parent = recycleBtn
 	recyclePlus = plus
 
-	local function markDown(claimed: string?)
-		local screenPos = UserInputService:GetMouseLocation()
+	local function markDown(claimed: string?, input: InputObject?)
+		local screenPos = PlaceConfirmHitTest.pointerScreenPos(input)
 		local resolved = PlaceConfirmHitTest.resolveTarget(screenPos, checkBtn, cancelBtn, playerGui, rotLeftBtn, rotRightBtn)
 		local target: string? = nil
-		-- Trust ✓/X when they received the press; rot below often shares AbsolutePosition discs.
-		if claimed == "check" or claimed == "cancel" or claimed == "recycle" then
+		-- Gui buttons are square; only accept ✓/X/rot inside the round disc so nearby drags work.
+		if claimed == "check" or claimed == "cancel" then
+			local btn = if claimed == "check" then checkBtn else cancelBtn
+			if not PlaceConfirmHitTest.isOverDisc(screenPos, btn) then
+				return
+			end
+			target = claimed
+		elseif claimed == "recycle" then
+			target = claimed
+		elseif claimed == "rotLeft" or claimed == "rotRight" then
+			local btn = if claimed == "rotLeft" then rotLeftBtn else rotRightBtn
+			if not PlaceConfirmHitTest.isOverDisc(screenPos, btn) then
+				return
+			end
 			target = claimed
 		elseif resolved == "check" or resolved == "cancel" then
 			target = resolved
 		elseif resolved == "rotLeft" or resolved == "rotRight" then
 			target = resolved
-		elseif claimed == "rotLeft" and PlaceConfirmHitTest.isOverGui(screenPos, rotLeftBtn) then
-			target = "rotLeft"
-		elseif claimed == "rotRight" and PlaceConfirmHitTest.isOverGui(screenPos, rotRightBtn) then
-			target = "rotRight"
 		elseif resolved then
 			target = resolved
 		else
@@ -698,27 +706,27 @@ local function makeUi()
 	end)
 	checkBtn.InputBegan:Connect(function(input)
 		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-			markDown("check")
+			markDown("check", input)
 		end
 	end)
 	cancelBtn.InputBegan:Connect(function(input)
 		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-			markDown("cancel")
+			markDown("cancel", input)
 		end
 	end)
 	rotLeftBtn.InputBegan:Connect(function(input)
 		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-			markDown("rotLeft")
+			markDown("rotLeft", input)
 		end
 	end)
 	rotRightBtn.InputBegan:Connect(function(input)
 		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-			markDown("rotRight")
+			markDown("rotRight", input)
 		end
 	end)
 	recycleBtn.InputBegan:Connect(function(input)
 		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-			markDown("recycle")
+			markDown("recycle", input)
 		end
 	end)
 	-- Same path as Enter → commit. Hit-test InputEnded often maps Confirm → Cancel on billboards.
@@ -1252,7 +1260,7 @@ rotateSelectedSeaFan = function(dir: number)
 	if recyclePending or not part or not part.Parent then
 		return
 	end
-	if not CoralVisual.isSeaFan(part:GetAttribute("OceanTD_SpeciesId")) then
+	if not CoralVisual.hasYawRotateChrome(part:GetAttribute("OceanTD_SpeciesId")) then
 		return
 	end
 	local yaw = relocateFacingYaw
@@ -2618,6 +2626,11 @@ table.insert(inputConns, UserInputService.InputBegan:Connect(function(input, _pr
 	if not InventoryState.isOpen() or PlacementController.isActive() then
 		return
 	end
+	if InventoryState.isBuildModalBlocking() then
+		pendingPick = nil
+		pendingPickScreen = nil
+		return
+	end
 	local screenPos = pointerScreenPos()
 	if InventoryState.isPointerOverBackpack(screenPos) then
 		pendingPick = nil
@@ -2749,7 +2762,9 @@ table.insert(inputConns, UserInputService.InputEnded:Connect(function(input, _pr
 
 	-- Tap fallback: if press didn't open the tool (processed/ray miss), try again on release.
 	if not active and not PlacementController.isActive() and pendingPick and pendingPickScreen then
-		if (pickPos - pendingPickScreen).Magnitude <= C.PICK_TAP_PX then
+		if InventoryState.isPointerOverBackpack(pickPos) or InventoryState.isBuildModalBlocking() then
+			-- HUD click — never promote a coral that was under the button.
+		elseif (pickPos - pendingPickScreen).Magnitude <= C.PICK_TAP_PX then
 			if pendingPick.Parent then
 				RelocateController.begin(pendingPick)
 			else

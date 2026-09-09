@@ -243,7 +243,8 @@ local function syncMarkers(hosts: { BasePart }, activeHost: BasePart?, aimPos: V
 				markers[host] = m
 			end
 		end
-		if m then
+		-- While snapped, freeze sizes — aim/ray noise was resizing every white dot.
+		if m and not activeHost then
 			local dist = (host.Position - aimPos).Magnitude
 			setMarkerSize(m, dotScaleForDist(dist))
 		end
@@ -263,6 +264,23 @@ local function syncMarkers(hosts: { BasePart }, activeHost: BasePart?, aimPos: V
 		end
 		lastMarkerActiveHost = activeHost
 	end
+end
+
+-- Larger release radius so snap doesn't flicker on/off at the hit edge (dots + ghost).
+local function pointerHitsDotRelaxed(screenPos: Vector2?, aimPos: Vector3, hostPos: Vector3): boolean
+	local hitPx = BrainStack.SNAP_DOT_HIT_PX * 1.65
+	local hitStuds = BrainStack.SNAP_DOT_HIT_STUDS * 1.85
+	local cam = Workspace.CurrentCamera
+	if screenPos and cam then
+		local sp, onScreen = cam:WorldToViewportPoint(hostPos)
+		if onScreen and sp.Z > 0 then
+			local px = (Vector2.new(sp.X, sp.Y) - screenPos).Magnitude
+			if px <= hitPx then
+				return true
+			end
+		end
+	end
+	return BrainStack.horizontalDist(aimPos, hostPos) <= hitStuds
 end
 
 function BrainSnapPreview.nudgeOrbit(dir: number, newDiam: number, ignore: BasePart?): boolean
@@ -329,6 +347,13 @@ function BrainSnapPreview.resolve(
 				bestScore = score
 				best = host
 			end
+		end
+	end
+	-- Sticky: stay on the current host until aim clearly leaves (stops edge flicker).
+	if not best and active and active.valid and active.host.Parent then
+		local tip = dotWorldPos(active.host)
+		if pointerHitsDotRelaxed(screenPos, aimPos, tip) then
+			best = active.host
 		end
 	end
 

@@ -79,6 +79,8 @@ local MODE_GRAPHICS: { [CamMode]: string } = {
 }
 
 local mode: CamMode = "off"
+-- FishCam/PlotCam/DroneCam to restore after Out Of Reef Health → Continue.
+local defeatResumeMode: CamMode? = nil
 local camPos = Vector3.zero
 local lookYaw = 0
 local lookPitch = 0
@@ -958,6 +960,16 @@ local function restoreDefaultCamera()
 	setCharacterLocked(false)
 	setDroneLookCapture(false)
 
+	-- Intro/defeat cinematics own the camera — don't yank back to Custom mid-shot.
+	if playerGui:GetAttribute("OceanTD_TangCamBusy") == true
+		or playerGui:GetAttribute("OceanTD_SharkCamBusy") == true
+		or playerGui:GetAttribute("OceanTD_UrchinCamBusy") == true
+		or playerGui:GetAttribute("OceanTD_ReefDefeatCamBusy") == true
+	then
+		savedCameraType = nil
+		return
+	end
+
 	local camera = getCamera()
 	if camera then
 		local restore = savedCameraType or Enum.CameraType.Custom
@@ -1205,6 +1217,18 @@ local function startRenderLoop()
 		if playerGui:GetAttribute("OceanTD_PlotSizeCinematicBusy") == true then
 			return
 		end
+		if playerGui:GetAttribute("OceanTD_SharkCamBusy") == true then
+			return
+		end
+		if playerGui:GetAttribute("OceanTD_UrchinCamBusy") == true then
+			return
+		end
+		if playerGui:GetAttribute("OceanTD_TangCamBusy") == true then
+			return
+		end
+		if playerGui:GetAttribute("OceanTD_ReefDefeatCamBusy") == true then
+			return
+		end
 		if PlacementController.isActive() or RelocateController.isActive() then
 			setMode("off")
 			return
@@ -1231,6 +1255,18 @@ setMode = function(nextMode: CamMode)
 	end
 	if nextMode ~= "off" then
 		if playerGui:GetAttribute("OceanTD_PlotSizeCinematicBusy") == true then
+			return
+		end
+		if playerGui:GetAttribute("OceanTD_SharkCamBusy") == true then
+			return
+		end
+		if playerGui:GetAttribute("OceanTD_UrchinCamBusy") == true then
+			return
+		end
+		if playerGui:GetAttribute("OceanTD_TangCamBusy") == true then
+			return
+		end
+		if playerGui:GetAttribute("OceanTD_ReefDefeatCamBusy") == true then
 			return
 		end
 		if PlacementController.isActive() or RelocateController.isActive() then
@@ -1804,8 +1840,34 @@ local function bindMobileLeftUi(left: Instance)
 
 		playerGui:GetAttributeChangedSignal("OceanTD_ForceCloseFreeCam"):Connect(function()
 			if mode ~= "off" then
+				-- Defeat cam sets Busy before ForceClose so we can restore FishCam after Continue.
+				if playerGui:GetAttribute("OceanTD_ReefDefeatCamBusy") == true then
+					defeatResumeMode = mode
+				end
 				setMode("off")
 			end
+		end)
+
+		playerGui:GetAttributeChangedSignal("OceanTD_ResumeDefeatCam"):Connect(function()
+			local resume = defeatResumeMode
+			defeatResumeMode = nil
+			if resume and resume ~= "off" then
+				task.defer(function()
+					if mode == "off" and not PlacementController.isActive() and not RelocateController.isActive() then
+						setMode(resume)
+					end
+				end)
+			elseif mode == "off" then
+				-- No stash: still ensure we aren't stuck Scriptable on the defeat pose.
+				local cam = getCamera()
+				if cam and cam.CameraType == Enum.CameraType.Scriptable then
+					restoreDefaultCamera()
+				end
+			end
+		end)
+
+		playerGui:GetAttributeChangedSignal("OceanTD_ClearDefeatCamStash"):Connect(function()
+			defeatResumeMode = nil
 		end)
 	end
 

@@ -94,12 +94,21 @@ function CoralVisual.isDualColorMesh(speciesId: any): boolean
 	return CoralVisual.isSeaFan(speciesId) or CoralVisual.isMainAccentMesh(speciesId)
 end
 
--- Species that plant with a Y facing (plot-local). SeaFan is player-rotated; others roll random (no rotate chrome).
+-- Species that plant with a Y facing (plot-local). SeaFan / TreeCoral / Sponge use rotate chrome; others roll random.
 function CoralVisual.needsFacingYaw(speciesId: any): boolean
 	return speciesId == "SeaFan"
 		or speciesId == "FireCoral"
 		or speciesId == "Zoas"
 		or speciesId == "LeatherCoral"
+		or speciesId == "TreeCoral"
+		or speciesId == "Sponge"
+end
+
+-- Player yaw buttons (place + relocate), same as Sea Fan.
+function CoralVisual.hasYawRotateChrome(speciesId: any): boolean
+	return CoralVisual.isSeaFan(speciesId)
+		or CoralVisual.isTreeCoral(speciesId)
+		or speciesId == "Sponge"
 end
 
 function CoralVisual.randomFacingYaw(): number
@@ -612,6 +621,10 @@ local function getAccentPart(stem: BasePart): BasePart?
 		end
 	end
 	return getSeaFanWeb(stem)
+end
+
+function CoralVisual.getAccentPart(stem: BasePart): BasePart?
+	return getAccentPart(stem)
 end
 
 local function readWebRestColor(stem: BasePart): Color3?
@@ -1285,7 +1298,8 @@ local function createMainAccentMesh(
 	if useFacingYaw then
 		facingYaw = opts.facingYaw
 		if typeof(facingYaw) ~= "number" or facingYaw ~= facingYaw then
-			facingYaw = CoralVisual.randomFacingYaw()
+			-- Rotate-chrome species start upright (player turns them). Others pick a random facing.
+			facingYaw = if CoralVisual.hasYawRotateChrome(speciesId) then 0 else CoralVisual.randomFacingYaw()
 		end
 	end
 
@@ -1318,7 +1332,7 @@ local function createZoas(def: any, worldPos: Vector3, opts: VisualOptions): Bas
 end
 
 local function createTreeCoral(def: any, worldPos: Vector3, opts: VisualOptions): BasePart?
-	return createMainAccentMesh("TreeCoral", def, worldPos, opts, false)
+	return createMainAccentMesh("TreeCoral", def, worldPos, opts, true)
 end
 
 local function createLeatherCoral(def: any, worldPos: Vector3, opts: VisualOptions): BasePart?
@@ -1449,6 +1463,11 @@ function CoralVisual.restyleSponge(
 		if scaleHeightOpt == nil then
 			scaleHeight = CoralVisual.randomSeaFanAxis()
 		end
+		local template = findSeaFanModel(class, variant)
+		if not template then
+			warn("[CoralVisual] Missing SeaFan for restyle", SIZE_PREFIX[class], variant)
+			return nil
+		end
 		-- Keep exact planted rotation — do not rebuild yaw (avoids spin on upgrade).
 		local keepRotation = part.CFrame
 		local webColor = readWebRestColor(part) or color
@@ -1459,11 +1478,6 @@ function CoralVisual.restyleSponge(
 		end
 		part:Destroy()
 
-		local template = findSeaFanModel(class, variant)
-		if not template then
-			warn("[CoralVisual] Missing SeaFan for restyle", SIZE_PREFIX[class], variant)
-			return nil
-		end
 		local newStem, newWeb = assembleSeaFanFromTemplate(template, class, scale, scaleWidth, scaleHeight)
 		if not newStem then
 			return nil
@@ -1490,6 +1504,11 @@ function CoralVisual.restyleSponge(
 
 	-- Main + Accent mesh corals (Zoas, Tree Coral): rebuild Main+Accent (preserves rotation + dual colors).
 	if CoralVisual.isMainAccentMesh(speciesId) then
+		local template = findMainAccentModel(speciesId, class)
+		if not template then
+			warn("[CoralVisual] Missing", speciesId, "for restyle", SIZE_PREFIX[class])
+			return nil
+		end
 		local keepRotation = part.CFrame
 		local accentColor = readWebRestColor(part) or color
 		local parent = part.Parent
@@ -1499,11 +1518,6 @@ function CoralVisual.restyleSponge(
 		end
 		part:Destroy()
 
-		local template = findMainAccentModel(speciesId, class)
-		if not template then
-			warn("[CoralVisual] Missing", speciesId, "for restyle", SIZE_PREFIX[class])
-			return nil
-		end
 		local newStem, newAccent = assembleMainAccentFromTemplate(speciesId, template, scale, class)
 		if not newStem then
 			return nil
@@ -1664,10 +1678,18 @@ function CoralVisual.applyRestLook(part: BasePart)
 		syncSeaGrassClimb(part)
 	end
 	if part:GetAttribute("OceanTD_CrabStunned") == true then
+		part.Material = Enum.Material.Plastic
 		part.Color = Color3.new(1, 1, 1)
+		if part:IsA("MeshPart") then
+			part.TextureID = ""
+		end
 		local web = getAccentPart(part)
 		if web then
+			web.Material = Enum.Material.Plastic
 			web.Color = Color3.new(1, 1, 1)
+			if web:IsA("MeshPart") then
+				web.TextureID = ""
+			end
 		end
 		return
 	end

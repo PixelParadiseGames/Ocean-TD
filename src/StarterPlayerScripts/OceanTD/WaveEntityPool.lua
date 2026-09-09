@@ -6,6 +6,7 @@
 	pooled for reuse; size jitter on longest axis (min 25% below prior floor, same max).
 	Crabs: ReplicatedStorage.Fish.CrabTemplate. Same acquireFish/releaseFish API.
 	Urchins: ReplicatedStorage.Fish.Urchin.UrchinMesh (RootPart + ShellHitbox under UrchinMesh).
+	Sharks: ReplicatedStorage.Fish.Shark (RootPart drive; passenger seats kept).
 
 	Also pools food orbs, green/red arrow sets, ammo balls, and short SFX clones.
 ]]
@@ -13,16 +14,21 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local SoundService = game:GetService("SoundService")
 
+local WaveCritterSeats = require(script.Parent:WaitForChild("WaveCritterSeats"))
+
 local WaveEntityPool = {}
 
 WaveEntityPool.FISH_TANG = "Tang"
 WaveEntityPool.FISH_CRAB = "CrabTemplate"
 WaveEntityPool.FISH_URCHIN = "Urchin"
+WaveEntityPool.FISH_SHARK = "Shark"
 
 local MAX_FISH_PER_KIND = 48
-local MAX_FOOD = 64
+-- Soft ceilings for neon orbs. Nests need ~foodSlots per coral; shots borrow from the same budget.
+-- Old caps (64) forced Destroy/Instance.new churn at ~1000 corals.
+local MAX_FOOD = 1024
 local MAX_ARROW = 40
-local MAX_AMMO = 64
+local MAX_AMMO = 4096
 local MAX_SOUND_PER_KEY = 12
 -- Longest-axis studs: floor = (longest + JITTER) * MIN_SCALE, max = longest + 3*JITTER.
 local HUNGRY_SIZE_JITTER = 2 * 1.2
@@ -108,8 +114,11 @@ local function resolveMovementRoot(inst: Instance): BasePart?
 	return findPrimary(inst)
 end
 
--- Utility parts that must stay invisible (authored hitboxes / movement roots).
+-- Utility parts that must stay invisible (authored hitboxes / movement roots / seats).
 local function isUtilityHitbox(p: BasePart): boolean
+	if p:IsA("Seat") or p:IsA("VehicleSeat") then
+		return true
+	end
 	local n = p.Name
 	return n == "ShellHitbox" or n == "RootPart" or string.find(n, "Hitbox", 1, true) ~= nil
 end
@@ -132,6 +141,7 @@ end
 
 -- Root stays anchored so Pivot/CFrame drives the assembly; welded legs stay
 -- unanchored so C0 walk-cycle offsets actually move them.
+-- Passenger seats are kept (E to ride); driver / VehicleSeat stay non-drivable.
 local function prepareCrabInstance(inst: Instance): BasePart?
 	local root = resolveMovementRoot(inst)
 	local toDestroy: { Instance } = {}
@@ -152,8 +162,10 @@ local function prepareCrabInstance(inst: Instance): BasePart?
 			end
 		elseif d:IsA("Script") or d:IsA("LocalScript") then
 			d.Disabled = true
-		elseif d:IsA("Seat") or d:IsA("VehicleSeat") or d:IsA("Humanoid") then
+		elseif d:IsA("Humanoid") then
 			table.insert(toDestroy, d)
+		elseif d:IsA("Seat") or d:IsA("VehicleSeat") then
+			-- Seats configured after loop via WaveCritterSeats.
 		end
 	end
 	for _, d in ipairs(toDestroy) do
@@ -174,6 +186,47 @@ local function prepareCrabInstance(inst: Instance): BasePart?
 			inst.Massless = true
 		end
 	end
+	WaveCritterSeats.prepareModel(inst)
+	return root
+end
+
+-- Shark: RootPart anchored drive via PivotTo; keep passenger seats; no collision.
+local function prepareSharkInstance(inst: Instance): BasePart?
+	local root = resolveMovementRoot(inst)
+	local toDestroy: { Instance } = {}
+	for _, d in ipairs(inst:GetDescendants()) do
+		if d:IsA("BasePart") then
+			d.CanCollide = false
+			d.CanTouch = false
+			d.CanQuery = false
+			d.CastShadow = false
+			if isUtilityHitbox(d) then
+				d.Transparency = 1
+			end
+			if d == root then
+				d.Anchored = true
+			else
+				d.Anchored = false
+				d.Massless = true
+			end
+		elseif d:IsA("Script") or d:IsA("LocalScript") then
+			d.Disabled = true
+		elseif d:IsA("Humanoid") then
+			table.insert(toDestroy, d)
+		elseif d:IsA("LinearVelocity") or d:IsA("AlignOrientation") or d:IsA("VectorForce")
+			or d:IsA("AngularVelocity") or d:IsA("Torque") or d:IsA("BodyVelocity")
+			or d:IsA("BodyGyro") or d:IsA("BodyPosition")
+		then
+			d.Enabled = false
+		end
+	end
+	for _, d in ipairs(toDestroy) do
+		d:Destroy()
+	end
+	if inst:IsA("Model") and root then
+		inst.PrimaryPart = root
+	end
+	WaveCritterSeats.prepareModel(inst)
 	return root
 end
 
@@ -270,7 +323,7 @@ end
 
 local function stripHungerUi(root: BasePart)
 	for _, ch in ipairs(root:GetChildren()) do
-		if ch:IsA("BillboardGui") and ch.Name == "HungerBar" then
+		if ch:IsA("BillboardGui") and (ch.Name == "HungerBar" or ch.Name == "HungerMood") then
 			ch:Destroy()
 		end
 	end
@@ -351,6 +404,16 @@ local function getFishTemplate(kind: string): Instance?
 		end
 		if not tmpl then
 			warn("[WAVEPOOL] Urchin missing (Fish.Urchin.UrchinMesh)")
+			return nil
+		end
+		fishTemplateCache[kind] = tmpl
+		return tmpl
+	end
+	if kind == WaveEntityPool.FISH_SHARK then
+		local fishFolder = ReplicatedStorage:FindFirstChild("Fish")
+		local tmpl = fishFolder and fishFolder:FindFirstChild("Shark")
+		if not tmpl then
+			warn("[WAVEPOOL] Shark missing (Fish.Shark)")
 			return nil
 		end
 		fishTemplateCache[kind] = tmpl
@@ -446,6 +509,8 @@ local function newFishFromTemplate(kind: string): (Instance?, BasePart?)
 		root = prepareUrchinInstance(clone)
 	elseif kind == WaveEntityPool.FISH_CRAB then
 		root = prepareCrabInstance(clone)
+	elseif kind == WaveEntityPool.FISH_SHARK then
+		root = prepareSharkInstance(clone)
 	else
 		prepareLocalFxInstance(clone)
 		root = findPrimary(clone)
@@ -493,6 +558,10 @@ function WaveEntityPool.acquireFish(kind: string, name: string): (Instance?, Bas
 			-- Re-assert anchors (pooled urchins may have been crab-prepared historically).
 			prepareUrchinInstance(inst)
 			applyUrchinScale(inst, root, URCHIN_SCALE_MIN + math.random() * (URCHIN_SCALE_MAX - URCHIN_SCALE_MIN))
+		elseif kind == WaveEntityPool.FISH_CRAB then
+			prepareCrabInstance(inst)
+		elseif kind == WaveEntityPool.FISH_SHARK then
+			prepareSharkInstance(inst)
 		end
 		fishInUse[inst] = true
 		return inst, root
@@ -500,7 +569,9 @@ function WaveEntityPool.acquireFish(kind: string, name: string): (Instance?, Bas
 	while #pool > 0 do
 		local inst = table.remove(pool) :: Instance
 		if inst and not fishInUse[inst] then
-			local root = if kind == WaveEntityPool.FISH_CRAB or kind == WaveEntityPool.FISH_URCHIN
+			local root = if kind == WaveEntityPool.FISH_CRAB
+				or kind == WaveEntityPool.FISH_URCHIN
+				or kind == WaveEntityPool.FISH_SHARK
 				then resolveMovementRoot(inst)
 				else findPrimary(inst)
 			if root then
@@ -526,7 +597,10 @@ function WaveEntityPool.releaseFish(kind: string, model: Instance)
 		return
 	end
 	fishInUse[model] = nil
-	local root = if kind == WaveEntityPool.FISH_URCHIN
+	if kind == WaveEntityPool.FISH_SHARK or kind == WaveEntityPool.FISH_CRAB then
+		WaveCritterSeats.ejectIfRidingModel(model)
+	end
+	local root = if kind == WaveEntityPool.FISH_URCHIN or kind == WaveEntityPool.FISH_SHARK
 		then resolveMovementRoot(model)
 		else findPrimary(model)
 	if root then
@@ -620,6 +694,63 @@ function WaveEntityPool.releaseAmmo(p: BasePart)
 	else
 		p:Destroy()
 	end
+end
+
+local function makeIdleAmmo(): BasePart
+	local n = Instance.new("Part")
+	n.Name = "OceanTD_CoralAmmo"
+	n.Shape = Enum.PartType.Ball
+	n.Material = Enum.Material.Neon
+	n.Anchored = true
+	n.CanCollide = false
+	n.CanQuery = false
+	n.CanTouch = false
+	n.CastShadow = false
+	n.Transparency = 1
+	n.Size = Vector3.new(1, 1, 1)
+	n.Parent = nil
+	return n
+end
+
+local function makeIdleFood(radius: number): BasePart
+	local n = Instance.new("Part")
+	n.Name = "OceanTD_FoodOrb"
+	n.Shape = Enum.PartType.Ball
+	n.Material = Enum.Material.Neon
+	n.Anchored = true
+	n.CanCollide = false
+	n.CanQuery = false
+	n.CanTouch = false
+	n.CastShadow = false
+	n.Transparency = 1
+	n.Size = Vector3.new(radius * 2, radius * 2, radius * 2)
+	n.Parent = nil
+	return n
+end
+
+--[[
+	Grow idle ammo/food pools up to the requested counts (clamped to MAX_*).
+	Call once when arming a wave / after large place bursts so acquire does not
+	Instance.new under fire. Safe to call repeatedly — only creates the deficit.
+]]
+function WaveEntityPool.prewarmOrbs(ammoCount: number, foodCount: number, foodRadius: number?)
+	local wantAmmo = math.clamp(math.floor(ammoCount), 0, MAX_AMMO)
+	local wantFood = math.clamp(math.floor(foodCount), 0, MAX_FOOD)
+	local r = if typeof(foodRadius) == "number" and (foodRadius :: number) > 0 then foodRadius :: number else 0.52
+	while #ammoPool < wantAmmo do
+		table.insert(ammoPool, makeIdleAmmo())
+	end
+	while #foodPool < wantFood do
+		table.insert(foodPool, makeIdleFood(r))
+	end
+end
+
+function WaveEntityPool.ammoPoolCap(): number
+	return MAX_AMMO
+end
+
+function WaveEntityPool.foodPoolCap(): number
+	return MAX_FOOD
 end
 
 local function newArrowFromTemplate(name: string, preferRed: boolean): Instance?

@@ -103,6 +103,11 @@ local SKIP_SCREEN_GUI = {
 -- SKIP entries that must remain Enabled while HUD is hidden.
 local KEEP_ENABLED_WHILE_HIDDEN = {
 	[FLY_OVERLAY_NAME] = true,
+	-- PlayerModule locomotion (keyboard + thumbstick + jump). Disabling this ScreenGui
+	-- freezes the avatar for the whole hide-UI session.
+	TouchGui = true,
+	-- Belt-and-suspenders if forceShow races ChildAdded (Out Of Reef Health summary).
+	OceanTD_WaveSummary = true,
 }
 local animEntries: { AnimEntry } = {}
 local hiddenScreenGuis: { ScreenGuiEntry } = {}
@@ -487,9 +492,11 @@ local function makeFlyClone(entry: AnimEntry, atCenter: Vector2, startScale: num
 	for _, d in ipairs(clone:GetDescendants()) do
 		if d:IsA("UIScale") then
 			d:Destroy()
-		elseif d:IsA("GuiButton") then
+		elseif d:IsA("GuiObject") then
 			d.Active = false
-			d.AutoButtonColor = false
+			if d:IsA("GuiButton") then
+				d.AutoButtonColor = false
+			end
 		end
 	end
 	for _, ch in ipairs(clone:GetChildren()) do
@@ -500,6 +507,8 @@ local function makeFlyClone(entry: AnimEntry, atCenter: Vector2, startScale: num
 	if clone:IsA("GuiButton") then
 		clone.Active = false
 		clone.AutoButtonColor = false
+	else
+		clone.Active = false
 	end
 	local scale = Instance.new("UIScale")
 	scale.Name = ANIM_SCALE_NAME
@@ -647,6 +656,9 @@ local function collectHudHideTargets(): ({ AnimEntry }, { ScreenGuiEntry })
 	local screenGuis: { ScreenGuiEntry } = {}
 	for _, ch in ipairs(playerGui:GetChildren()) do
 		if ch:IsA("ScreenGui") and ch.Name ~= "MobileLeftUI" and ch.Enabled then
+			if KEEP_ENABLED_WHILE_HIDDEN[ch.Name] then
+				continue
+			end
 			if SKIP_SCREEN_GUI[ch.Name] then
 				if not KEEP_ENABLED_WHILE_HIDDEN[ch.Name] then
 					table.insert(screenGuis, { gui = ch, wasEnabled = ch.Enabled })
@@ -1105,7 +1117,13 @@ function HideUiController.init()
 		if not HideUiState.isActive() or animBusy then
 			return
 		end
-		if ch:IsA("ScreenGui") and SKIP_SCREEN_GUI[ch.Name] and not KEEP_ENABLED_WHILE_HIDDEN[ch.Name] then
+		if not ch:IsA("ScreenGui") then
+			return
+		end
+		if KEEP_ENABLED_WHILE_HIDDEN[ch.Name] or ch.Name == "MobileLeftUI" then
+			return
+		end
+		if SKIP_SCREEN_GUI[ch.Name] and not KEEP_ENABLED_WHILE_HIDDEN[ch.Name] then
 			task.defer(function()
 				if not HideUiState.isActive() or ch.Parent ~= playerGui then
 					return
@@ -1117,7 +1135,7 @@ function HideUiController.init()
 			end)
 			return
 		end
-		if ch:IsA("ScreenGui") and ch.Name ~= "MobileLeftUI" and not SKIP_SCREEN_GUI[ch.Name] then
+		if ch.Name ~= "MobileLeftUI" and not SKIP_SCREEN_GUI[ch.Name] then
 			task.defer(function()
 				if not HideUiState.isActive() or animBusy or ch.Parent ~= playerGui then
 					return
@@ -1165,6 +1183,16 @@ end
 
 function HideUiController.isActive(): boolean
 	return HideUiState.isActive()
+end
+
+-- Out Of Reef Health / modal popups: turn hide-UI off so the player can see them.
+function HideUiController.forceShow()
+	if not HideUiState.isActive() and #animEntries == 0 and not animBusy then
+		return
+	end
+	flashButtonBg(GREEN, 0, BG_FADE_SEC)
+	applyHudHiddenInstant(false)
+	refreshButtonVisual()
 end
 
 function HideUiController.handleConfirmInput(input: InputObject, gameProcessed: boolean): boolean

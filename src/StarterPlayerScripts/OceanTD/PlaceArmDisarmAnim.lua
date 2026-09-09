@@ -7,11 +7,15 @@
 local Players = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
 local RunService = game:GetService("RunService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local InventoryState = require(script.Parent:WaitForChild("InventoryState"))
 local PlaceConfirmChrome = require(script.Parent:WaitForChild("PlaceConfirmChrome"))
 local PlaceVfx = require(script.Parent:WaitForChild("PlaceVfx"))
 local HandOrb = require(script.Parent:WaitForChild("HandOrb"))
+
+local oceanRoot = ReplicatedStorage:WaitForChild("OceanTD")
+local CoralVisual = require(oceanRoot:WaitForChild("Shared"):WaitForChild("CoralVisual"))
 
 local PlaceArmDisarmAnim = {}
 
@@ -86,8 +90,7 @@ export type Env = {
 local function layoutChrome(env: Env, checkBtn: TextButton?, cancelBtn: TextButton?)
 	local rotL = if env.getRotLeftBtn then env.getRotLeftBtn() else nil
 	local rotR = if env.getRotRightBtn then env.getRotRightBtn() else nil
-	local armed = env.getArmedItemId()
-	local showRot = armed == "SeaFan"
+	local showRot = CoralVisual.hasYawRotateChrome(env.getArmedItemId())
 	if rotL then
 		rotL.Visible = showRot
 	end
@@ -508,7 +511,7 @@ function PlaceArmDisarmAnim.playArmIntroFromSlot(
 	local moveHintImage = env.getMoveHintImage()
 	-- SeaFan: show yaw controls as soon as chrome exists (not only after fly-in ends).
 	do
-		local showRot = itemId == "SeaFan"
+		local showRot = CoralVisual.hasYawRotateChrome(itemId)
 		local rotL = if env.getRotLeftBtn then env.getRotLeftBtn() else nil
 		local rotR = if env.getRotRightBtn then env.getRotRightBtn() else nil
 		if rotL then
@@ -597,7 +600,7 @@ function PlaceArmDisarmAnim.playArmIntroFromSlot(
 			local bsize = fullBtn * math.max(scale, 0.35)
 			local rotL = if env.getRotLeftBtn then env.getRotLeftBtn() else nil
 			local rotR = if env.getRotRightBtn then env.getRotRightBtn() else nil
-			local showRot = env.getArmedItemId() == "SeaFan"
+			local showRot = CoralVisual.hasYawRotateChrome(env.getArmedItemId())
 			if rotL then
 				rotL.Visible = showRot
 			end

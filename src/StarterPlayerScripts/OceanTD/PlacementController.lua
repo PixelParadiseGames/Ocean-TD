@@ -122,6 +122,8 @@ local ghostBaseMaterial: Enum.Material? = nil
 local placeSelectRing = SelectRing.new()
 local placeResumeToken = 0
 local postPlaceWaiting = false
+-- After Shift quick-place on press, ignore the matching release park/confirm.
+local suppressAimParkOnce = false
 local pendingGhostScaleIn = false
 local ghostScaleConn: RBXScriptConnection? = nil
 -- Optional slot targets when switching items (capture before pulse moves).
@@ -810,10 +812,17 @@ local function updateGhostAt(anchorPos: Vector3)
 		if speciesId == "BrainCoral" then
 			ghostDiameter = ghostPlaceDiameter or CoralVisual.randomBrainDiameter()
 			ghostPlaceDiameter = ghostDiameter
-		elseif CoralVisual.isSeaFan(speciesId) then
+		elseif CoralVisual.hasYawRotateChrome(speciesId) then
 			ghostPlaceDiameter = nil
-			ghostPlaceVariant = 1
-			ghostPlaceScale, ghostPlaceScaleWidth, ghostPlaceScaleHeight = CoralVisual.randomSeaFanScales()
+			if CoralVisual.isSeaFan(speciesId) then
+				ghostPlaceVariant = 1
+				ghostPlaceScale, ghostPlaceScaleWidth, ghostPlaceScaleHeight = CoralVisual.randomSeaFanScales()
+			else
+				ghostPlaceVariant = CoralVisual.randomMeshVariant(speciesId)
+				ghostPlaceScale = CoralVisual.randomMeshScale(speciesId)
+				ghostPlaceScaleWidth = nil
+				ghostPlaceScaleHeight = nil
+			end
 			-- Default upright; player rotates with chrome. Do not auto-face the character.
 			ghostPlaceFacingYaw = 0
 		elseif CoralVisual.isMeshSpecies(speciesId) then
@@ -865,7 +874,7 @@ local function updateGhostAt(anchorPos: Vector3)
 			end)
 		end
 	else
-		if CoralVisual.isSeaFan(speciesId) then
+		if CoralVisual.hasYawRotateChrome(speciesId) then
 			-- Keep player-adjusted yaw; seed 0 only when unset.
 			if typeof(ghostPlaceFacingYaw) ~= "number" then
 				ghostPlaceFacingYaw = 0
@@ -951,8 +960,8 @@ local function syncConfirmButtonsImpl()
 	-- Visibility first so feet layout can center X-only vs ✓+X pair.
 	checkBtn.Visible = validSpot and (mode == MODE_CONFIRM or gamepadPlacement)
 	cancelBtn.Visible = true
-	local showRot = armedItemId == "SeaFan"
-		or CoralVisual.isSeaFan(if armedItemId then getSpeciesIdForItem(armedItemId) else nil)
+	local armedSid = if armedItemId then getSpeciesIdForItem(armedItemId) else nil
+	local showRot = CoralVisual.hasYawRotateChrome(armedSid)
 		or (armedItemId == "BrainCoral" and BrainSnapPreview.isSnapped())
 	local bb, adornee = PlaceConfirmChrome.layoutOnTorso(
 		BTN_SIZE,
@@ -995,7 +1004,7 @@ local function rotateSeaFanGhost(dir: number)
 		return
 	end
 	local sid = armedItemId and getSpeciesIdForItem(armedItemId)
-	if not CoralVisual.isSeaFan(sid) then
+	if not CoralVisual.hasYawRotateChrome(sid) then
 		return
 	end
 	local yaw = ghostPlaceFacingYaw
@@ -1099,7 +1108,7 @@ local function makeConfirmUiImpl()
 	rotRightBtn.ZIndex = 5
 	applyGamepadButtonLabels()
 
-	local function markChromePointerDown(claimed: string)
+	local function markChromePointerDown(claimed: string, input: InputObject?)
 		-- Gui Confirm/Cancel always wins (UIS may have already tried to re-park under the button).
 		local fromGuiChrome = claimed == "check" or claimed == "cancel"
 		if not fromGuiChrome then
@@ -1108,19 +1117,23 @@ local function makeConfirmUiImpl()
 				return
 			end
 		end
-		local screenPos = UserInputService:GetMouseLocation()
+		local screenPos = PlaceConfirmHitTest.pointerScreenPos(input)
 		local resolved = PlaceConfirmHitTest.resolveTarget(screenPos, checkBtn, cancelBtn, playerGui, rotLeftBtn, rotRightBtn)
-		-- If ✓/X received the press (AutoButtonColor), trust that over disc overlap with rot.
+		-- Gui buttons are square; only accept ✓/X inside the round disc (near Cancel must allow drag).
 		local target: string?
 		if claimed == "check" or claimed == "cancel" then
+			local btn = if claimed == "check" then checkBtn else cancelBtn
+			if not PlaceConfirmHitTest.isOverDisc(screenPos, btn) then
+				return
+			end
 			target = claimed
 		elseif resolved == "check" or resolved == "cancel" then
 			target = resolved
 		elseif resolved == "rotLeft" or resolved == "rotRight" then
 			target = resolved
-		elseif claimed == "rotLeft" and PlaceConfirmHitTest.isOverGui(screenPos, rotLeftBtn) then
+		elseif claimed == "rotLeft" and PlaceConfirmHitTest.isOverDisc(screenPos, rotLeftBtn) then
 			target = "rotLeft"
-		elseif claimed == "rotRight" and PlaceConfirmHitTest.isOverGui(screenPos, rotRightBtn) then
+		elseif claimed == "rotRight" and PlaceConfirmHitTest.isOverDisc(screenPos, rotRightBtn) then
 			target = "rotRight"
 		elseif resolved then
 			target = resolved
@@ -1172,22 +1185,22 @@ local function makeConfirmUiImpl()
 	end)
 	checkBtn.InputBegan:Connect(function(input)
 		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-			markChromePointerDown("check")
+			markChromePointerDown("check", input)
 		end
 	end)
 	cancelBtn.InputBegan:Connect(function(input)
 		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-			markChromePointerDown("cancel")
+			markChromePointerDown("cancel", input)
 		end
 	end)
 	rotLeftBtn.InputBegan:Connect(function(input)
 		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-			markChromePointerDown("rotLeft")
+			markChromePointerDown("rotLeft", input)
 		end
 	end)
 	rotRightBtn.InputBegan:Connect(function(input)
 		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-			markChromePointerDown("rotRight")
+			markChromePointerDown("rotRight", input)
 		end
 	end)
 	-- Native button click — primary commit path (InputEnded is backup).
@@ -1544,6 +1557,7 @@ local function exitPlacement(clearArmed: boolean)
 	placeResumeToken += 1
 	postPlaceWaiting = false
 	placeCommitBusy = false
+	suppressAimParkOnce = false
 	pendingGhostScaleIn = false
 	PlaceArmDisarmAnim.stopDisarmAnim()
 	PlaceArmDisarmAnim.stopOutgoingFlyback()
@@ -1577,6 +1591,11 @@ local function exitPlacement(clearArmed: boolean)
 		InventoryState.clearSelection()
 	end
 	log("Placement off")
+end
+
+local function isShiftKeepPlacing(): boolean
+	return UserInputService:IsKeyDown(Enum.KeyCode.LeftShift)
+		or UserInputService:IsKeyDown(Enum.KeyCode.RightShift)
 end
 
 local function commitPlace()
@@ -1628,42 +1647,55 @@ local function commitPlace()
 		placePayload.scaleHeight = ghostPlaceScaleHeight
 		placePayload.facingYaw = yaw
 	end
+	local placedSpeciesId = armedItemId
 	local result = rf:InvokeServer(armedItemId, placePos, placePayload)
 	if typeof(result) == "table" and result.ok then
 		log("Committed", armedItemId)
 		UiHaptics.rampOpen(1)
-		local keepId = armedItemId :: string
+		local placedId = result.placeId
 		local vfxPos = (typeof(result.worldPos) == "Vector3" and result.worldPos) or placePos
 		PlaceVfx.playVisuals(vfxPos, vfxColor)
 		clearGhost()
 		destroyConfirmUi()
 		confirmPos = nil
-		-- Hold freeze for 1s, then bring the next ghost in with a scale-up.
-		postPlaceWaiting = true
-		mode = MODE_AIM
-		armedItemId = keepId
-		stopAimLoop()
-		freeze()
 		placeResumeToken += 1
-		local token = placeResumeToken
-		aimConn = RunService.RenderStepped:Connect(function()
-			if token ~= placeResumeToken or mode == MODE_OFF then
-				return
+		postPlaceWaiting = false
+		placeCommitBusy = false
+		stopAimLoop()
+		-- Hold Shift (keyboard): keep placing the same coral instead of opening inspect.
+		local keepPlacing = typeof(placedSpeciesId) == "string"
+			and placedSpeciesId ~= ""
+			and isShiftKeepPlacing()
+		if keepPlacing then
+			beginAim(placedSpeciesId, true)
+		else
+			-- Open coral inspect (powerup) UI for the coral just planted.
+			PlacementController.forceExit()
+			if typeof(placedId) == "string" and placedId ~= "" then
+				task.spawn(function()
+					local RelocatePickHover = require(script.Parent:WaitForChild("RelocatePickHover"))
+					local RelocateController = require(script.Parent:WaitForChild("RelocateController"))
+					local part: BasePart? = nil
+					for _ = 1, 20 do
+						part = RelocatePickHover.findByPlaceId(placedId)
+						if part then
+							break
+						end
+						task.wait()
+					end
+					if not part or not part.Parent then
+						return
+					end
+					if not InventoryState.isOpen() then
+						return
+					end
+					if PlacementController.isActive() then
+						PlacementController.forceExit()
+					end
+					RelocateController.begin(part)
+				end)
 			end
-			keepCameraFrozen()
-		end)
-		task.delay(POST_PLACE_GHOST_DELAY, function()
-			if token ~= placeResumeToken then
-				return
-			end
-			if mode == MODE_OFF or not InventoryState.isOpen() then
-				return
-			end
-			if armedItemId ~= keepId then
-				return
-			end
-			beginAim(keepId, true)
-		end)
+		end
 	else
 		local code = typeof(result) == "table" and result.errorCode or "Reject"
 		log("Place rejected", code)
@@ -1785,6 +1817,24 @@ local function enterConfirm(worldPos: Vector3)
 	log("Confirm mode", if validSpot then "valid" else (rejectReason or "invalid"))
 end
 
+-- Shift: place immediately at worldPos (no ✓/X). Otherwise park into confirm.
+local function parkOrQuickPlace(worldPos: Vector3)
+	if isShiftKeepPlacing() then
+		confirmPos = worldPos
+		placeAnchor = worldPos
+		updateGhostAt(worldPos)
+		if validSpot and armedItemId then
+			-- Before InvokeServer yields so mouse-up can't open confirm mid-place.
+			suppressAimParkOnce = true
+			commitPlace()
+			return
+		end
+		-- Invalid under Shift: stay in aim (no confirm chrome).
+		return
+	end
+	enterConfirm(worldPos)
+end
+
 -- World press (or drag off the backpack): show ✓ while the finger is still down, then drag to slide.
 local function parkAtPointer(screenPos: Vector2)
 	if gamepadPlacement then
@@ -1807,12 +1857,18 @@ local function parkAtPointer(screenPos: Vector2)
 		placePointerHeld = true
 		return
 	end
-	if mode ~= MODE_CONFIRM then
-		enterConfirm(pos)
-	else
+	if mode == MODE_CONFIRM then
 		confirmPos = pos
 		updateGhostAt(pos)
+		confirmPressOrigin = screenPos
+		confirmDragging = true
+		return
 	end
+	if isShiftKeepPlacing() then
+		parkOrQuickPlace(pos)
+		return
+	end
+	enterConfirm(pos)
 	confirmPressOrigin = screenPos
 	confirmDragging = true
 end
@@ -1986,9 +2042,13 @@ function PlacementController.notifyPointerUp(_screenPos: Vector2)
 		backpackDrag = false
 		aimFingerDown = false
 		placePointerHeld = false
+		if suppressAimParkOnce then
+			suppressAimParkOnce = false
+			return
+		end
 		local pos = resolveParkPos(_screenPos)
 		if pos then
-			enterConfirm(pos)
+			parkOrQuickPlace(pos)
 		end
 		return
 	end
@@ -2281,6 +2341,10 @@ table.insert(inputConns, UserInputService.InputEnded:Connect(function(input, _pr
 		aimFingerDown = false
 		backpackDrag = false
 		placePointerHeld = false
+		if suppressAimParkOnce then
+			suppressAimParkOnce = false
+			return
+		end
 		-- Select-tap lift is still on the backpack with the coral in-hand — don't park.
 		if (overBackpack and not ghostOnPlot) or not shouldPark then
 			return
@@ -2289,7 +2353,7 @@ table.insert(inputConns, UserInputService.InputEnded:Connect(function(input, _pr
 		-- only run when the press *started* on those buttons (chromeBtnPointerDown).
 		local pos = resolveParkPos(screenPos)
 		if pos then
-			enterConfirm(pos)
+			parkOrQuickPlace(pos)
 		end
 		return
 	end

@@ -1,6 +1,6 @@
 --!strict
 --[[
-	Wave summary panel content (title, stats columns, Continue/Finish).
+	Wave summary panel content (title, stats columns, Continue/Retry/Finish).
 	Extracted so WaveSlot stays under Luau's 200-local limit.
 ]]
 
@@ -67,11 +67,13 @@ end
 function WaveSummaryUi.ensureButtons(
 	panel: Frame,
 	onContinue: () -> (),
-	onFinish: () -> ()
+	onFinish: () -> (),
+	retrySameWave: boolean?
 ): (TextButton, TextButton)
 	local btnY = -(SUMMARY_BTN_BOTTOM)
 	local captionY = -(SUMMARY_BTN_BOTTOM + SUMMARY_BTN_H + SUMMARY_CAPTION_GAP)
 	local captionH = SUMMARY_CAPTION_SIZE + 6
+	local primaryText = if retrySameWave then "RETRY" else "CONTINUE"
 
 	local function ensureCaption(name: string, text: string, xScale: number)
 		local existing = panel:FindFirstChild(name)
@@ -114,7 +116,7 @@ function WaveSummaryUi.ensureButtons(
 		btn.Position = UDim2.new(0.27, 0, 1, btnY)
 		btn.Size = UDim2.fromOffset(SUMMARY_BTN_W, SUMMARY_BTN_H)
 		btn.Font = UiTheme.Font
-		btn.Text = "CONTINUE"
+		btn.Text = primaryText
 		btn.TextSize = 22
 		btn.AutoButtonColor = true
 		btn.Selectable = true
@@ -126,7 +128,7 @@ function WaveSummaryUi.ensureButtons(
 		continue.AnchorPoint = Vector2.new(0.5, 1)
 		continue.Position = UDim2.new(0.27, 0, 1, btnY)
 		continue.Size = UDim2.fromOffset(SUMMARY_BTN_W, SUMMARY_BTN_H)
-		continue.Text = "CONTINUE"
+		continue.Text = primaryText
 	end
 	local continueBtn = continue :: TextButton
 	styleSummaryButton(continueBtn, CONTINUE_GREEN, CONTINUE_STROKE)
@@ -442,10 +444,11 @@ function WaveSummaryUi.ensurePanelContent(
 	panel: Frame,
 	onContinue: () -> (),
 	onFinish: () -> (),
-	onReefPlus: (() -> ())?
+	onReefPlus: (() -> ())?,
+	retrySameWave: boolean?
 ): (TextButton, TextButton, UIStroke?)
 	ensureSummaryStats(panel, onReefPlus)
-	local c, f = WaveSummaryUi.ensureButtons(panel, onContinue, onFinish)
+	local c, f = WaveSummaryUi.ensureButtons(panel, onContinue, onFinish, retrySameWave)
 	local titleStroke = WaveSummaryUi.ensureTitle(panel, onReefPlus)
 	return c, f, titleStroke
 end

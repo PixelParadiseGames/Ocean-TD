@@ -263,7 +263,7 @@ function InventoryState.isBuildModalBlocking(): boolean
 	return InventoryState.isClearPlotBlocking() or InventoryState.isSavePlotsBlocking() or settingsOpen
 end
 
--- True when the pointer is over the open backpack panel (scroll list / chrome).
+-- True when the pointer is over blocking build UI (backpack list + HUD slots / Active buttons).
 local backpackHitTest: ((Vector2) -> boolean)? = nil
 
 function InventoryState.setBackpackHitTest(provider: (Vector2) -> boolean)
