@@ -88,6 +88,8 @@ local ROOT_NAME = "OceanTD_Placed"
 local suppressUndoRecord = false
 -- Debounce DataStore writes while players spam dice rolls (grid/visual still update live).
 local colorSaveTokenByUser: { [number]: number } = {}
+-- Serialize hue paints per player so parallel RequestCoralColor invokes cannot race the cap check.
+local coralColorBusyByUser: { [number]: boolean } = {}
 
 local function log(...: any)
 	print("[PLACE]", ...)
@@ -2634,13 +2636,25 @@ function PlacementService.setCoralColor(
 	if not PlayerSession.canSave(player) then
 		return { ok = false, errorCode = "NotReady" }
 	end
+	local uid = player.UserId
+	while coralColorBusyByUser[uid] do
+		task.wait()
+		if not player.Parent then
+			return { ok = false, errorCode = "NotReady" }
+		end
+	end
+	coralColorBusyByUser[uid] = true
+	local function finish(result: any): any
+		coralColorBusyByUser[uid] = nil
+		return result
+	end
 	local plotId = PlotService.getOwnerPlotId(player)
 	if not plotId then
-		return { ok = false, errorCode = "NoPlot" }
+		return finish({ ok = false, errorCode = "NoPlot" })
 	end
 	local visual = findVisualByPlaceId(plotId, placeId)
 	if not visual then
-		return { ok = false, errorCode = "Missing" }
+		return finish({ ok = false, errorCode = "Missing" })
 	end
 	local idx = PlotOutlineColors.clampCoralIndex(colorIndex)
 	local paint = PlotOutlineColors.resolveCoralPaint(idx, colorR, colorG, colorB)
@@ -2652,7 +2666,7 @@ function PlacementService.setCoralColor(
 	if not cell then
 		local slot = PlotService.getSlot(plotId)
 		if not slot then
-			return { ok = false, errorCode = "BadPlot" }
+			return finish({ ok = false, errorCode = "BadPlot" })
 		end
 		local anchorPos = CoralVisual.readGridAnchor(visual) or visual.Position
 		local localPos = GridMath.worldToPlotLocal(anchorPos, slot.cframe)
@@ -2660,7 +2674,7 @@ function PlacementService.setCoralColor(
 		cell = GridService.getCellAtGrid(plotId, gx, gy, gz)
 	end
 	if not cell then
-		return { ok = false, errorCode = "Missing" }
+		return finish({ ok = false, errorCode = "Missing" })
 	end
 	if prevIdx == nil and typeof(visual:GetAttribute("OceanTD_DefaultRestR")) ~= "number" then
 		CoralVisual.snapshotDefaultRestLook(visual)
@@ -2668,14 +2682,14 @@ function PlacementService.setCoralColor(
 	if skipCapCheck ~= true and typeof(itemId) == "string" and itemId ~= "" then
 		if prevIdx ~= idx and not canAssignHue(player, plotId, itemId, placeId, idx, cell) then
 			if PersistenceService.getHueSeedCount(player, itemId, idx) <= 0 then
-				return { ok = false, errorCode = "ColorLocked" }
+				return finish({ ok = false, errorCode = "ColorLocked" })
 			end
-			return { ok = false, errorCode = "HueCap" }
+			return finish({ ok = false, errorCode = "HueCap" })
 		end
 	end
 	local gx, gy, gz = cell.gx, cell.gy, cell.gz
 	if not GridService.setColorAtGrid(plotId, gx, gy, gz, idx, paint.R, paint.G, paint.B) then
-		return { ok = false, errorCode = "Missing" }
+		return finish({ ok = false, errorCode = "Missing" })
 	end
 	visual:SetAttribute("OceanTD_ColorIndex", idx)
 	local webPaint: Color3? = nil
@@ -2735,7 +2749,7 @@ function PlacementService.setCoralColor(
 	-- Live grid/visual now; DataStore after 5s idle so rapid dice rolls don't thrash saves.
 	scheduleCoralColorSave(player, plotId)
 	log("Color", placeId, "index", idx)
-	return {
+	return finish({
 		ok = true,
 		colorIndex = idx,
 		colorR = paint.R,
@@ -2745,7 +2759,7 @@ function PlacementService.setCoralColor(
 		webColorR = if webPaint then webPaint.R else nil,
 		webColorG = if webPaint then webPaint.G else nil,
 		webColorB = if webPaint then webPaint.B else nil,
-	}
+	})
 end
 
 function PlacementService.init()

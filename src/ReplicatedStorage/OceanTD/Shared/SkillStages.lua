@@ -351,11 +351,11 @@ function SkillStages.unlockDesc(skillId: string, stage: number): string
 	return ""
 end
 
--- Earn More / Place More stay gated until Plot Size reaches this stage.
+-- All other skills stay gated until Plot Size reaches this stage (first purchase = stage 2).
 SkillStages.PLOT_SIZE_GATE_STAGE = 2
 
 function SkillStages.isGatedByPlotSize(skillId: string): boolean
-	return skillId == "EarnMore" or skillId == "PlaceMore"
+	return skillId ~= "PlotSize"
 end
 
 function SkillStages.isLockedUntilPlotSize(skillId: string, plotSizeStage: number): boolean
@@ -365,7 +365,7 @@ function SkillStages.isLockedUntilPlotSize(skillId: string, plotSizeStage: numbe
 	return SkillStages.clampStage(plotSizeStage) < SkillStages.PLOT_SIZE_GATE_STAGE
 end
 
--- Reef Health stays gated until Place More reaches this stage (stage 2 purchased).
+-- Reef Health max HP scaling (no longer gates unlock behind Place More).
 SkillStages.PLACE_MORE_GATE_STAGE = 2
 SkillStages.REEF_HEALTH_BASE = 10
 SkillStages.REEF_HEALTH_PER_STAGE = 10
@@ -383,22 +383,17 @@ function SkillStages.reefHealthIncrementAtStage(stage: number): number
 	return SkillStages.REEF_HEALTH_PER_STAGE
 end
 
-function SkillStages.isGatedByPlaceMore(skillId: string): boolean
-	return skillId == "RHealth"
+function SkillStages.isGatedByPlaceMore(_skillId: string): boolean
+	return false
 end
 
-function SkillStages.isLockedUntilPlaceMore(skillId: string, placeMoreStage: number): boolean
-	if not SkillStages.isGatedByPlaceMore(skillId) then
-		return false
-	end
-	return SkillStages.clampStage(placeMoreStage) < SkillStages.PLACE_MORE_GATE_STAGE
+function SkillStages.isLockedUntilPlaceMore(_skillId: string, _placeMoreStage: number): boolean
+	return false
 end
 
 function SkillStages.isSkillLocked(skillId: string, stages: { [string]: number }): boolean
 	local plot = if typeof(stages) == "table" then stages.PlotSize else 1
-	local place = if typeof(stages) == "table" then stages.PlaceMore else 1
 	return SkillStages.isLockedUntilPlotSize(skillId, plot)
-		or SkillStages.isLockedUntilPlaceMore(skillId, place)
 end
 
 -- Skip Wave: stage 1 = 0 uses; stage 2 = 1 use/session; each further stage +1.

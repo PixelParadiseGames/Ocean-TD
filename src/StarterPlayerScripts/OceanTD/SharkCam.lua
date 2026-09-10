@@ -77,6 +77,47 @@ local function claimCamera(cam: Camera)
 	end
 end
 
+local function willResumeCycleCam(pg: PlayerGui?): boolean
+	if not pg then
+		return false
+	end
+	local m = pg:GetAttribute("OceanTD_CinematicResumeMode")
+	return typeof(m) == "string" and m ~= "" and m ~= "off"
+end
+
+local function finishAndResume(pg: PlayerGui?, cam: Camera?, savedCf: CFrame, savedType: Enum.CameraType, savedSubject: Instance?)
+	if cam then
+		cam.CFrame = savedCf
+	end
+	busy = false
+	if pg and pg.Parent then
+		pg:SetAttribute("OceanTD_SharkCamBusy", false)
+	end
+	if willResumeCycleCam(pg) and cam then
+		cam.CameraType = Enum.CameraType.Scriptable
+		cam.CameraSubject = nil
+		if pg then
+			pg:SetAttribute("OceanTD_ResumeCinematicCam", os.clock())
+		end
+		return
+	end
+	if cam then
+		local restore = savedType
+		if restore == Enum.CameraType.Scriptable then
+			restore = Enum.CameraType.Custom
+		end
+		cam.CameraType = restore
+		if savedSubject and savedSubject.Parent then
+			cam.CameraSubject = savedSubject
+		else
+			local hum = getHumanoid()
+			if hum then
+				cam.CameraSubject = hum
+			end
+		end
+	end
+end
+
 -- getPose: () -> (position, lookDir)? while shark is alive
 function SharkCam.play(getPose: () -> (Vector3?, Vector3?))
 	if busy then
@@ -113,11 +154,7 @@ function SharkCam.play(getPose: () -> (Vector3?, Vector3?))
 
 		local posePos, poseLook = getPose()
 		if not posePos then
-			cam.CameraType = savedType
-			if savedSubject then
-				cam.CameraSubject = savedSubject
-			end
-			SharkCam.stopImmediate()
+			finishAndResume(pg, cam, savedCf, savedType, savedSubject)
 			return
 		end
 		local lockedFlat = flatUnit(poseLook or Vector3.new(0, 0, -1))
@@ -184,27 +221,7 @@ function SharkCam.play(getPose: () -> (Vector3?, Vector3?))
 			return
 		end
 
-		local c3 = Workspace.CurrentCamera
-		if c3 then
-			local restore = savedType
-			if restore == Enum.CameraType.Scriptable then
-				restore = Enum.CameraType.Custom
-			end
-			c3.CameraType = restore
-			if savedSubject and savedSubject.Parent then
-				c3.CameraSubject = savedSubject
-			else
-				local hum = getHumanoid()
-				if hum then
-					c3.CameraSubject = hum
-				end
-			end
-		end
-
-		busy = false
-		if pg and pg.Parent then
-			pg:SetAttribute("OceanTD_SharkCamBusy", false)
-		end
+		finishAndResume(pg, Workspace.CurrentCamera, savedCf, savedType, savedSubject)
 	end)
 end
 

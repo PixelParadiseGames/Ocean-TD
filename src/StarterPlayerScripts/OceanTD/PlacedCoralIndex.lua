@@ -13,6 +13,8 @@ local oceanShared = ReplicatedStorage:WaitForChild("OceanTD"):WaitForChild("Shar
 local GridMath = require(oceanShared:WaitForChild("GridMath"))
 local BrainStack = require(oceanShared:WaitForChild("BrainStack"))
 local PlotOutlineColors = require(oceanShared:WaitForChild("PlotOutlineColors"))
+local CoralSize = require(oceanShared:WaitForChild("CoralSize"))
+local SpeciesCatalog = require(oceanShared:WaitForChild("SpeciesCatalog"))
 
 local ClientPlot = require(script.Parent:WaitForChild("ClientPlot"))
 
@@ -259,6 +261,67 @@ function PlacedCoralIndex.getParts(plotId: string): { BasePart }
 		return {}
 	end
 	return bucket.parts
+end
+
+local function resolvedHueForPart(part: BasePart, itemId: string): number
+	local painted = part:GetAttribute("OceanTD_ColorIndex")
+	if typeof(painted) == "number" then
+		return PlotOutlineColors.clampCoralIndex(painted)
+	end
+	local seedHue = part:GetAttribute("OceanTD_SeedHue")
+	if typeof(seedHue) == "number" then
+		return PlotOutlineColors.clampCoralIndex(seedHue)
+	end
+	local species = SpeciesCatalog.getByItemId(itemId)
+	local defHue = if species then species.defaultColorIndex else nil
+	return PlotOutlineColors.clampCoralIndex(defHue or PlotOutlineColors.DEFAULT_INDEX)
+end
+
+function PlacedCoralIndex.hueOfPart(part: BasePart, itemId: string): number
+	return resolvedHueForPart(part, itemId)
+end
+
+-- Placed hue counts for one catalog item: [hueIndex] = count (1–14).
+function PlacedCoralIndex.hueCountsForItem(plotId: string, itemId: string): { [number]: number }
+	PlacedCoralIndex.ensure()
+	local out: { [number]: number } = {}
+	local bucket = buckets[plotId]
+	if not bucket then
+		return out
+	end
+	for _, part in ipairs(bucket.parts) do
+		if not part.Parent then
+			continue
+		end
+		if part:GetAttribute("OceanTD_ItemId") ~= itemId then
+			continue
+		end
+		local hue = resolvedHueForPart(part, itemId)
+		out[hue] = (out[hue] or 0) + 1
+	end
+	return out
+end
+
+-- Placed size-band counts for one catalog item: [1|2|3] = count (S/M/L).
+function PlacedCoralIndex.sizeCountsForItem(plotId: string, itemId: string): { [number]: number }
+	PlacedCoralIndex.ensure()
+	local out: { [number]: number } = { [1] = 0, [2] = 0, [3] = 0 }
+	local bucket = buckets[plotId]
+	if not bucket then
+		return out
+	end
+	for _, part in ipairs(bucket.parts) do
+		if not part.Parent then
+			continue
+		end
+		if part:GetAttribute("OceanTD_ItemId") ~= itemId then
+			continue
+		end
+		local _, class = CoralSize.readFromPart(part)
+		local c = CoralSize.clampTier(class)
+		out[c] = (out[c] or 0) + 1
+	end
+	return out
 end
 
 function PlacedCoralIndex.countLocal(): number

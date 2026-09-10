@@ -217,21 +217,43 @@ local function waitWhile(my: number, pred: () -> boolean)
 	end
 end
 
-local function smoothRestore(my: number, savedType: Enum.CameraType, savedSubject: Instance?, savedRel: CFrame?)
+local function willResumeCycleCam(pg: PlayerGui?): boolean
+	if not pg then
+		return false
+	end
+	local m = pg:GetAttribute("OceanTD_CinematicResumeMode")
+	return typeof(m) == "string" and m ~= "" and m ~= "off"
+end
+
+local function smoothRestore(
+	my: number,
+	savedType: Enum.CameraType,
+	savedSubject: Instance?,
+	savedRel: CFrame?,
+	savedCf: CFrame?,
+	pg: PlayerGui?
+)
 	local cam = Workspace.CurrentCamera
 	if not cam or my ~= token then
 		return
 	end
 	cam.CameraType = Enum.CameraType.Scriptable
 
+	local resumeCycle = willResumeCycleCam(pg)
 	local goalCf = cam.CFrame
-	local hrp = getHrp()
-	if hrp and savedRel then
-		goalCf = hrp.CFrame * savedRel
-	elseif hrp then
-		local flat = flatUnit(hrp.CFrame.LookVector)
-		local from = hrp.Position - flat * 16 + Vector3.new(0, 6, 0)
-		goalCf = CFrame.lookAt(from, hrp.Position + Vector3.new(0, 1.5, 0), Vector3.yAxis)
+	if resumeCycle and savedCf then
+		goalCf = savedCf
+	else
+		local hrp = getHrp()
+		if hrp and savedRel then
+			goalCf = hrp.CFrame * savedRel
+		elseif hrp then
+			local flat = flatUnit(hrp.CFrame.LookVector)
+			local from = hrp.Position - flat * 16 + Vector3.new(0, 6, 0)
+			goalCf = CFrame.lookAt(from, hrp.Position + Vector3.new(0, 1.5, 0), Vector3.yAxis)
+		elseif savedCf then
+			goalCf = savedCf
+		end
 	end
 
 	local dur = math.max(0.4, C.TANG_CAM_OVERVIEW_RESTORE_SEC)
@@ -246,27 +268,45 @@ local function smoothRestore(my: number, savedType: Enum.CameraType, savedSubjec
 		return
 	end
 
-	hrp = getHrp()
 	cam = Workspace.CurrentCamera
-	if cam and hrp and savedRel then
-		cam.CFrame = hrp.CFrame * savedRel
-	elseif cam then
-		cam.CFrame = goalCf
+	if not cam then
+		return
+	end
+	if resumeCycle and savedCf then
+		cam.CFrame = savedCf
+	else
+		local hrp = getHrp()
+		if hrp and savedRel then
+			cam.CFrame = hrp.CFrame * savedRel
+		else
+			cam.CFrame = goalCf
+		end
+	end
+
+	if resumeCycle then
+		cam.CameraType = Enum.CameraType.Scriptable
+		cam.CameraSubject = nil
+		if pg and pg.Parent then
+			pg:SetAttribute("OceanTD_TangCamBusy", false)
+			pg:SetAttribute("OceanTD_ResumeCinematicCam", os.clock())
+		end
+		return
 	end
 
 	local restore = savedType
 	if restore == Enum.CameraType.Scriptable then
 		restore = Enum.CameraType.Custom
 	end
-	if cam then
-		local subject = savedSubject
-		if not (subject and subject.Parent) then
-			subject = getHumanoid()
-		end
-		if subject then
-			cam.CameraSubject = subject
-		end
-		cam.CameraType = restore
+	local subject = savedSubject
+	if not (subject and subject.Parent) then
+		subject = getHumanoid()
+	end
+	if subject then
+		cam.CameraSubject = subject
+	end
+	cam.CameraType = restore
+	if pg and pg.Parent then
+		pg:SetAttribute("OceanTD_TangCamBusy", false)
 	end
 end
 
@@ -305,6 +345,7 @@ function TangCam.play(args: PlayArgs)
 
 		local savedType = cam.CameraType
 		local savedSubject = cam.CameraSubject
+		local savedCf = cam.CFrame
 		if savedType == Enum.CameraType.Scriptable then
 			savedType = Enum.CameraType.Custom
 		end
@@ -418,12 +459,13 @@ function TangCam.play(args: PlayArgs)
 			return
 		end
 
-		smoothRestore(my, savedType, savedSubject, savedRel)
+		smoothRestore(my, savedType, savedSubject, savedRel, savedCf, pg)
 		if my ~= token then
 			return
 		end
 		busy = false
-		if pg and pg.Parent then
+		-- Busy cleared inside smoothRestore when resuming cycle cam / Custom path.
+		if pg and pg.Parent and pg:GetAttribute("OceanTD_TangCamBusy") == true then
 			pg:SetAttribute("OceanTD_TangCamBusy", false)
 		end
 	end)

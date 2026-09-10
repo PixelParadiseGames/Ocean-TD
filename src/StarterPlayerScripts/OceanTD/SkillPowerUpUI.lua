@@ -1079,8 +1079,6 @@ local function doUnlockRemote()
 		showToast("Max Stage")
 	elseif code == "PlotSizeGate" then
 		showToast("Unlock Plot Size Stage 2 first")
-	elseif code == "PlaceMoreGate" then
-		showToast("Unlock Place More Stage 2 first")
 	else
 		showToast("Can't unlock")
 	end

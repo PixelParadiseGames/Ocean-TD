@@ -79,8 +79,10 @@ local MODE_GRAPHICS: { [CamMode]: string } = {
 }
 
 local mode: CamMode = "off"
--- FishCam/PlotCam/DroneCam to restore after Out Of Reef Health → Continue.
-local defeatResumeMode: CamMode? = nil
+-- FishCam/PlotCam/DroneCam to restore after defeat / wave intro cinematics.
+local cinematicResumeMode: CamMode? = nil
+local resumePreserveView = false
+local ATTR_CINEMATIC_RESUME_MODE = "OceanTD_CinematicResumeMode"
 local camPos = Vector3.zero
 local lookYaw = 0
 local lookPitch = 0
@@ -336,6 +338,7 @@ end
 
 local function skillsBubblesOpen(): boolean
 	return playerGui:GetAttribute("OceanTD_SkillsBubblesOpen") == true
+		or playerGui:GetAttribute("OceanTD_ReefReportOpen") == true
 end
 
 -- Skills / backpack own the left HUD — never force cam triangle icons back on.
@@ -1303,7 +1306,7 @@ setMode = function(nextMode: CamMode)
 			playCamCarousel(nextMode, "off", false)
 			return
 		end
-		if nextMode == "plotcam" then
+		if nextMode == "plotcam" and not resumePreserveView then
 			local sky = resolveSkyParts()
 			if sky then
 				camPos = clampToSkyCam(camPos, sky)
@@ -1316,19 +1319,26 @@ setMode = function(nextMode: CamMode)
 		local sky, focus = resolveSkyParts()
 		local cam = getCamera()
 		if sky and focus and cam then
-			camPos = clampToSkyCam(camPos, sky)
 			cam.CameraType = Enum.CameraType.Scriptable
-			cam.CFrame = lookAtFocus(focus.Position)
+			if resumePreserveView then
+				camPos = clampToSkyCam(cam.CFrame.Position, sky)
+				syncLookFromCFrame(cam.CFrame)
+				cam.CFrame = CFrame.new(camPos) * (cam.CFrame - cam.CFrame.Position)
+			else
+				camPos = clampToSkyCam(camPos, sky)
+				cam.CFrame = lookAtFocus(focus.Position)
+			end
 		end
 		setDroneLookCapture(false)
 	elseif nextMode == "fishcam" then
-		resetRoutePatrol(camPos)
-		local spawnFocus = resolveFishSpawnFocus()
-		resetFishFollowState(spawnFocus or camPos)
 		local cam = getCamera()
-		if cam then
+		if resumePreserveView and cam then
 			cam.CameraType = Enum.CameraType.Scriptable
+			camPos = cam.CFrame.Position
+			syncLookFromCFrame(cam.CFrame)
+			resetRoutePatrol(camPos)
 			local fish = WaveSim.getFurthestUnfedFish()
+			local spawnFocus = resolveFishSpawnFocus()
 			if fish then
 				fishFocusPos = fish.position
 				fishDampPos = fish.position
@@ -1337,18 +1347,42 @@ setMode = function(nextMode: CamMode)
 				fishFocusPos = spawnFocus
 				fishDampPos = spawnFocus
 				fishTargetId = nil
+			else
+				resetFishFollowState(camPos)
 			end
-			camPos = fishFocusPos + fishChaseOffset(0)
-			cam.CFrame = lookAtFocus(fishFocusPos)
-			syncLookFromCFrame(cam.CFrame)
+		else
+			resetRoutePatrol(camPos)
+			local spawnFocus = resolveFishSpawnFocus()
+			resetFishFollowState(spawnFocus or camPos)
+			if cam then
+				cam.CameraType = Enum.CameraType.Scriptable
+				local fish = WaveSim.getFurthestUnfedFish()
+				if fish then
+					fishFocusPos = fish.position
+					fishDampPos = fish.position
+					fishTargetId = fish.id
+				elseif spawnFocus then
+					fishFocusPos = spawnFocus
+					fishDampPos = spawnFocus
+					fishTargetId = nil
+				end
+				camPos = fishFocusPos + fishChaseOffset(0)
+				cam.CFrame = lookAtFocus(fishFocusPos)
+				syncLookFromCFrame(cam.CFrame)
+			end
 		end
 		setDroneLookCapture(false)
 	elseif nextMode == "dronecam" then
 		local cam = getCamera()
 		if cam then
 			cam.CameraType = Enum.CameraType.Scriptable
-			syncLookFromCFrame(cam.CFrame)
-			cam.CFrame = droneLookCFrame()
+			if resumePreserveView then
+				camPos = cam.CFrame.Position
+				syncLookFromCFrame(cam.CFrame)
+			else
+				syncLookFromCFrame(cam.CFrame)
+				cam.CFrame = droneLookCFrame()
+			end
 			setDroneLookCapture(true)
 		end
 	end
@@ -1368,7 +1402,7 @@ ContextActionService:BindActionAtPriority(DPAD_ACTION, function(_name, state, _i
 	if InventoryState.isOpen() then
 		return Enum.ContextActionResult.Pass
 	end
-	if playerGui:GetAttribute("OceanTD_SkillsBubblesOpen") == true then
+	if skillsBubblesOpen() then
 		return Enum.ContextActionResult.Pass
 	end
 	if PlacementController.isActive() or RelocateController.isActive() then
@@ -1709,9 +1743,8 @@ local function syncDPadIcon()
 		return
 	end
 	-- Decorative dPad graphic: visible whenever backpack is closed (all input types).
-	-- Hide while skills bubbles own the screen (avoids a second white center dot).
-	local skillsOpen = playerGui:GetAttribute("OceanTD_SkillsBubblesOpen") == true
-	local want = not InventoryState.isOpen() and not skillsOpen
+	-- Hide while skills / reef report own the screen (avoids a second white center dot).
+	local want = not InventoryState.isOpen() and not skillsBubblesOpen()
 	if want == dPadIconShown then
 		if want then
 			raiseDPadIconLayer()
@@ -1827,6 +1860,10 @@ local function bindMobileLeftUi(left: Instance)
 			syncDPadIcon()
 			syncCamModeIconsForHud()
 		end)
+		playerGui:GetAttributeChangedSignal("OceanTD_ReefReportOpen"):Connect(function()
+			syncDPadIcon()
+			syncCamModeIconsForHud()
+		end)
 
 		playerGui:GetAttributeChangedSignal("OceanTD_SyncCamCycleFromView"):Connect(function()
 			if mode ~= "off" then
@@ -1840,34 +1877,51 @@ local function bindMobileLeftUi(left: Instance)
 
 		playerGui:GetAttributeChangedSignal("OceanTD_ForceCloseFreeCam"):Connect(function()
 			if mode ~= "off" then
-				-- Defeat cam sets Busy before ForceClose so we can restore FishCam after Continue.
-				if playerGui:GetAttribute("OceanTD_ReefDefeatCamBusy") == true then
-					defeatResumeMode = mode
+				-- Busy is set before ForceClose so we can restore Plot/Fish/Drone after the shot.
+				if playerGui:GetAttribute("OceanTD_ReefDefeatCamBusy") == true
+					or playerGui:GetAttribute("OceanTD_TangCamBusy") == true
+					or playerGui:GetAttribute("OceanTD_SharkCamBusy") == true
+					or playerGui:GetAttribute("OceanTD_UrchinCamBusy") == true
+				then
+					cinematicResumeMode = mode
+					playerGui:SetAttribute(ATTR_CINEMATIC_RESUME_MODE, mode)
 				end
 				setMode("off")
 			end
 		end)
 
-		playerGui:GetAttributeChangedSignal("OceanTD_ResumeDefeatCam"):Connect(function()
-			local resume = defeatResumeMode
-			defeatResumeMode = nil
+		local function onResumeCinematicCam()
+			local resume = cinematicResumeMode
+			cinematicResumeMode = nil
+			playerGui:SetAttribute(ATTR_CINEMATIC_RESUME_MODE, "")
 			if resume and resume ~= "off" then
 				task.defer(function()
 					if mode == "off" and not PlacementController.isActive() and not RelocateController.isActive() then
+						resumePreserveView = true
 						setMode(resume)
+						resumePreserveView = false
+						local cam = getCamera()
+						if cam and mode ~= "off" then
+							camPos = cam.CFrame.Position
+							syncLookFromCFrame(cam.CFrame)
+						end
 					end
 				end)
 			elseif mode == "off" then
-				-- No stash: still ensure we aren't stuck Scriptable on the defeat pose.
+				-- No stash: still ensure we aren't stuck Scriptable on the cinematic pose.
 				local cam = getCamera()
 				if cam and cam.CameraType == Enum.CameraType.Scriptable then
 					restoreDefaultCamera()
 				end
 			end
-		end)
+		end
+
+		playerGui:GetAttributeChangedSignal("OceanTD_ResumeDefeatCam"):Connect(onResumeCinematicCam)
+		playerGui:GetAttributeChangedSignal("OceanTD_ResumeCinematicCam"):Connect(onResumeCinematicCam)
 
 		playerGui:GetAttributeChangedSignal("OceanTD_ClearDefeatCamStash"):Connect(function()
-			defeatResumeMode = nil
+			cinematicResumeMode = nil
+			playerGui:SetAttribute(ATTR_CINEMATIC_RESUME_MODE, "")
 		end)
 	end
 

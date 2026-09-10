@@ -2239,9 +2239,11 @@ local function spinColorDice()
 	end)
 end
 
-local function applyCoralPaint(part: BasePart, idx: number, paint: Color3, placeId: string, skipHaptic: boolean?)
+local function applyCoralPaint(part: BasePart, idx: number, paint: Color3, placeId: string, skipHaptic: boolean?): boolean
 	activeColorIndex = idx
 	focusColorIndex = idx
+	local prevAttr = part:GetAttribute("OceanTD_ColorIndex")
+	local prevIdx = if typeof(prevAttr) == "number" then PlotOutlineColors.clampCoralIndex(prevAttr) else nil
 	local webPaint: Color3? = nil
 	local webIdx: number? = nil
 	if CoralVisual.isSeaFan(part:GetAttribute("OceanTD_SpeciesId")) then
@@ -2258,57 +2260,65 @@ local function applyCoralPaint(part: BasePart, idx: number, paint: Color3, place
 	if not skipHaptic then
 		UiHaptics.pulseShort()
 	end
-	colorSendToken += 1
-	local myToken = colorSendToken
-	task.spawn(function()
-		local ok, result = pcall(function()
-			return colorRf:InvokeServer(
-				placeId,
-				idx,
-				paint.R,
-				paint.G,
-				paint.B,
-				webIdx,
-				if webPaint then webPaint.R else nil,
-				if webPaint then webPaint.G else nil,
-				if webPaint then webPaint.B else nil
-			)
-		end)
-		if myToken ~= colorSendToken then
-			return
-		end
-		if not RelocateController.isPartSelected(part) then
-			return
-		end
-		if not ok or typeof(result) ~= "table" or result.ok ~= true then
-			if typeof(result) == "table" and result.errorCode == "HueCap" then
-				showToast("All slots in use")
-			end
-			syncColorFromPart(part)
-			return
-		end
-		local confirmed = PlotOutlineColors.clampCoralIndex(result.colorIndex or idx)
-		activeColorIndex = confirmed
-		part:SetAttribute("OceanTD_ColorIndex", confirmed)
-		local confirmedPaint = PlotOutlineColors.resolveCoralPaint(confirmed, result.colorR, result.colorG, result.colorB)
-		local confirmedWeb: Color3? = nil
-		local confirmedWebIdx: number? = nil
-		if typeof(result.webColorR) == "number" and typeof(result.webColorG) == "number" and typeof(result.webColorB) == "number" then
-			confirmedWeb = Color3.new(result.webColorR, result.webColorG, result.webColorB)
-		end
-		if typeof(result.webColorIndex) == "number" then
-			confirmedWebIdx = result.webColorIndex
-		end
-		CoralVisual.setRestColor(part, confirmedPaint, confirmedWeb, confirmedWebIdx)
-		RelocateController.syncPartRestColor(part)
-		refreshColorSwatches()
+	local ok, result = pcall(function()
+		return colorRf:InvokeServer(
+			placeId,
+			idx,
+			paint.R,
+			paint.G,
+			paint.B,
+			webIdx,
+			if webPaint then webPaint.R else nil,
+			if webPaint then webPaint.G else nil,
+			if webPaint then webPaint.B else nil
+		)
 	end)
+	if not RelocateController.isPartSelected(part) then
+		return ok == true and typeof(result) == "table" and result.ok == true
+	end
+	if not ok or typeof(result) ~= "table" or result.ok ~= true then
+		-- Optimistic paint must not stick when the server rejects (HueCap / locked).
+		if typeof(prevIdx) == "number" then
+			part:SetAttribute("OceanTD_ColorIndex", prevIdx)
+			local restore = PlotOutlineColors.coralColor(prevIdx)
+			CoralVisual.setRestColor(part, restore)
+		else
+			CoralVisual.clearPalettePaint(part)
+		end
+		RelocateController.syncPartRestColor(part)
+		syncColorFromPart(part)
+		return false
+	end
+	local confirmed = PlotOutlineColors.clampCoralIndex(result.colorIndex or idx)
+	activeColorIndex = confirmed
+	part:SetAttribute("OceanTD_ColorIndex", confirmed)
+	local confirmedPaint = PlotOutlineColors.resolveCoralPaint(confirmed, result.colorR, result.colorG, result.colorB)
+	local confirmedWeb: Color3? = nil
+	local confirmedWebIdx: number? = nil
+	if typeof(result.webColorR) == "number" and typeof(result.webColorG) == "number" and typeof(result.webColorB) == "number" then
+		confirmedWeb = Color3.new(result.webColorR, result.webColorG, result.webColorB)
+	end
+	if typeof(result.webColorIndex) == "number" then
+		confirmedWebIdx = result.webColorIndex
+	end
+	CoralVisual.setRestColor(part, confirmedPaint, confirmedWeb, confirmedWebIdx)
+	RelocateController.syncPartRestColor(part)
+	refreshColorSwatches()
+	return true
 end
 
-local function pickBulkHueTargets(parts: { BasePart }, itemId: string, hue: number, maxCount: number): { BasePart }
-	if maxCount <= 0 then
-		return {}
+local function partCanPaintHueFree(part: BasePart, hue: number): boolean
+	local cur = part:GetAttribute("OceanTD_ColorIndex")
+	if typeof(cur) == "number" then
+		return false
 	end
+	local seedHue = part:GetAttribute("OceanTD_SeedHue")
+	return typeof(seedHue) == "number" and PlotOutlineColors.clampCoralIndex(seedHue) == hue
+end
+
+-- All selected corals that still need this hue, free seed-backed first, then defaults, then repaints.
+local function listBulkHueTargets(parts: { BasePart }, itemId: string, hue: number): { BasePart }
+	local free: { BasePart } = {}
 	local defaults: { BasePart } = {}
 	local others: { BasePart } = {}
 	for _, p in ipairs(parts) do
@@ -2317,28 +2327,28 @@ local function pickBulkHueTargets(parts: { BasePart }, itemId: string, hue: numb
 		end
 		local cur = p:GetAttribute("OceanTD_ColorIndex")
 		if typeof(cur) == "number" and PlotOutlineColors.clampCoralIndex(cur) == hue then
-			continue -- already this hue
+			continue
 		end
-		if typeof(cur) ~= "number" then
+		if partCanPaintHueFree(p, hue) then
+			table.insert(free, p)
+		elseif typeof(cur) ~= "number" then
 			table.insert(defaults, p)
 		else
 			table.insert(others, p)
 		end
 	end
 	local rng = Random.new()
+	shuffleInPlace(free, rng)
 	shuffleInPlace(defaults, rng)
 	shuffleInPlace(others, rng)
 	local out: { BasePart } = {}
+	for _, p in ipairs(free) do
+		table.insert(out, p)
+	end
 	for _, p in ipairs(defaults) do
-		if #out >= maxCount then
-			break
-		end
 		table.insert(out, p)
 	end
 	for _, p in ipairs(others) do
-		if #out >= maxCount then
-			break
-		end
 		table.insert(out, p)
 	end
 	return out
@@ -2350,8 +2360,9 @@ local function shuffleSelectedHueShades(idx: number, parts: { BasePart }): numbe
 	for _, p in ipairs(parts) do
 		local placeId = placeIdOf(p)
 		if placeId then
-			applyCoralPaint(p, idx, PlotOutlineColors.randomHueVariant(idx), placeId, true)
-			applied += 1
+			if applyCoralPaint(p, idx, PlotOutlineColors.randomHueVariant(idx), placeId, true) then
+				applied += 1
+			end
 		end
 	end
 	return applied
@@ -2390,10 +2401,20 @@ local function selectCoralColor(index: number)
 		end
 		if activeColorIndex == idx then
 			spinColorDice()
-			applyCoralPaint(part, idx, PlotOutlineColors.randomHueVariant(idx), placeId)
+			local ok = applyCoralPaint(part, idx, PlotOutlineColors.randomHueVariant(idx), placeId)
+			if not ok then
+				showToast("All slots in use")
+			end
 			return true
 		end
-		applyCoralPaint(part, idx, PlotOutlineColors.coralColor(idx), placeId)
+		local ok = applyCoralPaint(part, idx, PlotOutlineColors.coralColor(idx), placeId)
+		if not ok then
+			if typeof(itemId) == "string" and getHueAvailableSlots(itemId, idx, placeId) <= 0 then
+				showConfirmColorUnlock(itemId, idx)
+			else
+				showToast("All slots in use")
+			end
+		end
 		return true
 	end
 
@@ -2405,8 +2426,7 @@ local function selectCoralColor(index: number)
 		return true
 	end
 
-	-- Multi: apply hue to as many as slots allow; prefer default-painted corals.
-	-- Group by itemId — each species has its own hue seed pool.
+	-- Multi: apply only while hue slots remain (sequential so server + client stay in sync).
 	local byItem: { [string]: { BasePart } } = {}
 	for _, p in ipairs(parts) do
 		local itemId = p:GetAttribute("OceanTD_ItemId")
@@ -2420,31 +2440,35 @@ local function selectCoralColor(index: number)
 	local totalCandidates = 0
 	local totalApplied = 0
 	local anyLocked = false
+	local hitCap = false
 	for itemId, group in pairs(byItem) do
-		local slots = getHueAvailableSlots(itemId, idx)
-		local candidates = pickBulkHueTargets(group, itemId, idx, math.max(slots, 0))
-		-- If slots are 0 but some can use own seed / already painted path — still count candidates wanting paint
-		local wanting = 0
-		for _, p in ipairs(group) do
-			local cur = p:GetAttribute("OceanTD_ColorIndex")
-			if not (typeof(cur) == "number" and PlotOutlineColors.clampCoralIndex(cur) == idx) then
-				wanting += 1
+		local remaining = getHueAvailableSlots(itemId, idx)
+		local targets = listBulkHueTargets(group, itemId, idx)
+		totalCandidates += #targets
+		for _, p in ipairs(targets) do
+			local free = partCanPaintHueFree(p, idx)
+			if not free and remaining <= 0 then
+				anyLocked = true
+				continue
 			end
-		end
-		totalCandidates += wanting
-		if slots <= 0 and wanting > 0 then
-			anyLocked = true
-		end
-		for _, p in ipairs(candidates) do
 			local placeId = placeIdOf(p)
-			if placeId then
-				applyCoralPaint(p, idx, PlotOutlineColors.coralColor(idx), placeId)
+			if not placeId then
+				continue
+			end
+			local ok = applyCoralPaint(p, idx, PlotOutlineColors.coralColor(idx), placeId, true)
+			if ok then
 				totalApplied += 1
+				if not free then
+					remaining -= 1
+				end
+			else
+				hitCap = true
+				remaining = 0
+				anyLocked = true
 			end
 		end
 	end
 	if totalApplied == 0 and anyLocked then
-		-- Offer buy for the primary's item if possible
 		local primary = selectedPart()
 		local itemId = if primary then primary:GetAttribute("OceanTD_ItemId") else nil
 		if typeof(itemId) == "string" then
@@ -2456,8 +2480,13 @@ local function selectCoralColor(index: number)
 	end
 	if totalApplied > 0 and totalApplied < totalCandidates then
 		showToast("Only some corals got this color")
+	elseif hitCap and totalApplied == 0 then
+		showToast("All slots in use")
 	end
-	UiHaptics.pulseShort()
+	if totalApplied > 0 then
+		UiHaptics.pulseShort()
+	end
+	refreshColorSwatches()
 	return true
 end
 

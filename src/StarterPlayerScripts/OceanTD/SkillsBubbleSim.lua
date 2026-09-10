@@ -20,7 +20,6 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local oceanShared = ReplicatedStorage:WaitForChild("OceanTD"):WaitForChild("Shared")
 local SkillStages = require(oceanShared:WaitForChild("SkillStages"))
-local UiIdleCycle = require(oceanShared:WaitForChild("UiIdleCycle"))
 local UiPopupScale = require(oceanShared:WaitForChild("UiPopupScale"))
 
 local SkillsBubbleSim = {}
@@ -46,10 +45,13 @@ local UNLOCK_SETTLE_SEC = 1
 local UNLOCK_SETTLE_INFO = TweenInfo.new(UNLOCK_SETTLE_SEC, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 -- Extra bubble + label size on 720p+ (on top of HUD scale baked into bubble Size).
 local HUD_BUBBLE_TEXT_BOOST = 1.5
-local HUD_BUBBLE_SIZE_MULT = 1.3
--- Small stages can't fit icon + text; alternate every 2s (half bubbles offset).
-local COMPACT_ICON_TEXT_PERIOD = 2
-local COMPACT_ICON_SIZE = UDim2.fromScale(0.62, 0.62)
+local HUD_BUBBLE_SIZE_MULT = 1.42 -- slightly larger bubbles overall
+-- Early stages: always show skill icon above text (no flash cycle).
+local COMPACT_SIZE_MULT = 1.14 -- slightly larger than raw stage-1 templates
+local COMPACT_ICON_SIZE = UDim2.fromScale(0.40, 0.40)
+local COMPACT_ICON_POS = UDim2.fromScale(0.5, 0.38)
+local COMPACT_LABEL_POS = UDim2.fromScale(0.5, 0.64)
+local COMPACT_LABEL_SIZE = UDim2.fromScale(0.86, 0.32)
 
 type Bubble = {
 	btn: GuiButton,
@@ -141,11 +143,15 @@ local onBubbleActivated: ((buttonName: string) -> ())? = nil
 local readSkillStage: (string) -> number
 local rejectFxToken = 0
 
--- Orbit locks on EarnMore / PlaceMore until Plot Size stage 2.
+-- Orbit lock icons + thin red stroke on skills gated until Plot Size stage 2.
 local LOCK_IMAGE = "rbxassetid://105420423737825"
 local LOCK_SIZE_PX = 30
 local LOCK_ORBIT_SPEED = 1.35 -- rad/sec
 local LOCK_ORBIT_FRAC = 0.62 -- of bubble radius
+local LOCK_STROKE_NAME = "OceanTD_SkillGateStroke"
+local LOCK_STROKE_THICKNESS = 2
+local LOCK_STROKE_COLOR = Color3.fromRGB(220, 40, 45)
+local LOCK_STROKE_TRANSPARENCY = 0.12
 
 type OrbitLock = {
 	bubble: Bubble,
@@ -154,11 +160,6 @@ type OrbitLock = {
 }
 
 local orbitLocks: { OrbitLock } = {}
-
--- Small-stage bubbles: cycle Icon vs labels (shared 2s clock; alternate invert for ~half/half).
-local compactCycleBtns: { [GuiButton]: boolean } = {}
-local compactCycleStops: { UiIdleCycle.StopFn } = {}
-local rejectFlashBtn: GuiButton? = nil
 
 -- Purchase progress (gates / lock icons). Active stage can be dialed below this.
 -- Must be defined before syncOrbitLocks (local function scope).
@@ -203,8 +204,37 @@ local function skillIdForBubble(b: Bubble): string?
 	return if def then def.id else nil
 end
 
+local function clearLockedStrokes()
+	for _, b in ipairs(bubbles) do
+		local stroke = b.btn:FindFirstChild(LOCK_STROKE_NAME)
+		if stroke then
+			stroke:Destroy()
+		end
+	end
+end
+
+local function ensureLockedStroke(btn: GuiButton): UIStroke
+	local existing = btn:FindFirstChild(LOCK_STROKE_NAME)
+	if existing and existing:IsA("UIStroke") then
+		return existing
+	end
+	if existing then
+		existing:Destroy()
+	end
+	local stroke = Instance.new("UIStroke")
+	stroke.Name = LOCK_STROKE_NAME
+	stroke.Thickness = LOCK_STROKE_THICKNESS
+	stroke.Color = LOCK_STROKE_COLOR
+	stroke.Transparency = LOCK_STROKE_TRANSPARENCY
+	stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+	stroke.LineJoinMode = Enum.LineJoinMode.Round
+	stroke.Parent = btn
+	return stroke
+end
+
 local function syncOrbitLocks()
 	clearOrbitLocks()
+	clearLockedStrokes()
 	if not running then
 		return
 	end
@@ -227,6 +257,7 @@ local function syncOrbitLocks()
 			icon.ZIndex = math.max(b.btn.ZIndex + 8, 90)
 			icon.Active = false
 			icon.Parent = b.btn
+			ensureLockedStroke(b.btn)
 			table.insert(orbitLocks, {
 				bubble = b,
 				icon = icon,
@@ -316,7 +347,6 @@ end
 
 -- Global ZIndex: ImageButton art draws at btn.ZIndex; children with lower Z sit behind it.
 local function setBubbleZ(btn: GuiButton, z: number)
-	local compact = compactCycleBtns[btn] == true
 	btn.ZIndex = z
 	for _, d in ipairs(btn:GetDescendants()) do
 		if not d:IsA("GuiObject") then
@@ -324,19 +354,17 @@ local function setBubbleZ(btn: GuiButton, z: number)
 		end
 		if d:IsA("TextLabel") then
 			d.ZIndex = z + 40
-			-- Compact mode owns label visibility (icon ↔ text cycle).
-			if not compact then
-				d.Visible = true
-			end
+			d.Visible = true
 			d.Active = false
 			d.TextTransparency = 0
 		elseif d:IsA("TextButton") then
 			d.ZIndex = z + 40
-			if not compact then
-				d.Visible = true
-			end
+			d.Visible = true
 			d.Active = false
 			d.TextTransparency = 0
+		elseif d.Name == "Icon" and d:IsA("ImageLabel") then
+			d.ZIndex = z + 30
+			d.Visible = true
 		else
 			d.ZIndex = z + 1
 		end
@@ -563,55 +591,67 @@ local function scaleSnapUdim(u: UDim2, hud: number): UDim2
 	return UDim2.new(u.X.Scale, xOff, u.Y.Scale, yOff)
 end
 
-local function applyCompactIconTextFrame(btn: GuiButton, showText: boolean)
-	if rejectFlashBtn == btn then
-		showText = true
-	end
-	local icon = findBubbleIcon(btn)
+local function applyCompactStackedLayout(btn: GuiButton, iconImage: string)
+	local icon = ensureBubbleIcon(btn)
+	icon.Position = COMPACT_ICON_POS
+	icon.Size = COMPACT_ICON_SIZE
+	icon.AnchorPoint = Vector2.new(0.5, 0.5)
+	icon.ZIndex = btn.ZIndex + 30
+	icon.ImageTransparency = 0
+	icon.ScaleType = Enum.ScaleType.Fit
+	icon.Image = iconImage
+	icon.Visible = true
 	for _, lbl in ipairs(collectBubbleLabels(btn)) do
-		lbl.Visible = showText
-	end
-	if icon then
-		icon.Visible = not showText
+		lbl.Visible = true
+		lbl.AnchorPoint = Vector2.new(0.5, 0.5)
+		lbl.Position = COMPACT_LABEL_POS
+		lbl.Size = COMPACT_LABEL_SIZE
+		lbl.TextXAlignment = Enum.TextXAlignment.Center
+		lbl.TextYAlignment = Enum.TextYAlignment.Center
+		lbl.TextScaled = true
+		lbl.TextWrapped = true
+		lbl.ZIndex = btn.ZIndex + 40
 	end
 end
 
-local function stopCompactIconTextCycles()
-	for _, stop in ipairs(compactCycleStops) do
-		stop()
+local function toTwoLineBubbleText(raw: string): string
+	local cleaned = string.gsub(raw, "[\r\n]+", " ")
+	cleaned = string.gsub(cleaned, "%s+", " ")
+	cleaned = (string.match(cleaned, "^%s*(.-)%s*$") :: string?) or cleaned
+	if cleaned == "" then
+		return raw
 	end
-	table.clear(compactCycleStops)
+	local words = string.split(cleaned, " ")
+	if #words <= 1 then
+		return cleaned
+	end
+	if #words == 2 then
+		return words[1] .. "\n" .. words[2]
+	end
+	local mid = math.ceil(#words / 2)
+	return table.concat(words, " ", 1, mid) .. "\n" .. table.concat(words, " ", mid + 1)
 end
 
-local function syncCompactIconTextCycles()
-	stopCompactIconTextCycles()
-	if not running or closing then
-		return
-	end
-	local idx = 0
-	for _, b in ipairs(bubbles) do
-		local btn = b.btn
-		if not btn.Parent or not compactCycleBtns[btn] then
-			continue
+local function applyTwoLineBubbleText(btn: GuiButton, skillId: string?)
+	local preferred: string? = nil
+	if skillId then
+		local def = SkillStages.get(skillId)
+		if def and def.displayName ~= "" then
+			preferred = def.displayName
 		end
-		idx += 1
-		-- Even indices invert so ~half show graphic while the rest show text.
-		local invert = (idx % 2) == 0
-		local stop = UiIdleCycle.subscribeSharedToggle(COMPACT_ICON_TEXT_PERIOD, function(showText)
-			if not btn.Parent or not compactCycleBtns[btn] then
-				return
-			end
-			applyCompactIconTextFrame(btn, showText)
-		end, function()
-			return running and not closing and btn.Parent ~= nil and compactCycleBtns[btn] == true
-		end, invert)
-		table.insert(compactCycleStops, stop)
+	end
+	for _, lbl in ipairs(collectBubbleLabels(btn)) do
+		local source = preferred or lbl.Text
+		if source ~= "" then
+			lbl.Text = toTwoLineBubbleText(source)
+		end
+		lbl.TextWrapped = true
 	end
 end
 
 local function applyBubbleLayoutSnap(btn: GuiButton, snap: BubbleLayoutSnap, skillId: string?)
 	local hud = UiPopupScale.getHud()
-	local sizeMult = if hud > 1.01 then hud * HUD_BUBBLE_SIZE_MULT else 1
+	local sizeMult = if hud > 1.01 then hud * HUD_BUBBLE_SIZE_MULT else COMPACT_SIZE_MULT
 	local w = snap.sizeOffset.X
 	local h = snap.sizeOffset.Y
 	if sizeMult > 1.01 then
@@ -645,10 +685,9 @@ local function applyBubbleLayoutSnap(btn: GuiButton, snap: BubbleLayoutSnap, ski
 	end
 
 	-- Larger stage templates (5–8) include Icon + labels together.
-	-- Smaller stages can't fit both: place a centered icon and cycle with text.
+	-- Smaller stages: always stack skill graphic above text (no flash cycle).
 	local iconSnap = snap.icon
 	local iconImage = if skillId then SkillStages.iconImageFor(skillId) else nil
-	compactCycleBtns[btn] = false
 	if iconSnap and iconImage then
 		local icon = ensureBubbleIcon(btn)
 		if sizeMult > 1.01 then
@@ -668,16 +707,7 @@ local function applyBubbleLayoutSnap(btn: GuiButton, snap: BubbleLayoutSnap, ski
 			lbl.Visible = true
 		end
 	elseif iconImage then
-		local icon = ensureBubbleIcon(btn)
-		icon.Position = UDim2.fromScale(0.5, 0.5)
-		icon.Size = COMPACT_ICON_SIZE
-		icon.AnchorPoint = Vector2.new(0.5, 0.5)
-		icon.ZIndex = btn.ZIndex + 2
-		icon.ImageTransparency = 0
-		icon.ScaleType = Enum.ScaleType.Fit
-		icon.Image = iconImage
-		icon.Visible = false
-		compactCycleBtns[btn] = true
+		applyCompactStackedLayout(btn, iconImage)
 	else
 		local existing = findBubbleIcon(btn)
 		if existing then
@@ -688,6 +718,7 @@ local function applyBubbleLayoutSnap(btn: GuiButton, snap: BubbleLayoutSnap, ski
 			lbl.Visible = true
 		end
 	end
+	applyTwoLineBubbleText(btn, skillId)
 end
 
 readSkillStage = function(skillId: string): number
@@ -1335,9 +1366,6 @@ local function disconnectInputs()
 end
 
 local function restoreBubbles()
-	stopCompactIconTextCycles()
-	table.clear(compactCycleBtns)
-	rejectFlashBtn = nil
 	for _, b in ipairs(bubbles) do
 		local btn = b.btn
 		local sc = btn:FindFirstChild("_OceanTD_BubbleScale")
@@ -1347,6 +1375,10 @@ local function restoreBubbles()
 		local lock = btn:FindFirstChild("OceanTD_SkillGateLock")
 		if lock then
 			lock:Destroy()
+		end
+		local gateStroke = btn:FindFirstChild(LOCK_STROKE_NAME)
+		if gateStroke then
+			gateStroke:Destroy()
 		end
 		if btn.Parent then
 			btn.Visible = true
@@ -1502,8 +1534,6 @@ function SkillsBubbleSim.stop(onDone: (() -> ())?)
 	stopToken += 1
 	rejectFxToken += 1
 	suppressed = false
-	stopCompactIconTextCycles()
-	rejectFlashBtn = nil
 	local my = stopToken
 	local function finish()
 		if my ~= stopToken then
@@ -1811,7 +1841,6 @@ function SkillsBubbleSim.start(panel: Instance)
 	end)
 
 	syncOrbitLocks()
-	syncCompactIconTextCycles()
 	playPopIn()
 	print("[SkillsBubbles] Started", #bubbles, "bubbles")
 end
@@ -1887,7 +1916,6 @@ function SkillsBubbleSim.refreshStageLayouts()
 		writeBubble(b)
 	end
 	syncOrbitLocks()
-	syncCompactIconTextCycles()
 end
 
 local function applyGamepadFocusVisual()
@@ -1980,13 +2008,13 @@ function SkillsBubbleSim.setOnBubbleActivated(cb: ((buttonName: string) -> ())?)
 	onBubbleActivated = cb
 end
 
--- Locked skill tap: flash that bubble's labels red; unlocked bubbles grow then shrink over 2s.
-local REJECT_FX_SEC = 2
-local REJECT_RED = Color3.fromRGB(255, 45, 50)
-local REJECT_GROW_SCALE = 2 -- 2× current size (skipped if skill is already max stage)
-local REJECT_HALF_SEC = REJECT_FX_SEC * 0.5
-local REJECT_UP_INFO = TweenInfo.new(REJECT_HALF_SEC, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
-local REJECT_DOWN_INFO = TweenInfo.new(REJECT_HALF_SEC, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
+-- Locked skill tap: flash red stroke, then pulse Plot Size so the unlock path is clear.
+local REJECT_STROKE_FLASH_SEC = 0.7
+local REJECT_PLOT_PULSE_SEC = 0.85
+local REJECT_PLOT_GROW_SCALE = 1.55
+local REJECT_STROKE_FLASH_THICK = 4.5
+local REJECT_PLOT_UP_INFO = TweenInfo.new(REJECT_PLOT_PULSE_SEC * 0.5, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+local REJECT_PLOT_DOWN_INFO = TweenInfo.new(REJECT_PLOT_PULSE_SEC * 0.5, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
 
 function SkillsBubbleSim.playLockedRejectFx(skillId: string)
 	if not running or closing or suppressed or #bubbles == 0 then
@@ -1994,10 +2022,9 @@ function SkillsBubbleSim.playLockedRejectFx(skillId: string)
 	end
 	rejectFxToken += 1
 	local token = rejectFxToken
-	local stages = unlockedStagesMap()
 
 	local locked: Bubble? = nil
-	local growTargets: { Bubble } = {}
+	local plotBubble: Bubble? = nil
 	for _, b in ipairs(bubbles) do
 		if not b.btn.Parent then
 			continue
@@ -2008,75 +2035,66 @@ function SkillsBubbleSim.playLockedRejectFx(skillId: string)
 		end
 		if id == skillId then
 			locked = b
-		elseif not SkillStages.isSkillLocked(id, stages) then
-			-- Already at max stage layout — don't enlarge the circle further.
-			if readUnlockedStage(id) < SkillStages.maxStageFor(id) then
-				table.insert(growTargets, b)
-			end
+		end
+		if id == "PlotSize" then
+			plotBubble = b
 		end
 	end
 
-	type SavedColor = { lbl: TextLabel, color: Color3 }
-	local saved: { SavedColor } = {}
+	local stroke: UIStroke? = nil
+	local baseThick = LOCK_STROKE_THICKNESS
+	local baseTrans = LOCK_STROKE_TRANSPARENCY
 	if locked then
-		rejectFlashBtn = locked.btn
-		-- Keep skill name readable during the red flash (don't leave icon-only mode).
-		applyCompactIconTextFrame(locked.btn, true)
-		for _, lbl in ipairs(collectBubbleLabels(locked.btn)) do
-			table.insert(saved, { lbl = lbl, color = lbl.TextColor3 })
-		end
+		stroke = ensureLockedStroke(locked.btn)
+		baseThick = stroke.Thickness
+		baseTrans = stroke.Transparency
 	end
 
-	for _, b in ipairs(growTargets) do
-		if b.scale.Parent then
-			b.scale.Scale = b.settledScale
-			local scaleObj = b.scale
-			local up = TweenService:Create(scaleObj, REJECT_UP_INFO, { Scale = REJECT_GROW_SCALE * b.settledScale })
-			up:Play()
-			up.Completed:Connect(function()
-				if token ~= rejectFxToken or not scaleObj.Parent then
-					return
-				end
-				TweenService:Create(scaleObj, REJECT_DOWN_INFO, { Scale = b.settledScale }):Play()
-			end)
-		end
-	end
-
-	local t0 = os.clock()
 	task.spawn(function()
-		while token == rejectFxToken and (os.clock() - t0) < REJECT_FX_SEC do
+		local t0 = os.clock()
+		while token == rejectFxToken and (os.clock() - t0) < REJECT_STROKE_FLASH_SEC do
 			if not running or closing or suppressed then
 				break
 			end
 			local elapsed = os.clock() - t0
-			-- ~2.5 flashes/sec between original and bright red.
-			local flash = (math.sin(elapsed * math.pi * 5) + 1) * 0.5
-			for _, s in ipairs(saved) do
-				if s.lbl.Parent then
-					s.lbl.TextColor3 = s.color:Lerp(REJECT_RED, 0.25 + flash * 0.75)
-				end
+			local flash = (math.sin(elapsed * math.pi * 8) + 1) * 0.5
+			if stroke and stroke.Parent then
+				stroke.Color = LOCK_STROKE_COLOR
+				stroke.Thickness = baseThick + (REJECT_STROKE_FLASH_THICK - baseThick) * flash
+				stroke.Transparency = math.clamp(baseTrans * (1 - flash * 0.95), 0, 1)
 			end
 			task.wait()
 		end
 		if token ~= rejectFxToken then
 			return
 		end
-		if rejectFlashBtn == (if locked then locked.btn else nil) then
-			rejectFlashBtn = nil
+		if stroke and stroke.Parent then
+			stroke.Thickness = LOCK_STROKE_THICKNESS
+			stroke.Transparency = LOCK_STROKE_TRANSPARENCY
+			stroke.Color = LOCK_STROKE_COLOR
 		end
-		for _, s in ipairs(saved) do
-			if s.lbl.Parent then
-				s.lbl.TextColor3 = s.color
-			end
+
+		local plot = plotBubble
+		if not plot or not plot.btn.Parent or not plot.scale.Parent then
+			return
 		end
-		for _, b in ipairs(growTargets) do
-			if b.scale.Parent then
-				b.scale.Scale = b.settledScale
-			end
+		if token ~= rejectFxToken or not running or closing or suppressed then
+			return
 		end
-		-- Resume compact icon/text phase for the locked bubble.
-		if locked and locked.btn.Parent and compactCycleBtns[locked.btn] then
-			syncCompactIconTextCycles()
+		local scaleObj = plot.scale
+		local settled = plot.settledScale
+		scaleObj.Scale = settled
+		local up = TweenService:Create(scaleObj, REJECT_PLOT_UP_INFO, { Scale = REJECT_PLOT_GROW_SCALE * settled })
+		up:Play()
+		up.Completed:Wait()
+		if token ~= rejectFxToken or not scaleObj.Parent then
+			return
+		end
+		local down = TweenService:Create(scaleObj, REJECT_PLOT_DOWN_INFO, { Scale = settled })
+		down:Play()
+		down.Completed:Wait()
+		if token == rejectFxToken and scaleObj.Parent then
+			scaleObj.Scale = settled
 		end
 	end)
 end

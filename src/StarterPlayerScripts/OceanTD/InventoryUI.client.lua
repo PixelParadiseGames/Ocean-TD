@@ -96,7 +96,9 @@ local function setLeftUiHiddenForBackpack(hide: boolean)
 		end
 	else
 		-- Skills owns left UI while bubbles are open — don't fight that restore.
-		if playerGui:GetAttribute("OceanTD_SkillsBubblesOpen") == true then
+		if playerGui:GetAttribute("OceanTD_SkillsBubblesOpen") == true
+			or playerGui:GetAttribute("OceanTD_ReefReportOpen") == true
+		then
 			table.clear(hiddenLeftUiForBackpack)
 			return
 		end
@@ -115,11 +117,16 @@ local TEMP_BRAIN_CORAL_SLOT_COUNT = 0
 local BACKPACK_SLOT_COUNT = 24
 
 local SKILLS_OPEN_ATTR = "OceanTD_SkillsBubblesOpen"
+local REPORT_OPEN_ATTR = "OceanTD_ReefReportOpen"
 local SKILLS_DISMISS_KEY_ATTR = "OceanTD_SkillsDismissKey"
 local SKILLS_DISMISS_BLOCK_SEC = 0.25
 
 local function skillsBubblesOpen(): boolean
 	return playerGui:GetAttribute(SKILLS_OPEN_ATTR) == true
+end
+
+local function reefReportOpen(): boolean
+	return playerGui:GetAttribute(REPORT_OPEN_ATTR) == true
 end
 
 local function skillsDismissKeyRecentlyConsumed(): boolean
@@ -128,7 +135,7 @@ local function skillsDismissKeyRecentlyConsumed(): boolean
 end
 
 local function backpackToggleBlockedBySkills(): boolean
-	return skillsBubblesOpen() or skillsDismissKeyRecentlyConsumed()
+	return skillsBubblesOpen() or reefReportOpen() or skillsDismissKeyRecentlyConsumed()
 end
 
 local function log(...: any)

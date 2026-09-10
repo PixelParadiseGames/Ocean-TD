@@ -672,20 +672,13 @@ function PersistenceService.tryUnlockSkillStage(player: Player, skillId: string)
 	if cash < cost then
 		return { ok = false, stage = current, prevStage = current, errorCode = "CantAfford", sandDollars = cash }
 	end
-	-- Earn More / Place More require Plot Size stage 2+.
-	-- Reef Health requires Place More stage 2+.
+	-- All other skills require Plot Size stage 2+ (first Plot Size purchase).
 	if SkillStages.isSkillLocked(skillId, profile.skillStages) then
-		local errorCode = if SkillStages.isLockedUntilPlaceMore(
-				skillId,
-				SkillStages.clampStage(profile.skillStages.PlaceMore)
-			)
-			then "PlaceMoreGate"
-			else "PlotSizeGate"
 		return {
 			ok = false,
 			stage = current,
 			prevStage = current,
-			errorCode = errorCode,
+			errorCode = "PlotSizeGate",
 			sandDollars = cash,
 		}
 	end

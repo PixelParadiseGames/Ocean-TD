@@ -211,7 +211,12 @@ local function playTick()
 end
 
 local function applySeedWheelDisplayOrder(gui: ScreenGui)
-	-- Under skills bubbles while open; otherwise under MobileLeftUI (♪ / dPad).
+	-- Under reef report while open; under skills bubbles while skills open; else under left HUD.
+	local report = playerGui:FindFirstChild("OceanTD_ReefReport")
+	if playerGui:GetAttribute("OceanTD_ReefReportOpen") == true and report and report:IsA("ScreenGui") then
+		gui.DisplayOrder = math.max(0, report.DisplayOrder - 1)
+		return
+	end
 	local skills = playerGui:FindFirstChild("MobileSkillsA")
 	if playerGui:GetAttribute("OceanTD_SkillsBubblesOpen") == true and skills and skills:IsA("ScreenGui") then
 		gui.DisplayOrder = math.max(0, skills.DisplayOrder - 1)
@@ -1259,6 +1264,13 @@ SeedWheelRevealApi.isBusy = function(): boolean
 end
 
 playerGui:GetAttributeChangedSignal("OceanTD_SkillsBubblesOpen"):Connect(function()
+	local overlay = playerGui:FindFirstChild("OceanTD_SeedWheel")
+	if overlay and overlay:IsA("ScreenGui") then
+		applySeedWheelDisplayOrder(overlay)
+	end
+end)
+
+playerGui:GetAttributeChangedSignal("OceanTD_ReefReportOpen"):Connect(function()
 	local overlay = playerGui:FindFirstChild("OceanTD_SeedWheel")
 	if overlay and overlay:IsA("ScreenGui") then
 		applySeedWheelDisplayOrder(overlay)
