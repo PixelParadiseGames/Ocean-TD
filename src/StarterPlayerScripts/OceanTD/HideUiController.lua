@@ -99,6 +99,7 @@ local SKIP_SCREEN_GUI = {
 	OceanTD_SkillUnlockConfirm = true,
 	-- Skip clone/reparent of spinning Band; still disabled via screenGuis list below.
 	OceanTD_SeedWheel = true,
+	OceanTD_JoinIntro = true,
 }
 -- SKIP entries that must remain Enabled while HUD is hidden.
 local KEEP_ENABLED_WHILE_HIDDEN = {

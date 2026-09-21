@@ -96,6 +96,8 @@ export type PlayerProfile = {
 	coralColorUnlocks: { [string]: { [string]: boolean } },
 	-- Purchased once: dPad HideUI toggles HUD visibility.
 	hideUiUnlocked: boolean,
+	-- Player has finished (or skipped after first) the join Wave-100 showcase intro.
+	hasSeenJoinIntro: boolean,
 }
 
 local Constants = require(script.Parent.Constants)
@@ -143,6 +145,7 @@ function PlotTypes.defaultProfile(): PlayerProfile
 		skillActiveStages = SkillStages.defaultMap(),
 		coralColorUnlocks = {},
 		hideUiUnlocked = false,
+		hasSeenJoinIntro = false,
 	}
 end
 

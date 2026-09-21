@@ -23,6 +23,7 @@ local Remotes = require(oceanRoot:WaitForChild("Remotes"))
 local SeedWheel = require(oceanRoot:WaitForChild("Shared"):WaitForChild("SeedWheel"))
 local ItemCatalog = require(oceanRoot:WaitForChild("Shared"):WaitForChild("ItemCatalog"))
 local UiTheme = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiTheme"))
+local UiHaptics = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiHaptics"))
 local UiViewportTags = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiViewportTags"))
 local InventoryState = require(script.Parent:WaitForChild("InventoryState"))
 local CoralColorUnlockState = require(script.Parent:WaitForChild("CoralColorUnlockState"))
@@ -81,7 +82,14 @@ local busy = false
 local busySince = 0
 local BUSY_WATCHDOG_SEC = 20
 local pitchCursor = 0.92
-type Queued = { itemId: string, token: number, amount: number, colorIndex: number, colorWasUnlocked: boolean }
+type Queued = {
+	itemId: string,
+	token: number,
+	amount: number,
+	colorIndex: number,
+	colorWasUnlocked: boolean,
+	manual: boolean?,
+}
 local queued: Queued? = nil
 local activeConns: { RBXScriptConnection } = {}
 local abortRequested = false
@@ -157,7 +165,7 @@ local function easeOutQuint(t: number): number
 	return 1 - u * u * u * u * u
 end
 
-local playReveal: (string, number, number, number, boolean) -> ()
+local playReveal: (string, number, number, number, boolean, boolean?) -> ()
 
 local function claim(itemId: string, token: number)
 	local ok, err = pcall(function()
@@ -174,8 +182,16 @@ local function finishBusy()
 	currentClaim = nil
 	local q = queued
 	queued = nil
-	if q and SeedWheelAutoRollState.isEnabled() then
-		task.defer(playReveal, q.itemId, q.token, q.amount, q.colorIndex, q.colorWasUnlocked)
+	-- Replay a one-shot even when auto-roll is off. Auto chain only continues while enabled.
+	local continuing = q ~= nil and (q.manual == true or SeedWheelAutoRollState.isEnabled())
+	if continuing and q then
+		task.defer(playReveal, q.itemId, q.token, q.amount, q.colorIndex, q.colorWasUnlocked, q.manual)
+		return
+	end
+	local done = SeedWheelRevealApi.onCycleFinished
+	if done then
+		SeedWheelRevealApi.onCycleFinished = nil
+		task.defer(done)
 	end
 end
 
@@ -893,6 +909,8 @@ local function flyBundle(
 		return
 	end
 
+	UiHaptics.rampSmallToMed(FLY_SEC)
+
 	holder.Parent = gui
 	holder.AnchorPoint = Vector2.new(0.5, 0.5)
 	holder.Position = UDim2.fromOffset(start.X, start.Y)
@@ -915,6 +933,7 @@ local function flyBundle(
 			if conn then
 				conn:Disconnect()
 			end
+			UiHaptics.cancel()
 			if nameLbl and nameLbl.Parent then
 				nameLbl:Destroy()
 			end
@@ -1016,8 +1035,15 @@ abortActiveReveal = function(claimPending: boolean)
 	abortRequested = false
 end
 
-playReveal = function(itemId: string, token: number, amount: number, colorIndex: number, colorWasUnlocked: boolean)
-	if not SeedWheelAutoRollState.isEnabled() then
+playReveal = function(
+	itemId: string,
+	token: number,
+	amount: number,
+	colorIndex: number,
+	colorWasUnlocked: boolean,
+	manual: boolean?
+)
+	if manual ~= true and not SeedWheelAutoRollState.isEnabled() then
 		return
 	end
 	if busy then
@@ -1027,6 +1053,7 @@ playReveal = function(itemId: string, token: number, amount: number, colorIndex:
 			amount = amount,
 			colorIndex = colorIndex,
 			colorWasUnlocked = colorWasUnlocked,
+			manual = manual,
 		}
 		return
 	end
@@ -1169,6 +1196,8 @@ playReveal = function(itemId: string, token: number, amount: number, colorIndex:
 				return
 			end
 
+			UiHaptics.pulseTiny()
+
 			colorWinner.Position = UDim2.new(0.5, 0, 0.5, 0)
 			colorWinner.Visible = true
 			styleByOffset(colorWinner, 0, halfW, colorPx, OUTER_PEEK_SCALE_COLOR, stepPx)
@@ -1231,7 +1260,8 @@ Remotes.get("SeedWheelAutoRollSync").OnClientEvent:Connect(function(enabled: any
 end)
 
 Remotes.get("SeedWheelReveal").OnClientEvent:Connect(function(itemId: any, token: any, amount: any, colorIndex: any)
-	if not SeedWheelAutoRollState.isEnabled() then
+	local manual = SeedWheelAutoRollState.consumeManual()
+	if not manual and not SeedWheelAutoRollState.isEnabled() then
 		return
 	end
 	if typeof(itemId) ~= "string" or typeof(token) ~= "number" then
@@ -1245,7 +1275,7 @@ Remotes.get("SeedWheelReveal").OnClientEvent:Connect(function(itemId: any, token
 		colorWasUnlocked = CoralColorUnlockState.isUnlocked(itemId, cidx)
 		CoralColorUnlockState.markUnlocked(itemId, cidx)
 	end
-	task.spawn(playReveal, itemId, token, add, cidx, colorWasUnlocked)
+	task.spawn(playReveal, itemId, token, add, cidx, colorWasUnlocked, manual)
 end)
 
 SeedWheelRevealApi.collapseToTarget = function(target: GuiObject, onDone: () -> ())

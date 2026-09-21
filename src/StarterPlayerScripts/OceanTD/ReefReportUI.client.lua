@@ -2,8 +2,8 @@
 --[[
 	Reef Report — fullscreen coral breakdown UI (separate from skills).
 
-	Studio: MobileLeftUI.dPad.Cart (also CartBTN / Report / ReefReport).
-	While open: Cart becomes pulsing red close (X / B), same look as Skills.
+	Studio: MobileLeftUI.dPad.CartIcon (also Cart / CartBTN / Report).
+	While open: CartIcon becomes pulsing red close (X / B), same look as Skills.
 	Shortcuts: DPadUp toggle; X / ButtonB close; Cart button toggle.
 	Title shows live reef score N (abundance + mix bonuses); S/M/L bars tint by size balance.
 ]]
@@ -56,6 +56,7 @@ local WAVE_HUD_NAMES = {
 }
 
 local CART_NAMES = {
+	CartIcon = true, -- Studio: MobileLeftUI.dPad.CartIcon
 	Cart = true,
 	CartBTN = true,
 	CartBtn = true,
@@ -115,7 +116,9 @@ local function isGamepadMode(): boolean
 end
 
 local function findCartButton(dPad: Instance): GuiObject?
-	for name in pairs(CART_NAMES) do
+	-- Prefer CartIcon (actual on-screen cart glyph) over container / alias names.
+	local preferred = { "CartIcon", "CartBTN", "CartBtn", "Cart", "cart", "Report", "ReefReport", "ShoppingCart" }
+	for _, name in ipairs(preferred) do
 		local ch = dPad:FindFirstChild(name)
 		if ch and ch:IsA("GuiObject") then
 			return ch
@@ -198,7 +201,7 @@ local function hideCartBtnContent(hide: boolean)
 	if hide then
 		table.clear(hiddenCartKids)
 		for _, ch in ipairs(cartBtn:GetChildren()) do
-			if ch:IsA("GuiObject") and ch.Name ~= "_OceanTD_CartHit" then
+			if ch:IsA("GuiObject") and ch.Name ~= "_OceanTD_CartHit" and ch.Name ~= "_OceanTD_ReefReportClose" then
 				if ch.Visible then
 					table.insert(hiddenCartKids, ch)
 					ch.Visible = false
@@ -250,21 +253,6 @@ local function restoreCartHitForToggle()
 	end
 end
 
-local function syncCloseToCart()
-	if not closeChrome or not cartBtn then
-		return
-	end
-	local ap = cartBtn.AbsolutePosition
-	local as = cartBtn.AbsoluteSize
-	if as.X < 4 or as.Y < 4 then
-		return
-	end
-	local side = math.max(as.X, as.Y)
-	closeChrome.AnchorPoint = Vector2.new(0.5, 0.5)
-	closeChrome.Position = UDim2.fromOffset(ap.X + as.X * 0.5, ap.Y + as.Y * 0.5)
-	closeChrome.Size = UDim2.fromOffset(side, side)
-end
-
 local function destroyCloseChrome()
 	stopClosePulse()
 	stopCloseSync()
@@ -279,35 +267,35 @@ local function destroyCloseChrome()
 end
 
 local function ensureCloseChrome()
-	if not cartBtn or not reportGui then
+	if not cartBtn then
 		return
 	end
 	destroyCloseChrome()
 	hideCartBtnContent(true)
 
-	-- Keep left HUD under the report so dPad/cart cannot steal column pie hits.
-	-- Close chrome lives on the report ScreenGui and tracks the cart each frame.
-	cartBtnWasActive = cartBtn.Active
-	cartBtn.Active = false
-	local cartHit = cartBtn:FindFirstChild("_OceanTD_CartHit")
-	if cartHit and cartHit:IsA("GuiObject") then
-		cartHitWasActive = cartHit.Active
-		cartHit.Active = false
-		cartHit.Visible = false
-	end
-
-	local chrome = Instance.new("TextButton")
+	-- Parent to CartIcon (same as Skills close on Skills btn) so layout/UIScale always match.
+	-- Left HUD is raised above the report while open so this stays clickable; dPad stays
+	-- Active=false so empty left HUD space does not steal column pie hits.
+	local chrome = Instance.new("Frame")
 	chrome.Name = "_OceanTD_ReefReportClose"
-	chrome.Text = ""
-	chrome.AutoButtonColor = false
 	chrome.BackgroundColor3 = Color3.fromRGB(220, 40, 50)
 	chrome.BorderSizePixel = 0
 	chrome.AnchorPoint = Vector2.new(0.5, 0.5)
-	chrome.Position = UDim2.fromOffset(0, 0)
-	chrome.Size = UDim2.fromOffset(48, 48)
-	chrome.ZIndex = 200
-	chrome.Active = true
-	chrome.Parent = reportGui
+	chrome.Position = UDim2.fromScale(0.5, 0.5)
+	chrome.Size = UDim2.fromScale(1, 1)
+	chrome.ZIndex = cartBtn.ZIndex + 50
+	chrome.Active = false
+	chrome.Parent = cartBtn
+	local hitBtn = cartBtn:FindFirstChild("_OceanTD_CartHit")
+	if hitBtn and hitBtn:IsA("GuiObject") then
+		hitBtn.Visible = true
+		hitBtn.Active = true
+		hitBtn.ZIndex = chrome.ZIndex + 5
+	else
+		hitBtn = ensureHitOverlay(cartBtn)
+		hitBtn.ZIndex = chrome.ZIndex + 5
+		hitBtn.Active = true
+	end
 	local corner = Instance.new("UICorner")
 	corner.CornerRadius = UDim.new(1, 0)
 	corner.Parent = chrome
@@ -329,6 +317,8 @@ local function ensureCloseChrome()
 	lbl.TextScaled = true
 	lbl.TextColor3 = Color3.fromRGB(255, 255, 255)
 	lbl.TextStrokeTransparency = 0.6
+	lbl.TextXAlignment = Enum.TextXAlignment.Center
+	lbl.TextYAlignment = Enum.TextYAlignment.Center
 	lbl.ZIndex = chrome.ZIndex + 1
 	lbl.Active = false
 	lbl.Parent = chrome
@@ -339,20 +329,10 @@ local function ensureCloseChrome()
 	pad.PaddingRight = UDim.new(0.18, 0)
 	pad.Parent = lbl
 
-	chrome.Activated:Connect(function()
-		lastToggleAt = os.clock()
-		if open then
-			applyOpen(false)
-		end
-	end)
-
 	closeChrome = chrome
 	closeLabel = lbl
 	closeScale = scale
 	syncCloseLabel()
-	syncCloseToCart()
-	stopCloseSync()
-	closeSyncConn = RunService.RenderStepped:Connect(syncCloseToCart)
 	startClosePulse()
 end
 
@@ -504,14 +484,14 @@ local function pushSeedWheelUnderReport()
 end
 
 local function raiseCloseLayer()
-	-- Report must stay above left HUD so column pies receive clicks. Close chrome is
-	-- parented to the report and synced to the cart (see ensureCloseChrome).
+	-- Close chrome is parented to CartIcon on the left HUD (Skills-style). Raise left
+	-- above the report so close stays clickable; dPad.Active=false so empty HUD space
+	-- does not eat reef column clicks.
 	if reportGui then
-		local leftOrder = if leftGui then leftGui.DisplayOrder else leftOrderBase
-		reportGui.DisplayOrder = math.max(REPORT_DISPLAY_ORDER, leftOrder + 40)
+		reportGui.DisplayOrder = REPORT_DISPLAY_ORDER
 	end
 	if leftGui then
-		leftGui.DisplayOrder = leftOrderBase
+		leftGui.DisplayOrder = math.max(leftOrderBase, REPORT_DISPLAY_ORDER + 80)
 		leftGui.IgnoreGuiInset = true
 		leftGui.ClipToDeviceSafeArea = false
 	end
@@ -1784,7 +1764,7 @@ task.spawn(function()
 	end
 	local cart = findCartButton(dPad)
 	if not cart then
-		warn("[ReefReport] Cart button missing under MobileLeftUI.dPad (Cart / CartBTN / Report)")
+		warn("[ReefReport] Cart button missing under MobileLeftUI.dPad (CartIcon / Cart / CartBTN / Report)")
 		return
 	end
 	bindCart(cart)

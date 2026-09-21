@@ -7,7 +7,9 @@ Update this file in the **same change** when you add or rename a system. If inde
 | System | Status | Owner | Helpers | Notes |
 |--------|--------|-------|---------|-------|
 | Bootstrap (server) | Live | `src/ServerScriptService/OceanTD/Bootstrap.server.lua` | wires services below | Join → load → assign → hydrate → ready; leave → snapshot → save → free |
-| Bootstrap (client) | Live | `src/StarterPlayerScripts/OceanTD/Bootstrap.client.lua` | `ClientPlot.lua` | Mirrors plot bounds; SessionReady |
+| Friend plot previews | Live | `.../Services/FriendPlotPreviewService.lua` | Persistence offline load + reef-score OrderedDataStore, PlotService free seats, Grid/Placement hydrate | Empty seats: friends' reefs first; else random from top-25 reef report scores; evict on real join; refill on leave |
+| JoinIntro | Live | `JoinIntro.client.lua` | `PlotLoadDropIn`, ClientPlot remap from Plot4, FreeCam `ForceCamMode` / `JoinIntroBusy`, Persistence `hasSeenJoinIntro` | Every join: remap `Workspace.Plots.Intro` → local plot showcase; plotcam top→bottom + bleach/fall; then real reef drop-in + follow cam; SKIP after first view |
+| SkyCamParts | Live | `SkyCamParts.lua` | FreeCam, JoinIntro | Resolve SkyCam + SkyCamFocus; remap MasterPlotDecor when StaticPlot clone missing |
 | PlotService | Live | `.../Services/PlotService.lua` | `Shared/Constants`, `Shared/GridMath`, `Shared/RingMath` | Master + RingMath poses (no PreviewBox / no voxel align); random first assign; later joins seat beside occupied |
 | WaveHeartReplicator | Live | `.../Services/WaveHeartReplicator.lua` | PlotService poses, WaveRoute.A.EndPoint | Clones end heart onto Plot2..N via rigid Plot1→slot remap |
 | DecorReplicator | Live | `.../Services/DecorReplicator.lua` | PlotService poses | Boot: `MasterPlotDecor` → `StaticPlot_2..N` via rigid Plot1→slot remap |

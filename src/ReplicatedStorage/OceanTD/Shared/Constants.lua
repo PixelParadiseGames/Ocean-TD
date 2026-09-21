@@ -24,7 +24,9 @@ local Constants = {
 	PREVIEW_BOX_PREFIX = "PreviewBox_",
 
 	DATASTORE_NAME = "OceanTD_Player_v1",
-	PROFILE_VERSION = 8,
+	-- OrderedDataStore: key = userId string, value = Reef Report score (int).
+	REEF_SCORE_ORDERED_STORE = "OceanTD_ReefScore_v1",
+	PROFILE_VERSION = 9,
 
 	AUTOSAVE_INTERVAL_SEC = 60,
 

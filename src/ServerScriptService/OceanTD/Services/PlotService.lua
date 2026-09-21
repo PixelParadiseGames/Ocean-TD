@@ -43,6 +43,8 @@ local PlotService = {}
 
 local slotsById: { [string]: PlotSlot } = {}
 local ownerToPlot: { [Player]: PlotId } = {}
+-- Friend / offline reef previews on free seats (not real owners — assign still treats as free).
+local previewUserByPlot: { [string]: number } = {}
 local masterPlotCf: CFrame? = nil
 local ringCenter: Vector3? = nil
 local initialized = false
@@ -336,22 +338,80 @@ function PlotService.getPlotOwner(plotId: PlotId): Player?
 	return if slot then slot.owner else nil
 end
 
-function PlotService.getRosterPayload(): { { plotId: string, cframe: CFrame, size: Vector3, ownerUserId: number, ringCFrame: CFrame } }
+function PlotService.getRosterPayload(): {
+	{
+		plotId: string,
+		cframe: CFrame,
+		size: Vector3,
+		ownerUserId: number,
+		previewUserId: number,
+		ringCFrame: CFrame,
+	}
+}
 	local out = {}
 	for i = 1, Constants.MAX_PLOTS do
 		local plotId = plotIdFromIndex(i)
 		local slot = slotsById[plotId]
 		if slot then
+			local previewId = previewUserByPlot[plotId]
 			table.insert(out, {
 				plotId = plotId,
 				cframe = slot.cframe,
 				size = slot.size,
 				ownerUserId = if slot.owner then slot.owner.UserId else 0,
+				previewUserId = if typeof(previewId) == "number" then previewId else 0,
 				ringCFrame = slot.ringCFrame,
 			})
 		end
 	end
 	return out
+end
+
+function PlotService.getPreviewUserId(plotId: PlotId): number?
+	local id = previewUserByPlot[plotId]
+	return if typeof(id) == "number" and id > 0 then id else nil
+end
+
+function PlotService.setPreviewUserId(plotId: PlotId, userId: number?)
+	if typeof(userId) == "number" and userId > 0 then
+		previewUserByPlot[plotId] = userId
+	else
+		previewUserByPlot[plotId] = nil
+	end
+end
+
+function PlotService.listFreePlotIds(): { PlotId }
+	local free: { PlotId } = {}
+	for i = 1, Constants.MAX_PLOTS do
+		local plotId = plotIdFromIndex(i)
+		local slot = slotsById[plotId]
+		if slot and slot.owner == nil then
+			table.insert(free, plotId)
+		end
+	end
+	return free
+end
+
+-- Resize a free seat for a friend preview (no owner). Occupied seats use applyOwnerPlotSizeStage.
+function PlotService.applySlotPlotSizeStage(plotId: PlotId, stage: number): (CFrame?, Vector3?)
+	local slot = slotsById[plotId]
+	if not slot then
+		return nil, nil
+	end
+	if slot.owner ~= nil then
+		return slot.cframe, slot.size
+	end
+	local worldCf, size = PlotService.getStageWorldPose(slot, stage)
+	if not worldCf or not size then
+		return slot.cframe, slot.size
+	end
+	local sx = math.max(4, size.X)
+	local sy = math.max(1, size.Y)
+	local sz = math.max(4, size.Z)
+	slot.size = Vector3.new(sx, sy, sz)
+	slot.cframe = worldCf
+	slot.spawnCFrame = resolveSpawnCFrame(slot.ringCFrame, slot.size)
+	return slot.cframe, slot.size
 end
 
 local function wrapPlotIndex(i: number): number

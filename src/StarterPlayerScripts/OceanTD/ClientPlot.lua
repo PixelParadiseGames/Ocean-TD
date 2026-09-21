@@ -228,6 +228,16 @@ function ClientPlot.remapCFrameFromPlot1(worldCf: CFrame): CFrame
 	return base * p1:ToObjectSpace(worldCf)
 end
 
+-- Rigid remap from any authored plot pose (e.g. Plots.Intro aligned to Plot4) onto the local plot.
+function ClientPlot.remapCFrameFromSource(sourcePlotCf: CFrame, worldCf: CFrame): CFrame
+	local localPlot = mirrored
+	if not localPlot then
+		return worldCf
+	end
+	local base = localPlot.ringCFrame or localPlot.cframe
+	return base * sourcePlotCf:ToObjectSpace(worldCf)
+end
+
 -- Remap into an arbitrary plot (spectate / ghost waves).
 function ClientPlot.remapFromPlot1To(
 	worldPos: Vector3,

@@ -26,6 +26,7 @@ local InventoryState = require(script.Parent:WaitForChild("InventoryState"))
 local PlacementController = require(script.Parent:WaitForChild("PlacementController"))
 local RelocateController = require(script.Parent:WaitForChild("RelocateController"))
 local ClientPlot = require(script.Parent:WaitForChild("ClientPlot"))
+local PlotLoadDropIn = require(script.Parent:WaitForChild("PlotLoadDropIn"))
 
 local SavePlotSlot = {}
 
@@ -439,45 +440,7 @@ local function gatherOwnedPlotParts(): { BasePart }
 end
 
 local function playLoadDropIn(expectedCount: number?)
-	task.spawn(function()
-		local want = if typeof(expectedCount) == "number" then math.max(0, math.floor(expectedCount)) else nil
-		local parts: { BasePart } = {}
-		local deadline = os.clock() + 0.75
-		while os.clock() < deadline do
-			parts = gatherOwnedPlotParts()
-			if want == nil then
-				break
-			end
-			if want == 0 then
-				return
-			end
-			if #parts >= want then
-				break
-			end
-			RunService.Heartbeat:Wait()
-		end
-		if #parts == 0 then
-			return
-		end
-		local rng = Random.new()
-		for _, part in ipairs(parts) do
-			if not part.Parent then
-				continue
-			end
-			local finalCF = part.CFrame
-			local lift = LOAD_DROP_HEIGHT + part.Size.Y * 0.5
-			part.CFrame = finalCF + Vector3.new(0, lift, 0)
-			setPartHiddenLocal(part, true)
-			local delaySec = rng:NextNumber(0, LOAD_DROP_SPAN_SEC)
-			task.delay(delaySec, function()
-				if not part.Parent then
-					return
-				end
-				setPartHiddenLocal(part, false)
-				TweenService:Create(part, LOAD_DROP_TWEEN, { CFrame = finalCF }):Play()
-			end)
-		end
-	end)
+	PlotLoadDropIn.play(expectedCount, LOAD_DROP_SPAN_SEC)
 end
 
 local function resolveItemId(part: BasePart): string

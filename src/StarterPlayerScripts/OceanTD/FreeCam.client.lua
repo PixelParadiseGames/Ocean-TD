@@ -37,6 +37,7 @@ local PlacementController = require(script.Parent:WaitForChild("PlacementControl
 local RelocateController = require(script.Parent:WaitForChild("RelocateController"))
 local WaveSim = require(script.Parent:WaitForChild("WaveSim"))
 local Wave1FishCam = require(script.Parent:WaitForChild("Wave1FishCam"))
+local SkyCamParts = require(script.Parent:WaitForChild("SkyCamParts"))
 
 local RED = Color3.fromRGB(255, 40, 40)
 local GREEN = Color3.fromRGB(40, 255, 70)
@@ -49,8 +50,6 @@ local TOUCH_STICK_RADIUS = 90
 local SINK_ACTION = "OceanTD_FreeCamSink"
 local DPAD_ACTION = "OceanTD_FreeCamDPad"
 local MARGIN = 0.75
-local SKY_CAM_NAME = "SkyCam"
-local SKY_FOCUS_NAME = "SkyCamFocus"
 local FISH_DAMP_RATE = 0.95 -- same-fish damper; filters path twitches
 local FISH_CAM_RATE = 1.7 -- camera body follow (slower than look-at focus)
 local FISH_SWITCH_SEC = 3.5
@@ -149,6 +148,7 @@ local lookStick = Vector2.zero
 local cachedSkyCam: BasePart? = nil
 local cachedFocus: BasePart? = nil
 local cachedPlotId: string? = nil
+local cachedSkyPose: SkyCamParts.SkyPose? = nil
 
 -- FishCam follow (always; idle patrols W1..Wn when no waves / no fish)
 local fishTargetId: number? = nil
@@ -175,15 +175,11 @@ local function publishMode()
 	playerGui:SetAttribute(ATTR_MODE, mode)
 end
 
-local function decorRootForPlot(plotId: string): Instance?
-	if plotId == "Plot1" then
-		return Workspace:FindFirstChild(Constants.MASTER_DECOR_NAME)
-	end
-	local n = tonumber(string.match(plotId, "%d+"))
-	if n and n >= 2 then
-		return Workspace:FindFirstChild(Constants.STATIC_PLOT_PREFIX .. tostring(n))
-	end
-	return nil
+local function clearSkyCache()
+	cachedSkyCam = nil
+	cachedFocus = nil
+	cachedPlotId = nil
+	cachedSkyPose = nil
 end
 
 local function resolveSkyParts(): (BasePart?, BasePart?)
@@ -192,54 +188,46 @@ local function resolveSkyParts(): (BasePart?, BasePart?)
 	if plotId and cachedPlotId == plotId and cachedSkyCam and cachedSkyCam.Parent and cachedFocus and cachedFocus.Parent then
 		return cachedSkyCam, cachedFocus
 	end
-	cachedSkyCam = nil
-	cachedFocus = nil
+	clearSkyCache()
 	cachedPlotId = plotId
 
-	local root: Instance? = nil
-	if plotId then
-		root = decorRootForPlot(plotId)
+	local sky, focus = SkyCamParts.findLocalParts()
+	if sky and focus then
+		cachedSkyCam = sky
+		cachedFocus = focus
+		cachedSkyPose = {
+			skyCFrame = sky.CFrame,
+			skySize = sky.Size,
+			focusPos = focus.Position,
+			skyPart = sky,
+			focusPart = focus,
+		}
+		return cachedSkyCam, cachedFocus
 	end
-	-- Fallback to master (plot1 authored path) if plot not assigned yet.
-	if not root then
-		root = Workspace:FindFirstChild(Constants.MASTER_DECOR_NAME)
-	end
-	if not root then
-		return nil, nil
-	end
-
-	local sky: Instance? = root:FindFirstChild(SKY_CAM_NAME)
-	if not sky then
-		sky = root:FindFirstChild(SKY_CAM_NAME, true)
-	end
-	if not (sky and sky:IsA("BasePart")) then
-		return nil, nil
-	end
-	local focus = sky:FindFirstChild(SKY_FOCUS_NAME)
-	if not (focus and focus:IsA("BasePart")) then
-		focus = root:FindFirstChild(SKY_FOCUS_NAME, true)
-	end
-	if not (focus and focus:IsA("BasePart")) then
-		return nil, nil
-	end
-
-	cachedSkyCam = sky
-	cachedFocus = focus :: BasePart
-	return cachedSkyCam, cachedFocus
+	return nil, nil
 end
 
-local function clampToSkyCam(pos: Vector3, sky: BasePart): Vector3
-	local localPos = sky.CFrame:PointToObjectSpace(pos)
-	local half = sky.Size * 0.5
-	local hx = math.max(half.X - MARGIN, 0.05)
-	local hy = math.max(half.Y - MARGIN, 0.05)
-	local hz = math.max(half.Z - MARGIN, 0.05)
-	local clamped = Vector3.new(
-		math.clamp(localPos.X, -hx, hx),
-		math.clamp(localPos.Y, -hy, hy),
-		math.clamp(localPos.Z, -hz, hz)
-	)
-	return sky.CFrame:PointToWorldSpace(clamped)
+-- Prefer live parts; else remapped MasterPlotDecor pose (StaticPlot late / missing SkyCam).
+local function resolveSkyPose(): SkyCamParts.SkyPose?
+	local sky, focus = resolveSkyParts()
+	if sky and focus and cachedSkyPose then
+		-- Refresh live CFrames each call when parts exist.
+		cachedSkyPose = {
+			skyCFrame = sky.CFrame,
+			skySize = sky.Size,
+			focusPos = focus.Position,
+			skyPart = sky,
+			focusPart = focus,
+		}
+		return cachedSkyPose
+	end
+	local pose = SkyCamParts.resolvePose()
+	cachedSkyPose = pose
+	return pose
+end
+
+local function clampToSkyPose(pos: Vector3, pose: SkyCamParts.SkyPose): Vector3
+	return SkyCamParts.clampToPose(pos, pose, MARGIN)
 end
 
 local function lookAtFocus(focusPos: Vector3): CFrame
@@ -968,6 +956,7 @@ local function restoreDefaultCamera()
 		or playerGui:GetAttribute("OceanTD_SharkCamBusy") == true
 		or playerGui:GetAttribute("OceanTD_UrchinCamBusy") == true
 		or playerGui:GetAttribute("OceanTD_ReefDefeatCamBusy") == true
+		or playerGui:GetAttribute("OceanTD_JoinIntroBusy") == true
 	then
 		savedCameraType = nil
 		return
@@ -1108,20 +1097,31 @@ local function tickRoutePatrol(dt: number): Vector3
 end
 
 local setMode: (CamMode) -> ()
+local forceModeOverride = false
 
 local function tickPlotCam(dt: number)
 	local cam = getCamera()
-	local box, focusPart = resolveSkyParts()
-	if not cam or not box or not focusPart then
+	local pose = resolveSkyPose()
+	if not cam or not pose then
 		setMode("off")
 		return
 	end
 	keepCharacterStill()
-	local cf = lookAtFocus(focusPart.Position)
+	local focusPos = pose.focusPos
+	if playerGui:GetAttribute("OceanTD_JoinIntroBusy") == true then
+		local forced = playerGui:GetAttribute("OceanTD_JoinIntroCamPos")
+		if typeof(forced) == "Vector3" then
+			camPos = clampToSkyPose(forced, pose)
+			cam.CameraType = Enum.CameraType.Scriptable
+			cam.CFrame = lookAtFocus(focusPos)
+			return
+		end
+	end
+	local cf = lookAtFocus(focusPos)
 	local wish = readMoveWish(cf)
-	camPos = clampToSkyCam(camPos + wish * moveSpeedForWish() * dt, box)
+	camPos = clampToSkyPose(camPos + wish * moveSpeedForWish() * dt, pose)
 	cam.CameraType = Enum.CameraType.Scriptable
-	cam.CFrame = lookAtFocus(focusPart.Position)
+	cam.CFrame = lookAtFocus(focusPos)
 end
 
 local function tickFishFollow(dt: number)
@@ -1232,6 +1232,12 @@ local function startRenderLoop()
 		if playerGui:GetAttribute("OceanTD_ReefDefeatCamBusy") == true then
 			return
 		end
+		if playerGui:GetAttribute("OceanTD_JoinIntroBusy") == true then
+			-- Still drive plotcam when intro supplies OceanTD_JoinIntroCamPos.
+			if mode ~= "plotcam" then
+				return
+			end
+		end
 		if PlacementController.isActive() or RelocateController.isActive() then
 			setMode("off")
 			return
@@ -1256,6 +1262,9 @@ setMode = function(nextMode: CamMode)
 	if nextMode == mode then
 		return
 	end
+	if not forceModeOverride and playerGui:GetAttribute("OceanTD_JoinIntroBusy") == true then
+		return
+	end
 	if nextMode ~= "off" then
 		if playerGui:GetAttribute("OceanTD_PlotSizeCinematicBusy") == true then
 			return
@@ -1272,12 +1281,15 @@ setMode = function(nextMode: CamMode)
 		if playerGui:GetAttribute("OceanTD_ReefDefeatCamBusy") == true then
 			return
 		end
+		if not forceModeOverride and playerGui:GetAttribute("OceanTD_JoinIntroBusy") == true then
+			return
+		end
 		if PlacementController.isActive() or RelocateController.isActive() then
 			return
 		end
 		if nextMode == "plotcam" then
-			local sky, focus = resolveSkyParts()
-			if not sky or not focus then
+			local pose = resolveSkyPose()
+			if not pose then
 				warn("[CamCycle] SkyCam / SkyCamFocus missing for local plot — PlotCam unavailable")
 				return
 			end
@@ -1307,26 +1319,26 @@ setMode = function(nextMode: CamMode)
 			return
 		end
 		if nextMode == "plotcam" and not resumePreserveView then
-			local sky = resolveSkyParts()
-			if sky then
-				camPos = clampToSkyCam(camPos, sky)
+			local pose = resolveSkyPose()
+			if pose then
+				camPos = clampToSkyPose(camPos, pose)
 			end
 		end
 		lockAvatarForMode()
 	end
 
 	if nextMode == "plotcam" then
-		local sky, focus = resolveSkyParts()
+		local pose = resolveSkyPose()
 		local cam = getCamera()
-		if sky and focus and cam then
+		if pose and cam then
 			cam.CameraType = Enum.CameraType.Scriptable
 			if resumePreserveView then
-				camPos = clampToSkyCam(cam.CFrame.Position, sky)
+				camPos = clampToSkyPose(cam.CFrame.Position, pose)
 				syncLookFromCFrame(cam.CFrame)
 				cam.CFrame = CFrame.new(camPos) * (cam.CFrame - cam.CFrame.Position)
 			else
-				camPos = clampToSkyCam(camPos, sky)
-				cam.CFrame = lookAtFocus(focus.Position)
+				camPos = clampToSkyPose(camPos, pose)
+				cam.CFrame = lookAtFocus(pose.focusPos)
 			end
 		end
 		setDroneLookCapture(false)
@@ -1594,16 +1606,14 @@ player.CharacterAdded:Connect(function()
 end)
 
 ClientPlot.onChanged(function()
-	cachedSkyCam = nil
-	cachedFocus = nil
-	cachedPlotId = nil
+	clearSkyCache()
 	table.clear(routeWaypoints)
 	if mode == "plotcam" then
-		local sky, focus = resolveSkyParts()
-		if not sky or not focus then
+		local pose = resolveSkyPose()
+		if not pose then
 			setMode("off")
 		else
-			camPos = clampToSkyCam(camPos, sky)
+			camPos = clampToSkyPose(camPos, pose)
 		end
 	elseif mode == "fishcam" then
 		resetRoutePatrol(fishFocusPos)
@@ -1886,8 +1896,25 @@ local function bindMobileLeftUi(left: Instance)
 					cinematicResumeMode = mode
 					playerGui:SetAttribute(ATTR_CINEMATIC_RESUME_MODE, mode)
 				end
+				forceModeOverride = true
 				setMode("off")
+				forceModeOverride = false
 			end
+		end)
+
+		playerGui:GetAttributeChangedSignal("OceanTD_ForceCamMode"):Connect(function()
+			local raw = playerGui:GetAttribute("OceanTD_ForceCamMode")
+			if raw ~= "off" and raw ~= "plotcam" and raw ~= "fishcam" and raw ~= "dronecam" then
+				return
+			end
+			if playerGui:GetAttribute("OceanTD_JoinIntroBusy") == true then
+				if raw ~= "plotcam" and raw ~= "off" then
+					return
+				end
+			end
+			forceModeOverride = true
+			setMode(raw :: CamMode)
+			forceModeOverride = false
 		end)
 
 		local function onResumeCinematicCam()

@@ -146,10 +146,9 @@ function ReefScore.sizeBarFillFrac(count: number, total: number, minFrac: number
 	return math.clamp(frac, 0, 1)
 end
 
-local function hueBucketOfPart(part: BasePart): number
-	local painted = part:GetAttribute("OceanTD_ColorIndex")
-	if typeof(painted) == "number" then
-		return PlotOutlineColors.clampCoralIndex(painted)
+local function hueBucketOfIndex(colorIndex: number?): number
+	if typeof(colorIndex) == "number" then
+		return PlotOutlineColors.clampCoralIndex(colorIndex)
 	end
 	return UNPAINTED_BUCKET
 end
@@ -162,7 +161,13 @@ function ReefScore.maxTotal(): number
 		+ ReefScore.SIZE_BONUS_PER_SPECIES * nSpecies
 end
 
-function ReefScore.compute(plotId: string?, parts: { BasePart }): Breakdown
+export type ScoreEntry = {
+	itemId: string,
+	colorIndex: number?,
+	sizeClass: number?,
+}
+
+function ReefScore.computeFromEntries(entries: { ScoreEntry }): Breakdown
 	local defs = catalogDefs()
 	local nSpecies = #defs
 	local maxTotal = ReefScore.maxTotal()
@@ -177,7 +182,7 @@ function ReefScore.compute(plotId: string?, parts: { BasePart }): Breakdown
 		maxTotal = maxTotal,
 		quality = 0,
 	}
-	if typeof(plotId) ~= "string" or plotId == "" or nSpecies == 0 then
+	if nSpecies == 0 then
 		return empty
 	end
 
@@ -197,11 +202,8 @@ function ReefScore.compute(plotId: string?, parts: { BasePart }): Breakdown
 	end
 
 	local placed = 0
-	for _, part in ipairs(parts) do
-		if not part.Parent then
-			continue
-		end
-		local itemId = part:GetAttribute("OceanTD_ItemId")
+	for _, entry in ipairs(entries) do
+		local itemId = entry.itemId
 		if typeof(itemId) ~= "string" then
 			continue
 		end
@@ -211,10 +213,9 @@ function ReefScore.compute(plotId: string?, parts: { BasePart }): Breakdown
 		end
 		placed += 1
 		speciesCounts[si] += 1
-		local hb = hueBucketOfPart(part)
+		local hb = hueBucketOfIndex(entry.colorIndex)
 		hueCountsBySpecies[si][hb] += 1
-		local _, class = CoralSize.readFromPart(part)
-		local c = CoralSize.clampTier(class)
+		local c = CoralSize.clampTier(entry.sizeClass or 1)
 		sizeCountsBySpecies[si][c] += 1
 	end
 
@@ -233,7 +234,6 @@ function ReefScore.compute(plotId: string?, parts: { BasePart }): Breakdown
 		end
 	end
 
-	-- Round to whole points for the title N.
 	abundance = math.floor(abundance + 0.5)
 	speciesBonus = math.floor(speciesBonus + 0.5)
 	hueBonus = math.floor(hueBonus + 0.5)
@@ -251,6 +251,60 @@ function ReefScore.compute(plotId: string?, parts: { BasePart }): Breakdown
 		maxTotal = maxTotal,
 		quality = quality,
 	}
+end
+
+function ReefScore.computeFromLayout(layout: { any }): Breakdown
+	local entries: { ScoreEntry } = {}
+	if typeof(layout) ~= "table" then
+		return ReefScore.computeFromEntries(entries)
+	end
+	for _, obj in ipairs(layout) do
+		if typeof(obj) == "table" and typeof(obj.id) == "string" then
+			local sizeClass = tonumber(obj.sizeClass) or tonumber(obj.sizeTier) or 1
+			table.insert(entries, {
+				itemId = obj.id,
+				colorIndex = tonumber(obj.colorIndex),
+				sizeClass = sizeClass,
+			})
+		end
+	end
+	return ReefScore.computeFromEntries(entries)
+end
+
+function ReefScore.compute(plotId: string?, parts: { BasePart }): Breakdown
+	local maxTotal = ReefScore.maxTotal()
+	local empty: Breakdown = {
+		total = 0,
+		abundance = 0,
+		speciesBonus = 0,
+		hueBonus = 0,
+		sizeBonus = 0,
+		placed = 0,
+		maxTotal = maxTotal,
+		quality = 0,
+	}
+	if typeof(plotId) ~= "string" or plotId == "" then
+		return empty
+	end
+
+	local entries: { ScoreEntry } = {}
+	for _, part in ipairs(parts) do
+		if not part.Parent then
+			continue
+		end
+		local itemId = part:GetAttribute("OceanTD_ItemId")
+		if typeof(itemId) ~= "string" then
+			continue
+		end
+		local _, class = CoralSize.readFromPart(part)
+		local painted = part:GetAttribute("OceanTD_ColorIndex")
+		table.insert(entries, {
+			itemId = itemId,
+			colorIndex = if typeof(painted) == "number" then painted else nil,
+			sizeClass = class,
+		})
+	end
+	return ReefScore.computeFromEntries(entries)
 end
 
 return ReefScore

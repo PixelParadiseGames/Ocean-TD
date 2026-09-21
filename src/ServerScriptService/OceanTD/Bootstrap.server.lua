@@ -27,6 +27,7 @@ local UndoService = require(Services:WaitForChild("UndoService"))
 local PlotSaveService = require(Services:WaitForChild("PlotSaveService"))
 local WaveWatchService = require(Services:WaitForChild("WaveWatchService"))
 local UrchinStingService = require(Services:WaitForChild("UrchinStingService"))
+local FriendPlotPreviewService = require(Services:WaitForChild("FriendPlotPreviewService"))
 
 local Constants = require(oceanRoot:WaitForChild("Shared"):WaitForChild("Constants"))
 
@@ -38,6 +39,7 @@ PlacementService.init()
 PlotSaveService.init()
 WaveWatchService.init()
 UrchinStingService.init()
+FriendPlotPreviewService.init()
 
 do
 	local poses = {}
@@ -50,6 +52,24 @@ do
 	DecorReplicator.replicate(poses)
 	local WaveHeartReplicator = require(Services:WaitForChild("WaveHeartReplicator"))
 	WaveHeartReplicator.replicate(poses)
+
+	-- Stash join-intro template out of the world until the showcase is re-enabled.
+	-- Source stays in ServerStorage.OceanTD_IntroHold.Intro (not Workspace.Plots.Intro).
+	do
+		local ServerStorage = game:GetService("ServerStorage")
+		local plots = Workspace:FindFirstChild("Plots")
+		local intro = plots and plots:FindFirstChild("Intro")
+		if intro then
+			local hold = ServerStorage:FindFirstChild("OceanTD_IntroHold")
+			if not hold then
+				hold = Instance.new("Folder")
+				hold.Name = "OceanTD_IntroHold"
+				hold.Parent = ServerStorage
+			end
+			intro.Parent = hold
+			print("[JoinIntro] Stashed Workspace.Plots.Intro → ServerStorage.OceanTD_IntroHold (showcase disabled)")
+		end
+	end
 end
 
 local plotAssignedRemote = Remotes.get("PlotAssigned")
@@ -101,6 +121,9 @@ local function onPlayerAdded(player: Player)
 		return
 	end
 
+	-- Clear any friend-preview reef on this seat before size apply / hydrate.
+	FriendPlotPreviewService.evictPreview(payload.plotId)
+
 	-- Apply Plot Size stage BEFORE hydrate so layout locals match the Studio box pose.
 	do
 		local plotSizeStage = PersistenceService.getSkillStage(player, "PlotSize")
@@ -132,6 +155,8 @@ local function onPlayerAdded(player: Player)
 	GridService.hydrate(payload.plotId, player.UserId, profile.layout, payload.cframe)
 	PlacementService.hydrateVisuals(payload.plotId, payload.cframe)
 	PlayerSession.markReady(player, payload.plotId)
+	-- Seed reef-score board on join (don't wait for leave/autosave).
+	PersistenceService.publishReefScore(player.UserId, profile.layout, true)
 	PersistenceService.syncWaveRecordAttributes(player)
 	PersistenceService.syncPlotOutlineColorAttribute(player)
 	PersistenceService.syncSandDollarsAttribute(player)
@@ -142,11 +167,17 @@ local function onPlayerAdded(player: Player)
 	Remotes.get("SkillStagesSync"):FireClient(player, PersistenceService.getSkillStagesPayload(player))
 	PersistenceService.syncCoralColorUnlocksToClient(player)
 	PersistenceService.syncHideUiToClient(player)
-	-- Seed wheel auto-roll on by default (StopAutoRoll UI hidden).
-	PersistenceService.setSeedWheelAutoRollEnabled(player, true)
+	do
+		local plot4 = PlotService.getSlotByIndex(4)
+		PersistenceService.syncJoinIntroToClient(player, if plot4 then plot4.ringCFrame else nil)
+	end
+	-- Seed wheel auto-roll off until the player presses START (StopAutoRoll button).
+	PersistenceService.syncSeedWheelAutoRollToClient(player)
 	-- Joiner first (race-safe), then everyone.
 	WaveWatchService.broadcastRoster(player)
 	WaveWatchService.broadcastRoster(nil)
+	-- Fill remaining empty seats with friends' saved reefs (offline OK).
+	FriendPlotPreviewService.scheduleFillEmpty()
 
 	local function hookCharacter(character: Model)
 		onCharacterAdded(player, character)
@@ -184,6 +215,23 @@ local function onPlayerRemoving(player: Player)
 	PersistenceService.release(player)
 	PlayerSession.remove(player)
 	UndoService.clear(player)
+
+	-- PlayerRemoving still lists the leaver in GetPlayers — count everyone else.
+	local others = 0
+	for _, plr in ipairs(Players:GetPlayers()) do
+		if plr ~= player then
+			others += 1
+		end
+	end
+	if others == 0 then
+		FriendPlotPreviewService.clearAllPreviews()
+	elseif plotId then
+		task.spawn(function()
+			FriendPlotPreviewService.fillVacated(plotId)
+		end)
+	else
+		FriendPlotPreviewService.scheduleFillEmpty()
+	end
 end
 
 Players.PlayerAdded:Connect(onPlayerAdded)
@@ -549,4 +597,18 @@ end
 local requestUnlockHideUi = Remotes.getFunction("RequestUnlockHideUi")
 requestUnlockHideUi.OnServerInvoke = function(player: Player)
 	return PersistenceService.tryUnlockHideUi(player)
+end
+
+local requestMarkJoinIntroSeen = Remotes.getFunction("RequestMarkJoinIntroSeen")
+requestMarkJoinIntroSeen.OnServerInvoke = function(player: Player)
+	return PersistenceService.markJoinIntroSeen(player)
+end
+
+local requestGetJoinIntro = Remotes.getFunction("RequestGetJoinIntro")
+requestGetJoinIntro.OnServerInvoke = function(player: Player)
+	local plot4 = PlotService.getSlotByIndex(4)
+	return {
+		hasSeenJoinIntro = PersistenceService.hasSeenJoinIntro(player),
+		introSourceCFrame = if plot4 then plot4.ringCFrame else CFrame.identity,
+	}
 end

@@ -14,6 +14,7 @@ local HueSeeds = require(game:GetService("ReplicatedStorage"):WaitForChild("Ocea
 local HideUiUnlock = require(game:GetService("ReplicatedStorage"):WaitForChild("OceanTD"):WaitForChild("Shared"):WaitForChild("HideUiUnlock"))
 local SkillStages = require(game:GetService("ReplicatedStorage"):WaitForChild("OceanTD"):WaitForChild("Shared"):WaitForChild("SkillStages"))
 local SeedWheel = require(game:GetService("ReplicatedStorage"):WaitForChild("OceanTD"):WaitForChild("Shared"):WaitForChild("SeedWheel"))
+local ReefScore = require(game:GetService("ReplicatedStorage"):WaitForChild("OceanTD"):WaitForChild("Shared"):WaitForChild("ReefScore"))
 local Remotes = require(game:GetService("ReplicatedStorage"):WaitForChild("OceanTD"):WaitForChild("Remotes"))
 
 type PlayerProfile = PlotTypes.PlayerProfile
@@ -25,6 +26,7 @@ type ProcessedReceipt = PlotTypes.ProcessedReceipt
 local PersistenceService = {}
 
 local store: DataStore? = nil
+local reefScoreStore: OrderedDataStore? = nil
 local profiles: { [Player]: PlayerProfile } = {}
 local intentionalClear: { [number]: boolean } = {} -- userId -> allow empty overwrite once
 -- GetAsync failed: session may play, but we must not persist (would write $D = 0).
@@ -58,6 +60,48 @@ local function getStore(): DataStore
 	end
 	store = DataStoreService:GetDataStore(Constants.DATASTORE_NAME)
 	return store :: DataStore
+end
+
+local function getReefScoreStore(): OrderedDataStore
+	if reefScoreStore then
+		return reefScoreStore
+	end
+	reefScoreStore = DataStoreService:GetOrderedDataStore(Constants.REEF_SCORE_ORDERED_STORE)
+	return reefScoreStore :: OrderedDataStore
+end
+
+-- Cleared when scores publish so empty-plot fill can re-fetch.
+local topReefCache: { ids: { number }, at: number }? = nil
+local TOP_REEF_CACHE_TTL = 120
+local TOP_REEF_COUNT = 25
+
+local function publishReefScore(userId: number, layout: { LayoutObject }, waitForDone: boolean?)
+	local total = ReefScore.computeFromLayout(layout).total
+	local score = math.max(0, math.floor(tonumber(total) or 0))
+	local function run()
+		local ok, err = pcall(function()
+			local ods = getReefScoreStore()
+			local key = tostring(userId)
+			if score <= 0 then
+				ods:RemoveAsync(key)
+			else
+				ods:UpdateAsync(key, function(_old)
+					return score
+				end)
+			end
+		end)
+		topReefCache = nil
+		if not ok then
+			warnPersist("ReefScore OrderedDataStore failed for", userId, err)
+		else
+			log("ReefScore published userId=", userId, "score=", score)
+		end
+	end
+	if waitForDone == true then
+		run()
+	else
+		task.spawn(run)
+	end
 end
 
 -- Studio / cloud blips (502) are common; retry a few times before failing the save/load.
@@ -371,6 +415,7 @@ local function sanitizeProfile(raw: any): PlayerProfile
 	profile.skillActiveStages = SkillStages.sanitizeActiveMap(raw.skillActiveStages, profile.skillStages)
 	profile.coralColorUnlocks = {}
 	profile.hideUiUnlocked = raw.hideUiUnlocked == true
+	profile.hasSeenJoinIntro = raw.hasSeenJoinIntro == true
 	profile.version = math.max(profile.version, Constants.PROFILE_VERSION)
 	return profile
 end
@@ -775,6 +820,38 @@ function PersistenceService.syncHideUiToClient(player: Player)
 	Remotes.get("HideUiSync"):FireClient(player, unlocked)
 end
 
+function PersistenceService.hasSeenJoinIntro(player: Player): boolean
+	local profile = profiles[player]
+	if not profile then
+		return false
+	end
+	return profile.hasSeenJoinIntro == true
+end
+
+function PersistenceService.syncJoinIntroToClient(player: Player, introSourceCFrame: CFrame?)
+	local seen = PersistenceService.hasSeenJoinIntro(player)
+	Remotes.get("JoinIntroSync"):FireClient(player, {
+		hasSeenJoinIntro = seen,
+		introSourceCFrame = if typeof(introSourceCFrame) == "CFrame" then introSourceCFrame else CFrame.identity,
+	})
+end
+
+function PersistenceService.markJoinIntroSeen(player: Player): { ok: boolean, errorCode: string? }
+	local profile = profiles[player]
+	if not profile then
+		return { ok = false, errorCode = "NoProfile" }
+	end
+	if profile.hasSeenJoinIntro then
+		return { ok = true }
+	end
+	profile.hasSeenJoinIntro = true
+	task.spawn(function()
+		PersistenceService.save(player)
+	end)
+	PersistenceService.syncJoinIntroToClient(player, nil)
+	return { ok = true }
+end
+
 function PersistenceService.tryUnlockHideUi(player: Player): {
 	ok: boolean,
 	errorCode: string?,
@@ -1148,7 +1225,7 @@ local function fulfillSeedWheel(player: Player, pending: SeedWheelPending)
 end
 
 -- Start a random coral seed wheel for the player. Seed is credited after claim (or timeout).
-function PersistenceService.beginSeedWheelGrant(player: Player, amount: number?): (boolean, string?)
+function PersistenceService.beginSeedWheelGrant(player: Player, amount: number?, manual: boolean?): (boolean, string?)
 	if not player or not player.Parent then
 		return false, "NoPlayer"
 	end
@@ -1159,7 +1236,8 @@ function PersistenceService.beginSeedWheelGrant(player: Player, amount: number?)
 	if seedWheelPending[userId] then
 		return false, "Busy"
 	end
-	if not isSeedWheelAutoRollEnabled(userId) then
+	-- Manual tap grants one seed and does not require (or enable) auto-roll.
+	if manual ~= true and not isSeedWheelAutoRollEnabled(userId) then
 		return false, "AutoRollOff"
 	end
 	local add = math.max(1, math.floor(tonumber(amount) or 1))
@@ -1221,6 +1299,9 @@ function PersistenceService.initSeedWheel()
 			return
 		end
 		PersistenceService.setSeedWheelAutoRollEnabled(player, enabled)
+	end)
+	Remotes.get("SeedWheelRollOnce").OnServerEvent:Connect(function(player: Player)
+		PersistenceService.beginSeedWheelGrant(player, 1, true)
 	end)
 	Players.PlayerRemoving:Connect(function(player)
 		clearSeedWheelPending(player.UserId)
@@ -1412,6 +1493,7 @@ function PersistenceService.save(player: Player, layoutOverride: { LayoutObject 
 		skillActiveStages = SkillStages.sanitizeActiveMap(profile.skillActiveStages, profile.skillStages),
 		coralColorUnlocks = {},
 		hideUiUnlocked = profile.hideUiUnlocked == true,
+		hasSeenJoinIntro = profile.hasSeenJoinIntro == true,
 	}
 
 	local saved = false
@@ -1476,6 +1558,9 @@ function PersistenceService.save(player: Player, layoutOverride: { LayoutObject 
 	profile.processedReceipts = cloneReceipts(toWrite.processedReceipts)
 	profile.currencies.sandDollars = clampSandDollars(toWrite.currencies.sandDollars)
 	PersistenceService.syncSandDollarsAttribute(player)
+	if saved then
+		publishReefScore(userId, toWrite.layout)
+	end
 	return saved
 end
 
@@ -1484,6 +1569,65 @@ function PersistenceService.release(player: Player)
 	loadFailed[player] = nil
 	feedRate[player] = nil
 	inventorySyncQueued[player] = nil
+end
+
+-- Top N reef-report scores (descending). Cached briefly for empty-plot previews.
+function PersistenceService.getTopReefUserIds(limit: number?): { number }
+	local n = math.clamp(math.floor(tonumber(limit) or TOP_REEF_COUNT), 1, 50)
+	local now = os.clock()
+	if topReefCache and (now - topReefCache.at) < TOP_REEF_CACHE_TTL and #topReefCache.ids >= 1 then
+		return topReefCache.ids
+	end
+	local ids: { number } = {}
+	local ok, pages = pcall(function()
+		return getReefScoreStore():GetSortedAsync(false, n)
+	end)
+	if not ok or pages == nil then
+		warnPersist("GetSortedAsync reef scores failed", pages)
+		topReefCache = { ids = ids, at = now }
+		return ids
+	end
+	local pageOk, page = pcall(function()
+		return (pages :: any):GetCurrentPage()
+	end)
+	if pageOk and typeof(page) == "table" then
+		for _, entry in ipairs(page) do
+			if typeof(entry) == "table" then
+				local key = entry.key or entry.Key
+				local userId = tonumber(key)
+				local value = tonumber(entry.value or entry.Value) or 0
+				if userId and userId > 0 and value > 0 then
+					table.insert(ids, userId)
+				end
+			end
+		end
+	end
+	topReefCache = { ids = ids, at = now }
+	log("Top reef scores loaded count=", #ids)
+	return ids
+end
+
+-- Publish active layout score (join seed + saves). waitForDone=true before first empty-plot fill.
+function PersistenceService.publishReefScore(userId: number, layout: { LayoutObject }, waitForDone: boolean?)
+	publishReefScore(userId, layout, waitForDone)
+end
+
+-- Offline GetAsync for friend-plot previews. Never caches into `profiles` (no save path).
+function PersistenceService.loadOfflineProfile(userId: number): PlayerProfile?
+	if typeof(userId) ~= "number" or userId <= 0 then
+		return nil
+	end
+	local ok, result = withDataStoreRetry("GetAsyncOffline", userId, function()
+		return getStore():GetAsync(keyFor(userId))
+	end)
+	if not ok then
+		warnPersist("Offline GetAsync failed for", userId, result)
+		return nil
+	end
+	if result == nil then
+		return nil
+	end
+	return sanitizeProfile(result)
 end
 
 return PersistenceService

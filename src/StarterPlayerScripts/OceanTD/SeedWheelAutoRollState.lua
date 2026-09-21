@@ -3,8 +3,21 @@
 
 local SeedWheelAutoRollState = {}
 
-local enabled = true
+local enabled = false
+local manualArmed = false
 local changed = Instance.new("BindableEvent")
+
+function SeedWheelAutoRollState.armManual()
+	manualArmed = true
+end
+
+function SeedWheelAutoRollState.consumeManual(): boolean
+	if not manualArmed then
+		return false
+	end
+	manualArmed = false
+	return true
+end
 
 function SeedWheelAutoRollState.isEnabled(): boolean
 	return enabled
