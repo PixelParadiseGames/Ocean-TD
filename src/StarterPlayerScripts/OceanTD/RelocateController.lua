@@ -2,7 +2,8 @@
 --[[
 	Relocate a previously placed coral while the backpack is open.
 	Click coral → move icon + X scale up from its center.
-	X (unmoved) → close tool. Drag → show ✓. ✓ saves and closes; X after drag reverts.
+	X (unmoved) → close tool. Drag / rotate saves immediately on release (undo covers mistakes).
+	Recycle still uses ✓ confirm.
 ]]
 
 local Players = game:GetService("Players")
@@ -120,6 +121,7 @@ local hasRotated = false
 -- Forward decls: makeUi's rot-hold closures call these before their definitions below.
 local rotateSelectedSeaFan: (dir: number) -> ()
 local rotateBrainSnapOrbit: (dir: number) -> ()
+local finalizeMoveOrRotateIfReady: () -> ()
 
 local frozen = false
 local savedWalkSpeed = C.DEFAULT_WALK_SPEED
@@ -215,6 +217,7 @@ local function clampGamepadCursor(pos: Vector2): Vector2
 end
 
 -- GetMouseLocation is viewport space. Pair with ViewportPointToRay / WorldToViewportPoint.
+-- Mouse world picks use PlayerMouse.UnitRay (see RelocatePickHover) — same as PlaceRaycast.
 local function viewportRay(cam: Camera, vp: Vector2): Ray
 	return cam:ViewportPointToRay(vp.X, vp.Y)
 end
@@ -1101,15 +1104,15 @@ local function syncChrome()
 	end
 
 	-- Idle close (exit tool): keyboard/mouse instantly; gamepad after 3s.
-	-- After a move / recycle confirm: always show cancel for that action.
+	-- After recycle confirm: always show cancel for that action. Move/rotate auto-commit (no ✓).
 	local idleCloseReady = (not gamepadRelocate) or ((os.clock() - relocateShownAt) >= C.IDLE_CLOSE_DELAY_SEC)
 	local showIdleClose = (not hasMoved) and (not hasRotated) and (not recyclePending) and idleCloseReady
 	local showCancel = hasMoved or recyclePending or showIdleClose
 	cancelBtn.Visible = showCancel
 	local tipLetter = if gamepadRelocate then "B" else "X"
 	local showWord = (math.floor((os.clock() - gamepadChromeT0) / C.HOVER_HINT_PERIOD) % 2) == 1
-	-- Recycle confirm: ✓/X over the avatar waist (same as move cancel), not coral tip.
-	checkBtn.Visible = (hasMoved and validSpot) or hasRotated or recyclePending
+	-- Recycle confirm only: move/rotate save immediately on release (undo covers mistakes).
+	checkBtn.Visible = recyclePending
 
 	-- Keep button size fixed — shrinking on rotate made the whole chrome jump.
 	layoutWaistChrome(C.BTN_SIZE, checkBtn.Visible)
@@ -1356,6 +1359,7 @@ end
 
 local function startLoop()
 	stopLoop()
+	local stickWasAiming = false
 	loopConn = RunService.RenderStepped:Connect(function(dt)
 		if not active then
 			return
@@ -1367,6 +1371,7 @@ local function startLoop()
 			local stick = readThumbstick1()
 			local mag = stick.Magnitude
 			if mag > C.GAMEPAD_STICK_DEADZONE then
+				stickWasAiming = true
 				local screen = if part then worldToViewport(Workspace.CurrentCamera :: Camera, coralChromeWorldPos(part)) else nil
 				if not gamepadCursor then
 					gamepadCursor = screen or UserInputService:GetMouseLocation()
@@ -1378,6 +1383,10 @@ local function startLoop()
 				if pos then
 					updateAt(pos)
 				end
+			elseif stickWasAiming then
+				stickWasAiming = false
+				-- Stick released after a move: save immediately (same as mouse drag end).
+				finalizeMoveOrRotateIfReady()
 			end
 		end
 		syncChrome()
@@ -1555,6 +1564,10 @@ function RelocateController.setCinematicHold(on: boolean)
 	else
 		busy = false
 	end
+end
+
+function RelocateController.isCinematicHold(): boolean
+	return cinematicHold == true
 end
 
 function RelocateController.setInspectModal(on: boolean)
@@ -2518,11 +2531,9 @@ table.insert(inputConns, UserInputService.InputBegan:Connect(function(input, _pr
 			return
 		end
 		local screenPos = PlaceConfirmHitTest.pointerScreenPos(input)
-		-- World picks use viewport space (GetMouseLocation / Touch Position).
-		-- PlaceConfirmHitTest adds GuiInset for touch — that breaks ViewportPointToRay.
-		local pickPos = if isTouch
-			then Vector2.new(input.Position.X, input.Position.Y)
-			else UserInputService:GetMouseLocation()
+		-- World picks: GetMouseLocation tracks mouse and touch in viewport space.
+		-- Do not use PlaceConfirmHitTest's touch+inset for rays (that parks hits above the finger).
+		local pickPos = UserInputService:GetMouseLocation()
 		-- Move handle wins over ✓/X/recycle so grabbing the icon starts a drag.
 		local grabHandle = isOverMoveIcon(screenPos)
 		if not grabHandle then
@@ -2689,14 +2700,27 @@ table.insert(inputConns, UserInputService.InputChanged:Connect(function(input, _
 	end
 end))
 
+finalizeMoveOrRotateIfReady = function()
+	if not active or busy or recyclePending then
+		return
+	end
+	if not hasMoved and not hasRotated then
+		return
+	end
+	if validSpot then
+		RelocateController.commit()
+	else
+		-- Invalid drop: revert instead of leaving a stuck confirm state.
+		RelocateController.cancel()
+	end
+end
+
 table.insert(inputConns, UserInputService.InputEnded:Connect(function(input, _processed)
 	if input.UserInputType ~= Enum.UserInputType.MouseButton1 and input.UserInputType ~= Enum.UserInputType.Touch then
 		return
 	end
 	local screenPos = PlaceConfirmHitTest.pointerScreenPos(input)
-	local pickPos = if input.UserInputType == Enum.UserInputType.Touch
-		then Vector2.new(input.Position.X, input.Position.Y)
-		else UserInputService:GetMouseLocation()
+	local pickPos = UserInputService:GetMouseLocation()
 	local switchTarget = pendingCoralSwitch
 	local switchOrigin = pendingCoralSwitchScreen
 	local shiftTarget, shiftOrigin = RelocateMultiSelect.getPendingShift()
@@ -2720,6 +2744,8 @@ table.insert(inputConns, UserInputService.InputEnded:Connect(function(input, _pr
 	if active and wasChrome and chromeTarget then
 		if chromeTarget == "rotLeft" or chromeTarget == "rotRight" then
 			PlaceConfirmChrome.stopRotateHold()
+			-- Rotate is final on release (no ✓).
+			finalizeMoveOrRotateIfReady()
 			return
 		end
 		PlaceConfirmChrome.stopRotateHold()
@@ -2758,6 +2784,11 @@ table.insert(inputConns, UserInputService.InputEnded:Connect(function(input, _pr
 			RelocateController.begin(switchTarget)
 			return
 		end
+	end
+
+	-- Drag release: move is final when valid (undo covers mistakes).
+	if active and wasDragging then
+		finalizeMoveOrRotateIfReady()
 	end
 
 	-- Tap fallback: if press didn't open the tool (processed/ray miss), try again on release.

@@ -36,8 +36,16 @@ local layoutCache: {
 } =
 	{}
 local FRIEND_CACHE_TTL = 300
+-- Studio GetAsync budget is tiny; keep probes sparse and abort on rate-limit.
+local MAX_OFFLINE_PROBES_PER_PICK = 3
+local MAX_OFFLINE_PROBES_PER_PLOT = 5
+local MAX_OFFLINE_PROBES_PER_FILL = 12
+local PROBE_GAP_SEC = 0.85
 local fillGen = 0
 local fillQueued = false
+local plotProbeCount = 0
+local fillProbeCount = 0
+local fillPaused = false
 
 local function log(...: any)
 	print("[FRIEND_PREVIEW]", ...)
@@ -131,15 +139,27 @@ local function unionFriendCandidates(): { number }
 	return out
 end
 
-local function readOfflineLayout(userId: number): ( { LayoutObject }, number, number?, boolean )
+local function readOfflineLayout(userId: number): ( { LayoutObject }, number, number?, boolean, boolean )
 	local cached = layoutCache[userId]
 	if cached then
-		return cached.layout, cached.plotSizeStage, cached.savedLayoutStage, cached.empty
+		return cached.layout, cached.plotSizeStage, cached.savedLayoutStage, cached.empty, false
 	end
-	local profile = PersistenceService.loadOfflineProfile(userId)
+	if PersistenceService.isOfflineGetPaused() then
+		return {}, 1, nil, true, true
+	end
+	local profile, fetched = PersistenceService.loadOfflineProfile(userId)
+	if PersistenceService.isOfflineGetPaused() or not fetched then
+		-- Rate-limited / failed — nil is not a confirmed empty reef.
+		return {}, 1, nil, true, PersistenceService.isOfflineGetPaused()
+	end
 	if not profile then
-		layoutCache[userId] = { layout = {}, plotSizeStage = 1, savedLayoutStage = nil, empty = true }
-		return {}, 1, nil, true
+		layoutCache[userId] = {
+			layout = {},
+			plotSizeStage = 1,
+			savedLayoutStage = nil,
+			empty = true,
+		}
+		return {}, 1, nil, true, false
 	end
 	local unlocked = SkillStages.sanitizeMap(profile.skillStages)
 	local active = SkillStages.sanitizeActiveMap(profile.skillActiveStages, unlocked)
@@ -157,13 +177,8 @@ local function readOfflineLayout(userId: number): ( { LayoutObject }, number, nu
 		savedLayoutStage = savedLayoutStage,
 		empty = empty,
 	}
-	-- Opportunistically seed/update the global reef-score board from offline layouts.
-	if not empty then
-		task.spawn(function()
-			PersistenceService.publishReefScore(userId, layout, false)
-		end)
-	end
-	return layout, stage, savedLayoutStage, empty
+	-- Don't publish reef scores during fill — UpdateAsync competes with GetAsync budget.
+	return layout, stage, savedLayoutStage, empty, false
 end
 
 local function forgetPreview(plotId: string)
@@ -213,26 +228,50 @@ local function hydrateFriend(
 	usedPreviewIds[friendUserId] = true
 	PlotService.setPreviewUserId(plotId, friendUserId)
 	log("Filled", plotId, "with preview", friendUserId, "corals=", #layoutCopy, "plotSize=", plotSizeStage)
+	-- Score publish only for seats we actually filled (not every probe).
+	task.delay(8 + math.random() * 6, function()
+		if previewByPlot[plotId] == friendUserId and not PersistenceService.isOfflineGetPaused() then
+			pcall(function()
+				PersistenceService.publishReefScore(friendUserId, layout, false)
+			end)
+		end
+	end)
 	return true
 end
 
 local function pickFromCandidates(candidates: { number }, allowReuse: boolean): (number?, { LayoutObject }, number, number?)
-	local nonempty: { number } = {}
-	for _, uid in ipairs(candidates) do
+	-- Probe one-at-a-time (shuffled) and stop at first nonempty — do not GetAsync every friend/top entry.
+	local order = table.clone(candidates)
+	shuffleInPlace(order)
+	local probed = 0
+	for _, uid in ipairs(order) do
+		if fillPaused or PersistenceService.isOfflineGetPaused() then
+			fillPaused = true
+			break
+		end
+		if plotProbeCount >= MAX_OFFLINE_PROBES_PER_PLOT or fillProbeCount >= MAX_OFFLINE_PROBES_PER_FILL then
+			break
+		end
 		if allowReuse or not usedPreviewIds[uid] then
-			local _layout, _stage, _saved, empty = readOfflineLayout(uid)
-			if not empty then
-				table.insert(nonempty, uid)
+			if probed >= MAX_OFFLINE_PROBES_PER_PICK then
+				break
 			end
+			probed += 1
+			plotProbeCount += 1
+			fillProbeCount += 1
+			local layout, stage, saved, empty, paused = readOfflineLayout(uid)
+			if paused then
+				fillPaused = true
+				log("Offline GetAsync paused — stopping preview probes")
+				break
+			end
+			if not empty then
+				return uid, layout, stage, saved
+			end
+			task.wait(PROBE_GAP_SEC)
 		end
 	end
-	shuffleInPlace(nonempty)
-	if #nonempty == 0 then
-		return nil, {}, 1, nil
-	end
-	local uid = nonempty[1]
-	local layout, stage, saved = readOfflineLayout(uid)
-	return uid, layout, stage, saved
+	return nil, {}, 1, nil
 end
 
 local function topReefCandidates(allowReuse: boolean): { number }
@@ -250,21 +289,29 @@ local function topReefCandidates(allowReuse: boolean): { number }
 end
 
 local function pickPreviewForFill(friendCandidates: { number }): (number?, { LayoutObject }, number, number?)
+	if fillPaused or PersistenceService.isOfflineGetPaused() then
+		fillPaused = true
+		return nil, {}, 1, nil
+	end
 	-- 1) Unique friends with reefs
 	local uid, layout, stage, saved = pickFromCandidates(friendCandidates, false)
-	if uid then
+	if uid or fillPaused then
 		return uid, layout, stage, saved
 	end
 	-- 2) Unique top-25 reef scores
 	uid, layout, stage, saved = pickFromCandidates(topReefCandidates(false), false)
-	if uid then
-		log("Top-reef unique pick", uid)
+	if uid or fillPaused then
+		if uid then
+			log("Top-reef unique pick", uid)
+		end
 		return uid, layout, stage, saved
 	end
 	-- 3) Reuse top-25 (high-score reefs can fill multiple empty seats)
 	uid, layout, stage, saved = pickFromCandidates(topReefCandidates(true), true)
-	if uid then
-		log("Top-reef reuse pick", uid)
+	if uid or fillPaused then
+		if uid then
+			log("Top-reef reuse pick", uid)
+		end
 		return uid, layout, stage, saved
 	end
 	-- 4) Last resort: reuse friend reefs
@@ -304,22 +351,35 @@ function FriendPlotPreviewService.fillEmptyPlots()
 	end
 	fillGen += 1
 	local token = fillGen
+	fillProbeCount = 0
+	fillPaused = PersistenceService.isOfflineGetPaused()
+	if fillPaused then
+		log("Skip fill — offline GetAsync still cooling down")
+		return
+	end
 	local friends = unionFriendCandidates()
 	local free = PlotService.listFreePlotIds()
 	shuffleInPlace(free)
 	local filled = 0
 	local skipped = 0
+	local probesTotal = 0
 	for _, plotId in ipairs(free) do
 		if token ~= fillGen then
 			return
 		end
+		if fillPaused or fillProbeCount >= MAX_OFFLINE_PROBES_PER_FILL then
+			log("Stopping fill early paused=", fillPaused, "probes=", fillProbeCount)
+			break
+		end
 		if PlotService.getPlotOwner(plotId) == nil and previewByPlot[plotId] == nil then
+			plotProbeCount = 0
 			if fillPlotId(plotId, friends) then
 				filled += 1
 			else
 				skipped += 1
 			end
-			task.wait(0.05)
+			probesTotal += plotProbeCount
+			task.wait(0.75)
 		end
 	end
 	log(
@@ -327,6 +387,8 @@ function FriendPlotPreviewService.fillEmptyPlots()
 		filled,
 		"skipped=",
 		skipped,
+		"probes=",
+		probesTotal,
 		"friendPool=",
 		#friends,
 		"topPool=",
@@ -355,7 +417,12 @@ function FriendPlotPreviewService.scheduleFillEmpty()
 	fillQueued = true
 	task.defer(function()
 		fillQueued = false
-		task.wait(0.35)
+		-- Give the joining player's GetAsync / save budget time to settle first.
+		task.wait(2.5)
+		local waitDeadline = os.clock() + 50
+		while PersistenceService.isOfflineGetPaused() and os.clock() < waitDeadline do
+			task.wait(1)
+		end
 		FriendPlotPreviewService.fillEmptyPlots()
 	end)
 end

@@ -52,6 +52,14 @@ local function isTransientDataStoreError(err: any): boolean
 		or string.find(msg, "throttl", 1, true) ~= nil
 		or string.find(msg, "429", 1, true) ~= nil
 		or string.find(msg, "busy", 1, true) ~= nil
+		or string.find(msg, "too many requests", 1, true) ~= nil
+end
+
+local function isRateLimitedError(err: any): boolean
+	local msg = string.lower(tostring(err))
+	return string.find(msg, "too many requests", 1, true) ~= nil
+		or string.find(msg, "throttl", 1, true) ~= nil
+		or string.find(msg, "429", 1, true) ~= nil
 end
 
 local function getStore(): DataStore
@@ -74,6 +82,31 @@ end
 local topReefCache: { ids: { number }, at: number }? = nil
 local TOP_REEF_CACHE_TTL = 120
 local TOP_REEF_COUNT = 25
+
+-- Offline preview GetAsync cache (positive + negative) to avoid join-time storms.
+local offlineProfileCache: {
+	[number]: { profile: PlayerProfile?, expiresAt: number },
+} = {}
+local OFFLINE_CACHE_OK_TTL = 300
+local OFFLINE_CACHE_MISS_TTL = 90
+local OFFLINE_RATE_LIMIT_COOLDOWN = 45
+local offlineGetGate = false
+local offlineRateLimitUntil = 0
+
+local function waitForGetAsyncBudget(minBudget: number?)
+	local need = math.max(1, math.floor(tonumber(minBudget) or 1))
+	for _ = 1, 40 do
+		local budget = DataStoreService:GetRequestBudgetForRequestType(Enum.DataStoreRequestType.GetAsync)
+		if budget >= need then
+			return
+		end
+		task.wait(0.35)
+	end
+end
+
+function PersistenceService.isOfflineGetPaused(): boolean
+	return os.clock() < offlineRateLimitUntil
+end
 
 local function publishReefScore(userId: number, layout: { LayoutObject }, waitForDone: boolean?)
 	local total = ReefScore.computeFromLayout(layout).total
@@ -107,7 +140,7 @@ end
 -- Studio / cloud blips (502) are common; retry a few times before failing the save/load.
 local function withDataStoreRetry(label: string, userId: number, fn: () -> any): (boolean, any)
 	local attempts = 4
-	local delaySec = 0.4
+	local delaySec = 0.5
 	local lastErr: any = nil
 	for attempt = 1, attempts do
 		local ok, result = pcall(fn)
@@ -117,8 +150,37 @@ local function withDataStoreRetry(label: string, userId: number, fn: () -> any):
 		lastErr = result
 		if attempt < attempts and isTransientDataStoreError(result) then
 			warnPersist(label, "transient fail for", userId, "attempt", attempt, "/", attempts, result)
+			if isRateLimitedError(result) then
+				delaySec = math.max(delaySec, 2)
+			end
 			task.wait(delaySec)
-			delaySec = math.min(delaySec * 2, 3)
+			delaySec = math.min(delaySec * 2, 8)
+		else
+			break
+		end
+	end
+	return false, tostring(lastErr)
+end
+
+-- Offline preview gets: fail fast on rate-limit so we don't burn the shared GetAsync budget.
+local function withOfflineGetRetry(label: string, userId: number, fn: () -> any): (boolean, any)
+	local attempts = 2
+	local delaySec = 1.5
+	local lastErr: any = nil
+	for attempt = 1, attempts do
+		local ok, result = pcall(fn)
+		if ok then
+			return true, result
+		end
+		lastErr = result
+		if isRateLimitedError(result) then
+			warnPersist(label, "rate-limited for", userId, "— aborting retries")
+			return false, tostring(lastErr)
+		end
+		if attempt < attempts and isTransientDataStoreError(result) then
+			warnPersist(label, "transient fail for", userId, "attempt", attempt, "/", attempts, result)
+			task.wait(delaySec)
+			delaySec = math.min(delaySec * 2, 6)
 		else
 			break
 		end
@@ -209,6 +271,14 @@ local function sanitizeLayout(raw: any): { LayoutObject }
 			if typeof(obj.parentPlaceId) == "string" and obj.parentPlaceId ~= "" then
 				entry.parentPlaceId = obj.parentPlaceId
 			end
+			local fedTotal = tonumber(obj.fedTotal)
+			if fedTotal and fedTotal > 0 then
+				entry.fedTotal = math.floor(fedTotal)
+			end
+			local wavesTotal = tonumber(obj.wavesTotal)
+			if wavesTotal and wavesTotal > 0 then
+				entry.wavesTotal = math.floor(wavesTotal)
+			end
 			table.insert(layout, entry)
 		end
 	end
@@ -243,6 +313,8 @@ local function cloneLayout(layout: { LayoutObject }): { LayoutObject }
 			webColorB = obj.webColorB,
 			placeId = obj.placeId,
 			parentPlaceId = obj.parentPlaceId,
+			fedTotal = obj.fedTotal,
+			wavesTotal = obj.wavesTotal,
 		})
 	end
 	return out
@@ -1176,6 +1248,7 @@ end
 type SeedWheelPending = { itemId: string, token: number, amount: number, colorIndex: number, at: number }
 local seedWheelPending: { [number]: SeedWheelPending } = {}
 local seedWheelAutoRollEnabled: { [number]: boolean } = {}
+local seedWheelAutoRollRemaining: { [number]: number } = {}
 local seedWheelTokenSeq = 0
 local SEED_WHEEL_CLAIM_TIMEOUT_SEC = 25
 
@@ -1187,11 +1260,43 @@ local function isSeedWheelAutoRollEnabled(userId: number): boolean
 	return seedWheelAutoRollEnabled[userId] == true
 end
 
+local function autoRollActiveStage(player: Player): number
+	local active = PersistenceService.getSkillActiveStages(player)
+	return SkillStages.clampStageFor("AutoRoll", active.AutoRoll or SkillStages.MIN_STAGE)
+end
+
+local function autoRollBudgetForPlayer(player: Player): number
+	local stages = PersistenceService.getSkillStages(player)
+	if SkillStages.isSkillLocked("AutoRoll", stages) then
+		return 0
+	end
+	return SkillStages.autoRollBudgetAtStage(autoRollActiveStage(player))
+end
+
+local function remainingWirePayload(userId: number): number?
+	if not isSeedWheelAutoRollEnabled(userId) then
+		return nil
+	end
+	local rem = seedWheelAutoRollRemaining[userId]
+	if typeof(rem) ~= "number" then
+		return nil
+	end
+	if rem == math.huge then
+		return -1
+	end
+	return rem
+end
+
 function PersistenceService.syncSeedWheelAutoRollToClient(player: Player)
 	if not player or not player.Parent then
 		return
 	end
-	Remotes.get("SeedWheelAutoRollSync"):FireClient(player, isSeedWheelAutoRollEnabled(player.UserId))
+	local userId = player.UserId
+	Remotes.get("SeedWheelAutoRollSync"):FireClient(
+		player,
+		isSeedWheelAutoRollEnabled(userId),
+		remainingWirePayload(userId)
+	)
 end
 
 function PersistenceService.setSeedWheelAutoRollEnabled(player: Player, enabled: boolean)
@@ -1200,8 +1305,19 @@ function PersistenceService.setSeedWheelAutoRollEnabled(player: Player, enabled:
 	end
 	local userId = player.UserId
 	local next = enabled == true
+	if next then
+		local budget = autoRollBudgetForPlayer(player)
+		if budget <= 0 then
+			next = false
+			seedWheelAutoRollRemaining[userId] = nil
+		else
+			seedWheelAutoRollRemaining[userId] = budget
+		end
+	else
+		seedWheelAutoRollRemaining[userId] = nil
+	end
 	seedWheelAutoRollEnabled[userId] = next
-	Remotes.get("SeedWheelAutoRollSync"):FireClient(player, next)
+	Remotes.get("SeedWheelAutoRollSync"):FireClient(player, next, remainingWirePayload(userId))
 	if next then
 		task.defer(function()
 			if player.Parent and isSeedWheelAutoRollEnabled(userId) and not seedWheelPending[userId] then
@@ -1215,13 +1331,24 @@ local function fulfillSeedWheel(player: Player, pending: SeedWheelPending)
 	clearSeedWheelPending(player.UserId)
 	PersistenceService.creditHueSeed(player, pending.itemId, pending.colorIndex, pending.amount)
 	log("SeedWheel grant", pending.itemId, "hue", pending.colorIndex, "x", pending.amount, "for", player.Name)
-	if isSeedWheelAutoRollEnabled(player.UserId) then
-		task.defer(function()
-			if player.Parent and isSeedWheelAutoRollEnabled(player.UserId) then
-				PersistenceService.beginSeedWheelGrant(player, 1)
-			end
-		end)
+	if not isSeedWheelAutoRollEnabled(player.UserId) then
+		return
 	end
+	local rem = seedWheelAutoRollRemaining[player.UserId]
+	if typeof(rem) == "number" and rem ~= math.huge then
+		rem -= 1
+		seedWheelAutoRollRemaining[player.UserId] = rem
+		if rem <= 0 then
+			PersistenceService.setSeedWheelAutoRollEnabled(player, false)
+			return
+		end
+	end
+	PersistenceService.syncSeedWheelAutoRollToClient(player)
+	task.defer(function()
+		if player.Parent and isSeedWheelAutoRollEnabled(player.UserId) then
+			PersistenceService.beginSeedWheelGrant(player, 1)
+		end
+	end)
 end
 
 -- Start a random coral seed wheel for the player. Seed is credited after claim (or timeout).
@@ -1306,6 +1433,7 @@ function PersistenceService.initSeedWheel()
 	Players.PlayerRemoving:Connect(function(player)
 		clearSeedWheelPending(player.UserId)
 		seedWheelAutoRollEnabled[player.UserId] = nil
+		seedWheelAutoRollRemaining[player.UserId] = nil
 	end)
 end
 
@@ -1405,6 +1533,7 @@ function PersistenceService.load(player: Player): PlayerProfile
 	local userId = player.UserId
 	local profile = PlotTypes.defaultProfile()
 
+	waitForGetAsyncBudget()
 	local ok, result = withDataStoreRetry("GetAsync", userId, function()
 		return getStore():GetAsync(keyFor(userId))
 	end)
@@ -1613,21 +1742,82 @@ function PersistenceService.publishReefScore(userId: number, layout: { LayoutObj
 end
 
 -- Offline GetAsync for friend-plot previews. Never caches into `profiles` (no save path).
-function PersistenceService.loadOfflineProfile(userId: number): PlayerProfile?
+-- Returns profile, fetched — fetched=false means paused/error (do not treat as confirmed empty).
+function PersistenceService.loadOfflineProfile(userId: number): (PlayerProfile?, boolean)
 	if typeof(userId) ~= "number" or userId <= 0 then
-		return nil
+		return nil, false
 	end
-	local ok, result = withDataStoreRetry("GetAsyncOffline", userId, function()
-		return getStore():GetAsync(keyFor(userId))
+	local now = os.clock()
+	local cached = offlineProfileCache[userId]
+	if cached and now < cached.expiresAt then
+		return cached.profile, true
+	end
+
+	-- After TooManyRequests, pause offline probes so Studio / live budget can recover.
+	if now < offlineRateLimitUntil then
+		if cached then
+			return cached.profile, true
+		end
+		return nil, false
+	end
+
+	-- Serialize offline gets so fillEmptyPlots can't stampede GetAsync budget.
+	while offlineGetGate do
+		if os.clock() < offlineRateLimitUntil then
+			return nil, false
+		end
+		task.wait(0.05)
+	end
+	if os.clock() < offlineRateLimitUntil then
+		return nil, false
+	end
+	offlineGetGate = true
+	local ok, result
+	local profile: PlayerProfile? = nil
+	local skipCache = false
+	local fetched = false
+	local success, err = pcall(function()
+		-- Leave headroom for the joining player's own GetAsync / saves.
+		waitForGetAsyncBudget(2)
+		if os.clock() < offlineRateLimitUntil then
+			skipCache = true
+			return
+		end
+		ok, result = withOfflineGetRetry("GetAsyncOffline", userId, function()
+			return getStore():GetAsync(keyFor(userId))
+		end)
+		if not ok then
+			if isRateLimitedError(result) then
+				offlineRateLimitUntil = os.clock() + OFFLINE_RATE_LIMIT_COOLDOWN
+				-- Don't poison this user as "empty" — pause all offline probes instead.
+				skipCache = true
+			end
+			warnPersist("Offline GetAsync failed for", userId, result)
+			profile = nil
+			return
+		end
+		fetched = true
+		if result == nil then
+			profile = nil
+			return
+		end
+		profile = sanitizeProfile(result)
 	end)
-	if not ok then
-		warnPersist("Offline GetAsync failed for", userId, result)
-		return nil
+	offlineGetGate = false
+	if not success then
+		warnPersist("Offline GetAsync gate error for", userId, err)
+		profile = nil
+		fetched = false
 	end
-	if result == nil then
-		return nil
+	if skipCache then
+		return nil, false
 	end
-	return sanitizeProfile(result)
+	if not fetched then
+		return nil, false
+	end
+	local ttl = if profile ~= nil then OFFLINE_CACHE_OK_TTL else OFFLINE_CACHE_MISS_TTL
+	offlineProfileCache[userId] = { profile = profile, expiresAt = os.clock() + ttl }
+	return profile, true
 end
 
 return PersistenceService

@@ -483,6 +483,99 @@ task.spawn(function()
 	end)
 end)
 
+function PlotSizeCinematic.resolveStagePose(stage: number): (CFrame?, Vector3?)
+	local folder = getPlotSizesFolder()
+	local part = if folder then findSizePart(folder, stage) else nil
+	if not part then
+		return nil, nil
+	end
+	return templateWorldPose(part), part.Size
+end
+
+-- Instant local footprint/heart for join intro (no server report, no camera).
+function PlotSizeCinematic.applyStageLocal(stage: number): boolean
+	local plot = ClientPlot.get()
+	if not plot then
+		return false
+	end
+	local cf, size = PlotSizeCinematic.resolveStagePose(stage)
+	if not cf or not size then
+		return false
+	end
+	ClientPlot.set({
+		plotId = plot.plotId,
+		cframe = cf,
+		size = size,
+		spawnCFrame = plot.spawnCFrame,
+		plot1CFrame = plot.plot1CFrame,
+		ringCFrame = plot.ringCFrame,
+	})
+	local WaveEndVfx = require(script.Parent:WaitForChild("WaveEndVfx"))
+	WaveEndVfx.syncToPlotSizeStage(stage)
+	return true
+end
+
+-- Local-only footprint tween (join intro bleach shrink). No ReportPlotSizeCinematicDone.
+function PlotSizeCinematic.tweenStagesLocal(
+	fromStage: number,
+	toStage: number,
+	opts: { duration: number?, cancelled: (() -> boolean)? }?
+): boolean
+	local plot = ClientPlot.get()
+	if not plot then
+		return false
+	end
+	local fromCf, fromSize = PlotSizeCinematic.resolveStagePose(fromStage)
+	local toCf, toSize = PlotSizeCinematic.resolveStagePose(toStage)
+	if not fromCf or not fromSize or not toCf or not toSize then
+		-- Fallback: snap to destination if templates missing.
+		return PlotSizeCinematic.applyStageLocal(toStage)
+	end
+	local duration = if opts and typeof(opts.duration) == "number" then math.max(0.2, opts.duration) else GROW_SEC
+	local cancelled = if opts then opts.cancelled else nil
+
+	local WaveEndVfx = require(script.Parent:WaitForChild("WaveEndVfx"))
+	local heartFrom = WaveEndVfx.getRouteEndWorldPosForStage(fromStage)
+	local heartTo = WaveEndVfx.getRouteEndWorldPosForStage(toStage)
+	local box = makeGrowBox(fromCf, fromSize)
+	local t0 = os.clock()
+	while os.clock() - t0 < duration do
+		if cancelled and cancelled() then
+			if box.Parent then
+				box:Destroy()
+			end
+			PlotSizeCinematic.applyStageLocal(toStage)
+			return false
+		end
+		local u = math.clamp((os.clock() - t0) / duration, 0, 1)
+		local e = u * u * (3 - 2 * u)
+		local size = fromSize:Lerp(toSize, e)
+		local cf = fromCf:Lerp(toCf, e)
+		box.Size = size
+		box.CFrame = cf
+		ClientPlot.set({
+			plotId = plot.plotId,
+			cframe = cf,
+			size = size,
+			spawnCFrame = plot.spawnCFrame,
+			plot1CFrame = plot.plot1CFrame,
+			ringCFrame = plot.ringCFrame,
+		})
+		if heartFrom and heartTo then
+			WaveEndVfx.setRouteEndWorldPos(heartFrom:Lerp(heartTo, e))
+		end
+		RunService.Heartbeat:Wait()
+	end
+	if box.Parent then
+		local fade = TweenService:Create(box, TweenInfo.new(0.25), { Transparency = 1 })
+		fade:Play()
+		fade.Completed:Wait()
+		box:Destroy()
+	end
+	PlotSizeCinematic.applyStageLocal(toStage)
+	return true
+end
+
 Remotes.get("PlotSizeChanged").OnClientEvent:Connect(function(payload: any)
 	if typeof(payload) ~= "table" then
 		return
@@ -508,13 +601,15 @@ Remotes.get("PlotSizeChanged").OnClientEvent:Connect(function(payload: any)
 		return
 	end
 	task.spawn(function()
+		local hint = playerGui:GetAttribute("OceanTD_RollFingerHint")
+		local tutorialKeep = hint == "closePlotSize" or hint == "plotSizeUpgrade" or hint == "closeSkills"
 		-- Always run the wide ChangeSizeCam shot for plot grow/shrink so players see the footprint.
-		-- Then reopen skills on PlotSize (avatar cam resumes via OceanTD_SkillsBubblesOpen).
+		-- Tutorial keeps skills/power-up open so the finger can point at CloseBTN.
 		PlotSizeCinematic.play(prev, stage, {
 			skipCamera = false,
-			keepSkillsOpen = false,
+			keepSkillsOpen = tutorialKeep,
 			dial = isDial,
-			reopenPlotSizeSkills = true,
+			reopenPlotSizeSkills = not tutorialKeep,
 			poses = {
 				prevCFrame = if typeof(payload.prevCFrame) == "CFrame" then payload.prevCFrame else nil,
 				prevSize = if typeof(payload.prevSize) == "Vector3" then payload.prevSize else nil,

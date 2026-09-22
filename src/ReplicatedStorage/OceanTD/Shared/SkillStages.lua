@@ -24,6 +24,8 @@ local DEFS: { SkillDef } = {
 	{ id = "RHealth", displayName = "Reef Health", buttonName = "RHealthBTN" },
 	{ id = "Skip", displayName = "Skip Wave", buttonName = "SkipBTN" },
 	{ id = "WaveSpeed", displayName = "Wave Speed", buttonName = "WaveSpeedBTN" },
+	-- Studio: MobileSkillsA LuckBTN (dice). Locked until Plot Size stage 2 like other skills.
+	{ id = "AutoRoll", displayName = "Auto\nRoll", buttonName = "LuckBTN" },
 }
 
 -- Shown on skill bubbles once stage layout templates include an Icon ImageLabel (larger stages).
@@ -33,7 +35,7 @@ local ICON_IMAGE_BY_SKILL: { [string]: string } = {
 	EarnMore = "rbxassetid://86150178739980",
 	RHealth = "rbxassetid://85263927394609",
 	PlaceMore = "rbxassetid://78740084531049",
-	Luck = "rbxassetid://77867192113507", -- More Luck (dice)
+	AutoRoll = "rbxassetid://77867192113507", -- dice
 	WaveSpeed = "rbxassetid://125774374435124",
 }
 
@@ -348,6 +350,16 @@ function SkillStages.unlockDesc(skillId: string, stage: number): string
 		end
 		return "All wave speeds unlocked"
 	end
+	if skillId == "AutoRoll" then
+		if SkillStages.isAutoRollUnlimited(s) then
+			return "Unlimited auto rolls"
+		end
+		local inc = SkillStages.autoRollIncrementAtStage(s)
+		if inc <= 0 then
+			return "Unlock stage 2 for limited auto roll"
+		end
+		return "+" .. tostring(inc) .. " auto rolls"
+	end
 	return ""
 end
 
@@ -421,6 +433,45 @@ function SkillStages.skipUsesIncrementAtStage(stage: number): number
 	return 1
 end
 
+-- Auto Roll: stage 1 = off; then limited rolls per auto-roll session; stage 8 = unlimited.
+local AUTO_ROLL_BUDGET_BY_STAGE: { [number]: number } = {
+	[1] = 0,
+	[2] = 5,
+	[3] = 10,
+	[4] = 20,
+	[5] = 30,
+	[6] = 50,
+	[7] = 75,
+	[8] = math.huge,
+}
+
+function SkillStages.isAutoRollUnlimited(stage: number): boolean
+	return SkillStages.clampStage(stage) >= SkillStages.MAX_STAGE
+end
+
+function SkillStages.autoRollBudgetAtStage(stage: number): number
+	local s = SkillStages.clampStage(stage)
+	return AUTO_ROLL_BUDGET_BY_STAGE[s] or 0
+end
+
+function SkillStages.autoRollIncrementAtStage(stage: number): number
+	local s = SkillStages.clampStage(stage)
+	if s <= 1 or SkillStages.isAutoRollUnlimited(s) then
+		return 0
+	end
+	local prev = SkillStages.autoRollBudgetAtStage(s - 1)
+	local cur = SkillStages.autoRollBudgetAtStage(s)
+	if cur == math.huge or prev == math.huge then
+		return 0
+	end
+	return math.max(0, cur - prev)
+end
+
+function SkillStages.autoRollAvailable(stage: number): boolean
+	local n = SkillStages.autoRollBudgetAtStage(stage)
+	return n > 0 or n == math.huge
+end
+
 -- Plain status line for the player's *active* stage (dialed or maxed), not the next unlock preview.
 function SkillStages.activeStatusDesc(skillId: string, stage: number): string
 	local s = SkillStages.clampStageFor(skillId, stage)
@@ -457,6 +508,16 @@ function SkillStages.activeStatusDesc(skillId: string, stage: number): string
 			return "1.5x wave speed"
 		end
 		return "Normal wave speed"
+	end
+	if skillId == "AutoRoll" then
+		if SkillStages.isAutoRollUnlimited(s) then
+			return "Unlimited auto rolls"
+		end
+		local n = SkillStages.autoRollBudgetAtStage(s)
+		if n <= 0 then
+			return "Auto roll off"
+		end
+		return tostring(n) .. " auto rolls"
 	end
 	if skillId == "PlotSize" then
 		return SkillStages.unlockDesc(skillId, s)

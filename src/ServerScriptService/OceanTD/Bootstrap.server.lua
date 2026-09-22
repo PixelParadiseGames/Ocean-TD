@@ -28,6 +28,7 @@ local PlotSaveService = require(Services:WaitForChild("PlotSaveService"))
 local WaveWatchService = require(Services:WaitForChild("WaveWatchService"))
 local UrchinStingService = require(Services:WaitForChild("UrchinStingService"))
 local FriendPlotPreviewService = require(Services:WaitForChild("FriendPlotPreviewService"))
+local JoinIntroPackageService = require(Services:WaitForChild("JoinIntroPackageService"))
 
 local Constants = require(oceanRoot:WaitForChild("Shared"):WaitForChild("Constants"))
 
@@ -40,6 +41,79 @@ PlotSaveService.init()
 WaveWatchService.init()
 UrchinStingService.init()
 FriendPlotPreviewService.init()
+-- JoinIntroPackageService.init() runs after Plots.Intro is restored (below).
+
+-- Hard gate: no friend-preview / neighbor décor / reef-score probes until join intro finishes.
+local introPending: { [Player]: boolean } = {}
+local deferredFillEmpty = false
+local deferredVacatePlotId: string? = nil
+local deferredReefScores: { { userId: number, layout: any } } = {}
+
+local function anyIntroPending(): boolean
+	return next(introPending) ~= nil
+end
+
+local function flushDeferredAfterIntro()
+	if anyIntroPending() then
+		return
+	end
+	for _, job in ipairs(deferredReefScores) do
+		pcall(function()
+			PersistenceService.publishReefScore(job.userId, job.layout, false)
+		end)
+	end
+	table.clear(deferredReefScores)
+	local vacateId = deferredVacatePlotId
+	deferredVacatePlotId = nil
+	if vacateId then
+		task.spawn(function()
+			FriendPlotPreviewService.fillVacated(vacateId)
+		end)
+	elseif deferredFillEmpty then
+		deferredFillEmpty = false
+		FriendPlotPreviewService.scheduleFillEmpty()
+	end
+end
+
+local function markIntroPending(player: Player)
+	introPending[player] = true
+end
+
+local function clearIntroPending(player: Player)
+	if not introPending[player] then
+		return
+	end
+	introPending[player] = nil
+	flushDeferredAfterIntro()
+end
+
+local function scheduleFillEmptyGated()
+	if anyIntroPending() then
+		deferredFillEmpty = true
+		print("[JoinIntro] Defer friend-preview fill — intro still pending")
+		return
+	end
+	FriendPlotPreviewService.scheduleFillEmpty()
+end
+
+local function fillVacatedGated(plotId: string)
+	if anyIntroPending() then
+		deferredVacatePlotId = plotId
+		deferredFillEmpty = true
+		print("[JoinIntro] Defer fillVacated", plotId, "— intro still pending")
+		return
+	end
+	FriendPlotPreviewService.fillVacated(plotId)
+end
+
+local function publishReefScoreGated(userId: number, layout: any)
+	if anyIntroPending() then
+		table.insert(deferredReefScores, { userId = userId, layout = layout })
+		print("[JoinIntro] Defer reef-score publish for", userId)
+		return
+	end
+	PersistenceService.publishReefScore(userId, layout, false)
+end
 
 do
 	local poses = {}
@@ -49,26 +123,77 @@ do
 			poses[i] = { plotIndex = slot.plotIndex, cframe = slot.cframe, size = slot.size }
 		end
 	end
-	DecorReplicator.replicate(poses)
-	local WaveHeartReplicator = require(Services:WaitForChild("WaveHeartReplicator"))
-	WaveHeartReplicator.replicate(poses)
 
-	-- Stash join-intro template out of the world until the showcase is re-enabled.
-	-- Source stays in ServerStorage.OceanTD_IntroHold.Intro (not Workspace.Plots.Intro).
+	-- Defer StaticPlot_2..N décor (+ plot hearts) until join intro finishes so
+	-- IntroElements / Plot1 stream in first and the showcase isn't fighting 5 plot clones.
+	Workspace:SetAttribute("DecorEnvReplicationReady", false)
+	local neighborPlotsLoading = false
+	local function ensureNeighborPlotsLoaded(reason: string)
+		if DecorReplicator.isReady() or neighborPlotsLoading then
+			return
+		end
+		if anyIntroPending() and reason ~= "timeout" then
+			print("[JoinIntro] Defer StaticPlot décor (" .. reason .. ") — intro still pending")
+			deferredFillEmpty = true
+			return
+		end
+		neighborPlotsLoading = true
+		print("[JoinIntro] Loading StaticPlot décor (" .. reason .. ")")
+		local WaveHeartReplicator = require(Services:WaitForChild("WaveHeartReplicator"))
+		local ok = DecorReplicator.replicate(poses)
+		if ok then
+			WaveHeartReplicator.replicate(poses)
+			scheduleFillEmptyGated()
+		else
+			neighborPlotsLoading = false
+			warn("[JoinIntro] StaticPlot décor failed (" .. reason .. ") — will retry on timeout/complete")
+		end
+	end
+
+	Remotes.get("JoinIntroComplete").OnServerEvent:Connect(function(player: Player)
+		if typeof(player) == "Instance" and player:IsA("Player") then
+			clearIntroPending(player)
+			-- One free coral size upgrade this session while join-intro finger tutorial runs.
+			PlayerSession.grantTutorialFreeCoralSize(player)
+		end
+		ensureNeighborPlotsLoaded("intro complete")
+		-- Single authoritative spawn seat after showcase (client no longer double-teleports).
+		if typeof(player) == "Instance" and player:IsA("Player") and player.Parent then
+			PlotService.teleportToPlot(player, true)
+		end
+	end)
+	-- Safety: only seat players still stuck in intro — never re-drop everyone after ~1 min.
+	task.delay(75, function()
+		local stuck: { Player } = {}
+		for plr in pairs(introPending) do
+			table.insert(stuck, plr)
+		end
+		table.clear(introPending)
+		flushDeferredAfterIntro()
+		ensureNeighborPlotsLoaded("timeout")
+		for _, plr in ipairs(stuck) do
+			if plr.Parent and PlayerSession.canSave(plr) then
+				PlotService.teleportToPlot(plr, true)
+			end
+		end
+	end)
+
+	-- Join Wave-100 showcase: keep Workspace.Plots.Intro in-world, then freeze a package
+	-- for clients (ServerStorage snapshot + ReplicatedStorage.JoinIntroPackage).
 	do
 		local ServerStorage = game:GetService("ServerStorage")
 		local plots = Workspace:FindFirstChild("Plots")
-		local intro = plots and plots:FindFirstChild("Intro")
-		if intro then
-			local hold = ServerStorage:FindFirstChild("OceanTD_IntroHold")
-			if not hold then
-				hold = Instance.new("Folder")
-				hold.Name = "OceanTD_IntroHold"
-				hold.Parent = ServerStorage
-			end
-			intro.Parent = hold
-			print("[JoinIntro] Stashed Workspace.Plots.Intro → ServerStorage.OceanTD_IntroHold (showcase disabled)")
+		local hold = ServerStorage:FindFirstChild("OceanTD_IntroHold")
+		local stashed = hold and hold:FindFirstChild("Intro")
+		if plots and stashed and not plots:FindFirstChild("Intro") then
+			stashed.Parent = plots
+			print("[JoinIntro] Restored ServerStorage.OceanTD_IntroHold.Intro → Workspace.Plots.Intro")
+		elseif plots and plots:FindFirstChild("Intro") then
+			print("[JoinIntro] Workspace.Plots.Intro ready for join showcase")
+		else
+			warn("[JoinIntro] Workspace.Plots.Intro missing — join showcase will skip")
 		end
+		JoinIntroPackageService.init()
 	end
 end
 
@@ -77,10 +202,18 @@ local plotClearedRemote = Remotes.get("PlotCleared")
 local sessionReadyRemote = Remotes.get("SessionReady")
 
 local function onCharacterAdded(player: Player, _character: Model)
+	PlotService.clearSpawnSeat(player)
+	-- During join intro the client parks the avatar at IntroPosition; don't yank to plot spawn.
+	if introPending[player] then
+		return
+	end
 	-- Retarget spawn after respawn once session owns a plot.
 	if PlayerSession.canSave(player) then
 		task.defer(function()
-			PlotService.teleportToPlot(player)
+			if introPending[player] then
+				return
+			end
+			PlotService.teleportToPlot(player, true)
 		end)
 	end
 end
@@ -111,7 +244,8 @@ local function onPlayerAdded(player: Player)
 	print("[PLOT] PlayerAdded", player.Name)
 	PlayerSession.begin(player)
 
-	local profile = PersistenceService.load(player)
+	-- Assign the seat BEFORE DataStore load so join-intro can leave the load bar
+	-- without waiting on GetAsync (often 10–20s on device / Studio API).
 	local payload = PlotService.assign(player)
 	if not payload then
 		warn("[PLOT] Could not assign plot to", player.Name, "— kicking soft (no slot).")
@@ -123,6 +257,19 @@ local function onPlayerAdded(player: Player)
 
 	-- Clear any friend-preview reef on this seat before size apply / hydrate.
 	FriendPlotPreviewService.evictPreview(payload.plotId)
+	markIntroPending(player)
+
+	-- Early plot + intro sync (provisional hasSeen=false; corrected after profile load).
+	plotAssignedRemote:FireClient(player, payload)
+	do
+		local plot4 = PlotService.getSlotByIndex(4)
+		Remotes.get("JoinIntroSync"):FireClient(player, {
+			hasSeenJoinIntro = false,
+			introSourceCFrame = if plot4 then plot4.ringCFrame else CFrame.identity,
+		})
+	end
+
+	local profile = PersistenceService.load(player)
 
 	-- Apply Plot Size stage BEFORE hydrate so layout locals match the Studio box pose.
 	do
@@ -155,13 +302,14 @@ local function onPlayerAdded(player: Player)
 	GridService.hydrate(payload.plotId, player.UserId, profile.layout, payload.cframe)
 	PlacementService.hydrateVisuals(payload.plotId, payload.cframe)
 	PlayerSession.markReady(player, payload.plotId)
-	-- Seed reef-score board on join (don't wait for leave/autosave).
-	PersistenceService.publishReefScore(player.UserId, profile.layout, true)
+	-- Seed reef-score board after intro (don't compete with GetAsync / décor during showcase).
+	publishReefScoreGated(player.UserId, profile.layout)
 	PersistenceService.syncWaveRecordAttributes(player)
 	PersistenceService.syncPlotOutlineColorAttribute(player)
 	PersistenceService.syncSandDollarsAttribute(player)
 	PersistenceService.syncInventoryToClient(player)
 
+	-- Re-send sized plot + real join-intro flags now that the profile is loaded.
 	plotAssignedRemote:FireClient(player, payload)
 	sessionReadyRemote:FireClient(player)
 	Remotes.get("SkillStagesSync"):FireClient(player, PersistenceService.getSkillStagesPayload(player))
@@ -176,8 +324,8 @@ local function onPlayerAdded(player: Player)
 	-- Joiner first (race-safe), then everyone.
 	WaveWatchService.broadcastRoster(player)
 	WaveWatchService.broadcastRoster(nil)
-	-- Fill remaining empty seats with friends' saved reefs (offline OK).
-	FriendPlotPreviewService.scheduleFillEmpty()
+	-- Friend-seat previews wait until join intro finishes (see JoinIntroComplete) so
+	-- we don't stampede GetAsync while the player profile load is still settling.
 
 	local function hookCharacter(character: Model)
 		onCharacterAdded(player, character)
@@ -187,19 +335,14 @@ local function onPlayerAdded(player: Player)
 	end
 	player.CharacterAdded:Connect(hookCharacter)
 
-	-- Initial teleport once character exists.
-	task.spawn(function()
-		if not player.Character then
-			player.CharacterAdded:Wait()
-		end
-		PlotService.teleportToPlot(player)
-	end)
-
+	-- Spawn teleport is deferred until JoinIntroComplete so the showcase can
+	-- park the avatar at IntroPosition before the camera pans to them.
 	print("[PLOT] Session ready", player.Name, "plot=", payload.plotId, "layout=", #profile.layout)
 end
 
 local function onPlayerRemoving(player: Player)
 	print("[PLOT] PlayerRemoving", player.Name)
+	clearIntroPending(player)
 	PlacementService.clearPendingColorSave(player)
 	savePlayer(player, "leave")
 
@@ -227,10 +370,10 @@ local function onPlayerRemoving(player: Player)
 		FriendPlotPreviewService.clearAllPreviews()
 	elseif plotId then
 		task.spawn(function()
-			FriendPlotPreviewService.fillVacated(plotId)
+			fillVacatedGated(plotId)
 		end)
 	else
-		FriendPlotPreviewService.scheduleFillEmpty()
+		scheduleFillEmptyGated()
 	end
 end
 
@@ -340,6 +483,37 @@ reportFishFed.OnServerEvent:Connect(function(player: Player, fishCount: any)
 		return
 	end
 	PersistenceService.creditSandDollarsFromFeed(player, fishCount)
+end)
+
+local reportCoralLifeStats = Remotes.get("ReportCoralLifeStats")
+reportCoralLifeStats.OnServerEvent:Connect(function(player: Player, payload: any)
+	local session = PlayerSession.get(player)
+	if not session or session.layoutLoaded ~= true then
+		return
+	end
+	local plotId = session.plotId
+	if typeof(plotId) ~= "string" or plotId == "" then
+		return
+	end
+	if typeof(payload) ~= "table" then
+		return
+	end
+	local n = 0
+	for placeId, stats in pairs(payload) do
+		if n >= 100 then
+			break
+		end
+		if typeof(placeId) ~= "string" or placeId == "" or typeof(stats) ~= "table" then
+			continue
+		end
+		local fed = tonumber((stats :: any).fed)
+		local waves = tonumber((stats :: any).waves)
+		if not fed and not waves then
+			continue
+		end
+		GridService.mergeLifeStatsByPlaceId(plotId, placeId, fed or 0, waves or 0)
+		n += 1
+	end
 end)
 
 local reportHighestWave = Remotes.get("ReportHighestWave")
@@ -511,7 +685,7 @@ requestResetSkillStages.OnServerInvoke = function(player: Player)
 end
 
 local requestCoralSize = Remotes.getFunction("RequestCoralSize")
-requestCoralSize.OnServerInvoke = function(player: Player, placeId: any, targetClass: any, unlockNext: any)
+requestCoralSize.OnServerInvoke = function(player: Player, placeId: any, targetClass: any, unlockNext: any, freeTutorial: any)
 	if typeof(placeId) ~= "string" then
 		return { ok = false, errorCode = "BadRequest" }
 	end
@@ -519,7 +693,11 @@ requestCoralSize.OnServerInvoke = function(player: Player, placeId: any, targetC
 	if typeof(want) ~= "number" then
 		return { ok = false, errorCode = "BadRequest" }
 	end
-	return PlacementService.setCoralSize(player, placeId, want, unlockNext == true)
+	local opts: { skipSpend: boolean? }? = nil
+	if freeTutorial == true and PlayerSession.consumeTutorialFreeCoralSize(player) then
+		opts = { skipSpend = true }
+	end
+	return PlacementService.setCoralSize(player, placeId, want, unlockNext == true, opts)
 end
 
 local requestCoralSizeBulk = Remotes.getFunction("RequestCoralSizeBulk")

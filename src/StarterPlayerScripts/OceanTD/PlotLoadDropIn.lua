@@ -1,6 +1,7 @@
 --!strict
 --[[
 	Staggered sky drop-in for plot corals (Save Plot LOAD + Join Intro handoff).
+	Parts stay invisible until their drop starts, then fade in while falling.
 ]]
 
 local RunService = game:GetService("RunService")
@@ -16,9 +17,25 @@ local PlotLoadDropIn = {}
 
 local LOAD_DROP_HEIGHT = 70
 local LOAD_DROP_TWEEN = TweenInfo.new(0.4, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+local FADE_IN_TWEEN = TweenInfo.new(0.35, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+
+local function collectVisualParts(root: BasePart): { BasePart }
+	local parts: { BasePart } = { root }
+	local seen: { [BasePart]: boolean } = { [root] = true }
+	for _, d in ipairs(root:GetDescendants()) do
+		if d:IsA("BasePart") and not seen[d] then
+			seen[d] = true
+			table.insert(parts, d)
+		end
+	end
+	return parts
+end
 
 function PlotLoadDropIn.setPartHiddenLocal(part: BasePart, hidden: boolean)
-	part.LocalTransparencyModifier = if hidden then 1 else 0
+	local mod = if hidden then 1 else 0
+	for _, p in ipairs(collectVisualParts(part)) do
+		p.LocalTransparencyModifier = mod
+	end
 end
 
 function PlotLoadDropIn.gatherOwnedPlotParts(): { BasePart }
@@ -89,16 +106,24 @@ function PlotLoadDropIn.play(expectedCount: number?, spanSec: number?)
 			if not part.Parent then
 				continue
 			end
+			local visuals = collectVisualParts(part)
+			-- Invisible first so the sky park is never seen.
+			for _, p in ipairs(visuals) do
+				p.LocalTransparencyModifier = 1
+			end
 			local finalCF = part.CFrame
 			local lift = LOAD_DROP_HEIGHT + part.Size.Y * 0.5
 			part.CFrame = finalCF + Vector3.new(0, lift, 0)
-			PlotLoadDropIn.setPartHiddenLocal(part, true)
 			local delaySec = rng:NextNumber(0, span)
 			task.delay(delaySec, function()
 				if not part.Parent then
 					return
 				end
-				PlotLoadDropIn.setPartHiddenLocal(part, false)
+				for _, p in ipairs(visuals) do
+					if p.Parent then
+						TweenService:Create(p, FADE_IN_TWEEN, { LocalTransparencyModifier = 0 }):Play()
+					end
+				end
 				TweenService:Create(part, LOAD_DROP_TWEEN, { CFrame = finalCF }):Play()
 			end)
 		end

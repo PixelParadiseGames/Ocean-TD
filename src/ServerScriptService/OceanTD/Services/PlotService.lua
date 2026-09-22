@@ -45,6 +45,8 @@ local slotsById: { [string]: PlotSlot } = {}
 local ownerToPlot: { [Player]: PlotId } = {}
 -- Friend / offline reef previews on free seats (not real owners — assign still treats as free).
 local previewUserByPlot: { [string]: number } = {}
+-- One hard spawn teleport per character life (join intro + idle timeout were re-dropping).
+local spawnSeatedThisLife: { [Player]: boolean } = {}
 local masterPlotCf: CFrame? = nil
 local ringCenter: Vector3? = nil
 local initialized = false
@@ -513,7 +515,11 @@ function PlotService.assign(player: Player): PlotBoundsPayload?
 	return payload
 end
 
-function PlotService.teleportToPlot(player: Player)
+function PlotService.clearSpawnSeat(player: Player)
+	spawnSeatedThisLife[player] = nil
+end
+
+function PlotService.teleportToPlot(player: Player, force: boolean?)
 	local payload = PlotService.getBoundsPayload(player)
 	if not payload or not payload.spawnCFrame then
 		return
@@ -525,6 +531,12 @@ function PlotService.teleportToPlot(player: Player)
 	local hrp = character:FindFirstChild("HumanoidRootPart")
 	local humanoid = character:FindFirstChildOfClass("Humanoid")
 	if not (hrp and hrp:IsA("BasePart")) then
+		return
+	end
+	-- Already seated this life (join intro / prior spawn) — don't hard-drop again.
+	if spawnSeatedThisLife[player] and force ~= true then
+		hrp.AssemblyLinearVelocity = Vector3.zero
+		hrp.AssemblyAngularVelocity = Vector3.zero
 		return
 	end
 	local spawnCf = payload.spawnCFrame :: CFrame
@@ -545,9 +557,11 @@ function PlotService.teleportToPlot(player: Player)
 	hrp.CFrame = CFrame.lookAt(pos, pos + flatLook, Vector3.yAxis)
 	hrp.AssemblyLinearVelocity = Vector3.zero
 	hrp.AssemblyAngularVelocity = Vector3.zero
+	spawnSeatedThisLife[player] = true
 end
 
 function PlotService.free(player: Player)
+	spawnSeatedThisLife[player] = nil
 	local plotId = ownerToPlot[player]
 	if not plotId then
 		return

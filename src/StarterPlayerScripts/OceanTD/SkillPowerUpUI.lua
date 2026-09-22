@@ -450,10 +450,13 @@ local function applyGameplayForActiveStages()
 	local ok, err = pcall(function()
 		local WaveEndVfx = require(script.Parent:WaitForChild("WaveEndVfx"))
 		local WaveSim = require(script.Parent:WaitForChild("WaveSim"))
-		WaveEndVfx.syncToPlotSizeStage(currentStage("PlotSize"))
+		local introBusy = playerGui:GetAttribute("OceanTD_JoinIntroBusy") == true
+		if not introBusy then
+			WaveEndVfx.syncToPlotSizeStage(currentStage("PlotSize"))
+		end
 		WaveSim.applyReefHealthStage(currentStage("RHealth"))
 		WaveSim.clampSpeedToMaxStep(SkillStages.waveSpeedMaxStep(currentStage("WaveSpeed")))
-		if WaveSim.isRunning() then
+		if WaveSim.isRunning() and not introBusy and not WaveSim.isJoinIntroDemo() then
 			WaveSim.rebuildRouteForPlotSize(currentStage("PlotSize"))
 		end
 		if SkillsBubbleSim.isRunning() then
@@ -706,7 +709,7 @@ refreshTemplate = function()
 	local active = currentStage(activeSkillId)
 	local unlocked = unlockedStage(activeSkillId)
 	if unlockNameLbl then
-		unlockNameLbl.Text = def.displayName
+		unlockNameLbl.Text = string.gsub(def.displayName, "\n", " ")
 	end
 	local nextS = SkillStages.nextStageFor(activeSkillId, unlocked)
 	if nextStageLbl then
@@ -792,6 +795,28 @@ refreshTemplate = function()
 					unlockDescLbl.Text = "Normal wave speed"
 					unlockDescLbl.Visible = true
 				end
+			elseif activeSkillId == "AutoRoll" then
+				if SkillStages.isAutoRollUnlimited(active) then
+					startUnlockDescPulse("AutoRoll", function(c: Color3)
+						return string.format('<font color="%s">Unlimited auto rolls</font>', rgbFontTag(c))
+					end)
+				else
+					local n = SkillStages.autoRollBudgetAtStage(active)
+					if n <= 0 then
+						stopUnlockDescPulse()
+						unlockDescLbl.RichText = false
+						unlockDescLbl.Text = "Auto roll off"
+						unlockDescLbl.Visible = true
+					else
+						startUnlockDescPulse("AutoRoll", function(c: Color3)
+							return string.format(
+								'<font color="%s">%d</font> auto rolls',
+								rgbFontTag(c),
+								n
+							)
+						end)
+					end
+				end
 			else
 				stopUnlockDescPulse()
 				unlockDescLbl.RichText = false
@@ -870,6 +895,28 @@ refreshTemplate = function()
 					startUnlockDescPulse("WaveSpeed", function(c: Color3)
 						return string.format('Unlock wave <font color="%s">pause</font>', rgbFontTag(c))
 					end)
+				end
+			elseif activeSkillId == "AutoRoll" then
+				if SkillStages.isAutoRollUnlimited(descStage) then
+					startUnlockDescPulse("AutoRoll", function(c: Color3)
+						return string.format('<font color="%s">Unlimited auto rolls</font>', rgbFontTag(c))
+					end)
+				else
+					local inc = SkillStages.autoRollIncrementAtStage(descStage)
+					if inc <= 0 then
+						stopUnlockDescPulse()
+						unlockDescLbl.RichText = false
+						unlockDescLbl.Text = SkillStages.unlockDesc(activeSkillId, descStage)
+						unlockDescLbl.Visible = true
+					else
+						startUnlockDescPulse("AutoRoll", function(c: Color3)
+							return string.format(
+								'<font color="%s">+%d</font> auto rolls',
+								rgbFontTag(c),
+								inc
+							)
+						end)
+					end
 				end
 			else
 				stopUnlockDescPulse()
@@ -1060,13 +1107,23 @@ local function doUnlockRemote()
 			WaveSim.clampSpeedToMaxStep(SkillStages.waveSpeedMaxStep(newStage))
 		end
 		if skillId == "PlotSize" then
-			-- Drop avatar-cam ownership before ForceClose so its restore tween can't fight the cinematic.
-			pcall(function()
-				require(script.Parent:WaitForChild("SkillsAvatarCam")).releaseForCinematic()
-			end)
-			-- ForceClose always tears down skills + powerup; avoid close() while open
-			-- so onClosed cannot race HUD restore mid-cinematic.
-			playerGui:SetAttribute("OceanTD_ForceCloseSkills", os.clock())
+			local hint = playerGui:GetAttribute("OceanTD_RollFingerHint")
+			if hint == "plotSizeUpgrade" then
+				-- Guide CloseBTN on the power-up, then skills close — don't auto-tear UI down.
+				playerGui:SetAttribute("OceanTD_RollFingerHint", "closePlotSize")
+				pcall(function()
+					require(script.Parent:WaitForChild("SkillsAvatarCam")).releaseForCinematic()
+				end)
+				SkillsBubbleSim.refreshStageLayouts()
+			else
+				-- Drop avatar-cam ownership before ForceClose so its restore tween can't fight the cinematic.
+				pcall(function()
+					require(script.Parent:WaitForChild("SkillsAvatarCam")).releaseForCinematic()
+				end)
+				-- ForceClose always tears down skills + powerup; avoid close() while open
+				-- so onClosed cannot race HUD restore mid-cinematic.
+				playerGui:SetAttribute("OceanTD_ForceCloseSkills", os.clock())
+			end
 		else
 			SkillsBubbleSim.refreshStageLayouts()
 		end
@@ -1238,6 +1295,28 @@ function SkillPowerUpUI.isOpen(): boolean
 	return popupOpen
 end
 
+function SkillPowerUpUI.getActiveSkillId(): string?
+	return activeSkillId
+end
+
+function SkillPowerUpUI.getUnlockButton(): GuiObject?
+	if unlockBtn and unlockBtn.Visible then
+		return unlockBtn
+	end
+	return nil
+end
+
+function SkillPowerUpUI.getCloseButton(): GuiObject?
+	if not closeBtn or not closeBtn.Visible then
+		return nil
+	end
+	-- Prefer the hit proxy so the finger lands on the clickable close target.
+	if closeHitBtn and closeHitBtn.Visible then
+		return closeHitBtn
+	end
+	return closeBtn
+end
+
 function SkillPowerUpUI.close()
 	hideConfirm()
 	popupOpen = false
@@ -1257,6 +1336,14 @@ function SkillPowerUpUI.close()
 	end
 	if closeBtn and (not template or not closeBtn:IsDescendantOf(template)) then
 		closeBtn.Visible = false
+	end
+	if playerGui:GetAttribute("OceanTD_RollFingerHint") == "closePlotSize" then
+		-- Defer so MobileSkillsA can restore Skills close chrome before the finger aims.
+		task.defer(function()
+			if playerGui:GetAttribute("OceanTD_RollFingerHint") == "closePlotSize" then
+				playerGui:SetAttribute("OceanTD_RollFingerHint", "closeSkills")
+			end
+		end)
 	end
 	if onClosedCb then
 		onClosedCb()
@@ -1476,8 +1563,10 @@ function SkillPowerUpUI.bind(mobileSkillsRoot: Instance)
 			if popupOpen then
 				refreshTemplate()
 			end
-			local WaveEndVfx = require(script.Parent:WaitForChild("WaveEndVfx"))
-			WaveEndVfx.syncToPlotSizeStage(currentStage("PlotSize"))
+			if playerGui:GetAttribute("OceanTD_JoinIntroBusy") ~= true then
+				local WaveEndVfx = require(script.Parent:WaitForChild("WaveEndVfx"))
+				WaveEndVfx.syncToPlotSizeStage(currentStage("PlotSize"))
+			end
 		end
 	end)
 end
@@ -1587,6 +1676,13 @@ syncRemote.OnClientEvent:Connect(function(payload)
 	end
 	local PlotSizeCinematic = require(script.Parent:WaitForChild("PlotSizeCinematic"))
 	if PlotSizeCinematic.isBusy() then
+		return
+	end
+	-- Join intro owns max footprint / route until showcase ends.
+	if playerGui:GetAttribute("OceanTD_JoinIntroBusy") == true then
+		local WaveSim = require(script.Parent:WaitForChild("WaveSim"))
+		WaveSim.applyReefHealthStage(currentStage("RHealth"))
+		WaveSim.clampSpeedToMaxStep(SkillStages.waveSpeedMaxStep(currentStage("WaveSpeed")))
 		return
 	end
 	WaveEndVfx.syncToPlotSizeStage(currentStage("PlotSize"))

@@ -9,6 +9,7 @@
 local Players = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
 local RunService = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
 local ContextActionService = game:GetService("ContextActionService")
 local GuiService = game:GetService("GuiService")
 local Workspace = game:GetService("Workspace")
@@ -134,6 +135,7 @@ local queuedSwitchItemId: string? = nil
 local chromeBtnPointerDown = false
 local chromePressTarget: string? = nil -- "check" | "cancel"
 local placeCommitBusy = false
+local placeCommitLockUntil = 0
 
 -- Forward decls so confirm UI can wire before bodies are assigned.
 local onCheck: () -> ()
@@ -147,12 +149,17 @@ local attachMoveHintToGhost: () -> ()
 local releaseHandPin: () -> ()
 local startAimLoop: () -> ()
 local beginAim: (string, boolean?, boolean?) -> ()
+local noteOutOfPlotAim: (boolean) -> ()
 
 local savedWalkSpeed = 16
 local savedJumpPower = 75
 local savedJumpHeight = 10.8
 local savedCameraType: Enum.CameraType? = nil
 local savedCameraCFrame: CFrame? = nil
+local plotNudgeActive = false
+local plotNudgeToken = 0
+local outOfPlotSince: number? = nil
+local plotNudgeCooldownUntil = 0
 local aimConn: RBXScriptConnection? = nil
 local inputConns: { RBXScriptConnection } = {}
 local frozen = false
@@ -165,6 +172,10 @@ local DEFAULT_JUMP_POWER = 75
 local DEFAULT_JUMP_HEIGHT = 10.8 -- StarterPlayer default 7.2 × 1.5
 local CONFIRM_DRAG_PX = 28 -- ignore tiny finger jitter before moving parked ghost
 local BTN_SIZE = PlaceConfirmChrome.BASE_BTN_PX -- viewport-scaled via PlaceConfirmChrome.chromeBtnSize
+local OUT_OF_PLOT_NUDGE_WAIT = 1
+local OUT_OF_PLOT_NUDGE_HOLD = 1
+local OUT_OF_PLOT_NUDGE_TWEEN = TweenInfo.new(0.45, Enum.EasingStyle.Quad, Enum.EasingDirection.InOut)
+local OUT_OF_PLOT_NUDGE_COOLDOWN = 4
 
 local function log(...: any)
 	print("[PLACE]", ...)
@@ -297,7 +308,10 @@ local function unfreeze()
 			hum.JumpPower = DEFAULT_JUMP_POWER
 			hum.JumpHeight = DEFAULT_JUMP_HEIGHT
 		end
-		if camera and camera.CameraType == Enum.CameraType.Scriptable then
+		-- Don't steal FishCam/PlotCam/DroneCam Scriptable ownership when we never froze.
+		local camMode = playerGui:GetAttribute("OceanTD_CamCycleMode")
+		local freecamOwns = camMode == "fishcam" or camMode == "plotcam" or camMode == "dronecam"
+		if not freecamOwns and camera and camera.CameraType == Enum.CameraType.Scriptable then
 			camera.CameraType = Enum.CameraType.Custom
 			if hum then
 				camera.CameraSubject = hum
@@ -788,6 +802,62 @@ local function updateGhostPulse()
 	SelectRing.pulse(placeSelectRing)
 end
 
+local function startOutOfPlotCamNudge()
+	if plotNudgeActive or not camera or not savedCameraCFrame then
+		return
+	end
+	local plot = ClientPlot.get()
+	if not plot then
+		return
+	end
+	local from = savedCameraCFrame
+	local focus = plot.cframe.Position
+	if (focus - from.Position).Magnitude < 0.5 then
+		return
+	end
+	local to = CFrame.lookAt(from.Position, focus)
+	plotNudgeActive = true
+	plotNudgeToken += 1
+	local my = plotNudgeToken
+	local twIn = TweenService:Create(camera, OUT_OF_PLOT_NUDGE_TWEEN, { CFrame = to })
+	twIn:Play()
+	task.spawn(function()
+		twIn.Completed:Wait()
+		if my ~= plotNudgeToken then
+			return
+		end
+		task.wait(OUT_OF_PLOT_NUDGE_HOLD)
+		if my ~= plotNudgeToken then
+			return
+		end
+		local twOut = TweenService:Create(camera, OUT_OF_PLOT_NUDGE_TWEEN, { CFrame = from })
+		twOut:Play()
+		twOut.Completed:Wait()
+		if my ~= plotNudgeToken then
+			return
+		end
+		plotNudgeActive = false
+		plotNudgeCooldownUntil = os.clock() + OUT_OF_PLOT_NUDGE_COOLDOWN
+		outOfPlotSince = nil
+	end)
+end
+
+noteOutOfPlotAim = function(isOut: boolean)
+	if not isOut then
+		outOfPlotSince = nil
+		return
+	end
+	if plotNudgeActive or os.clock() < plotNudgeCooldownUntil then
+		return
+	end
+	if not outOfPlotSince then
+		outOfPlotSince = os.clock()
+	end
+	if (os.clock() - outOfPlotSince) >= OUT_OF_PLOT_NUDGE_WAIT then
+		startOutOfPlotCamNudge()
+	end
+end
+
 local function updateGhostAt(anchorPos: Vector3)
 	local speciesId = armedItemId and getSpeciesIdForItem(armedItemId)
 	if not speciesId then
@@ -897,6 +967,7 @@ local function updateGhostAt(anchorPos: Vector3)
 	updateGhostPulse()
 	syncBlockFlashForAim(anchorPos)
 	ClientPlot.setOutOfPlotFlash(not aimPinnedToHand and rejectReason == "Out Of Plot")
+	noteOutOfPlotAim(not aimPinnedToHand and rejectReason == "Out Of Plot")
 	if warnLabel then
 		if validSpot then
 			warnLabel.Text = ""
@@ -1233,6 +1304,9 @@ local function stopAimLoop()
 end
 
 local function keepCameraFrozen()
+	if plotNudgeActive then
+		return
+	end
 	if camera and savedCameraCFrame then
 		camera.CFrame = savedCameraCFrame
 	end
@@ -1554,6 +1628,9 @@ local function beginAimFromDrag(itemId: string)
 end
 
 local function exitPlacement(clearArmed: boolean)
+	plotNudgeToken += 1
+	plotNudgeActive = false
+	outOfPlotSince = nil
 	placeResumeToken += 1
 	postPlaceWaiting = false
 	placeCommitBusy = false
@@ -1591,6 +1668,10 @@ local function exitPlacement(clearArmed: boolean)
 		InventoryState.clearSelection()
 	end
 	log("Placement off")
+	-- Restore Fish/Plot/Drone if place/build ForceClosed FreeCam.
+	if not InventoryState.isOpen() then
+		playerGui:SetAttribute("OceanTD_ResumeBuildCam", os.clock())
+	end
 end
 
 local function isShiftKeepPlacing(): boolean
@@ -1602,6 +1683,9 @@ local function commitPlace()
 	if placeCommitBusy then
 		return
 	end
+	if os.clock() < placeCommitLockUntil then
+		return
+	end
 	if not armedItemId or not confirmPos or not validSpot then
 		return
 	end
@@ -1609,13 +1693,31 @@ local function commitPlace()
 		return
 	end
 	placeCommitBusy = true
-	local placePos = confirmPos
-	if ghost and ghost.Parent and armedItemId == "BrainCoral" then
-		-- Save the exact stacked pose the ghost shows (not a stale aim sample).
-		placePos = ghost.Position
-		placeAnchor = placePos
-		confirmPos = placePos
+	placeCommitLockUntil = os.clock() + 0.45
+	-- Stop aim loop while the server places — otherwise the ghost sees the new coral
+	-- and flashes "Spot Taken" before InvokeServer returns.
+	stopAimLoop()
+	if warnLabel then
+		warnLabel.Visible = false
+		warnLabel.Text = ""
 	end
+	-- Plant at the parked preview foot — do not re-raycast (touch raise drops on
+	-- InputEnded, so a fresh ray would land lower than the ghost the player saw).
+	local placePos = placeAnchor or confirmPos
+	if not placePos then
+		placeCommitBusy = false
+		return
+	end
+	if armedItemId == "BrainCoral" then
+		local snap = BrainSnapPreview.getActive()
+		if snap and snap.valid then
+			placePos = snap.worldPos
+		elseif placeAnchor then
+			placePos = placeAnchor
+		end
+	end
+	confirmPos = placePos
+	placeAnchor = placePos
 	local vfxColor = if ghost then ghost.Color else Color3.fromRGB(100, 200, 255)
 	-- Sound + hand-orb fly on ✓ immediately; don't wait for the server.
 	PlaceVfx.playSound(placePos)
@@ -1651,8 +1753,20 @@ local function commitPlace()
 	local result = rf:InvokeServer(armedItemId, placePos, placePayload)
 	if typeof(result) == "table" and result.ok then
 		log("Committed", armedItemId)
-		UiHaptics.rampOpen(1)
 		local placedId = result.placeId
+		-- Join-intro place tutorial: next point at coral UPGRADE (first upgrade free).
+		if playerGui:GetAttribute("OceanTD_RollFingerHint") == "plot" then
+			playerGui:SetAttribute("OceanTD_RollFingerHint", "upgrade")
+			if typeof(placedId) == "string" and placedId ~= "" then
+				playerGui:SetAttribute("OceanTD_TutorialHuePlaceId", placedId)
+				playerGui:SetAttribute("OceanTD_TutorialHueResume", "upgrade")
+			end
+		end
+		-- Unlock Start Waves once the player has planted something.
+		if playerGui:GetAttribute("OceanTD_TutorialGateWaves") == true then
+			playerGui:SetAttribute("OceanTD_TutorialGateWaves", false)
+		end
+		UiHaptics.rampOpen(1)
 		local vfxPos = (typeof(result.worldPos) == "Vector3" and result.worldPos) or placePos
 		PlaceVfx.playVisuals(vfxPos, vfxColor)
 		clearGhost()
@@ -1660,17 +1774,18 @@ local function commitPlace()
 		confirmPos = nil
 		placeResumeToken += 1
 		postPlaceWaiting = false
-		placeCommitBusy = false
 		stopAimLoop()
 		-- Hold Shift (keyboard): keep placing the same coral instead of opening inspect.
 		local keepPlacing = typeof(placedSpeciesId) == "string"
 			and placedSpeciesId ~= ""
 			and isShiftKeepPlacing()
 		if keepPlacing then
+			placeCommitBusy = false
 			beginAim(placedSpeciesId, true)
 		else
-			-- Open coral inspect (powerup) UI for the coral just planted.
+			-- Clear busy only after exit so a second InputEnded can't re-place.
 			PlacementController.forceExit()
+			placeCommitBusy = false
 			if typeof(placedId) == "string" and placedId ~= "" then
 				task.spawn(function()
 					local RelocatePickHover = require(script.Parent:WaitForChild("RelocatePickHover"))
@@ -1707,6 +1822,9 @@ local function commitPlace()
 		elseif ghost then
 			HandOrb.arm(ghost.Color)
 		end
+		if mode == MODE_AIM then
+			startAimLoop()
+		end
 		if code == "OutOfPlot" or code == "SpotTaken" or code == "PlaceCap" then
 			rejectReason = if code == "OutOfPlot"
 				then "Out Of Plot"
@@ -1739,16 +1857,8 @@ onCheck = function()
 	if not placeAnchor or not validSpot then
 		return
 	end
-	-- Gamepad: place from Aim with one A press (no park/confirm step).
-	if gamepadPlacement then
-		if mode == MODE_OFF then
-			return
-		end
-		confirmPos = placeAnchor
-		commitPlace()
-		return
-	end
-	if mode ~= MODE_CONFIRM then
+	-- Place immediately (no park/confirm step) from aim or legacy confirm.
+	if mode == MODE_OFF then
 		return
 	end
 	confirmPos = placeAnchor
@@ -1817,25 +1927,20 @@ local function enterConfirm(worldPos: Vector3)
 	log("Confirm mode", if validSpot then "valid" else (rejectReason or "invalid"))
 end
 
--- Shift: place immediately at worldPos (no ✓/X). Otherwise park into confirm.
+-- Place immediately at worldPos (no ✓/X). Invalid spots stay in aim.
 local function parkOrQuickPlace(worldPos: Vector3)
-	if isShiftKeepPlacing() then
-		confirmPos = worldPos
-		placeAnchor = worldPos
-		updateGhostAt(worldPos)
-		if validSpot and armedItemId then
-			-- Before InvokeServer yields so mouse-up can't open confirm mid-place.
-			suppressAimParkOnce = true
-			commitPlace()
-			return
-		end
-		-- Invalid under Shift: stay in aim (no confirm chrome).
+	confirmPos = worldPos
+	placeAnchor = worldPos
+	updateGhostAt(worldPos)
+	if validSpot and armedItemId then
+		-- Before InvokeServer yields so mouse-up can't re-enter place mid-request.
+		suppressAimParkOnce = true
+		commitPlace()
 		return
 	end
-	enterConfirm(worldPos)
 end
 
--- World press (or drag off the backpack): show ✓ while the finger is still down, then drag to slide.
+-- World press (or drag off the backpack): keep aiming under the finger; place on release.
 local function parkAtPointer(screenPos: Vector2)
 	if gamepadPlacement then
 		return
@@ -1858,19 +1963,21 @@ local function parkAtPointer(screenPos: Vector2)
 		return
 	end
 	if mode == MODE_CONFIRM then
+		-- Legacy confirm path: drag parks, release commits via notifyPointerUp → parkOrQuickPlace.
 		confirmPos = pos
 		updateGhostAt(pos)
 		confirmPressOrigin = screenPos
 		confirmDragging = true
 		return
 	end
-	if isShiftKeepPlacing() then
-		parkOrQuickPlace(pos)
-		return
-	end
-	enterConfirm(pos)
+	-- Stay in AIM while held; place on pointer up.
+	aimFingerDown = true
+	placePointerHeld = true
 	confirmPressOrigin = screenPos
 	confirmDragging = true
+	placeAnchor = pos
+	confirmPos = pos
+	updateGhostAt(pos)
 end
 
 function PlacementController.isActive(): boolean
@@ -2042,11 +2149,13 @@ function PlacementController.notifyPointerUp(_screenPos: Vector2)
 		backpackDrag = false
 		aimFingerDown = false
 		placePointerHeld = false
+		confirmDragging = false
 		if suppressAimParkOnce then
 			suppressAimParkOnce = false
 			return
 		end
-		local pos = resolveParkPos(_screenPos)
+		-- World press release: prefer the last preview foot so place matches what they saw.
+		local pos = placeAnchor or resolveParkPos(_screenPos)
 		if pos then
 			parkOrQuickPlace(pos)
 		end
@@ -2054,6 +2163,12 @@ function PlacementController.notifyPointerUp(_screenPos: Vector2)
 	end
 	if mode == MODE_CONFIRM then
 		confirmDragging = false
+		-- Legacy confirm: release places immediately (same as ✓).
+		if placeAnchor and validSpot and armedItemId then
+			suppressAimParkOnce = true
+			confirmPos = placeAnchor
+			commitPlace()
+		end
 	end
 end
 
@@ -2299,10 +2414,11 @@ table.insert(inputConns, UserInputService.InputChanged:Connect(function(input, _
 end))
 
 table.insert(inputConns, UserInputService.InputEnded:Connect(function(input, _processed)
+	-- Track touch end first so emulated MouseButton1 after finger-up is filtered.
+	PlaceAimScreen.trackTouch(input, true)
 	if PlaceAimScreen.isEmulatedMouse(input) then
 		return
 	end
-	PlaceAimScreen.trackTouch(input, true)
 	if postPlaceWaiting or mode == MODE_OFF then
 		return
 	end
@@ -2349,9 +2465,8 @@ table.insert(inputConns, UserInputService.InputEnded:Connect(function(input, _pr
 		if (overBackpack and not ghostOnPlot) or not shouldPark then
 			return
 		end
-		-- Park where the finger lifted — even if release is over ✓/X. Cancel/confirm
-		-- only run when the press *started* on those buttons (chromeBtnPointerDown).
-		local pos = resolveParkPos(screenPos)
+		-- Park at the last preview foot when available so place matches the ghost.
+		local pos = placeAnchor or resolveParkPos(screenPos)
 		if pos then
 			parkOrQuickPlace(pos)
 		end

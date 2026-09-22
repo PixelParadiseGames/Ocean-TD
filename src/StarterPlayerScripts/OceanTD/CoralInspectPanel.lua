@@ -29,31 +29,224 @@ local RelocateMultiSelect = require(script.Parent:WaitForChild("RelocateMultiSel
 local PlacedCoralIndex = require(script.Parent:WaitForChild("PlacedCoralIndex"))
 local ClientPlot = require(script.Parent:WaitForChild("ClientPlot"))
 local CoralRangeRings = require(script.Parent:WaitForChild("CoralRangeRings"))
+local WaveSim = require(script.Parent:WaitForChild("WaveSim"))
 local CoralVisual = require(oceanRoot:WaitForChild("Shared"):WaitForChild("CoralVisual"))
 local ColorUnlocks = require(oceanRoot:WaitForChild("Shared"):WaitForChild("ColorUnlocks"))
 local HueSeeds = require(oceanRoot:WaitForChild("Shared"):WaitForChild("HueSeeds"))
 local CoralColorUnlockState = require(script.Parent:WaitForChild("CoralColorUnlockState"))
 local InventoryState = require(script.Parent:WaitForChild("InventoryState"))
+local SeedWheelRevealApi = require(script.Parent:WaitForChild("SeedWheelRevealApi"))
+
+local Consts = require(script.Parent:WaitForChild("CoralInspectPanelConsts"))
 
 local CoralInspectPanel = {}
 
-local GREEN = Color3.fromRGB(40, 170, 70)
-local PULSE_GREEN = Color3.fromRGB(70, 255, 110)
-local STROKE_DARK = Color3.fromRGB(16, 80, 32)
-local ACTIVE_GREEN = Color3.fromRGB(40, 255, 90)
-local WHITE = Color3.new(1, 1, 1)
-local STAT_GREY = Color3.fromRGB(140, 140, 145)
-local RED = Color3.fromRGB(220, 50, 55)
-local PANEL_BG = Color3.fromRGB(12, 28, 36)
--- Match RelocateController recycle chrome.
-local REC_GREEN = Color3.fromRGB(48, 145, 70)
-local RECYCLE_ICON_IMAGE = "rbxassetid://75091344292202"
-local GROW_SOUND_ID = "rbxassetid://134057288"
-local DICE_SPIN_SOUND_ID = "rbxassetid://130406186928352"
-local DEFAULT_PALETTE_SOUND_ID = "rbxassetid://130119587466421"
-local PAINTBRUSH_ICON = "rbxassetid://139313922398517"
-local DEFAULT_PALETTE_SWATCH = 0
-local DEFAULT_SWATCH_STROKE = Color3.fromRGB(220, 45, 45)
+local TUTORIAL_FREE_ATTR = "OceanTD_TutorialFreeUpgrade"
+local HINT_ATTR = "OceanTD_RollFingerHint"
+local HUE_PLACE_ATTR = "OceanTD_TutorialHuePlaceId"
+local HUE_RESUME_ATTR = "OceanTD_TutorialHueResume"
+local pendingTutorialFreeInvoke = false
+local hueScrollToken = 0
+local focusColorIndex = 0
+
+local function tutorialFreeUpgradeAvailable(): boolean
+	return playerGui:GetAttribute(TUTORIAL_FREE_ATTR) == true
+end
+
+local function resolveTutorialHueIndex(): number?
+	local awarded = SeedWheelRevealApi.lastAwardedColorIndex
+	if typeof(awarded) == "number" then
+		return PlotOutlineColors.clampCoralIndex(awarded)
+	end
+	return nil
+end
+
+local huePlaceTrackConn: RBXScriptConnection? = nil
+
+local function clearTutorialHueTracking()
+	if huePlaceTrackConn then
+		huePlaceTrackConn:Disconnect()
+		huePlaceTrackConn = nil
+	end
+	playerGui:SetAttribute(HUE_PLACE_ATTR, nil)
+	playerGui:SetAttribute(HUE_RESUME_ATTR, nil)
+end
+
+local function rememberTutorialHueCoral()
+	local part = RelocateController.getSelectedPart()
+	if not part then
+		return
+	end
+	local id = part:GetAttribute("OceanTD_PlaceId")
+	if typeof(id) == "string" and id ~= "" then
+		playerGui:SetAttribute(HUE_PLACE_ATTR, id)
+	end
+	-- Keep the remembered id in sync if rotate/move reassigns PlaceId before deselect.
+	if huePlaceTrackConn then
+		huePlaceTrackConn:Disconnect()
+		huePlaceTrackConn = nil
+	end
+	huePlaceTrackConn = part:GetAttributeChangedSignal("OceanTD_PlaceId"):Connect(function()
+		if playerGui:GetAttribute(HUE_PLACE_ATTR) == nil then
+			return
+		end
+		local nextId = part:GetAttribute("OceanTD_PlaceId")
+		if typeof(nextId) == "string" and nextId ~= "" then
+			playerGui:SetAttribute(HUE_PLACE_ATTR, nextId)
+		end
+	end)
+end
+
+local function noteTutorialHueApplied(appliedIdx: number?)
+	local hint = playerGui:GetAttribute(HINT_ATTR)
+	if hint ~= "hue" and hint ~= "hueReroll" then
+		return
+	end
+	local want = resolveTutorialHueIndex()
+	if typeof(want) == "number" and typeof(appliedIdx) == "number" and appliedIdx ~= want then
+		return
+	end
+	if hint == "hue" then
+		-- First paint applied — finger stays on the swatch for a shade re-roll click.
+		playerGui:SetAttribute(HINT_ATTR, "hueReroll")
+	else
+		clearTutorialHueTracking()
+		playerGui:SetAttribute(HINT_ATTR, "closeBackpack")
+	end
+end
+
+-- Forward-declared; assigned after colorScroll exists.
+local animateScrollToSwatch: ((number, (() -> ())?) -> ())?
+local refreshColorSwatches: (() -> ())?
+
+local function beginTutorialHueFinger(resumeMode: string?)
+	local mode = if resumeMode == "hueReroll" then "hueReroll" else "hue"
+	rememberTutorialHueCoral()
+	playerGui:SetAttribute(HUE_RESUME_ATTR, mode)
+	local hue = resolveTutorialHueIndex()
+	if typeof(hue) ~= "number" then
+		local part = RelocateController.getSelectedPart()
+		local seed = if part then part:GetAttribute("OceanTD_SeedHue") else nil
+		if typeof(seed) == "number" then
+			hue = PlotOutlineColors.clampCoralIndex(seed)
+		end
+	end
+	if typeof(hue) ~= "number" then
+		clearTutorialHueTracking()
+		playerGui:SetAttribute(HINT_ATTR, "closeBackpack")
+		return
+	end
+	focusColorIndex = hue
+	if refreshColorSwatches then
+		refreshColorSwatches()
+	end
+	playerGui:SetAttribute(HINT_ATTR, false)
+	local scrollFn = animateScrollToSwatch
+	if scrollFn then
+		scrollFn(hue, function()
+			local cur = playerGui:GetAttribute(HINT_ATTR)
+			if cur == false or cur == nil then
+				playerGui:SetAttribute(HINT_ATTR, mode)
+			end
+		end)
+	else
+		playerGui:SetAttribute(HINT_ATTR, mode)
+	end
+end
+
+local function noteTutorialUpgradeSucceeded()
+	if playerGui:GetAttribute(TUTORIAL_FREE_ATTR) == true then
+		playerGui:SetAttribute(TUTORIAL_FREE_ATTR, false)
+	end
+	local hint = playerGui:GetAttribute(HINT_ATTR)
+	local resume = playerGui:GetAttribute(HUE_RESUME_ATTR)
+	-- Still on upgrade, or reselect/false after a cinematic flicker — advance to hue.
+	local fromUpgrade = hint == "upgrade"
+		or (hint == "reselectCoral" and resume == "upgrade")
+		or ((hint == false or hint == nil) and resume == "upgrade")
+	if not fromUpgrade then
+		return
+	end
+	playerGui:SetAttribute(HUE_RESUME_ATTR, nil)
+	-- Let inspect / color row lay out after size cine before scrolling the swatch.
+	task.defer(function()
+		task.wait(0.05)
+		if not root or not root.Visible then
+			-- Panel closed mid-upgrade — point at coral, resume hue on reselect.
+			rememberTutorialHueCoral()
+			playerGui:SetAttribute(HUE_RESUME_ATTR, "hue")
+			playerGui:SetAttribute(HINT_ATTR, "reselectCoral")
+			return
+		end
+		beginTutorialHueFinger("hue")
+	end)
+end
+
+local function resumeTutorialAfterReselect(resume: string?)
+	if resume == "upgrade" then
+		rememberTutorialHueCoral()
+		playerGui:SetAttribute(HUE_RESUME_ATTR, "upgrade")
+		playerGui:SetAttribute(HINT_ATTR, "upgrade")
+		return
+	end
+	beginTutorialHueFinger(if typeof(resume) == "string" then resume else "hue")
+end
+
+local function onInspectVisibilityForTutorial(visible: boolean)
+	local hint = playerGui:GetAttribute(HINT_ATTR)
+	local placeId = playerGui:GetAttribute(HUE_PLACE_ATTR)
+	local hasTrackedPlace = typeof(placeId) == "string" and placeId ~= ""
+	local resumeAttr = playerGui:GetAttribute(HUE_RESUME_ATTR)
+
+	if visible then
+		-- First open with upgrade finger: remember which coral so deselect can reselect it.
+		if hint == "upgrade" then
+			rememberTutorialHueCoral()
+			playerGui:SetAttribute(HUE_RESUME_ATTR, "upgrade")
+			return
+		end
+		if hint ~= "reselectCoral" then
+			return
+		end
+		local wantPid = playerGui:GetAttribute(HUE_PLACE_ATTR)
+		local part = RelocateController.getSelectedPart()
+		local pid = if part then part:GetAttribute("OceanTD_PlaceId") else nil
+		if typeof(wantPid) == "string" and wantPid ~= "" and pid ~= wantPid then
+			-- Selected a different coral — keep pointing at the tutorial one.
+			return
+		end
+		local resume = playerGui:GetAttribute(HUE_RESUME_ATTR)
+		playerGui:SetAttribute(HUE_RESUME_ATTR, nil)
+		resumeTutorialAfterReselect(if typeof(resume) == "string" then resume else "hue")
+		return
+	end
+
+	-- Inspect closed.
+	if RelocateController.isCinematicHold() then
+		return
+	end
+	if hint == "upgrade" then
+		rememberTutorialHueCoral()
+		playerGui:SetAttribute(HUE_RESUME_ATTR, "upgrade")
+		playerGui:SetAttribute(HINT_ATTR, "reselectCoral")
+		return
+	end
+
+	local midHue = hint == "hue" or hint == "hueReroll"
+		or (hasTrackedPlace and (hint == false or hint == nil) and resumeAttr ~= "upgrade")
+	if midHue then
+		rememberTutorialHueCoral()
+		if hint == "hue" or hint == "hueReroll" then
+			playerGui:SetAttribute(HUE_RESUME_ATTR, hint)
+		elseif playerGui:GetAttribute(HUE_RESUME_ATTR) == nil then
+			playerGui:SetAttribute(HUE_RESUME_ATTR, "hue")
+		end
+		-- Cancel in-flight swatch scroll so it can't restore the hue finger while closed.
+		hueScrollToken += 1
+		playerGui:SetAttribute(HINT_ATTR, "reselectCoral")
+	end
+end
+
 local defaultStrokeFlashUntil = 0
 local defaultStrokeFlashTween: Tween? = nil
 
@@ -61,24 +254,12 @@ local function pulseWave(): number
 	return (math.sin(os.clock() * math.pi * 2) + 1) * 0.5
 end
 
--- Size-change cinematics: 25% faster than original 0.5s shrink / 0.9s grow.
-local CINE_TIME_SCALE = 0.75
-local CINE_SHRINK_SEC = 0.5 * CINE_TIME_SCALE
-local CINE_GROW_SEC = 0.9 * CINE_TIME_SCALE
-local CINE_CAM_SEC = 0.5 * CINE_TIME_SCALE
-local CINE_CAM_BACK_SEC = 0.45 * CINE_TIME_SCALE
-local CINE_UNLOCK_GROW_SEC = 0.7 * CINE_TIME_SCALE
-local CINE_BRAIN_RESIZE_SEC = 0.28 * CINE_TIME_SCALE
-
 local function easeQuad(u: number, easeIn: boolean): number
 	if easeIn then
 		return u * u
 	end
 	return 1 - (1 - u) * (1 - u)
 end
-
-local LETTERS = { "S", "M", "L" }
-local WORDS = { "Small", "Medium", "Large" }
 
 local root: Frame? = nil
 local catalog: GuiObject? = nil
@@ -98,10 +279,8 @@ local wavesLbl: TextLabel? = nil
 local lifePad: UIPadding? = nil
 local diceSpinToken = 0
 local activeColorIndex: number? = nil
-local focusColorIndex: number = DEFAULT_PALETTE_SWATCH
+focusColorIndex = Consts.DEFAULT_PALETTE_SWATCH
 local colorSendToken = 0
-local DICE_ICON = "rbxassetid://77867192113507"
-local COLOR_FOCUS = Color3.fromRGB(255, 220, 40)
 local h1s: { TextButton } = {}
 local h2s: { TextLabel } = {}
 local h3s: { Frame } = {}
@@ -122,10 +301,18 @@ local fedAttrConn: RBXScriptConnection? = nil
 local wavesAttrConn: RBXScriptConnection? = nil
 local lifePart: BasePart? = nil
 
-local sizeRf = Remotes.getFunction("RequestCoralSize")
-local colorRf = Remotes.getFunction("RequestCoralColor")
-local clearHueRf = Remotes.getFunction("RequestClearCoralHue")
-local unlockColorRf = Remotes.getFunction("RequestUnlockCoralColor")
+local remotes = {
+	size = Remotes.getFunction("RequestCoralSize"),
+	color = Remotes.getFunction("RequestCoralColor"),
+	clearHue = Remotes.getFunction("RequestClearCoralHue"),
+	unlockColor = Remotes.getFunction("RequestUnlockCoralColor"),
+}
+
+local function invokeSizeRemote(placeId: string, targetClass: number, unlockNext: boolean): any
+	local free = pendingTutorialFreeInvoke
+	pendingTutorialFreeInvoke = false
+	return remotes.size:InvokeServer(placeId, targetClass, unlockNext, free)
+end
 
 local function waitBarrier(remaining: () -> number)
 	while remaining() > 0 do
@@ -151,7 +338,7 @@ local function applyUnlockStroke(btn: GuiObject)
 		stroke.Parent = btn
 	end
 	stroke.Thickness = 2
-	stroke.Color = PULSE_GREEN
+	stroke.Color = Consts.PULSE_GREEN
 	stroke.Enabled = true
 end
 
@@ -225,7 +412,7 @@ local function showToast(msg: string)
 	lbl.AnchorPoint = Vector2.new(0.5, 1)
 	lbl.Position = UDim2.new(0.5, 0, 1, -48)
 	lbl.Size = UDim2.fromOffset(360, 44)
-	lbl.BackgroundColor3 = PANEL_BG
+	lbl.BackgroundColor3 = Consts.PANEL_BG
 	lbl.BackgroundTransparency = 0.1
 	lbl.BorderSizePixel = 0
 	lbl.Font = UiTheme.Font
@@ -249,6 +436,8 @@ local function handleSizeResult(result: any, unlockNext: boolean): boolean
 		return false
 	end
 	if result.ok == true then
+		-- Hue finger starts after the cinematic finishes (noteTutorialUpgradeSucceeded),
+		-- not here — mid-cine AbsoluteSize is 0 and would cancel the scroll.
 		return true
 	end
 	if unlockNext then
@@ -322,7 +511,7 @@ local function setActiveCircleStroke(btn: GuiObject, on: boolean)
 			stroke.Parent = btn
 		end
 		stroke.Thickness = 3
-		stroke.Color = WHITE
+		stroke.Color = Consts.WHITE
 		stroke.Enabled = true
 	elseif stroke and stroke:IsA("UIStroke") then
 		stroke.Enabled = false
@@ -352,11 +541,11 @@ local function paintStatColumn(i: number, asDelta: boolean, fromClass: number?, 
 		end
 		labels[k].Text = formatStatLine(STAT_ICONS[k], n, asDelta)
 		if asDelta then
-			labels[k].TextColor3 = ACTIVE_GREEN
+			labels[k].TextColor3 = Consts.ACTIVE_GREEN
 		elseif isActive then
-			labels[k].TextColor3 = WHITE
+			labels[k].TextColor3 = Consts.WHITE
 		else
-			labels[k].TextColor3 = STAT_GREY
+			labels[k].TextColor3 = Consts.STAT_GREY
 		end
 	end
 end
@@ -381,20 +570,20 @@ local function refreshSizeColors(fromPart: BasePart?, previewClass: number?, pre
 		local btn = h1s[i]
 		if btn then
 			btn.Active = true
-			btn.TextColor3 = WHITE
+			btn.TextColor3 = Consts.WHITE
 			if isNext then
-				btn.BackgroundColor3 = RED
+				btn.BackgroundColor3 = Consts.RED
 			elseif locked then
-				btn.BackgroundColor3 = RED
+				btn.BackgroundColor3 = Consts.RED
 			elseif i == class then
-				btn.BackgroundColor3 = ACTIVE_GREEN
+				btn.BackgroundColor3 = Consts.ACTIVE_GREEN
 			else
-				btn.BackgroundColor3 = GREEN
+				btn.BackgroundColor3 = Consts.GREEN
 			end
 			setActiveCircleStroke(btn, i == class)
 		end
 		if h2s[i] then
-			h2s[i].TextColor3 = WHITE
+			h2s[i].TextColor3 = Consts.WHITE
 		end
 		paintStatColumn(i, false, nil, i == class)
 	end
@@ -407,7 +596,7 @@ local function refreshSizeColors(fromPart: BasePart?, previewClass: number?, pre
 			if not flashBtn.Parent then
 				return
 			end
-			flashBtn.BackgroundColor3 = RED:Lerp(PULSE_GREEN, pulseWave())
+			flashBtn.BackgroundColor3 = Consts.RED:Lerp(Consts.PULSE_GREEN, pulseWave())
 			local showDelta = math.floor((os.clock() - t0) / 2) % 2 == 1
 			paintStatColumn(flashIdx, showDelta, fromClass, false)
 		end)
@@ -680,7 +869,7 @@ end
 
 local function playGrowSound()
 	local s = Instance.new("Sound")
-	s.SoundId = GROW_SOUND_ID
+	s.SoundId = Consts.GROW_SOUND_ID
 	s.Volume = 0.85
 	s.Parent = SoundService
 	s:Play()
@@ -696,7 +885,7 @@ end
 
 local function playDiceSpinSound()
 	local s = Instance.new("Sound")
-	s.SoundId = DICE_SPIN_SOUND_ID
+	s.SoundId = Consts.DICE_SPIN_SOUND_ID
 	s.Volume = 0.85
 	-- Slight pitch variance so re-rolls don't sound identical.
 	s.PlaybackSpeed = 0.92 + math.random() * 0.16
@@ -714,7 +903,7 @@ end
 
 local function playDefaultPaletteSound()
 	local s = Instance.new("Sound")
-	s.SoundId = DEFAULT_PALETTE_SOUND_ID
+	s.SoundId = Consts.DEFAULT_PALETTE_SOUND_ID
 	s.Volume = 0.85
 	s.Parent = SoundService
 	s:Play()
@@ -729,7 +918,7 @@ local function playDefaultPaletteSound()
 end
 
 local function flashDefaultSwatchStroke()
-	local stroke = colorSwatchStrokes[DEFAULT_PALETTE_SWATCH]
+	local stroke = colorSwatchStrokes[Consts.DEFAULT_PALETTE_SWATCH]
 	if not stroke then
 		return
 	end
@@ -738,17 +927,17 @@ local function flashDefaultSwatchStroke()
 		defaultStrokeFlashTween = nil
 	end
 	defaultStrokeFlashUntil = os.clock() + 0.28
-	stroke.Color = GREEN
+	stroke.Color = Consts.GREEN
 	defaultStrokeFlashTween = TweenService:Create(
 		stroke,
 		TweenInfo.new(0.22, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
-		{ Color = DEFAULT_SWATCH_STROKE }
+		{ Color = Consts.DEFAULT_SWATCH_STROKE }
 	)
 	defaultStrokeFlashTween:Play()
 	defaultStrokeFlashTween.Completed:Connect(function()
 		defaultStrokeFlashTween = nil
 		if stroke.Parent then
-			stroke.Color = DEFAULT_SWATCH_STROKE
+			stroke.Color = Consts.DEFAULT_SWATCH_STROKE
 		end
 	end)
 end
@@ -790,11 +979,11 @@ local function runUnlockCinematic(part: BasePart, newDiam: number)
 
 	local camTw = TweenService:Create(
 		cam,
-		TweenInfo.new(CINE_CAM_SEC, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+		TweenInfo.new(Consts.CINE_CAM_SEC, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
 		{ CFrame = zoomCf }
 	)
 	camTw:Play()
-	tweenSize(part, fromD, fromD * 0.1, CINE_SHRINK_SEC, true)
+	tweenSize(part, fromD, fromD * 0.1, Consts.CINE_SHRINK_SEC, true)
 	if token ~= cineToken or not part.Parent then
 		RelocateController.setCinematicHold(false)
 		if saved then
@@ -803,7 +992,7 @@ local function runUnlockCinematic(part: BasePart, newDiam: number)
 		return
 	end
 	playGrowSound()
-	tweenSize(part, fromD * 0.1, newDiam, CINE_UNLOCK_GROW_SEC, false)
+	tweenSize(part, fromD * 0.1, newDiam, Consts.CINE_UNLOCK_GROW_SEC, false)
 	if token ~= cineToken or not part.Parent then
 		RelocateController.setCinematicHold(false)
 		return
@@ -812,7 +1001,7 @@ local function runUnlockCinematic(part: BasePart, newDiam: number)
 	if backCam then
 		local backTw = TweenService:Create(
 			backCam,
-			TweenInfo.new(CINE_CAM_BACK_SEC, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+			TweenInfo.new(Consts.CINE_CAM_BACK_SEC, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
 			{ CFrame = startCf }
 		)
 		backTw:Play()
@@ -881,7 +1070,7 @@ applyServerSize = function(result: any, unlock: boolean, partOverride: BasePart?
 		end
 	end
 	local BrainStackClient = require(script.Parent:WaitForChild("BrainStackClient"))
-	BrainStackClient.applyStackMoves(result.stackMoves, if unlock then 0.55 * CINE_TIME_SCALE else CINE_BRAIN_RESIZE_SEC)
+	BrainStackClient.applyStackMoves(result.stackMoves, if unlock then 0.55 * Consts.CINE_TIME_SCALE else Consts.CINE_BRAIN_RESIZE_SEC)
 	local d = tonumber(result.diameter)
 	local class = tonumber(result.sizeClass)
 	local tier = tonumber(result.sizeTier)
@@ -963,7 +1152,7 @@ applyServerSize = function(result: any, unlock: boolean, partOverride: BasePart?
 		local sizedPart = part
 		local fromD = math.max(part.Size.X, 0.05)
 		task.spawn(function()
-			tweenSize(sizedPart, fromD, d, CINE_BRAIN_RESIZE_SEC)
+			tweenSize(sizedPart, fromD, d, Consts.CINE_BRAIN_RESIZE_SEC)
 			CoralSize.applyToPart(sizedPart, d, class or CoralSize.classFromDiameter(d), tier or (class or 1))
 			if RelocateController.isActive() then
 				RelocateController.refreshSizedPart(sizedPart, rebindFrom)
@@ -1062,7 +1251,7 @@ local function runSpongeSizeCinematic(
 		RelocateController.setCinematicHold(true)
 		local camTw = TweenService:Create(
 			cam,
-			TweenInfo.new(CINE_CAM_SEC, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+			TweenInfo.new(Consts.CINE_CAM_SEC, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
 			{ CFrame = zoomCf }
 		)
 		camTw:Play()
@@ -1081,7 +1270,7 @@ local function runSpongeSizeCinematic(
 		if replacesInstance and not deferServer then
 			task.spawn(function()
 				local ok, result = pcall(function()
-					return sizeRf:InvokeServer(placeId, targetClass, unlockNext)
+					return invokeSizeRemote(placeId, targetClass, unlockNext)
 				end)
 				serverOk = ok
 				serverResult = result
@@ -1091,9 +1280,9 @@ local function runSpongeSizeCinematic(
 
 		if oldPart.Parent then
 			if anchor then
-				tweenSpongeScale(oldPart, fullSize, anchor, 1, 0.05, CINE_SHRINK_SEC, true)
+				tweenSpongeScale(oldPart, fullSize, anchor, 1, 0.05, Consts.CINE_SHRINK_SEC, true)
 			else
-				tweenMeshScale(oldPart, fullSize, 1, 0.05, CINE_SHRINK_SEC, true)
+				tweenMeshScale(oldPart, fullSize, 1, 0.05, Consts.CINE_SHRINK_SEC, true)
 			end
 		end
 		if token ~= nil and token ~= cineToken then
@@ -1139,7 +1328,7 @@ local function runSpongeSizeCinematic(
 
 		if not replacesInstance then
 			local ok, result = pcall(function()
-				return sizeRf:InvokeServer(placeId, targetClass, unlockNext)
+				return invokeSizeRemote(placeId, targetClass, unlockNext)
 			end)
 			serverOk = ok
 			serverResult = result
@@ -1278,9 +1467,9 @@ local function runSpongeSizeCinematic(
 
 	playGrowSound()
 	if growAnchor then
-		tweenSpongeScale(part, newFull, growAnchor, 0.05, 1, CINE_GROW_SEC, false)
+		tweenSpongeScale(part, newFull, growAnchor, 0.05, 1, Consts.CINE_GROW_SEC, false)
 	else
-		tweenMeshScale(part, newFull, 0.05, 1, CINE_GROW_SEC, false)
+		tweenMeshScale(part, newFull, 0.05, 1, Consts.CINE_GROW_SEC, false)
 	end
 	-- Lock final Size to the recovered target (replication can leave a stale Large box).
 	if not CoralVisual.isDualColorMesh(part:GetAttribute("OceanTD_SpeciesId")) then
@@ -1302,7 +1491,7 @@ local function runSpongeSizeCinematic(
 		if backCam then
 			local backTw = TweenService:Create(
 				backCam,
-				TweenInfo.new(CINE_CAM_BACK_SEC, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+				TweenInfo.new(Consts.CINE_CAM_BACK_SEC, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
 				{ CFrame = startCf }
 			)
 			backTw:Play()
@@ -1317,6 +1506,7 @@ local function runSpongeSizeCinematic(
 	end
 
 	applyServerSize(result, useCamera, part, true)
+	-- Tutorial hue finger is started by finishAll() after this cinematic returns.
 end
 
 type SizeJob = { part: BasePart, placeId: string, cost: number, targetClass: number }
@@ -1378,6 +1568,9 @@ local function runSizeJobsWithCinematic(jobs: { SizeJob }, unlockNext: boolean, 
 			RelocateMultiSelect.refreshSummary()
 		end
 		RelocateController.restoreSelectionByPlaceIds(keepIds)
+		if unlockNext then
+			noteTutorialUpgradeSucceeded()
+		end
 	end
 
 	-- Single coral: full cinematic (may include camera on unlock).
@@ -1392,7 +1585,7 @@ local function runSizeJobsWithCinematic(jobs: { SizeJob }, unlockNext: boolean, 
 		else
 			task.spawn(function()
 				local ok, result = pcall(function()
-					return sizeRf:InvokeServer(j.placeId, j.targetClass, unlockNext)
+					return invokeSizeRemote(j.placeId, j.targetClass, unlockNext)
 				end)
 				if ok and handleSizeResult(result, unlockNext) then
 					applyServerSize(result, unlockNext, j.part, true)
@@ -1453,7 +1646,7 @@ local function runSizeJobsWithCinematic(jobs: { SizeJob }, unlockNext: boolean, 
 		local idx = i
 		task.spawn(function()
 			local ok, result = pcall(function()
-				return sizeRf:InvokeServer(j.placeId, j.targetClass, unlockNext)
+				return invokeSizeRemote(j.placeId, j.targetClass, unlockNext)
 			end)
 			serverOk[idx] = ok
 			serverResult[idx] = result
@@ -1541,13 +1734,21 @@ local function invokeUpgradeNextOneTier()
 		end
 		return a.cost < b.cost
 	end)
+	local free = tutorialFreeUpgradeAvailable()
 	local cash = tonumber(player:GetAttribute(Constants.SAND_DOLLARS_ATTR)) or 0
 	local chosen: { Job } = {}
 	local spent = 0
-	for _, j in ipairs(jobs) do
-		if spent + j.cost <= cash then
-			spent += j.cost
-			table.insert(chosen, j)
+	if free and #jobs > 0 then
+		-- First join-intro upgrade this session is free (single coral).
+		local j = jobs[1]
+		table.insert(chosen, { part = j.part, placeId = j.placeId, want = j.want, cost = 0 })
+		pendingTutorialFreeInvoke = true
+	else
+		for _, j in ipairs(jobs) do
+			if spent + j.cost <= cash then
+				spent += j.cost
+				table.insert(chosen, j)
+			end
 		end
 	end
 	if #jobs > 0 and #chosen == 0 then
@@ -1589,7 +1790,7 @@ local function invokeSize(targetClass: number, unlockNext: boolean)
 			return
 		end
 		local ok, result = pcall(function()
-			return sizeRf:InvokeServer(placeId, targetClass, unlockNext)
+			return invokeSizeRemote(placeId, targetClass, unlockNext)
 		end)
 		if ok and handleSizeResult(result, unlockNext) then
 			applyServerSize(result, unlockNext)
@@ -1662,7 +1863,7 @@ local function seedCountLabelColor(swatchIndex: number): Color3
 	if swatchIndex == 14 then
 		return Color3.fromRGB(120, 128, 136)
 	end
-	return WHITE
+	return Consts.WHITE
 end
 
 local BASE_HUE_COUNT_MAX_TEXT = 12
@@ -1692,7 +1893,7 @@ end
 local function refreshColorSeedLabels()
 	local itemId = selectedItemId()
 	for idx, lock in pairs(colorSwatchLocks) do
-		if idx == DEFAULT_PALETTE_SWATCH then
+		if idx == Consts.DEFAULT_PALETTE_SWATCH then
 			continue
 		end
 		local btn = colorSwatchBtns[idx]
@@ -1725,6 +1926,10 @@ local function showConfirmUnlock(targetClass: number?)
 	if count <= 0 then
 		return
 	end
+	local freeUpgrade = tutorialFreeUpgradeAvailable() and oneTierEach and count == 1
+	if freeUpgrade then
+		cost = 0
+	end
 	hideConfirm()
 	RelocateController.setInspectModal(true)
 	confirmUnlockTarget = if oneTierEach then -1 else unlockTo -- -1 = one-tier UPGRADE path
@@ -1752,7 +1957,7 @@ local function showConfirmUnlock(targetClass: number?)
 	panel.AnchorPoint = Vector2.new(0.5, 0.5)
 	panel.Position = UDim2.fromScale(0.5, 0.5)
 	panel.Size = UDim2.fromOffset(320, 260)
-	panel.BackgroundColor3 = PANEL_BG
+	panel.BackgroundColor3 = Consts.PANEL_BG
 	panel.BorderSizePixel = 0
 	panel.ZIndex = 2
 	panel.Selectable = false
@@ -1765,7 +1970,7 @@ local function showConfirmUnlock(targetClass: number?)
 	panelStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
 	panelStroke.LineJoinMode = Enum.LineJoinMode.Round
 	panelStroke.Thickness = 3
-	panelStroke.Color = STROKE_DARK
+	panelStroke.Color = Consts.STROKE_DARK
 	panelStroke.Parent = panel
 
 	local title = Instance.new("TextLabel")
@@ -1797,7 +2002,7 @@ local function showConfirmUnlock(targetClass: number?)
 	costLbl.Font = UiTheme.Font
 	costLbl.TextSize = 22
 	costLbl.TextColor3 = Color3.fromRGB(255, 220, 120)
-	costLbl.Text = tostring(cost) .. " $D"
+	costLbl.Text = if freeUpgrade then "FREE" else (tostring(cost) .. " $D")
 	costLbl.ZIndex = 3
 	costLbl.Parent = panel
 
@@ -1806,8 +2011,8 @@ local function showConfirmUnlock(targetClass: number?)
 	unlock.Text = "UNLOCK"
 	unlock.Font = UiTheme.Font
 	unlock.TextSize = 20
-	unlock.TextColor3 = WHITE
-	unlock.BackgroundColor3 = GREEN
+	unlock.TextColor3 = Consts.WHITE
+	unlock.BackgroundColor3 = Consts.GREEN
 	unlock.BorderSizePixel = 0
 	unlock.Size = UDim2.fromOffset(200, 48)
 	unlock.AnchorPoint = Vector2.new(0.5, 0)
@@ -1828,7 +2033,7 @@ local function showConfirmUnlock(targetClass: number?)
 			return
 		end
 		local u = (math.sin(os.clock() * math.pi * 1.35) + 1) * 0.5
-		local c = STROKE_DARK:Lerp(PULSE_GREEN, u)
+		local c = Consts.STROKE_DARK:Lerp(Consts.PULSE_GREEN, u)
 		panelStroke.Color = c
 		if unlockStroke and unlockStroke:IsA("UIStroke") then
 			unlockStroke.Color = c
@@ -1838,9 +2043,12 @@ local function showConfirmUnlock(targetClass: number?)
 	end)
 	unlock.Activated:Connect(function()
 		local cash = tonumber(player:GetAttribute(Constants.SAND_DOLLARS_ATTR)) or 0
-		if cash <= 0 and cost > 0 then
+		if cash <= 0 and cost > 0 and not freeUpgrade then
 			showToast("Collect More $D")
 			return
+		end
+		if freeUpgrade then
+			pendingTutorialFreeInvoke = true
 		end
 		local oneTier = confirmUnlockTarget == -1
 		local n = confirmUnlockTarget
@@ -1857,8 +2065,8 @@ local function showConfirmUnlock(targetClass: number?)
 	cancel.Text = "CANCEL"
 	cancel.Font = UiTheme.Font
 	cancel.TextSize = 18
-	cancel.TextColor3 = WHITE
-	cancel.BackgroundColor3 = RED
+	cancel.TextColor3 = Consts.WHITE
+	cancel.BackgroundColor3 = Consts.RED
 	cancel.BorderSizePixel = 0
 	cancel.Size = UDim2.fromOffset(200, 44)
 	cancel.AnchorPoint = Vector2.new(0.5, 0)
@@ -1892,7 +2100,7 @@ local function tryUnlockColorConfirm()
 		return
 	end
 	local ok, result = pcall(function()
-		return unlockColorRf:InvokeServer(itemId, idx)
+		return remotes.unlockColor:InvokeServer(itemId, idx)
 	end)
 	if not ok or typeof(result) ~= "table" or result.ok ~= true then
 		local err = if typeof(result) == "table" then result.errorCode else nil
@@ -1940,7 +2148,7 @@ local function showConfirmColorUnlock(itemId: string, colorIndex: number)
 	panel.AnchorPoint = Vector2.new(0.5, 0.5)
 	panel.Position = UDim2.fromScale(0.5, 0.5)
 	panel.Size = UDim2.fromOffset(320, 240)
-	panel.BackgroundColor3 = PANEL_BG
+	panel.BackgroundColor3 = Consts.PANEL_BG
 	panel.BorderSizePixel = 0
 	panel.ZIndex = 2
 	panel.Selectable = false
@@ -1953,7 +2161,7 @@ local function showConfirmColorUnlock(itemId: string, colorIndex: number)
 	panelStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
 	panelStroke.LineJoinMode = Enum.LineJoinMode.Round
 	panelStroke.Thickness = 3
-	panelStroke.Color = STROKE_DARK
+	panelStroke.Color = Consts.STROKE_DARK
 	panelStroke.Parent = panel
 
 	local title = Instance.new("TextLabel")
@@ -1983,8 +2191,8 @@ local function showConfirmColorUnlock(itemId: string, colorIndex: number)
 	unlock.Text = "BUY"
 	unlock.Font = UiTheme.Font
 	unlock.TextSize = 20
-	unlock.TextColor3 = WHITE
-	unlock.BackgroundColor3 = GREEN
+	unlock.TextColor3 = Consts.WHITE
+	unlock.BackgroundColor3 = Consts.GREEN
 	unlock.BorderSizePixel = 0
 	unlock.Size = UDim2.fromOffset(200, 48)
 	unlock.AnchorPoint = Vector2.new(0.5, 0)
@@ -2005,7 +2213,7 @@ local function showConfirmColorUnlock(itemId: string, colorIndex: number)
 			return
 		end
 		local u = (math.sin(os.clock() * math.pi * 1.35) + 1) * 0.5
-		local c = STROKE_DARK:Lerp(PULSE_GREEN, u)
+		local c = Consts.STROKE_DARK:Lerp(Consts.PULSE_GREEN, u)
 		panelStroke.Color = c
 		if unlockStroke and unlockStroke:IsA("UIStroke") then
 			unlockStroke.Color = c
@@ -2020,8 +2228,8 @@ local function showConfirmColorUnlock(itemId: string, colorIndex: number)
 	cancel.Text = "CANCEL"
 	cancel.Font = UiTheme.Font
 	cancel.TextSize = 18
-	cancel.TextColor3 = WHITE
-	cancel.BackgroundColor3 = RED
+	cancel.TextColor3 = Consts.WHITE
+	cancel.BackgroundColor3 = Consts.RED
 	cancel.BorderSizePixel = 0
 	cancel.Size = UDim2.fromOffset(200, 44)
 	cancel.AnchorPoint = Vector2.new(0.5, 0)
@@ -2092,7 +2300,7 @@ local function startUpgradeFx()
 		if not upgradeBtn or not upgradeBtn.Visible then
 			return
 		end
-		upgradeBtn.BackgroundColor3 = GREEN:Lerp(PULSE_GREEN, pulseWave())
+		upgradeBtn.BackgroundColor3 = Consts.GREEN:Lerp(Consts.PULSE_GREEN, pulseWave())
 	end)
 	hintConn = RunService.Heartbeat:Connect(function()
 		if not upgradeBtn or not upgradeBtn.Visible or not isGamepad() then
@@ -2107,30 +2315,32 @@ local function startUpgradeFx()
 	end)
 end
 
-local function refreshColorSwatches()
+refreshColorSwatches = function()
 	local showFocus = isGamepad()
+		or playerGui:GetAttribute(HINT_ATTR) == "hue"
+		or playerGui:GetAttribute(HINT_ATTR) == "hueReroll"
 	local dice = colorDice
 	local activeBtn: GuiButton? = nil
-	local defaultStroke = colorSwatchStrokes[DEFAULT_PALETTE_SWATCH]
+	local defaultStroke = colorSwatchStrokes[Consts.DEFAULT_PALETTE_SWATCH]
 	if defaultStroke then
 		local defaultActive = activeColorIndex == nil
-		local defaultFocus = showFocus and focusColorIndex == DEFAULT_PALETTE_SWATCH
+		local defaultFocus = showFocus and focusColorIndex == Consts.DEFAULT_PALETTE_SWATCH
 		defaultStroke.Enabled = true
 		if os.clock() >= defaultStrokeFlashUntil then
-			defaultStroke.Color = DEFAULT_SWATCH_STROKE
+			defaultStroke.Color = Consts.DEFAULT_SWATCH_STROKE
 		end
 		defaultStroke.Thickness = if defaultActive or defaultFocus then 3 else 2.5
 		if defaultActive then
 			activeBtn = nil
 		end
 	end
-	local defaultBtn = colorSwatchBtns[DEFAULT_PALETTE_SWATCH]
+	local defaultBtn = colorSwatchBtns[Consts.DEFAULT_PALETTE_SWATCH]
 	if defaultBtn then
 		defaultBtn.BackgroundColor3 = Color3.new(0, 0, 0)
 		defaultBtn.BackgroundTransparency = 0
 	end
 	for idx, stroke in pairs(colorSwatchStrokes) do
-		if idx == DEFAULT_PALETTE_SWATCH then
+		if idx == Consts.DEFAULT_PALETTE_SWATCH then
 			continue
 		end
 		local isActive = activeColorIndex ~= nil and idx == activeColorIndex
@@ -2138,12 +2348,12 @@ local function refreshColorSwatches()
 		if isActive then
 			stroke.Enabled = true
 			stroke.Thickness = 2.5
-			stroke.Color = WHITE
+			stroke.Color = Consts.WHITE
 			activeBtn = colorSwatchBtns[idx]
 		elseif isFocus then
 			stroke.Enabled = true
 			stroke.Thickness = 2
-			stroke.Color = COLOR_FOCUS
+			stroke.Color = Consts.COLOR_FOCUS
 		else
 			stroke.Enabled = false
 			stroke.Thickness = 0
@@ -2183,16 +2393,178 @@ local function scrollFocusIntoView()
 	end
 end
 
+animateScrollToSwatch = function(idx: number, onDone: (() -> ())?)
+	hueScrollToken += 1
+	local my = hueScrollToken
+	local scroll = colorScroll
+	local btn = colorSwatchBtns[idx]
+	if not scroll or not btn then
+		if onDone then
+			onDone()
+		end
+		return
+	end
+	focusColorIndex = idx
+	if refreshColorSwatches then
+		refreshColorSwatches()
+	end
+
+	task.spawn(function()
+		if my ~= hueScrollToken then
+			return
+		end
+		-- Wait until the color row has real layout (upgrade cinematic can leave AbsoluteSize 0).
+		local deadline = os.clock() + 1.5
+		while os.clock() < deadline do
+			if my ~= hueScrollToken then
+				return
+			end
+			local sc = colorScroll
+			local sw = colorSwatchBtns[idx]
+			if sc and sw and sc.AbsoluteSize.X >= 8 and sw.AbsoluteSize.X >= 2 then
+				break
+			end
+			task.wait()
+		end
+		if my ~= hueScrollToken then
+			return
+		end
+		local sc = colorScroll
+		local sw = colorSwatchBtns[idx]
+		if not sc or not sw then
+			if onDone then
+				onDone()
+			end
+			return
+		end
+
+		-- Extra frames so AutomaticCanvasSize catches up.
+		for _ = 1, 3 do
+			task.wait()
+			if my ~= hueScrollToken then
+				return
+			end
+		end
+		sc = colorScroll
+		sw = colorSwatchBtns[idx]
+		if not sc or not sw then
+			if onDone then
+				onDone()
+			end
+			return
+		end
+
+		local function computeTargetX(): number
+			local scrollSize = sc.AbsoluteSize
+			local canvas = sc.CanvasPosition
+			local maxX = math.max(0, sc.AbsoluteCanvasSize.X - scrollSize.X)
+			-- Button center in canvas space (works while clipped off-screen).
+			local btnInCanvas = canvas.X + (sw.AbsolutePosition.X - sc.AbsolutePosition.X) + sw.AbsoluteSize.X * 0.5
+			return math.clamp(btnInCanvas - scrollSize.X * 0.5, 0, maxX)
+		end
+
+		local targetX = computeTargetX()
+		-- If canvas still reports empty, estimate from layout order (default=0 … hues).
+		if sc.AbsoluteCanvasSize.X < sc.AbsoluteSize.X + 1 then
+			local gap = 6
+			local pad = 4
+			local x = pad
+			local swatchW = math.max(sw.AbsoluteSize.X, 36)
+			for i = Consts.DEFAULT_PALETTE_SWATCH, idx - 1 do
+				local prev = colorSwatchBtns[i]
+				if prev then
+					x += math.max(prev.AbsoluteSize.X, swatchW) + gap
+				end
+			end
+			x += swatchW * 0.5
+			local maxX = math.max(0, x + sc.AbsoluteSize.X) -- loose upper bound; clamp after
+			targetX = math.max(0, x - sc.AbsoluteSize.X * 0.5)
+			-- Grow canvas enough to allow the scroll (AutomaticCanvasSize may lag).
+			local need = targetX + sc.AbsoluteSize.X + pad
+			if sc.AbsoluteCanvasSize.X < need then
+				sc.AutomaticCanvasSize = Enum.AutomaticSize.None
+				sc.CanvasSize = UDim2.fromOffset(math.ceil(need), 0)
+				maxX = math.max(0, need - sc.AbsoluteSize.X)
+				targetX = math.clamp(targetX, 0, maxX)
+			end
+		end
+
+		local startX = sc.CanvasPosition.X
+		if math.abs(targetX - startX) < 0.5 then
+			-- Still force a recompute after one frame in case layout settled late.
+			task.wait()
+			if my ~= hueScrollToken or not colorScroll then
+				if onDone then
+					onDone()
+				end
+				return
+			end
+			targetX = computeTargetX()
+			startX = colorScroll.CanvasPosition.X
+		end
+
+		if math.abs(targetX - startX) < 0.5 then
+			if onDone then
+				onDone()
+			end
+			return
+		end
+
+		local proxy = Instance.new("NumberValue")
+		proxy.Value = startX
+		local conn = proxy:GetPropertyChangedSignal("Value"):Connect(function()
+			if my ~= hueScrollToken or not colorScroll then
+				return
+			end
+			colorScroll.CanvasPosition = Vector2.new(proxy.Value, 0)
+		end)
+		local tw = TweenService:Create(
+			proxy,
+			TweenInfo.new(0.65, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+			{ Value = targetX }
+		)
+		tw:Play()
+		tw.Completed:Once(function()
+			conn:Disconnect()
+			proxy:Destroy()
+			if my ~= hueScrollToken then
+				return
+			end
+			if colorScroll then
+				colorScroll.CanvasPosition = Vector2.new(targetX, 0)
+			end
+			-- Restore automatic canvas if we temporarily forced it.
+			if colorScroll and colorScroll.AutomaticCanvasSize == Enum.AutomaticSize.None then
+				colorScroll.AutomaticCanvasSize = Enum.AutomaticSize.X
+			end
+			-- Snap once more after AutomaticCanvasSize restores.
+			task.wait()
+			if my ~= hueScrollToken or not colorScroll or not colorSwatchBtns[idx] then
+				if onDone then
+					onDone()
+				end
+				return
+			end
+			local finalX = computeTargetX()
+			colorScroll.CanvasPosition = Vector2.new(finalX, 0)
+			task.wait()
+			if onDone then
+				onDone()
+			end
+		end)
+	end)
+end
+
 local function nudgeColorFocus(delta: number)
 	if not root or not root.Visible then
 		return
 	end
 	local maxI = PlotOutlineColors.CORAL_MAX_INDEX
 	local next = focusColorIndex + delta
-	if next < DEFAULT_PALETTE_SWATCH then
+	if next < Consts.DEFAULT_PALETTE_SWATCH then
 		next = maxI
 	elseif next > maxI then
-		next = DEFAULT_PALETTE_SWATCH
+		next = Consts.DEFAULT_PALETTE_SWATCH
 	end
 	focusColorIndex = next
 	refreshColorSwatches()
@@ -2207,7 +2579,7 @@ local function syncColorFromPart(part: BasePart)
 		focusColorIndex = activeColorIndex
 	else
 		activeColorIndex = nil
-		focusColorIndex = DEFAULT_PALETTE_SWATCH
+		focusColorIndex = Consts.DEFAULT_PALETTE_SWATCH
 	end
 	refreshColorSwatches()
 	task.defer(scrollFocusIntoView)
@@ -2261,7 +2633,7 @@ local function applyCoralPaint(part: BasePart, idx: number, paint: Color3, place
 		UiHaptics.pulseShort()
 	end
 	local ok, result = pcall(function()
-		return colorRf:InvokeServer(
+		return remotes.color:InvokeServer(
 			placeId,
 			idx,
 			paint.R,
@@ -2304,6 +2676,7 @@ local function applyCoralPaint(part: BasePart, idx: number, paint: Color3, place
 	CoralVisual.setRestColor(part, confirmedPaint, confirmedWeb, confirmedWebIdx)
 	RelocateController.syncPartRestColor(part)
 	refreshColorSwatches()
+	noteTutorialHueApplied(confirmed)
 	return true
 end
 
@@ -2495,7 +2868,7 @@ local function selectDefaultPalette(): boolean
 	if #parts == 0 then
 		return false
 	end
-	focusColorIndex = DEFAULT_PALETTE_SWATCH
+	focusColorIndex = Consts.DEFAULT_PALETTE_SWATCH
 	RelocateController.setHueColorEditing(true)
 	activeColorIndex = nil
 	local cleared = 0
@@ -2530,7 +2903,7 @@ local function selectDefaultPalette(): boolean
 				return
 			end
 			local ok, result = pcall(function()
-				return clearHueRf:InvokeServer(t.placeId)
+				return remotes.clearHue:InvokeServer(t.placeId)
 			end)
 			if not ok or typeof(result) ~= "table" or result.ok ~= true then
 				failed += 1
@@ -2601,18 +2974,27 @@ local function refreshLifeRows(part: BasePart?)
 	local fed = 0
 	local waves = 0
 	if part then
+		WaveSim.noteCoralPart(part)
+		local pid = placeIdOf(part)
+		if pid then
+			fed, waves = WaveSim.getCoralLifeStats(pid)
+		end
 		local a = part:GetAttribute("OceanTD_CoralFedTotal")
+		local attrFed = 0
 		if typeof(a) == "number" then
-			fed = math.floor(a)
+			attrFed = math.floor(a)
 		elseif typeof(a) == "string" then
-			fed = math.floor(tonumber(a) or 0)
+			attrFed = math.floor(tonumber(a) or 0)
 		end
 		local b = part:GetAttribute("OceanTD_CoralWavesTotal")
+		local attrWaves = 0
 		if typeof(b) == "number" then
-			waves = math.floor(b)
+			attrWaves = math.floor(b)
 		elseif typeof(b) == "string" then
-			waves = math.floor(tonumber(b) or 0)
+			attrWaves = math.floor(tonumber(b) or 0)
 		end
+		fed = math.max(fed, attrFed)
+		waves = math.max(waves, attrWaves)
 	end
 	fedLbl.Text = "Fed: " .. tostring(math.max(0, fed))
 	wavesLbl.Text = "Waves: " .. tostring(math.max(0, waves))
@@ -2666,6 +3048,7 @@ local function setVisible(on: boolean)
 			startUpgradeFx()
 			showRangeRing(part)
 		end
+		onInspectVisibilityForTutorial(true)
 	else
 		stopPulses()
 		hideRangeRing()
@@ -2676,6 +3059,7 @@ local function setVisible(on: boolean)
 		cineToken += 1
 		-- In-flight size cine may have left the new mesh LTM-hidden; unhide on close.
 		revealAllCinePrepParts(nil)
+		onInspectVisibilityForTutorial(false)
 	end
 end
 
@@ -2771,7 +3155,7 @@ function CoralInspectPanel.bind(panel: GuiObject, catalogFrame: GuiObject)
 	nm.Size = UDim2.new(1, -108, 0.42, 0)
 	nm.Font = UiTheme.Font
 	nm.Text = "Coral"
-	nm.TextColor3 = WHITE
+	nm.TextColor3 = Consts.WHITE
 	nm.TextScaled = true
 	nm.TextXAlignment = Enum.TextXAlignment.Left
 	nm.Parent = row1
@@ -2782,8 +3166,8 @@ function CoralInspectPanel.bind(panel: GuiObject, catalogFrame: GuiObject)
 	recycle.Text = ""
 	recycle.Font = UiTheme.Font
 	recycle.TextScaled = true
-	recycle.TextColor3 = WHITE
-	recycle.BackgroundColor3 = REC_GREEN
+	recycle.TextColor3 = Consts.WHITE
+	recycle.BackgroundColor3 = Consts.REC_GREEN
 	recycle.BorderSizePixel = 0
 	recycle.AnchorPoint = Vector2.new(1, 0.5)
 	recycle.Position = UDim2.new(1, 0, 0.5, 2)
@@ -2792,7 +3176,7 @@ function CoralInspectPanel.bind(panel: GuiObject, catalogFrame: GuiObject)
 	recycle.Parent = row1
 	UiCircles.ensure(recycle)
 	local edge = Instance.new("UIStroke")
-	edge.Color = WHITE
+	edge.Color = Consts.WHITE
 	edge.Thickness = 2
 	edge.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
 	edge.Parent = recycle
@@ -2804,7 +3188,7 @@ function CoralInspectPanel.bind(panel: GuiObject, catalogFrame: GuiObject)
 	recycleIcon.Position = UDim2.fromScale(0.5, 0.5)
 	-- ~20% smaller than prior 0.62 so the logo sits inside the green circle.
 	recycleIcon.Size = UDim2.fromScale(0.5, 0.5)
-	recycleIcon.Image = RECYCLE_ICON_IMAGE
+	recycleIcon.Image = Consts.RECYCLE_ICON_IMAGE
 	recycleIcon.ScaleType = Enum.ScaleType.Fit
 	recycleIcon.ZIndex = 2
 	recycleIcon.Active = false
@@ -2829,42 +3213,47 @@ function CoralInspectPanel.bind(panel: GuiObject, catalogFrame: GuiObject)
 		nm.Position = UDim2.new(0, side + 12, 0.5, 2)
 		nm.Size = UDim2.new(1, -(side * 2 + 20), 0.42, 0)
 		if lifePad then
-			-- Align Fed/Waves rows under the coral name.
+			-- Align Fed/Waves under the coral name.
 			lifePad.PaddingLeft = UDim.new(0, side + 12)
 		end
 	end
 	row1:GetPropertyChangedSignal("AbsoluteSize"):Connect(refreshHeaderRow)
 	task.defer(refreshHeaderRow)
 
-	-- Fed / Waves rows under the coral title.
+	-- Fed / Waves: two tight labels under the coral name (not half-width columns).
 	local lifeRow = Instance.new("Frame")
 	lifeRow.Name = "LifeRow"
 	lifeRow.BackgroundTransparency = 1
-	lifeRow.Size = UDim2.new(1, 0, 0.11, 0)
+	lifeRow.Size = UDim2.new(1, 0, 0.06, 0)
 	lifeRow.LayoutOrder = 2
 	lifeRow.Parent = frame
 	local lifeLayout = Instance.new("UIListLayout")
-	lifeLayout.FillDirection = Enum.FillDirection.Vertical
+	lifeLayout.FillDirection = Enum.FillDirection.Horizontal
 	lifeLayout.SortOrder = Enum.SortOrder.LayoutOrder
 	lifeLayout.HorizontalAlignment = Enum.HorizontalAlignment.Left
 	lifeLayout.VerticalAlignment = Enum.VerticalAlignment.Center
-	lifeLayout.Padding = UDim.new(0, 2)
+	lifeLayout.Padding = UDim.new(0, 14)
 	lifeLayout.Parent = lifeRow
 	lifePad = Instance.new("UIPadding")
 	lifePad.PaddingLeft = UDim.new(0, 52)
 	lifePad.PaddingRight = UDim.new(0, 4)
+	lifePad.PaddingTop = UDim.new(0, 0)
+	lifePad.PaddingBottom = UDim.new(0, 0)
 	lifePad.Parent = lifeRow
 
 	local fed = Instance.new("TextLabel")
 	fed.Name = "FedRow"
 	fed.BackgroundTransparency = 1
 	fed.LayoutOrder = 1
-	fed.Size = UDim2.new(1, 0, 0.5, 0)
+	fed.AutomaticSize = Enum.AutomaticSize.X
+	fed.Size = UDim2.new(0, 0, 1, 0)
 	fed.Font = UiTheme.Font
 	fed.Text = "Fed: 0"
-	fed.TextColor3 = STAT_GREY
-	fed.TextScaled = true
+	fed.TextColor3 = Consts.STAT_GREY
+	fed.TextScaled = false
+	fed.TextSize = 14
 	fed.TextXAlignment = Enum.TextXAlignment.Left
+	fed.TextYAlignment = Enum.TextYAlignment.Center
 	fed.Parent = lifeRow
 	fedLbl = fed
 
@@ -2872,12 +3261,15 @@ function CoralInspectPanel.bind(panel: GuiObject, catalogFrame: GuiObject)
 	waves.Name = "WavesRow"
 	waves.BackgroundTransparency = 1
 	waves.LayoutOrder = 2
-	waves.Size = UDim2.new(1, 0, 0.5, 0)
+	waves.AutomaticSize = Enum.AutomaticSize.X
+	waves.Size = UDim2.new(0, 0, 1, 0)
 	waves.Font = UiTheme.Font
 	waves.Text = "Waves: 0"
-	waves.TextColor3 = STAT_GREY
-	waves.TextScaled = true
+	waves.TextColor3 = Consts.STAT_GREY
+	waves.TextScaled = false
+	waves.TextSize = 14
 	waves.TextXAlignment = Enum.TextXAlignment.Left
+	waves.TextYAlignment = Enum.TextYAlignment.Center
 	waves.Parent = lifeRow
 	wavesLbl = waves
 
@@ -2938,22 +3330,22 @@ function CoralInspectPanel.bind(panel: GuiObject, catalogFrame: GuiObject)
 	defaultBtn.BackgroundColor3 = Color3.new(0, 0, 0)
 	defaultBtn.BorderSizePixel = 0
 	defaultBtn.Size = UDim2.fromOffset(36, 36)
-	defaultBtn.LayoutOrder = DEFAULT_PALETTE_SWATCH
+	defaultBtn.LayoutOrder = Consts.DEFAULT_PALETTE_SWATCH
 	defaultBtn.Parent = scroll
 	UiCircles.ensure(defaultBtn)
 	local defaultStroke = Instance.new("UIStroke")
 	defaultStroke.Name = "_OceanTD_DefaultPaletteStroke"
 	defaultStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
 	defaultStroke.Thickness = 2.5
-	defaultStroke.Color = DEFAULT_SWATCH_STROKE
+	defaultStroke.Color = Consts.DEFAULT_SWATCH_STROKE
 	defaultStroke.Enabled = true
 	defaultStroke.Parent = defaultBtn
-	colorSwatchBtns[DEFAULT_PALETTE_SWATCH] = defaultBtn
-	colorSwatchStrokes[DEFAULT_PALETTE_SWATCH] = defaultStroke
+	colorSwatchBtns[Consts.DEFAULT_PALETTE_SWATCH] = defaultBtn
+	colorSwatchStrokes[Consts.DEFAULT_PALETTE_SWATCH] = defaultStroke
 	local brush = Instance.new("ImageLabel")
 	brush.Name = "Paintbrush"
 	brush.BackgroundTransparency = 1
-	brush.Image = PAINTBRUSH_ICON
+	brush.Image = Consts.PAINTBRUSH_ICON
 	brush.AnchorPoint = Vector2.new(0.5, 0.5)
 	brush.Position = UDim2.fromScale(0.5, 0.5)
 	brush.Size = UDim2.fromScale(0.62, 0.62)
@@ -2983,7 +3375,7 @@ function CoralInspectPanel.bind(panel: GuiObject, catalogFrame: GuiObject)
 		stroke.Name = "_OceanTD_ActiveColor"
 		stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
 		stroke.Thickness = 2.5
-		stroke.Color = WHITE
+		stroke.Color = Consts.WHITE
 		stroke.Enabled = false
 		stroke.Parent = btn
 		colorSwatchBtns[sw.index] = btn
@@ -3097,7 +3489,7 @@ function CoralInspectPanel.bind(panel: GuiObject, catalogFrame: GuiObject)
 	local dice = Instance.new("ImageButton")
 	dice.Name = "ColorDice"
 	dice.BackgroundTransparency = 1
-	dice.Image = DICE_ICON
+	dice.Image = Consts.DICE_ICON
 	dice.AnchorPoint = Vector2.new(0.5, 0.5)
 	dice.Position = UDim2.fromScale(0.5, 0.5)
 	dice.Size = UDim2.fromScale(0.58, 0.58)
@@ -3133,15 +3525,15 @@ function CoralInspectPanel.bind(panel: GuiObject, catalogFrame: GuiObject)
 		cell.LayoutOrder = i
 		cell.Parent = row3
 		local letter = Instance.new("TextButton")
-		letter.BackgroundColor3 = GREEN
+		letter.BackgroundColor3 = Consts.GREEN
 		letter.BackgroundTransparency = 0
 		letter.BorderSizePixel = 0
 		letter.AnchorPoint = Vector2.new(0.5, 0)
 		letter.Position = UDim2.new(0.5, 0, 0, 2)
 		letter.Size = UDim2.fromOffset(48, 48)
 		letter.Font = UiTheme.Font
-		letter.Text = LETTERS[i]
-		letter.TextColor3 = WHITE
+		letter.Text = Consts.LETTERS[i]
+		letter.TextColor3 = Consts.WHITE
 		letter.TextScaled = true
 		letter.AutoButtonColor = false
 		letter.Parent = cell
@@ -3153,8 +3545,8 @@ function CoralInspectPanel.bind(panel: GuiObject, catalogFrame: GuiObject)
 		word.Position = UDim2.new(0.5, 0, 0, 54)
 		word.Size = UDim2.new(1, -4, 0, 16)
 		word.Font = UiTheme.Font
-		word.Text = WORDS[i]
-		word.TextColor3 = WHITE
+		word.Text = Consts.WORDS[i]
+		word.TextColor3 = Consts.WHITE
 		word.TextScaled = true
 		word.TextXAlignment = Enum.TextXAlignment.Center
 		word.Parent = cell
@@ -3185,7 +3577,7 @@ function CoralInspectPanel.bind(panel: GuiObject, catalogFrame: GuiObject)
 			row.LayoutOrder = li
 			row.Font = UiTheme.Font
 			row.Text = formatStatLine(STAT_ICONS[li], n, false)
-			row.TextColor3 = WHITE
+			row.TextColor3 = Consts.WHITE
 			row.TextSize = 13
 			row.TextXAlignment = Enum.TextXAlignment.Center
 			row.Parent = stats
@@ -3226,8 +3618,8 @@ function CoralInspectPanel.bind(panel: GuiObject, catalogFrame: GuiObject)
 	up.Text = "UPGRADE"
 	up.Font = UiTheme.Font
 	up.TextScaled = true
-	up.TextColor3 = WHITE
-	up.BackgroundColor3 = GREEN
+	up.TextColor3 = Consts.WHITE
+	up.BackgroundColor3 = Consts.GREEN
 	up.BorderSizePixel = 0
 	up.AnchorPoint = Vector2.new(0.5, 0.5)
 	up.Position = UDim2.fromScale(0.5, 0.5)
@@ -3299,7 +3691,7 @@ function CoralInspectPanel.bind(panel: GuiObject, catalogFrame: GuiObject)
 		corner.CornerRadius = UDim.new(0, 8)
 		corner.Parent = box
 		local stroke = Instance.new("UIStroke")
-		stroke.Color = WHITE
+		stroke.Color = Consts.WHITE
 		stroke.Thickness = 1.5
 		stroke.Transparency = 0.35
 		stroke.Parent = box
@@ -3326,7 +3718,7 @@ function CoralInspectPanel.bind(panel: GuiObject, catalogFrame: GuiObject)
 			row.LayoutOrder = i
 			row.Font = UiTheme.Font
 			row.Text = string.format("%s  %s", STAT_ICONS[i], name)
-			row.TextColor3 = WHITE
+			row.TextColor3 = Consts.WHITE
 			row.TextSize = textSize
 			row.TextXAlignment = Enum.TextXAlignment.Center
 			row.ZIndex = 11
@@ -3463,7 +3855,7 @@ function CoralInspectPanel.bind(panel: GuiObject, catalogFrame: GuiObject)
 		if confirmGui then
 			return false
 		end
-		if focusColorIndex == DEFAULT_PALETTE_SWATCH then
+		if focusColorIndex == Consts.DEFAULT_PALETTE_SWATCH then
 			return selectDefaultPalette()
 		end
 		return selectCoralColor(focusColorIndex)
@@ -3527,6 +3919,28 @@ function CoralInspectPanel.bind(panel: GuiObject, catalogFrame: GuiObject)
 			nudgeColorFocus(1)
 		end
 	end)
+end
+
+function CoralInspectPanel.getTutorialHueSwatch(): GuiObject?
+	if not root or not root.Visible then
+		return nil
+	end
+	local hue = resolveTutorialHueIndex()
+	if typeof(hue) ~= "number" then
+		local part = RelocateController.getSelectedPart()
+		local seed = if part then part:GetAttribute("OceanTD_SeedHue") else nil
+		if typeof(seed) == "number" then
+			hue = PlotOutlineColors.clampCoralIndex(seed)
+		end
+	end
+	if typeof(hue) ~= "number" then
+		return nil
+	end
+	local btn = colorSwatchBtns[hue]
+	if btn and btn.Visible and btn.AbsoluteSize.X >= 2 then
+		return btn
+	end
+	return nil
 end
 
 return CoralInspectPanel

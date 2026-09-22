@@ -174,6 +174,19 @@ function InventoryState.getItemSlotScreenCenter(itemId: string): Vector2?
 	return nil
 end
 
+-- Scroll/focus a backpack cell into view (tutorial finger / placement).
+local revealItemInBackpackProvider: ((string) -> ())? = nil
+
+function InventoryState.setRevealItemInBackpackProvider(provider: (string) -> ())
+	revealItemInBackpackProvider = provider
+end
+
+function InventoryState.revealItemInBackpack(itemId: string)
+	if revealItemInBackpackProvider then
+		revealItemInBackpackProvider(itemId)
+	end
+end
+
 -- Center of the open backpack scroll list (Clear Plot orb fly target).
 local scrollCenterProvider: (() -> Vector2?)? = nil
 

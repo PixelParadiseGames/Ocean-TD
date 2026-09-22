@@ -38,6 +38,9 @@ export type CellData = {
 	webColorB: number?,
 	placeId: string?,
 	parentPlaceId: string?,
+	-- Lifetime inspect counters (client wave sim → server merge; durable on save).
+	fedTotal: number?,
+	wavesTotal: number?,
 }
 
 local GridService = {}
@@ -434,7 +437,29 @@ function GridService.copyCellMeta(from: CellData, to: CellData)
 	if typeof(from.parentPlaceId) == "string" and from.parentPlaceId ~= "" then
 		to.parentPlaceId = from.parentPlaceId
 	end
+	if typeof(from.fedTotal) == "number" and from.fedTotal > 0 then
+		to.fedTotal = math.max(to.fedTotal or 0, math.floor(from.fedTotal))
+	end
+	if typeof(from.wavesTotal) == "number" and from.wavesTotal > 0 then
+		to.wavesTotal = math.max(to.wavesTotal or 0, math.floor(from.wavesTotal))
+	end
 	GridService.copySeaFanExtras(from, to)
+end
+
+-- Client wave-sim lifetime counters (monotonic merge).
+function GridService.mergeLifeStatsByPlaceId(plotId: PlotId, placeId: string, fed: number, waves: number): boolean
+	if typeof(placeId) ~= "string" or placeId == "" then
+		return false
+	end
+	local cell = GridService.findCellByPlaceId(plotId, placeId)
+	if not cell then
+		return false
+	end
+	local nextFed = math.max(cell.fedTotal or 0, math.max(0, math.floor(fed)))
+	local nextWaves = math.max(cell.wavesTotal or 0, math.max(0, math.floor(waves)))
+	cell.fedTotal = nextFed
+	cell.wavesTotal = nextWaves
+	return true
 end
 
 function GridService.setSeaFanExtras(
@@ -652,6 +677,14 @@ function GridService.hydrate(plotId: PlotId, ownerUserId: number, layout: { Layo
 					if typeof(obj.parentPlaceId) == "string" and obj.parentPlaceId ~= "" then
 						cell.parentPlaceId = obj.parentPlaceId
 					end
+					local fedTotal = tonumber(obj.fedTotal)
+					if fedTotal and fedTotal > 0 then
+						cell.fedTotal = math.floor(fedTotal)
+					end
+					local wavesTotal = tonumber(obj.wavesTotal)
+					if wavesTotal and wavesTotal > 0 then
+						cell.wavesTotal = math.floor(wavesTotal)
+					end
 				end
 			end
 		end
@@ -703,6 +736,8 @@ function GridService.snapshot(plotId: PlotId): { LayoutObject }
 				webColorB = cell.webColorB,
 				placeId = cell.placeId,
 				parentPlaceId = cell.parentPlaceId,
+				fedTotal = cell.fedTotal,
+				wavesTotal = cell.wavesTotal,
 			})
 		end
 	end

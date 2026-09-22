@@ -35,6 +35,10 @@ Sacred and tiny. Species, UI, and shop do **not** belong here.
     PlotSize = 1,
     EarnMore = 1,
     PlaceMore = 1,
+    RHealth = 1,
+    Skip = 1,
+    WaveSpeed = 1,
+    AutoRoll = 1, -- LuckBTN; stage 1 = off, 8 = unlimited auto rolls
   },
 }
 ```
@@ -85,7 +89,7 @@ Refuse to overwrite a **non-empty** stored `layout` with an empty snapshot unles
 ## Ephemeral vs durable
 | Durable | Ephemeral (Phase 1+) |
 |---------|----------------------|
-| layout objects, currencies ($D), processedReceipts, inventory, skill unlocks, highestWave, plotOutlineColorIndex, skillStages | live wave agents, previews, session remotes, client outline parts |
+| layout objects (+fedTotal/wavesTotal), currencies ($D), processedReceipts, inventory, skill unlocks, highestWave, plotOutlineColorIndex, skillStages | live wave agents, previews, session remotes, client outline parts |
 
 ## Logs
 `[PERSIST] Load/Save ... layout=N` — trust counts over guesswork.

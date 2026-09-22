@@ -5,6 +5,7 @@
 ]]
 
 local GuiService = game:GetService("GuiService")
+local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
@@ -20,6 +21,7 @@ local WaveSummaryUi = require(script.Parent:WaitForChild("WaveSummaryUi"))
 local WaveEndVfx = require(script.Parent:WaitForChild("WaveEndVfx"))
 local ReefDefeatCam = require(script.Parent:WaitForChild("ReefDefeatCam"))
 local HideUiController = require(script.Parent:WaitForChild("HideUiController"))
+local InventoryState = require(script.Parent:WaitForChild("InventoryState"))
 
 local WaveSlotSummary = {}
 
@@ -419,6 +421,11 @@ function WaveSlotSummary.hide()
 	end
 	-- Finish / dismiss: restore follow cam, do not re-enter FishCam.
 	releaseDefeatCam(false)
+	-- Join-intro: skills finger starts on Finish, not when waves stop.
+	local pg = Players.LocalPlayer:FindFirstChild("PlayerGui")
+	if pg and pg:IsA("PlayerGui") then
+		pg:SetAttribute("OceanTD_TutorialSummaryFinished", os.clock())
+	end
 end
 
 function WaveSlotSummary.pauseForSkills()
@@ -545,6 +552,13 @@ function WaveSlotSummary.show(summary: WaveSim.Summary)
 	end
 	-- Hide-UI would swallow this popup (and keep the player blind to Continue/Retry).
 	HideUiController.forceShow()
+	-- Out of reef health (or any summary): leave backpack / build so the popup isn't buried.
+	if InventoryState.isOpen() then
+		InventoryState.setOpen(false)
+	end
+	pcall(function()
+		require(script.Parent:WaitForChild("PlacementController")).forceExit()
+	end)
 	summaryOpen = true
 	summaryIsDefeat = summary.defeated == true
 	local origin = summaryScaleOrigin(summary)

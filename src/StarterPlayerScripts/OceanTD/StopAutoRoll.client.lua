@@ -23,6 +23,7 @@ local UiCircles = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiCircl
 
 local SeedWheelAutoRollState = require(script.Parent:WaitForChild("SeedWheelAutoRollState"))
 local SeedWheelRevealApi = require(script.Parent:WaitForChild("SeedWheelRevealApi"))
+local SkillStages = require(oceanRoot:WaitForChild("Shared"):WaitForChild("SkillStages"))
 
 local STUDIO_ANCHOR_NAME = "StopAutoRoll"
 local HIT_NAME = "_OceanTD_StopAutoRollHit"
@@ -45,6 +46,27 @@ local DICE_EMOJI = "🎲"
 local FOUNTAIN_GUI_NAME = "OceanTD_DiceFountain"
 local HOLD_FOUNTAIN_GAP = 0.11
 local ROLL_PRESS_SOUND_ID = "rbxassetid://117344652481079"
+local SKILLS_OPEN_ATTR = "OceanTD_SkillsBubblesOpen"
+local POWERUP_OPEN_ATTR = "OceanTD_SkillPowerUpOpen"
+local REPORT_OPEN_ATTR = "OceanTD_ReefReportOpen"
+local HIDE_UI_ACTIVE_ATTR = "OceanTD_HideUiActive"
+local ROLL_FINGER_ATTR = "OceanTD_RollFingerHint"
+local COUNT_CLIP_NAME = "_OceanTD_RollCountClip"
+-- Per digit: ~4× the old 0.55s flash, with slide in/out from the left.
+-- Infinity holds 3× longer than a normal digit.
+local COUNT_DIGIT_TOTAL_SEC = 2.2
+local COUNT_INFINITY_MULT = 3
+local COUNT_SLIDE_SEC = 0.28
+local COUNT_SLIDE_PX = 36
+local INFINITY_GLYPH = "∞"
+
+local function clearRollFingerHint()
+	-- After roll: hide finger and wait for coral→backpack slide, then backpack tutorial.
+	local v = playerGui:GetAttribute(ROLL_FINGER_ATTR)
+	if v == true or v == "roll" then
+		playerGui:SetAttribute(ROLL_FINGER_ATTR, "await")
+	end
+end
 
 local rollPressSound = Instance.new("Sound")
 rollPressSound.Name = "OceanTD_RollPress"
@@ -77,6 +99,33 @@ local buttonScale: UIScale? = nil
 local labelScale: UIScale? = nil
 local fountainHoldGen = 0
 local fountainRng = Random.new()
+local countAnimToken = 0
+
+local function uiHidesRoll(): boolean
+	return playerGui:GetAttribute(SKILLS_OPEN_ATTR) == true
+		or playerGui:GetAttribute(POWERUP_OPEN_ATTR) == true
+		or playerGui:GetAttribute(REPORT_OPEN_ATTR) == true
+		or playerGui:GetAttribute(HIDE_UI_ACTIVE_ATTR) == true
+end
+
+local function refreshRollButtonVisibility()
+	if not anchor then
+		return
+	end
+	local show = not uiHidesRoll()
+	anchor.Visible = show
+	anchor.Active = show
+	pcall(function()
+		(anchor :: any).Interactable = show
+	end)
+	if hitBtn then
+		hitBtn.Visible = show
+		hitBtn.Active = show
+		pcall(function()
+			(hitBtn :: any).Interactable = show
+		end)
+	end
+end
 
 local function buttonScreenCenter(): Vector2?
 	if not anchor then
@@ -247,7 +296,175 @@ local function clearStudioImage(host: GuiObject)
 	host.BackgroundTransparency = 1
 end
 
-local function applyVisualRunning()
+local function formatRemainingLabel(count: number): string
+	if count == math.huge or count < 0 then
+		return INFINITY_GLYPH
+	end
+	return tostring(math.max(0, math.floor(count)))
+end
+
+local function setRunningLabel(text: string)
+	if label then
+		label.Text = text
+		label.TextTransparency = 0
+		label.TextColor3 = Color3.new(1, 1, 1)
+	end
+end
+
+local function clearCountClip()
+	if not anchor then
+		return
+	end
+	local clip = anchor:FindFirstChild(COUNT_CLIP_NAME)
+	if clip then
+		clip:Destroy()
+	end
+end
+
+local function ensureCountClip(): Frame?
+	if not anchor or not label then
+		return nil
+	end
+	local existing = anchor:FindFirstChild(COUNT_CLIP_NAME)
+	if existing and existing:IsA("Frame") then
+		return existing
+	end
+	if existing then
+		existing:Destroy()
+	end
+	local clip = Instance.new("Frame")
+	clip.Name = COUNT_CLIP_NAME
+	clip.BackgroundTransparency = 1
+	clip.BorderSizePixel = 0
+	clip.ClipsDescendants = true
+	clip.AnchorPoint = label.AnchorPoint
+	clip.Position = label.Position
+	clip.Size = label.Size
+	clip.ZIndex = label.ZIndex + 2
+	clip.Active = false
+	clip.Parent = anchor
+	return clip
+end
+
+local function tweenWait(inst: Instance, info: TweenInfo, props: { [string]: any }): boolean
+	local tw = TweenService:Create(inst, info, props)
+	tw:Play()
+	tw.Completed:Wait()
+	return tw.PlaybackState == Enum.PlaybackState.Completed
+end
+
+local function countDigitTotalSec(text: string): number
+	if text == INFINITY_GLYPH then
+		return COUNT_DIGIT_TOTAL_SEC * COUNT_INFINITY_MULT
+	end
+	return COUNT_DIGIT_TOTAL_SEC
+end
+
+-- One digit: slide in from left → hold → slide out to the right.
+local function playCountDigit(clip: Frame, text: string, token: number): boolean
+	local totalSec = countDigitTotalSec(text)
+	local hold = math.max(0.05, totalSec - COUNT_SLIDE_SEC * 2)
+	local digit = Instance.new("TextLabel")
+	digit.Name = "CountDigit"
+	digit.BackgroundTransparency = 1
+	digit.AnchorPoint = Vector2.new(0.5, 0.5)
+	digit.Position = UDim2.new(0.5, -COUNT_SLIDE_PX, 0.5, 0)
+	digit.Size = UDim2.fromScale(1, 1)
+	digit.Font = UiTheme.Font
+	digit.TextScaled = true
+	digit.TextColor3 = Color3.new(1, 1, 1)
+	digit.TextTransparency = 0
+	digit.Text = text
+	digit.ZIndex = clip.ZIndex + 1
+	digit.Active = false
+	digit.Parent = clip
+	-- ∞ glyph renders smaller than digits in the same TextScaled box.
+	if text == INFINITY_GLYPH then
+		local infScale = Instance.new("UIScale")
+		infScale.Name = "InfinityScale"
+		infScale.Scale = 1.5
+		infScale.Parent = digit
+	end
+	local slideIn = TweenInfo.new(COUNT_SLIDE_SEC, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+	local slideOut = TweenInfo.new(COUNT_SLIDE_SEC, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
+	if not tweenWait(digit, slideIn, { Position = UDim2.fromScale(0.5, 0.5) }) or token ~= countAnimToken then
+		digit:Destroy()
+		return false
+	end
+	task.wait(hold)
+	if token ~= countAnimToken or not digit.Parent then
+		digit:Destroy()
+		return false
+	end
+	if not tweenWait(digit, slideOut, { Position = UDim2.new(0.5, COUNT_SLIDE_PX, 0.5, 0), TextTransparency = 1 }) or token ~= countAnimToken then
+		digit:Destroy()
+		return false
+	end
+	digit:Destroy()
+	return true
+end
+
+local function playRemainingCountdown(before: number, after: number?)
+	countAnimToken += 1
+	local token = countAnimToken
+	clearCountClip()
+	local beforeText = formatRemainingLabel(before)
+	local clip = ensureCountClip()
+	if not clip then
+		setRunningLabel(beforeText)
+		if after ~= nil then
+			SeedWheelAutoRollState._setRemaining(after)
+			task.delay(countDigitTotalSec(beforeText), function()
+				if token == countAnimToken and SeedWheelAutoRollState.isEnabled() then
+					setRunningLabel(formatRemainingLabel(after))
+				end
+			end)
+		else
+			task.delay(countDigitTotalSec(beforeText), function()
+				if token == countAnimToken and SeedWheelAutoRollState.isEnabled() then
+					setRunningLabel("OFF")
+				end
+			end)
+		end
+		return
+	end
+	if label then
+		label.TextTransparency = 1
+	end
+	task.spawn(function()
+		if not playCountDigit(clip, beforeText, token) then
+			return
+		end
+		if after ~= nil then
+			SeedWheelAutoRollState._setRemaining(after)
+			if not playCountDigit(clip, formatRemainingLabel(after), token) then
+				return
+			end
+		end
+		if token ~= countAnimToken then
+			return
+		end
+		clearCountClip()
+		if SeedWheelAutoRollState.isEnabled() then
+			setRunningLabel("OFF")
+		elseif label then
+			label.TextTransparency = 0
+		end
+	end)
+end
+
+local function cancelRemainingCountdown()
+	countAnimToken += 1
+	clearCountClip()
+	if label then
+		label.TextTransparency = 0
+	end
+end
+
+local function applyVisualRunning(skipCountCancel: boolean?)
+	if not skipCountCancel then
+		cancelRemainingCountdown()
+	end
 	if disk then
 		disk.BackgroundColor3 = STOP_RED
 		disk.BackgroundTransparency = 0
@@ -256,14 +473,14 @@ local function applyVisualRunning()
 		outerStroke.Color = BRIGHT_RED
 		outerStroke.Enabled = true
 	end
-	if label then
-		label.Text = "OFF"
-		label.TextColor3 = Color3.new(1, 1, 1)
+	if not skipCountCancel then
+		setRunningLabel("OFF")
 	end
 	refreshIconSwap()
 end
 
 local function applyVisualStopped()
+	cancelRemainingCountdown()
 	if disk then
 		disk.BackgroundColor3 = START_GREEN
 		disk.BackgroundTransparency = 0
@@ -275,8 +492,23 @@ local function applyVisualStopped()
 	if label then
 		label.Text = "ROLL"
 		label.TextColor3 = Color3.new(1, 1, 1)
+		label.TextTransparency = 0
 	end
 	refreshIconSwap()
+end
+
+local function optimisticAutoRollBudget(): number?
+	local ok, ui = pcall(function()
+		return require(script.Parent:WaitForChild("SkillPowerUpUI"))
+	end)
+	if not ok or typeof(ui) ~= "table" or typeof((ui :: any).getStage) ~= "function" then
+		return nil
+	end
+	local budget = SkillStages.autoRollBudgetAtStage((ui :: any).getStage("AutoRoll"))
+	if budget <= 0 then
+		return nil
+	end
+	return budget
 end
 
 local function flashPressGreen()
@@ -392,7 +624,7 @@ end
 local function ensureLabel(host: GuiObject): TextLabel
 	local existing = host:FindFirstChild(LABEL_NAME)
 	if existing and existing:IsA("TextLabel") then
-		existing.Size = UDim2.new(1, -4, 0, 13)
+		existing.Size = UDim2.new(1, -4, 0, 11)
 		label = existing
 		return existing
 	end
@@ -404,7 +636,7 @@ local function ensureLabel(host: GuiObject): TextLabel
 	lbl.BackgroundTransparency = 1
 	lbl.AnchorPoint = Vector2.new(0.5, 1)
 	lbl.Position = UDim2.new(0.5, 0, 1, -2)
-	lbl.Size = UDim2.new(1, -4, 0, 13)
+	lbl.Size = UDim2.new(1, -4, 0, 11)
 	lbl.Font = UiTheme.Font
 	lbl.TextScaled = true
 	lbl.TextColor3 = Color3.new(1, 1, 1)
@@ -649,21 +881,56 @@ local function isPointerPress(input: InputObject): boolean
 	return input.KeyCode == Enum.KeyCode.ButtonA
 end
 
+local function canStartAutoRoll(): boolean
+	local ok, ui = pcall(function()
+		return require(script.Parent:WaitForChild("SkillPowerUpUI"))
+	end)
+	if not ok or typeof(ui) ~= "table" then
+		return false
+	end
+	local getUnlocked = (ui :: any).getUnlockedStage
+	local getStage = (ui :: any).getStage
+	if typeof(getUnlocked) ~= "function" or typeof(getStage) ~= "function" then
+		return false
+	end
+	local stages = {
+		PlotSize = getUnlocked("PlotSize"),
+		AutoRoll = getUnlocked("AutoRoll"),
+	}
+	if SkillStages.isSkillLocked("AutoRoll", stages) then
+		return false
+	end
+	return SkillStages.autoRollAvailable(getStage("AutoRoll"))
+end
+
 local function startAutoRoll()
 	if busyAnim or presenting or not anchor then
 		return
 	end
+	if not canStartAutoRoll() then
+		return
+	end
+	local budget = optimisticAutoRollBudget()
+	if budget then
+		SeedWheelAutoRollState._setRemaining(budget)
+	end
 	busyAnim = true
-	applyVisualRunning()
+	applyVisualRunning(true)
+	-- Optimistic enable so intro countdown can restore OFF afterward.
+	SeedWheelAutoRollState._setEnabled(true)
+	if budget then
+		-- Single slide of starting budget (N or ∞); backpack slides still do N → N-1.
+		playRemainingCountdown(budget, nil)
+	else
+		setRunningLabel("OFF")
+	end
 	local expand = SeedWheelRevealApi.expandFromTarget
 	if expand then
 		expand(anchor, function()
-			SeedWheelAutoRollState._setEnabled(true)
 			Remotes.get("SeedWheelAutoRoll"):FireServer(true)
 			busyAnim = false
 		end)
 	else
-		SeedWheelAutoRollState._setEnabled(true)
 		Remotes.get("SeedWheelAutoRoll"):FireServer(true)
 		busyAnim = false
 	end
@@ -691,6 +958,7 @@ local function stopAutoRoll()
 			labelScale.Scale = 1
 		end
 		applyVisualStopped()
+		refreshRollButtonVisibility()
 	end
 	local markCycle, cancelWait = whenRollSettled(function()
 		cycleDone = true
@@ -737,6 +1005,7 @@ local function rollOnce()
 		end
 		restoreButton()
 		applyVisualStopped()
+		refreshRollButtonVisibility()
 	end
 	local _, cancelWait = whenRollSettled(function()
 		cycleDone = true
@@ -776,6 +1045,10 @@ local function wireHit(hit: GuiButton)
 		if not isPointerPress(input) then
 			return
 		end
+		if uiHidesRoll() or busyAnim or presenting then
+			return
+		end
+		clearRollFingerHint()
 		flashPressGreen()
 		playRollPressSound()
 		UiHaptics.pulseDouble()
@@ -832,10 +1105,10 @@ local function wireStopAutoRoll(leftOpt: Instance?)
 	end
 
 	anchor = host
-	host.Visible = true
-	host.Active = true
+	refreshRollButtonVisibility()
+	host.Active = not uiHidesRoll()
 	pcall(function()
-		(host :: any).Interactable = true
+		(host :: any).Interactable = host.Active
 	end)
 
 	ensureChrome(host)
@@ -848,31 +1121,58 @@ local function wireStopAutoRoll(leftOpt: Instance?)
 	else
 		applyVisualStopped()
 	end
+	refreshRollButtonVisibility()
 end
 
-Remotes.get("SeedWheelAutoRollSync").OnClientEvent:Connect(function(enabled: any)
-	local on = enabled == true
-	SeedWheelAutoRollState._setEnabled(on)
+Remotes.get("SeedWheelAutoRollSync").OnClientEvent:Connect(function(enabled: any, remaining: any)
+	local wasOn = SeedWheelAutoRollState.isEnabled()
+	SeedWheelAutoRollState.applySync(enabled, remaining)
 	if presenting then
 		return
 	end
-	if on then
-		applyVisualRunning()
+	if SeedWheelAutoRollState.isEnabled() then
+		-- Keep any in-flight N / ∞ slide; only refresh chrome (or full OFF if just turned on externally).
+		if wasOn then
+			applyVisualRunning(true)
+		else
+			applyVisualRunning()
+			local rem = SeedWheelAutoRollState.getRemaining()
+			if rem ~= nil then
+				playRemainingCountdown(rem, nil)
+			end
+		end
 	else
 		applyVisualStopped()
 	end
+	refreshRollButtonVisibility()
 end)
 
 SeedWheelAutoRollState.onChanged(function(on)
 	if presenting then
 		return
 	end
-	if on then
-		applyVisualRunning()
-	else
+	-- startAutoRoll owns the turn-on intro; only force chrome/OFF here when stopping.
+	if not on then
 		applyVisualStopped()
 	end
+	refreshRollButtonVisibility()
 end)
+
+-- During backpack slide: OFF → N slide → N-1 slide (or ∞ once). ~3× longer per digit.
+SeedWheelAutoRollState.onFlyRemaining(function(before: number, after: number?)
+	if not SeedWheelAutoRollState.isEnabled() then
+		return
+	end
+	playRemainingCountdown(before, after)
+end)
+
+local function onOverlayUiAttrChanged()
+	refreshRollButtonVisibility()
+end
+playerGui:GetAttributeChangedSignal(SKILLS_OPEN_ATTR):Connect(onOverlayUiAttrChanged)
+playerGui:GetAttributeChangedSignal(POWERUP_OPEN_ATTR):Connect(onOverlayUiAttrChanged)
+playerGui:GetAttributeChangedSignal(REPORT_OPEN_ATTR):Connect(onOverlayUiAttrChanged)
+playerGui:GetAttributeChangedSignal(HIDE_UI_ACTIVE_ATTR):Connect(onOverlayUiAttrChanged)
 
 LeftHudLayout.watchMobileLeftUi(playerGui, wireStopAutoRoll)
 
@@ -883,9 +1183,8 @@ task.spawn(function()
 		local host = left and left:FindFirstChild(STUDIO_ANCHOR_NAME)
 		if not host or not host:IsA("GuiObject") or not hitBtn or not hitBtn.Parent or wiredHost ~= host then
 			wireStopAutoRoll(nil)
-		elseif not host.Visible then
-			host.Visible = true
-			host.Active = true
+		else
+			refreshRollButtonVisibility()
 		end
 	end
 end)

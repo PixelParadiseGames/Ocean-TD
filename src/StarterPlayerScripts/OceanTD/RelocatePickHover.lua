@@ -67,8 +67,14 @@ local function hoverPickScreenPos(): Vector2
 	return UserInputService:GetMouseLocation()
 end
 
-local function viewportRay(cam: Camera, vp: Vector2): Ray
-	return cam:ViewportPointToRay(vp.X, vp.Y)
+-- Mouse: PlayerMouse.UnitRay matches the cursor (same as PlaceRaycast.forPlace).
+-- Touch / gamepad: GetMouseLocation is viewport space → ViewportPointToRay.
+-- Do NOT use ScreenPointToRay with GetMouseLocation — that parks ~GuiInset above the cursor.
+local function pointerRay(cam: Camera, screenPos: Vector2): Ray
+	if not isUsingGamepad() and UserInputService:GetLastInputType() ~= Enum.UserInputType.Touch then
+		return player:GetMouse().UnitRay
+	end
+	return cam:ViewportPointToRay(screenPos.X, screenPos.Y)
 end
 
 local function worldToViewport(cam: Camera, world: Vector3): (Vector2?, boolean)
@@ -154,17 +160,11 @@ function RelocatePickHover.pick(screenPos: Vector2): BasePart?
 	end
 	local primary = if h then h.getPrimary() else nil
 
-	local exclude: { Instance } = {}
-	if player.Character then
-		table.insert(exclude, player.Character)
-	end
-	if primary then
-		table.insert(exclude, primary)
-	end
-
-	local worldParams = RaycastParams.new()
-	worldParams.FilterType = Enum.RaycastFilterType.Exclude
-	worldParams.FilterDescendantsInstances = exclude
+	-- Include-only so terrain/water can't steal the hit and force the proximity
+	-- fallback (which biased toward coral centers higher on screen).
+	local coralParams = RaycastParams.new()
+	coralParams.FilterType = Enum.RaycastFilterType.Include
+	coralParams.FilterDescendantsInstances = { folder }
 
 	local function coralFromHit(inst: Instance): BasePart?
 		local cur: Instance? = inst
@@ -174,7 +174,7 @@ function RelocatePickHover.pick(screenPos: Vector2): BasePart?
 			end
 			if cur:IsA("BasePart") and cur:IsDescendantOf(folder) then
 				local coral = isPlacedCoralPart(cur)
-				if coral then
+				if coral and coral ~= primary then
 					return coral
 				end
 			end
@@ -183,13 +183,27 @@ function RelocatePickHover.pick(screenPos: Vector2): BasePart?
 		return nil
 	end
 
-	local ray = viewportRay(cam, screenPos)
-	local result = Workspace:Raycast(ray.Origin, ray.Direction * 800, worldParams)
-	if result then
+	local ray = pointerRay(cam, screenPos)
+	local origin = ray.Origin
+	local dir = ray.Direction.Unit
+	local remaining = 800
+	-- Step past the selected coral (and any non-pickable folder parts) so a
+	-- click on a neighbor isn't lost to the proximity fallback.
+	for _ = 1, 6 do
+		if remaining <= 0.1 then
+			break
+		end
+		local result = Workspace:Raycast(origin, dir * remaining, coralParams)
+		if not result then
+			break
+		end
 		local hit = coralFromHit(result.Instance)
 		if hit then
 			return hit
 		end
+		local step = math.max(result.Distance, 0.05) + 0.05
+		origin = result.Position + dir * 0.05
+		remaining -= step
 	end
 
 	local losParams = RaycastParams.new()
@@ -223,7 +237,12 @@ function RelocatePickHover.pick(screenPos: Vector2): BasePart?
 	for _, inst in ipairs(folder:GetChildren()) do
 		local coral = isPlacedCoralPart(inst)
 		if coral and coral ~= primary then
-			local sp = worldToViewport(cam, coral.Position)
+			-- Mesh corals: center sits mid-body; tip tracks where you actually click.
+			local probe = coral.Position
+			if CoralVisual.isMeshSpecies(coral:GetAttribute("OceanTD_SpeciesId")) then
+				probe = coral.Position + Vector3.new(0, coral.Size.Y * 0.5, 0)
+			end
+			local sp = worldToViewport(cam, probe)
 			if sp then
 				local d = (sp - screenPos).Magnitude
 				if d <= radius then
@@ -264,23 +283,13 @@ function RelocatePickHover.pointerHitsSelected(screenPos: Vector2): boolean
 	if not cam then
 		return false
 	end
-	local ray = viewportRay(cam, screenPos)
+	local ray = pointerRay(cam, screenPos)
 	local params = RaycastParams.new()
-	params.FilterType = Enum.RaycastFilterType.Exclude
-	local exclude: { Instance } = {}
-	if player.Character then
-		table.insert(exclude, player.Character)
-	end
-	params.FilterDescendantsInstances = exclude
+	params.FilterType = Enum.RaycastFilterType.Include
+	params.FilterDescendantsInstances = { primary }
 	local result = Workspace:Raycast(ray.Origin, ray.Direction * 800, params)
 	if result then
-		local cur: Instance? = result.Instance
-		while cur do
-			if cur == primary then
-				return true
-			end
-			cur = cur.Parent
-		end
+		return true
 	end
 	local sp = worldToViewport(cam, primary.Position)
 	if sp then

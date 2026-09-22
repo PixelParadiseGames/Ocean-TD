@@ -120,8 +120,16 @@ local function waveSpeedStage(): number
 	return SkillPowerUpUI.getStage("WaveSpeed")
 end
 
+local function plotSizeBlocksSpeedSlot(): boolean
+	return SkillPowerUpUI.getStage("PlotSize") < SkillStages.PLOT_SIZE_GATE_STAGE
+end
+
 local function needsSpeedUnlock(): boolean
 	return SkillStages.waveSpeedLocked(waveSpeedStage())
+end
+
+local function speedSlotLocked(): boolean
+	return plotSizeBlocksSpeedSlot() or needsSpeedUnlock()
 end
 
 local function stopSpeedLockOrbit()
@@ -165,7 +173,7 @@ local function syncSpeedLock()
 	if not host then
 		return
 	end
-	local show = revealed == true and needsSpeedUnlock()
+	local show = revealed == true and speedSlotLocked()
 	if show then
 		local overlay = speedLockOverlay
 		if not overlay or not overlay.Parent then
@@ -827,6 +835,10 @@ function WaveSpeedSlot.cycle()
 		return false
 	end
 	if not WaveSim.isRunning() then
+		return false
+	end
+	-- Plot Size stage 2 required before Wave Speed is usable (or unlockable via Skills).
+	if plotSizeBlocksSpeedSlot() then
 		return false
 	end
 	if needsSpeedUnlock() then

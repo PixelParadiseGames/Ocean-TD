@@ -150,8 +150,24 @@ plotAssigned.OnClientEvent:Connect(function(payload)
 		log("Assigned deferred (plot-size cinematic busy)", payload.plotId)
 		return
 	end
+	-- Join intro needs the first PlotAssigned so ClientPlot exists (cam remap / max footprint).
+	-- Later assigns would snap size back to the real stage — skip those while busy.
+	local playerGui = player:FindFirstChildOfClass("PlayerGui") or player:WaitForChild("PlayerGui")
+	if playerGui:GetAttribute("OceanTD_JoinIntroBusy") == true and ClientPlot.get() ~= nil then
+		log("Assigned deferred (join intro busy)", payload.plotId)
+		return
+	end
 	ClientPlot.set(payload)
 	log("Assigned", payload.plotId, "size=", payload.size)
+	-- First assign during intro may carry real stage size — bump to max for showcase.
+	if playerGui:GetAttribute("OceanTD_JoinIntroBusy") == true then
+		local SkillStages = require(oceanRoot:WaitForChild("Shared"):WaitForChild("SkillStages"))
+		task.defer(function()
+			if playerGui:GetAttribute("OceanTD_JoinIntroBusy") == true then
+				PlotSizeCinematic.applyStageLocal(SkillStages.MAX_STAGE)
+			end
+		end)
+	end
 end)
 
 plotCleared.OnClientEvent:Connect(function()

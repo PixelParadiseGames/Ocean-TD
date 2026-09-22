@@ -20,6 +20,7 @@ local REMOTE_EVENTS = {
 	"SkillStagesSync",
 	"InventorySync",
 	"ReportFishFed",
+	"ReportCoralLifeStats",
 	"PlotSizeChanged",
 	"ReportPlotSizeCinematicDone",
 	"ReportUrchinSting",
@@ -33,6 +34,7 @@ local REMOTE_EVENTS = {
 	"CoralColorUnlocksSync",
 	"HideUiSync",
 	"JoinIntroSync",
+	"JoinIntroComplete",
 }
 
 local REMOTE_FUNCTIONS = {

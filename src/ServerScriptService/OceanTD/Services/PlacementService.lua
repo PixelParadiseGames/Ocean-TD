@@ -675,6 +675,14 @@ function PlacementService.hydrateVisuals(plotId: string, boundsCFrame: CFrame)
 					cell.placeId = pid
 				end
 			end
+			local fedTotal = tonumber(cell.fedTotal)
+			if fedTotal and fedTotal > 0 then
+				visual:SetAttribute("OceanTD_CoralFedTotal", math.floor(fedTotal))
+			end
+			local wavesTotal = tonumber(cell.wavesTotal)
+			if wavesTotal and wavesTotal > 0 then
+				visual:SetAttribute("OceanTD_CoralWavesTotal", math.floor(wavesTotal))
+			end
 			if typeof(cell.parentPlaceId) == "string" and cell.parentPlaceId ~= "" then
 				visual:SetAttribute("OceanTD_ParentPlaceId", cell.parentPlaceId)
 			end
@@ -2385,6 +2393,13 @@ function PlacementService.setCoralSize(
 			newDiam = height or newPart.Size.Y
 			variant = vOut or variant
 			scale = sOut or scale
+			-- restyleMesh replaces the instance; re-stamp durable life counters.
+			if typeof(cell.fedTotal) == "number" and cell.fedTotal > 0 then
+				visual:SetAttribute("OceanTD_CoralFedTotal", math.floor(cell.fedTotal))
+			end
+			if typeof(cell.wavesTotal) == "number" and cell.wavesTotal > 0 then
+				visual:SetAttribute("OceanTD_CoralWavesTotal", math.floor(cell.wavesTotal))
+			end
 		else
 			newDiam = visual.Size.Y
 		end

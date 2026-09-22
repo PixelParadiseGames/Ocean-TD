@@ -93,7 +93,7 @@ type Queued = {
 local queued: Queued? = nil
 local activeConns: { RBXScriptConnection } = {}
 local abortRequested = false
-local currentClaim: { itemId: string, token: number }? = nil
+local currentClaim: { itemId: string, token: number, colorIndex: number }? = nil
 local savedBandSize: Vector2? = nil
 local wheelIconsReady = false
 local wheelIconsPreloading = false
@@ -177,6 +177,8 @@ local function claim(itemId: string, token: number)
 end
 
 local function finishBusy()
+	local awardedId = if currentClaim then currentClaim.itemId else nil
+	local awardedColorIndex = if currentClaim then currentClaim.colorIndex else nil
 	busy = false
 	busySince = 0
 	currentClaim = nil
@@ -188,11 +190,13 @@ local function finishBusy()
 		task.defer(playReveal, q.itemId, q.token, q.amount, q.colorIndex, q.colorWasUnlocked, q.manual)
 		return
 	end
-	local done = SeedWheelRevealApi.onCycleFinished
-	if done then
-		SeedWheelRevealApi.onCycleFinished = nil
-		task.defer(done)
+	if typeof(awardedId) == "string" and awardedId ~= "" then
+		SeedWheelRevealApi.lastAwardedItemId = awardedId
 	end
+	if typeof(awardedColorIndex) == "number" then
+		SeedWheelRevealApi.lastAwardedColorIndex = math.clamp(math.floor(awardedColorIndex), 1, 14)
+	end
+	SeedWheelRevealApi.fireCycleFinished()
 end
 
 local function watchdogRecoverIfStuck()
@@ -911,6 +915,10 @@ local function flyBundle(
 
 	UiHaptics.rampSmallToMed(FLY_SEC)
 
+	if SeedWheelAutoRollState.isEnabled() then
+		SeedWheelAutoRollState.beginFlyRemainingTick()
+	end
+
 	holder.Parent = gui
 	holder.AnchorPoint = Vector2.new(0.5, 0.5)
 	holder.Position = UDim2.fromOffset(start.X, start.Y)
@@ -1065,7 +1073,10 @@ playReveal = function(
 	end
 	busy = true
 	busySince = os.clock()
-	currentClaim = { itemId = itemId, token = token }
+	currentClaim = { itemId = itemId, token = token, colorIndex = colorIndex }
+	-- Tutorial can target this hue as soon as the award starts.
+	SeedWheelRevealApi.lastAwardedItemId = itemId
+	SeedWheelRevealApi.lastAwardedColorIndex = math.clamp(math.floor(colorIndex), 1, 14)
 	disconnectAll()
 	abortRequested = false
 	preloadWheelIcons()
@@ -1255,8 +1266,8 @@ playReveal = function(
 	end, OUTER_PEEK_SCALE_CORAL, stepPx, CORAL_POP_LEAD_SEC, beginCoralLandPop)
 end
 
-Remotes.get("SeedWheelAutoRollSync").OnClientEvent:Connect(function(enabled: any)
-	SeedWheelAutoRollState._setEnabled(enabled == true)
+Remotes.get("SeedWheelAutoRollSync").OnClientEvent:Connect(function(enabled: any, remaining: any)
+	SeedWheelAutoRollState.applySync(enabled, remaining)
 end)
 
 Remotes.get("SeedWheelReveal").OnClientEvent:Connect(function(itemId: any, token: any, amount: any, colorIndex: any)

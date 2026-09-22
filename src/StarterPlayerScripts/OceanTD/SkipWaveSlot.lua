@@ -128,9 +128,17 @@ local function hasSkipAccess(): boolean
 	return skipUsesRemaining() > 0
 end
 
+local function plotSizeBlocksSkipSlot(): boolean
+	return SkillPowerUpUI.getStage("PlotSize") < SkillStages.PLOT_SIZE_GATE_STAGE
+end
+
 -- No uses left (stage 1 or spent) — show lock and route taps to Skills.
 local function needsSkipUnlock(): boolean
 	return not hasSkipAccess()
+end
+
+local function skipSlotLocked(): boolean
+	return plotSizeBlocksSkipSlot() or needsSkipUnlock()
 end
 
 local function resetSkipSession()
@@ -178,7 +186,7 @@ local function syncSkipLock()
 	if not host then
 		return
 	end
-	local show = revealed == true and needsSkipUnlock()
+	local show = revealed == true and skipSlotLocked()
 	if show then
 		local overlay = skipLockOverlay
 		if not overlay or not overlay.Parent then
@@ -737,6 +745,9 @@ function SkipWaveSlot.beginConfirm()
 		return
 	end
 	if deps.isWaveSummaryOpen() or deps.isSavePlotsOpen() or deps.isClearConfirmActive() then
+		return
+	end
+	if plotSizeBlocksSkipSlot() then
 		return
 	end
 	if needsSkipUnlock() then

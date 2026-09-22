@@ -54,6 +54,9 @@ export type LayoutObject = {
 	webColorR: number?,
 	webColorG: number?,
 	webColorB: number?,
+	-- Lifetime inspect counters (Fed / Waves).
+	fedTotal: number?,
+	wavesTotal: number?,
 }
 
 export type PlotSaveSlot = {

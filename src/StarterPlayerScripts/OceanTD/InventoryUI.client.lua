@@ -772,7 +772,7 @@ local focusPulseStroke: UIStroke? = nil
 local gamepadSelectActive = false
 local openWithGamepadPending = false
 local gamepadFocusIndex = 1
-local GRID_COLS = 3
+local GRID_COLS = 2 -- must match UIGridLayout.FillDirectionMaxCells
 local FOCUS_STROKE_BASE = 3
 local FOCUS_STROKE_PEAK = FOCUS_STROKE_BASE * 3 -- pulse grows to 3x thickness
 local MOVE_ICON_IMAGE = "rbxassetid://345081302"
@@ -1800,6 +1800,18 @@ InventoryState.setItemSlotScreenPosProvider(function(itemId: string): Vector2?
 	local pos = btn.AbsolutePosition
 	local size = btn.AbsoluteSize
 	return Vector2.new(pos.X + size.X * 0.5, pos.Y + size.Y * 0.5)
+end)
+
+InventoryState.setRevealItemInBackpackProvider(function(itemId: string)
+	if not InventoryState.isOpen() then
+		return
+	end
+	for _, btn in ipairs(itemButtons) do
+		if btn:GetAttribute("OceanTD_ItemId") == itemId then
+			scrollFocusIntoView(btn)
+			return
+		end
+	end
 end)
 
 InventoryState.setScrollCenterProvider(function(): Vector2?

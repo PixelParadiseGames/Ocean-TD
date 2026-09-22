@@ -11,6 +11,7 @@ local PlaceAimScreen = {}
 
 local GHOST_SCREEN_OFFSET_Y = 32 -- was 105; 70% less raise above finger
 local touchHeld = 0
+local touchGraceUntil = 0 -- ignore synthesized mouse briefly after last touch ends
 
 function PlaceAimScreen.trackTouch(input: InputObject, ended: boolean)
 	if input.UserInputType ~= Enum.UserInputType.Touch then
@@ -18,6 +19,8 @@ function PlaceAimScreen.trackTouch(input: InputObject, ended: boolean)
 	end
 	if ended then
 		touchHeld = math.max(0, touchHeld - 1)
+		-- Emulated MouseButton1 often fires after Touch ends; keep filtering it briefly.
+		touchGraceUntil = os.clock() + 0.2
 	else
 		touchHeld += 1
 	end
@@ -27,13 +30,13 @@ function PlaceAimScreen.touchHeld(): boolean
 	return touchHeld > 0
 end
 
--- Roblox synthesizes MouseButton1 / MouseMovement while a finger is down.
+-- Roblox synthesizes MouseButton1 / MouseMovement while a finger is down (and right after).
 function PlaceAimScreen.isEmulatedMouse(input: InputObject): boolean
-	if touchHeld <= 0 then
+	local t = input.UserInputType
+	if t ~= Enum.UserInputType.MouseButton1 and t ~= Enum.UserInputType.MouseMovement then
 		return false
 	end
-	local t = input.UserInputType
-	return t == Enum.UserInputType.MouseButton1 or t == Enum.UserInputType.MouseMovement
+	return touchHeld > 0 or os.clock() < touchGraceUntil
 end
 
 function PlaceAimScreen.notePointer(input: InputObject, state: { raiseForTouch: boolean, gamepadPlacement: boolean })
@@ -57,12 +60,12 @@ function PlaceAimScreen.shouldRaiseGhost(raiseForTouch: boolean, gamepadPlacemen
 	if gamepadPlacement then
 		return false
 	end
-	-- Live finger only — never treat sticky LastInputType Touch as touch aim on PC mouse.
+	-- Live finger only.
 	if touchHeld > 0 then
 		return true
 	end
-	-- Touch release frame: aimRaiseForTouch still set before InputEnded clears it.
-	return raiseForTouch
+	-- Release-park grace: only while LastInputType is still Touch (never sticky after mouse).
+	return raiseForTouch == true and UserInputService:GetLastInputType() == Enum.UserInputType.Touch
 end
 
 function PlaceAimScreen.raiseIfTouch(pos: Vector2, raiseForTouch: boolean, gamepadPlacement: boolean): Vector2

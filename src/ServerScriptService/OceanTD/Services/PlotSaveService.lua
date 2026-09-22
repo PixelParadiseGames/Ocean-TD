@@ -55,6 +55,8 @@ local function cloneLayout(layout: { LayoutObject }): { LayoutObject }
 			webColorB = obj.webColorB,
 			placeId = obj.placeId,
 			parentPlaceId = obj.parentPlaceId,
+			fedTotal = obj.fedTotal,
+			wavesTotal = obj.wavesTotal,
 		})
 	end
 	return out

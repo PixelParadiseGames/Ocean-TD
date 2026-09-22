@@ -288,11 +288,19 @@ local function hideLeftUiExceptSkillsClose()
 		return
 	end
 	local dPad = left:FindFirstChild("dPad")
-	if dPad then
+	if dPad and dPad:IsA("GuiObject") then
+		-- Always keep dPad visible so Skills close chrome can be clicked (tutorial
+		-- left-HUD gate or other callers may have flipped dPad off).
+		if dPad:GetAttribute("_OceanTD_TutorialLeftHudHidden") == true then
+			dPad:SetAttribute("_OceanTD_TutorialLeftHudHidden", nil)
+		end
+		dPad.Visible = true
 		for _, ch in ipairs(dPad:GetChildren()) do
 			-- dPadIcon is owned by FreeCam via OceanTD_SkillsBubblesOpen attribute.
 			if ch:IsA("GuiObject") and ch.Name ~= "Skills" and ch.Name ~= "dPadIcon" and not LeftHudLayout.isSandDollarChrome(ch) then
 				rememberHide(ch)
+			elseif ch:IsA("GuiObject") and ch.Name == "Skills" then
+				ch.Visible = true
 			end
 		end
 	end
@@ -636,6 +644,31 @@ task.spawn(function()
 		startClosePulse()
 	end
 
+	local function ensureSkillsCloseViable()
+		local left = playerGui:FindFirstChild("MobileLeftUI")
+		local dPad = left and left:FindFirstChild("dPad")
+		if dPad and dPad:IsA("GuiObject") then
+			if dPad:GetAttribute("_OceanTD_TutorialLeftHudHidden") == true then
+				dPad:SetAttribute("_OceanTD_TutorialLeftHudHidden", nil)
+			end
+			dPad.Visible = true
+		end
+		if skillsBtn then
+			skillsBtn.Visible = true
+			-- Drop tutorial lock overlay so Skills close chrome is clickable.
+			local lockOv = skillsBtn:FindFirstChild("_OceanTD_TutorialLeftLock")
+			if lockOv then
+				lockOv:Destroy()
+			end
+			local lockIc = skillsBtn:FindFirstChild("_OceanTD_TutorialLeftLockIcon")
+			if lockIc then
+				lockIc:Destroy()
+			end
+		end
+		ensureCloseChrome()
+		syncCloseLabel()
+	end
+
 	local function applyOpen(want: boolean)
 		open = want
 		openToken += 1
@@ -661,12 +694,10 @@ task.spawn(function()
 
 		if want then
 			-- Bubbles first — never block on PlayerModule / freeze setup.
-			-- Backpack may have hidden Skills; force it visible for close chrome.
-			if skillsBtn then
-				skillsBtn.Visible = true
-			end
+			-- Force Skills close chrome even when left HUD was tutorial-gated or
+			-- skills were opened via WaveSpeed / Skip (not the Skills button).
+			ensureSkillsCloseViable()
 			applySkillsViewportScale(panel)
-			ensureCloseChrome()
 			SkillsBubbleSim.preHide(panel)
 			if panel:IsA("ScreenGui") then
 				(panel :: ScreenGui).Enabled = true
@@ -678,6 +709,8 @@ task.spawn(function()
 				SkillsBubbleSim.setGamepadFocus(1)
 			end
 			syncMovementFreeze(true)
+			-- HUD hide can race tutorial gate — re-assert close after attribute settles.
+			task.defer(ensureSkillsCloseViable)
 		else
 			SkillsBubbleSim.clearGamepadFocus()
 			SkillPowerUpUI.close()
@@ -757,11 +790,8 @@ task.spawn(function()
 				skillsBtn.Visible = false
 			end
 		elseif open then
-			if skillsBtn then
-				skillsBtn.Visible = true
-			end
-			ensureCloseChrome()
-			syncCloseLabel()
+			-- Bubbles back — always restore close chrome (ForceOpen via WaveSpeed/Skip too).
+			ensureSkillsCloseViable()
 		end
 	end)
 
@@ -837,6 +867,12 @@ task.spawn(function()
 
 	LeftHudLayout.hardenScreenGui(left)
 	LeftHudLayout.hardenScreenGui(panel)
+	if panel:IsA("ScreenGui") then
+		(panel :: ScreenGui).IgnoreGuiInset = true
+		pcall(function()
+			(panel :: any).ScreenInsets = Enum.ScreenInsets.None
+		end)
+	end
 	LeftHudLayout.watchMobileLeftUi(playerGui, function()
 		rebindSkillsChrome()
 	end)

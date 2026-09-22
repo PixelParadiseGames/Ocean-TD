@@ -56,9 +56,16 @@ local deps: Deps
 local slot5: GuiObject? = nil
 local slot5Button: GuiButton? = nil
 local slot5Circle: GuiObject? = nil
+local helpHit: GuiButton? = nil
 local helpSlot5: GuiObject? = nil
 local helpSlot5Letter: TextLabel? = nil
-local helpHit: GuiButton? = nil
+
+local SLOT5_READY_ATTR = "OceanTD_TutorialWavesSlotReady"
+local slot5PopToken = 0
+local slot5TutorialPopPending = false
+local slot5PopDelayActive = false
+local slot5PopDelayGen = 0
+local slot5PopScale: UIScale? = nil
 
 local hudFrame: Frame? = nil
 local hudWaveBar: Frame? = nil
@@ -315,7 +322,9 @@ function WaveSlot.refreshHelpBadge()
 	if not helpSlot5 then
 		return
 	end
-	if Players.LocalPlayer.PlayerGui:GetAttribute("OceanTD_SkillsBubblesOpen") == true then
+	if Players.LocalPlayer.PlayerGui:GetAttribute("OceanTD_SkillsBubblesOpen") == true
+		or Players.LocalPlayer.PlayerGui:GetAttribute("OceanTD_TutorialGateWaves") == true
+	then
 		helpSlot5.Visible = false
 		if helpHit then
 			helpHit.Visible = false
@@ -1875,6 +1884,10 @@ local function toggleWaves()
 		WaveSlot.beginStopConfirm()
 		return
 	end
+	-- Join-intro: hide/block Start Waves until the player has placed a coral.
+	if deps.playerGui:GetAttribute("OceanTD_TutorialGateWaves") == true then
+		return
+	end
 	local ok = WaveSim.start()
 	if ok then
 		applyIcon(true)
@@ -2268,11 +2281,202 @@ function WaveSlot.mount(d: Deps)
 	WaveSlot.refreshHelpBadge()
 	ensureHud()
 	setSlot5Interactable(not InventoryState.isOpen())
+
+	local function tutorialWavesGated(): boolean
+		return deps.playerGui:GetAttribute("OceanTD_TutorialGateWaves") == true
+	end
+
+	local function ensureSlot5PopScale(): UIScale?
+		if not slot5 then
+			return nil
+		end
+		if slot5PopScale and slot5PopScale.Parent == slot5 then
+			return slot5PopScale
+		end
+		local existing = slot5:FindFirstChild("_OceanTD_Slot5PopScale")
+		if existing and existing:IsA("UIScale") then
+			slot5PopScale = existing
+			return existing
+		end
+		local s = Instance.new("UIScale")
+		s.Name = "_OceanTD_Slot5PopScale"
+		s.Scale = 1
+		s.Parent = slot5
+		slot5PopScale = s
+		return s
+	end
+
+	local function markSlot5TutorialReady()
+		deps.playerGui:SetAttribute(SLOT5_READY_ATTR, true)
+	end
+
+	local function playSlot5TutorialPop()
+		if not slot5 then
+			markSlot5TutorialReady()
+			return
+		end
+		local parent = slot5.Parent
+		if not parent or not parent:IsA("GuiObject") then
+			markSlot5TutorialReady()
+			return
+		end
+		slot5PopToken += 1
+		local my = slot5PopToken
+		local scale = ensureSlot5PopScale()
+		local homePos = slot5.Position
+		local homeAnchor = slot5.AnchorPoint
+		slot5.Visible = true
+		WaveSlot.refreshHelpBadge()
+		if not scale then
+			markSlot5TutorialReady()
+			return
+		end
+
+		task.spawn(function()
+			if my ~= slot5PopToken then
+				return
+			end
+			-- Fly-in: center on screen with AnchorPoint 0.5 (parent Abs is inset-exclusive).
+			scale.Scale = 1
+			slot5.AnchorPoint = homeAnchor
+			slot5.Position = homePos
+			task.wait()
+			if my ~= slot5PopToken or not slot5 then
+				return
+			end
+			local pAbs = parent.AbsolutePosition
+			local cam = Workspace.CurrentCamera
+			local vp = if cam then cam.ViewportSize else Vector2.new(1280, 720)
+			local inset = GuiService:GetGuiInset()
+			local sg = slot5:FindFirstAncestorOfClass("ScreenGui")
+			local centerAbs = Vector2.new(vp.X * 0.5, vp.Y * 0.5)
+			if not (sg and sg.IgnoreGuiInset == true) then
+				centerAbs = Vector2.new(centerAbs.X - inset.X, centerAbs.Y - inset.Y)
+			end
+
+			slot5.AnchorPoint = Vector2.new(0.5, 0.5)
+			slot5.Position = UDim2.fromOffset(centerAbs.X - pAbs.X, centerAbs.Y - pAbs.Y)
+			scale.Scale = 0
+
+			local grow = TweenService:Create(
+				scale,
+				TweenInfo.new(2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+				{ Scale = 4 }
+			)
+			grow:Play()
+			grow.Completed:Wait()
+			if my ~= slot5PopToken or not slot5 then
+				return
+			end
+
+			-- Settle home: restore Studio anchor first, then tween Position (one motion).
+			slot5.AnchorPoint = homeAnchor
+			local settleInfo = TweenInfo.new(0.9, Enum.EasingStyle.Quad, Enum.EasingDirection.InOut)
+			local shrink = TweenService:Create(scale, settleInfo, { Scale = 1 })
+			local move = TweenService:Create(slot5, settleInfo, { Position = homePos })
+			shrink:Play()
+			move:Play()
+			move.Completed:Wait()
+			if my ~= slot5PopToken or not slot5 then
+				return
+			end
+
+			slot5.AnchorPoint = homeAnchor
+			slot5.Position = homePos
+			scale.Scale = 1
+			markSlot5TutorialReady()
+		end)
+	end
+
+	local function syncSlot5TutorialGate()
+		if not slot5 then
+			return
+		end
+		local skillsOpen = deps.playerGui:GetAttribute("OceanTD_SkillsBubblesOpen") == true
+		if tutorialWavesGated() then
+			slot5TutorialPopPending = true
+			slot5PopDelayActive = false
+			slot5PopDelayGen += 1
+			deps.playerGui:SetAttribute(SLOT5_READY_ATTR, false)
+			local scale = ensureSlot5PopScale()
+			if scale then
+				scale.Scale = 0
+			end
+			slot5.Visible = false
+			WaveSlot.refreshHelpBadge()
+			return
+		end
+		if skillsOpen then
+			slot5.Visible = false
+			WaveSlot.refreshHelpBadge()
+			return
+		end
+		if slot5TutorialPopPending or slot5PopDelayActive then
+			-- Reveal with overscale only after build/backpack is closed (+1s delay).
+			if InventoryState.isOpen() then
+				slot5PopDelayGen += 1 -- cancel any in-flight delay
+				slot5PopDelayActive = false
+				slot5TutorialPopPending = true
+				slot5.Visible = false
+				WaveSlot.refreshHelpBadge()
+				return
+			end
+			if slot5PopDelayActive then
+				slot5.Visible = false
+				WaveSlot.refreshHelpBadge()
+				return
+			end
+			slot5PopDelayGen += 1
+			local myDelay = slot5PopDelayGen
+			slot5TutorialPopPending = false
+			slot5PopDelayActive = true
+			slot5.Visible = false
+			WaveSlot.refreshHelpBadge()
+			task.delay(1, function()
+				if myDelay ~= slot5PopDelayGen then
+					return
+				end
+				slot5PopDelayActive = false
+				if InventoryState.isOpen() then
+					slot5TutorialPopPending = true
+					return
+				end
+				if tutorialWavesGated() then
+					slot5TutorialPopPending = true
+					return
+				end
+				if deps.playerGui:GetAttribute("OceanTD_SkillsBubblesOpen") == true then
+					slot5TutorialPopPending = true
+					return
+				end
+				playSlot5TutorialPop()
+			end)
+			return
+		end
+		slot5.Visible = true
+		WaveSlot.refreshHelpBadge()
+	end
+
+	if tutorialWavesGated() then
+		slot5TutorialPopPending = true
+		deps.playerGui:SetAttribute(SLOT5_READY_ATTR, false)
+	elseif deps.playerGui:GetAttribute(SLOT5_READY_ATTR) ~= true then
+		-- Non-tutorial / already unlocked: finger can target Slot5 immediately.
+		deps.playerGui:SetAttribute(SLOT5_READY_ATTR, true)
+	end
+
+	syncSlot5TutorialGate()
+	deps.playerGui:GetAttributeChangedSignal("OceanTD_TutorialGateWaves"):Connect(syncSlot5TutorialGate)
+
 	InventoryState.onOpenChanged(function(isOpen)
 		setSlot5Interactable(not isOpen)
 		WaveSlot.refreshHelpBadge()
 		if isOpen and WaveSlot.isReefHealOpen() then
 			WaveSlot.cancelReefHeal()
+		end
+		-- Closing backpack after coral place → pop Start Waves.
+		if not isOpen then
+			syncSlot5TutorialGate()
 		end
 	end)
 	Players.LocalPlayer.PlayerGui:GetAttributeChangedSignal("OceanTD_SkillsBubblesOpen"):Connect(function()
@@ -2287,10 +2491,7 @@ function WaveSlot.mount(d: Deps)
 			end
 			syncTempW100Button(false)
 		else
-			if slot5 then
-				slot5.Visible = true
-			end
-			WaveSlot.refreshHelpBadge()
+			syncSlot5TutorialGate()
 			if WaveSim.isRunning() then
 				setHudVisible(true)
 			end

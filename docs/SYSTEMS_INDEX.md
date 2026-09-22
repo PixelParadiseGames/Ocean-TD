@@ -50,7 +50,7 @@ Update this file in the **same change** when you add or rename a system. If inde
 | MobileSkillsA | Live | `src/StarterPlayerScripts/OceanTD/MobileSkillsA.client.lua` | `SkillsBubbleSim`, `SkillPowerUpUI`, Studio `MobileLeftUI.dPad.Skills`, `MobileSkillsA` | Toggle skills; pulsing X/B close; gamepad focus; skill bubbles open power-up |
 | Skill power-up stages | Live | `SkillPowerUpUI.lua` | `SkillStages`, Persistence `skillStages`, PowerUpTemplate | Per-skill stages 1–8; rebind template; $D unlock (0 for test); CloseBTN hides popup only |
 | Plot Size grow | Live | `PlotSizeCinematic.lua` | `MasterPlotDecor.PlotSizes` templates, PlotService size | Unlock → cam ChangeSizeCam/Focus 1s → footprint tween → cam back 1s; join applies stage size |
-| SkillsBubbleSim | Live | `src/StarterPlayerScripts/OceanTD/SkillsBubbleSim.lua` | MobileSkillsA, SkillStages | Soft bubbles for PlotSize/EarnMore/PlaceMore BTNs only |
+| SkillsBubbleSim | Live | `src/StarterPlayerScripts/OceanTD/SkillsBubbleSim.lua` | MobileSkillsA, SkillStages | Soft bubbles incl. AutoRoll (LuckBTN); locked until Plot Size stage 2 |
 | PlotFrameContract | Live | `src/ReplicatedStorage/OceanTD/Shared/PlotFrameContract.lua` | RingMath, PlotService | Forbids runtime plot CFrame calibrate; boot drift check |
 | PlacedCoralIndex | Live | `src/StarterPlayerScripts/OceanTD/PlacedCoralIndex.lua` | ClientPlot, GridMath, CoralSize | Client grid index of `OceanTD_Placed`; `hueCountsForItem` / `sizeCountsForItem` for report pies |
 | WaveEntityPool | Live | `src/StarterPlayerScripts/OceanTD/WaveEntityPool.lua` | `ReplicatedStorage.Fish.*`, GreenArrows | Typed acquire/release for Tang (+ future kinds), food, arrows, ammo, SFX |

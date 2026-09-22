@@ -171,7 +171,12 @@ end
 
 function PlaceRaycast.forPlace(opts: PlaceAimOpts): Vector3?
 	local player = Players.LocalPlayer
-	if not opts.gamepadPlacement and not PlaceAimScreen.isTouchAim(opts.aimRaiseForTouch, opts.gamepadPlacement) then
+	-- Touch (live or sticky raise): use the same raised screen aim as the ghost.
+	-- Mouse UnitRay skips the raise and would plant lower than the preview.
+	local useAimScreen = opts.gamepadPlacement
+		or PlaceAimScreen.isTouchAim(opts.aimRaiseForTouch, opts.gamepadPlacement)
+		or PlaceAimScreen.shouldRaiseGhost(opts.aimRaiseForTouch, opts.gamepadPlacement)
+	if not useAimScreen then
 		local mouse = player:GetMouse()
 		local unit = mouse.UnitRay
 		return PlaceRaycast.cast(unit.Origin, unit.Direction, opts.exclude)

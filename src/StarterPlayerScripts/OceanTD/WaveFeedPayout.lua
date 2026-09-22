@@ -240,6 +240,13 @@ local function flyDollar(worldPos: Vector3)
 end
 
 function WaveFeedPayout.noteFilled(worldPos: Vector3?)
+	-- Join Wave-100 showcase must not grant $D or fire ReportFishFed.
+	local ok, WaveSim = pcall(function()
+		return require(script.Parent:WaitForChild("WaveSim"))
+	end)
+	if ok and WaveSim and typeof(WaveSim.isJoinIntroDemo) == "function" and WaveSim.isJoinIntroDemo() then
+		return
+	end
 	pending += 1
 	if typeof(worldPos) == "Vector3" then
 		flyDollar(worldPos)

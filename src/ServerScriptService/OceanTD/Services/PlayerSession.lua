@@ -9,6 +9,7 @@ export type Session = {
 	plotId: string?,
 	saving: boolean,
 	plotLoading: boolean,
+	tutorialFreeCoralSize: boolean,
 }
 
 local sessions: { [Player]: Session } = {}
@@ -24,9 +25,27 @@ function PlayerSession.begin(player: Player): Session
 		plotId = nil,
 		saving = false,
 		plotLoading = false,
+		tutorialFreeCoralSize = false,
 	}
 	sessions[player] = session
 	return session
+end
+
+function PlayerSession.grantTutorialFreeCoralSize(player: Player)
+	local session = sessions[player]
+	if session then
+		session.tutorialFreeCoralSize = true
+	end
+end
+
+-- Returns true once; subsequent calls false (consumed).
+function PlayerSession.consumeTutorialFreeCoralSize(player: Player): boolean
+	local session = sessions[player]
+	if not session or not session.tutorialFreeCoralSize then
+		return false
+	end
+	session.tutorialFreeCoralSize = false
+	return true
 end
 
 function PlayerSession.markReady(player: Player, plotId: string)

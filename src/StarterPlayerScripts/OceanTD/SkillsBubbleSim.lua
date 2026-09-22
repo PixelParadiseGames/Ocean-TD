@@ -3,14 +3,14 @@
 	Soft lava-lamp bubble physics for MobileSkillsA skill ImageButtons.
 	Heartbeat only while open. Does not touch placement / other HUD systems.
 	Bubble size + label placement use per-stage Studio templates (SkillStages);
-	only PlotSize / EarnMore / PlaceMore / RHealth / Skip BTNs are playable bubbles.
+	only PlotSize / EarnMore / PlaceMore / RHealth / Skip / WaveSpeed / AutoRoll (LuckBTN) are playable bubbles.
 
-	Coords: physics + hits use GuiObject.AbsolutePosition space.
-	Pointer→abs is calibrated per grab (raw vs inset-subtracted) so we never guess
-	IgnoreGuiInset wrong and snap above/below the cursor. Bounds = bubble layer AbsoluteSize.
+	Coords: bubble positions use AbsolutePosition space. Hits use native GuiButton
+	InputBegan (Roblox inset-correct) — no manual pointer↔Abs conversion for picking.
 	Bob = visual offset only. Pop-in / pop-out starts instantly; short stagger (~0.35s).
 	BackgroundGradient (Studio) fades in/out over the same window.
 ]]
+local Players = game:GetService("Players")
 local GuiService = game:GetService("GuiService")
 local RunService = game:GetService("RunService")
 local TweenService = game:GetService("TweenService")
@@ -50,6 +50,8 @@ local HUD_BUBBLE_SIZE_MULT = 1.42 -- slightly larger bubbles overall
 local COMPACT_SIZE_MULT = 1.14 -- slightly larger than raw stage-1 templates
 local COMPACT_ICON_SIZE = UDim2.fromScale(0.40, 0.40)
 local COMPACT_ICON_POS = UDim2.fromScale(0.5, 0.38)
+local AUTO_ROLL_ICON_SCALE = 0.75 -- 25% smaller dice
+local ICON_SKILL_SCALE_NAME = "_OceanTD_IconSkillScale"
 local COMPACT_LABEL_POS = UDim2.fromScale(0.5, 0.64)
 local COMPACT_LABEL_SIZE = UDim2.fromScale(0.86, 0.32)
 
@@ -104,7 +106,6 @@ type Drag = {
 	input: InputObject,
 	grabX: number,
 	grabY: number,
-	subInset: boolean, -- pointer space chosen at grab (must match updates)
 	startX: number,
 	startY: number,
 	moved: boolean,
@@ -187,6 +188,7 @@ local function unlockedStagesMap(): { [string]: number }
 		RHealth = readUnlockedStage("RHealth"),
 		Skip = readUnlockedStage("Skip"),
 		WaveSpeed = readUnlockedStage("WaveSpeed"),
+		AutoRoll = readUnlockedStage("AutoRoll"),
 	}
 end
 
@@ -293,35 +295,56 @@ local POP_OUT_INFO = TweenInfo.new(POP_OUT_SEC, Enum.EasingStyle.Back, Enum.Easi
 local BG_FADE_IN_INFO = TweenInfo.new(POP_IN_WINDOW, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 local BG_FADE_OUT_INFO = TweenInfo.new(POP_OUT_WINDOW, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
 
--- Window pointer → AbsolutePosition candidates (InventoryUI: mouse is inset-inclusive; Abs often is not).
-local function pointerCandidates(wx: number, wy: number): { Vector2 }
-	local inset = GuiService:GetGuiInset()
-	local list = { Vector2.new(wx, wy) }
-	if inset.X ~= 0 or inset.Y ~= 0 then
-		table.insert(list, Vector2.new(wx - inset.X, wy - inset.Y))
+-- GetMouseLocation is inset-inclusive. With IgnoreGuiInset/ScreenInsets.None, Abs matches it.
+local function pointerPos(_input: InputObject?): (number, number)
+	local m = UserInputService:GetMouseLocation()
+	if hostGui and hostGui.IgnoreGuiInset == true then
+		return m.X, m.Y
 	end
-	return list
+	local inset = GuiService:GetGuiInset()
+	return m.X - inset.X, m.Y - inset.Y
 end
 
-local function applyPointerSpace(wx: number, wy: number, subInset: boolean): (number, number)
-	if not subInset then
-		return wx, wy
+local DEBUG_HITBOXES = false
+local debugHitGui: ScreenGui? = nil
+local debugHitFrames: { Frame } = {}
+
+local function ensureDebugHitGui(): ScreenGui?
+	if not DEBUG_HITBOXES then
+		return nil
 	end
-	local inset = GuiService:GetGuiInset()
-	return wx - inset.X, wy - inset.Y
+	local existing = debugHitGui
+	if existing and existing.Parent then
+		return existing
+	end
+	local pg = Players.LocalPlayer:FindFirstChild("PlayerGui")
+	if not pg then
+		return nil
+	end
+	local sg = Instance.new("ScreenGui")
+	sg.Name = "OceanTD_BubbleHitDebug"
+	sg.ResetOnSpawn = false
+	sg.IgnoreGuiInset = true
+	sg.DisplayOrder = 100000
+	sg.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+	sg.Parent = pg
+	debugHitGui = sg
+	return sg
 end
 
--- Pick the pointer mapping closest to a known AbsolutePosition point (e.g. bubble center).
-local function calibratePointer(wx: number, wy: number, nearX: number, nearY: number): (number, number, boolean)
-	local inset = GuiService:GetGuiInset()
-	local rawDist = (wx - nearX) * (wx - nearX) + (wy - nearY) * (wy - nearY)
-	local sx, sy = wx - inset.X, wy - inset.Y
-	local subDist = (sx - nearX) * (sx - nearX) + (sy - nearY) * (sy - nearY)
-	if subDist < rawDist then
-		return sx, sy, true
+local function clearDebugHitBoxes()
+	for _, f in ipairs(debugHitFrames) do
+		f:Destroy()
 	end
-	return wx, wy, false
+	table.clear(debugHitFrames)
+	if debugHitGui then
+		debugHitGui:Destroy()
+		debugHitGui = nil
+	end
 end
+
+-- Assigned after absCenter (Lua local scoping).
+local refreshDebugHitBoxes: () -> ()
 
 local function screenSize(): Vector2
 	if layer then
@@ -331,10 +354,7 @@ local function screenSize(): Vector2
 		end
 	end
 	local cam = Workspace.CurrentCamera
-	local vp = if cam then cam.ViewportSize else Vector2.new(1280, 720)
-	local inset = GuiService:GetGuiInset()
-	-- Prefer usable GUI area; layer AbsoluteSize is authoritative once laid out.
-	return Vector2.new(math.max(1, vp.X - inset.X), math.max(1, vp.Y - inset.Y))
+	return if cam then cam.ViewportSize else Vector2.new(1280, 720)
 end
 
 local function playOrigin(): (number, number)
@@ -376,8 +396,70 @@ local function absCenter(btn: GuiObject): (number, number, number)
 	local sz = btn.AbsoluteSize
 	local cx = abs.X + sz.X * 0.5
 	local cy = abs.Y + sz.Y * 0.5
-	local r = math.max(sz.X, sz.Y) * 0.5
+	-- Inscribed circle matches UICorner visuals (not the tall AABB circumcircle).
+	local r = math.min(sz.X, sz.Y) * 0.5
 	return cx, cy, r
+end
+
+refreshDebugHitBoxes = function()
+	if not DEBUG_HITBOXES or not running then
+		return
+	end
+	local sg = ensureDebugHitGui()
+	if not sg then
+		return
+	end
+	while #debugHitFrames < #bubbles do
+		local f = Instance.new("Frame")
+		f.Name = "Hit"
+		f.AnchorPoint = Vector2.new(0.5, 0.5)
+		f.BackgroundColor3 = Color3.fromRGB(0, 255, 80)
+		f.BackgroundTransparency = 0.75
+		f.BorderSizePixel = 0
+		f.ZIndex = 10
+		local stroke = Instance.new("UIStroke")
+		stroke.Thickness = 2
+		stroke.Color = Color3.fromRGB(0, 255, 120)
+		stroke.Parent = f
+		local corner = Instance.new("UICorner")
+		corner.CornerRadius = UDim.new(1, 0)
+		corner.Parent = f
+		local lbl = Instance.new("TextLabel")
+		lbl.Name = "Label"
+		lbl.BackgroundTransparency = 1
+		lbl.Size = UDim2.fromScale(1, 1)
+		lbl.Font = Enum.Font.GothamBold
+		lbl.TextScaled = true
+		lbl.TextColor3 = Color3.new(1, 1, 1)
+		lbl.TextStrokeTransparency = 0.4
+		lbl.Parent = f
+		f.Parent = sg
+		table.insert(debugHitFrames, f)
+	end
+	for i, f in ipairs(debugHitFrames) do
+		local b = bubbles[i]
+		if not b or not b.btn.Visible then
+			f.Visible = false
+			continue
+		end
+		local bobX = 0
+		local bobY = 0
+		if not dragged[b] then
+			bobX = math.sin(bobTime * BOB_FREQ * math.pi * 2 + b.phase) * BOB_AMP
+			bobY = math.cos(bobTime * BOB_FREQ * 0.91 * math.pi * 2 + b.phase * 1.17) * BOB_AMP
+		end
+		local cx = b.x + bobX
+		local cy = b.y + bobY
+		local sc = if b.scale and b.scale.Parent then b.scale.Scale else 1
+		local r = b.radius * math.max(sc, 0.05)
+		f.Visible = true
+		f.Position = UDim2.fromOffset(cx, cy)
+		f.Size = UDim2.fromOffset(r * 2, r * 2)
+		local lbl = f:FindFirstChild("Label")
+		if lbl and lbl:IsA("TextLabel") then
+			lbl.Text = b.btn.Name
+		end
+	end
 end
 
 local function collectImageButtons(root: Instance, allowPowerUpCopies: boolean?): { GuiButton }
@@ -524,6 +606,29 @@ local function ensureBubbleIcon(btn: GuiButton): ImageLabel
 	return icon
 end
 
+local function applySkillIconScale(icon: ImageLabel, skillId: string?)
+	local existing = icon:FindFirstChild(ICON_SKILL_SCALE_NAME)
+	local want = if skillId == "AutoRoll" then AUTO_ROLL_ICON_SCALE else 1
+	if want >= 0.999 then
+		if existing then
+			existing:Destroy()
+		end
+		return
+	end
+	local scale: UIScale
+	if existing and existing:IsA("UIScale") then
+		scale = existing
+	else
+		if existing then
+			existing:Destroy()
+		end
+		scale = Instance.new("UIScale")
+		scale.Name = ICON_SKILL_SCALE_NAME
+		scale.Parent = icon
+	end
+	scale.Scale = want
+end
+
 -- Product of ancestor UIScales (skips pop-in bubble scale). AbsoluteSize includes this.
 local function ancestorHudScale(inst: Instance): number
 	local product = 1
@@ -591,7 +696,7 @@ local function scaleSnapUdim(u: UDim2, hud: number): UDim2
 	return UDim2.new(u.X.Scale, xOff, u.Y.Scale, yOff)
 end
 
-local function applyCompactStackedLayout(btn: GuiButton, iconImage: string)
+local function applyCompactStackedLayout(btn: GuiButton, iconImage: string, skillId: string?)
 	local icon = ensureBubbleIcon(btn)
 	icon.Position = COMPACT_ICON_POS
 	icon.Size = COMPACT_ICON_SIZE
@@ -601,6 +706,7 @@ local function applyCompactStackedLayout(btn: GuiButton, iconImage: string)
 	icon.ScaleType = Enum.ScaleType.Fit
 	icon.Image = iconImage
 	icon.Visible = true
+	applySkillIconScale(icon, skillId)
 	for _, lbl in ipairs(collectBubbleLabels(btn)) do
 		lbl.Visible = true
 		lbl.AnchorPoint = Vector2.new(0.5, 0.5)
@@ -703,16 +809,18 @@ local function applyBubbleLayoutSnap(btn: GuiButton, snap: BubbleLayoutSnap, ski
 		icon.ScaleType = iconSnap.scaleType
 		icon.Image = iconImage
 		icon.Visible = true
+		applySkillIconScale(icon, skillId)
 		for _, lbl in ipairs(dstLabels) do
 			lbl.Visible = true
 		end
 	elseif iconImage then
-		applyCompactStackedLayout(btn, iconImage)
+		applyCompactStackedLayout(btn, iconImage, skillId)
 	else
 		local existing = findBubbleIcon(btn)
 		if existing then
 			existing.Visible = false
 			existing.Image = ""
+			applySkillIconScale(existing, nil)
 		end
 		for _, lbl in ipairs(dstLabels) do
 			lbl.Visible = true
@@ -860,10 +968,19 @@ local function refreshBubbleRadii(forLayout: boolean?)
 		local sz = b.btn.Size
 		local w = math.max(sz.X.Offset, 1)
 		local h = math.max(sz.Y.Offset, 1)
+		if w < 2 and h < 2 then
+			local abs = b.btn.AbsoluteSize
+			w = math.max(abs.X, 64)
+			h = math.max(abs.Y, 64)
+		end
+		-- Square hit target = visible circle (tall label AABBs were the old click-above bug).
+		local d = math.min(w, h)
 		local pop = if forLayout then 1 elseif b.scale then math.max(b.scale.Scale, 0.01) else 1
-		local r = math.max(w, h) * 0.5 * pop
-		b.radius = math.max(8, r)
+		b.radius = math.max(8, d * 0.5 * pop)
 		b.mass = b.radius
+		if forLayout then
+			b.btn.Size = UDim2.fromOffset(d, d)
+		end
 	end
 end
 
@@ -1256,16 +1373,33 @@ local function physStep(dt: number)
 end
 
 local function findBubbleAtAbs(absX: number, absY: number): Bubble?
+	-- Closest circle at the physics/draw center (not tall AABB center — labels pull Abs center down).
+	local best: Bubble? = nil
+	local bestD2 = math.huge
 	for i = #bubbles, 1, -1 do
 		local b = bubbles[i]
-		local cx, cy, r = absCenter(b.btn)
+		if not b.btn.Visible then
+			continue
+		end
+		local bobX = 0
+		local bobY = 0
+		if not dragged[b] then
+			bobX = math.sin(bobTime * BOB_FREQ * math.pi * 2 + b.phase) * BOB_AMP
+			bobY = math.cos(bobTime * BOB_FREQ * 0.91 * math.pi * 2 + b.phase * 1.17) * BOB_AMP
+		end
+		local cx = b.x + bobX
+		local cy = b.y + bobY
+		local sc = if b.scale and b.scale.Parent then b.scale.Scale else 1
+		local r = b.radius * math.max(sc, 0.05)
 		local dx = absX - cx
 		local dy = absY - cy
-		if dx * dx + dy * dy <= r * r then
-			return b
+		local d2 = dx * dx + dy * dy
+		if d2 <= r * r and d2 <= bestD2 then
+			bestD2 = d2
+			best = b
 		end
 	end
-	return nil
+	return best
 end
 
 local function finishDrag(input: InputObject)
@@ -1284,7 +1418,7 @@ local function finishDrag(input: InputObject)
 	end
 end
 
-local function beginDrag(b: Bubble, input: InputObject, wx: number, wy: number)
+local function beginDrag(b: Bubble, input: InputObject, px: number, py: number)
 	if suppressed or dragged[b] or closing then
 		return
 	end
@@ -1292,16 +1426,13 @@ local function beginDrag(b: Bubble, input: InputObject, wx: number, wy: number)
 	local cx, cy = absCenter(b.btn)
 	b.x = cx
 	b.y = cy
-	-- Calibrate pointer space against this center so grab never snaps above/below cursor.
-	local ax, ay, subInset = calibratePointer(wx, wy, cx, cy)
 	drags[input] = {
 		bubble = b,
 		input = input,
-		grabX = ax - cx,
-		grabY = ay - cy,
-		subInset = subInset,
-		startX = ax,
-		startY = ay,
+		grabX = px - cx,
+		grabY = py - cy,
+		startX = px,
+		startY = py,
 		moved = false,
 	}
 	dragged[b] = true
@@ -1311,19 +1442,18 @@ local function beginDrag(b: Bubble, input: InputObject, wx: number, wy: number)
 	writeBubble(b)
 end
 
-local function updateDrag(input: InputObject, wx: number, wy: number)
+local function updateDrag(input: InputObject, px: number, py: number)
 	local d = drags[input]
 	if not d then
 		return
 	end
 	local b = d.bubble
-	local ax, ay = applyPointerSpace(wx, wy, d.subInset)
-	local movedDist = math.sqrt((ax - d.startX) * (ax - d.startX) + (ay - d.startY) * (ay - d.startY))
+	local movedDist = math.sqrt((px - d.startX) * (px - d.startX) + (py - d.startY) * (py - d.startY))
 	if movedDist > 14 then
 		d.moved = true
 	end
-	local targetX = ax - d.grabX
-	local targetY = ay - d.grabY
+	local targetX = px - d.grabX
+	local targetY = py - d.grabY
 	local nx = b.x + (targetX - b.x) * DRAG_SMOOTH
 	local ny = b.y + (targetY - b.y) * DRAG_SMOOTH
 	b.vx = (nx - b.x) / PHYS_DT
@@ -1338,14 +1468,8 @@ local function updateDrag(input: InputObject, wx: number, wy: number)
 	writeBubble(b)
 end
 
-local function findBubbleAtWindow(wx: number, wy: number): Bubble?
-	for _, cand in ipairs(pointerCandidates(wx, wy)) do
-		local hit = findBubbleAtAbs(cand.X, cand.Y)
-		if hit then
-			return hit
-		end
-	end
-	return nil
+local function findBubbleAtPointer(px: number, py: number): Bubble?
+	return findBubbleAtAbs(px, py)
 end
 
 local function clearSimState()
@@ -1548,6 +1672,7 @@ function SkillsBubbleSim.stop(onDone: (() -> ())?)
 		disconnectInputs()
 		clearSimState()
 		restoreBubbles()
+		clearDebugHitBoxes()
 		local faded = clearBgFadeKeepHidden()
 		if layer then
 			layer:Destroy()
@@ -1616,8 +1741,11 @@ function SkillsBubbleSim.start(panel: Instance)
 
 	hostGui = sg
 	hostPanel = panel
-	-- Do NOT toggle IgnoreGuiInset — keeps AbsolutePosition consistent with other UI
-	-- and avoids fighting PlacementController / HUD inset assumptions.
+	-- One coordinate space: AbsolutePosition == GetMouseLocation.
+	sg.IgnoreGuiInset = true
+	pcall(function()
+		(sg :: any).ScreenInsets = Enum.ScreenInsets.None
+	end)
 	-- Keep under MobileLeftUI so the Skills close button (on left HUD) stays clickable.
 	-- Stay above the seed wheel (which uses left.DisplayOrder - 1 when skills are closed).
 	local pg = sg.Parent
@@ -1716,8 +1844,20 @@ function SkillsBubbleSim.start(panel: Instance)
 		btn.Parent = bubbleLayer
 		btn.Visible = false -- still hidden until centered + scale 0
 		btn.AutoButtonColor = false
+		-- Native GuiButton hits (Roblox handles inset). Children must not steal taps.
 		btn.Active = true
 		btn.Selectable = false -- custom gamepad focus; GuiService highlight steals the stick
+		for _, d in ipairs(btn:GetDescendants()) do
+			if d:IsA("GuiObject") then
+				d.Active = false
+			end
+		end
+		local corner = btn:FindFirstChildOfClass("UICorner")
+		if not corner then
+			corner = Instance.new("UICorner")
+			corner.Parent = btn
+		end
+		corner.CornerRadius = UDim.new(1, 0)
 		setBubbleZ(btn, 20 + i)
 		-- Gamepad A press proxy (clients without GuiButton:Activate).
 		local press = btn:FindFirstChild("_OceanTD_SkillPress")
@@ -1731,8 +1871,6 @@ function SkillsBubbleSim.start(panel: Instance)
 			press = be
 		end
 		local skillName = btn.Name
-		-- Prefer tap-on-release (finishDrag) — Activated often doesn't fire after drag capture.
-		-- Keep BindableEvent for gamepad A (clients without GuiButton:Activate).
 		local pressEv = press :: BindableEvent
 		if pressEv:GetAttribute("_OceanTD_SkillPressBound") ~= true then
 			pressEv:SetAttribute("_OceanTD_SkillPressBound", true)
@@ -1760,37 +1898,28 @@ function SkillsBubbleSim.start(panel: Instance)
 		b.btn.Visible = true
 	end
 
-	table.insert(
-		inputConns,
-		UserInputService.InputBegan:Connect(function(input, _gameProcessed)
-			-- Do not gate on gameProcessed: bubbles are GuiButtons, so clicks are
-			-- always "processed" and that blocked open. Suppression covers power-up.
-			if not running or closing or suppressed then
-				return
-			end
-			local isTouch = input.UserInputType == Enum.UserInputType.Touch
-			local isMouse = input.UserInputType == Enum.UserInputType.MouseButton1
-			if not isTouch and not isMouse then
-				return
-			end
-			local wx: number
-			local wy: number
-			if isMouse then
-				local m = UserInputService:GetMouseLocation()
-				wx, wy = m.X, m.Y
-			else
-				wx, wy = input.Position.X, input.Position.Y
-			end
-			local b = findBubbleAtWindow(wx, wy)
-			if not b then
-				return
-			end
-			beginDrag(b, input, wx, wy)
-			if isMouse then
-				mouseDragInput = input
-			end
-		end)
-	)
+	-- Native button press → drag/tap. No manual GuiInset hit math.
+	for _, b in ipairs(bubbles) do
+		local bubble = b
+		table.insert(
+			inputConns,
+			bubble.btn.InputBegan:Connect(function(input)
+				if not running or closing or suppressed then
+					return
+				end
+				local isTouch = input.UserInputType == Enum.UserInputType.Touch
+				local isMouse = input.UserInputType == Enum.UserInputType.MouseButton1
+				if not isTouch and not isMouse then
+					return
+				end
+				local px, py = pointerPos(input)
+				beginDrag(bubble, input, px, py)
+				if isMouse then
+					mouseDragInput = input
+				end
+			end)
+		)
+	end
 	table.insert(
 		inputConns,
 		UserInputService.InputChanged:Connect(function(input, _gp)
@@ -1799,11 +1928,12 @@ function SkillsBubbleSim.start(panel: Instance)
 			end
 			if input.UserInputType == Enum.UserInputType.Touch then
 				if drags[input] then
-					updateDrag(input, input.Position.X, input.Position.Y)
+					local px, py = pointerPos(input)
+					updateDrag(input, px, py)
 				end
 			elseif input.UserInputType == Enum.UserInputType.MouseMovement and mouseDragInput then
-				local m = UserInputService:GetMouseLocation()
-				updateDrag(mouseDragInput, m.X, m.Y)
+				local mx, my = pointerPos(nil)
+				updateDrag(mouseDragInput, mx, my)
 			end
 		end)
 	)
@@ -1838,6 +1968,7 @@ function SkillsBubbleSim.start(panel: Instance)
 			physStep(PHYS_DT)
 		end
 		updateOrbitLocks(dt)
+		refreshDebugHitBoxes()
 	end)
 
 	syncOrbitLocks()
@@ -1859,16 +1990,11 @@ function SkillsBubbleSim.setSuppressed(value: boolean)
 		end
 		mouseDragInput = nil
 		SkillsBubbleSim.clearGamepadFocus()
-		for _, b in ipairs(bubbles) do
-			if b.btn.Parent then
-				b.btn.Active = false
-			end
-		end
-	else
-		for _, b in ipairs(bubbles) do
-			if b.btn.Parent then
-				b.btn.Active = true
-			end
+		clearDebugHitBoxes()
+	end
+	for _, b in ipairs(bubbles) do
+		if b.btn.Parent then
+			b.btn.Active = not suppressed
 		end
 	end
 	if layer and layer.Parent then
