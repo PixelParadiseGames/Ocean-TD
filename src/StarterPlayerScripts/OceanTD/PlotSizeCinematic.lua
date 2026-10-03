@@ -57,6 +57,20 @@ end
 local function reopenPlotSizeSkills()
 	playerGui:SetAttribute("OceanTD_ForceOpenSkillId", "PlotSize")
 	playerGui:SetAttribute("OceanTD_ForceOpenSkills", os.clock())
+	if playerGui:GetAttribute("OceanTD_PendingClosePlotSizeHint") == true then
+		playerGui:SetAttribute("OceanTD_PendingClosePlotSizeHint", nil)
+		-- Wait for power-up chrome so the close finger has a real target.
+		task.spawn(function()
+			local deadline = os.clock() + 2
+			while os.clock() < deadline do
+				if playerGui:GetAttribute("OceanTD_SkillPowerUpOpen") == true then
+					break
+				end
+				task.wait(0.05)
+			end
+			playerGui:SetAttribute("OceanTD_RollFingerHint", "closePlotSize")
+		end)
+	end
 end
 
 local function getPlotSizesFolder(): Instance?
@@ -602,14 +616,15 @@ Remotes.get("PlotSizeChanged").OnClientEvent:Connect(function(payload: any)
 	end
 	task.spawn(function()
 		local hint = playerGui:GetAttribute("OceanTD_RollFingerHint")
-		local tutorialKeep = hint == "closePlotSize" or hint == "plotSizeUpgrade" or hint == "closeSkills"
-		-- Always run the wide ChangeSizeCam shot for plot grow/shrink so players see the footprint.
-		-- Tutorial keeps skills/power-up open so the finger can point at CloseBTN.
+		local pendingCloseHint = playerGui:GetAttribute("OceanTD_PendingClosePlotSizeHint") == true
+		-- Never keep skills/power-up open during the grow shot — it covers the plot.
+		-- Tutorial CloseBTN finger is restored after reopen (PendingClosePlotSizeHint).
+		local tutorialKeep = hint == "closeSkills" and not pendingCloseHint
 		PlotSizeCinematic.play(prev, stage, {
 			skipCamera = false,
 			keepSkillsOpen = tutorialKeep,
 			dial = isDial,
-			reopenPlotSizeSkills = not tutorialKeep,
+			reopenPlotSizeSkills = not tutorialKeep or pendingCloseHint,
 			poses = {
 				prevCFrame = if typeof(payload.prevCFrame) == "CFrame" then payload.prevCFrame else nil,
 				prevSize = if typeof(payload.prevSize) == "Vector3" then payload.prevSize else nil,

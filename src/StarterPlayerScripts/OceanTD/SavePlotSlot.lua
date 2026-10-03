@@ -6,6 +6,7 @@
 
 local ContentProvider = game:GetService("ContentProvider")
 local GuiService = game:GetService("GuiService")
+local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local SoundService = game:GetService("SoundService")
 local TweenService = game:GetService("TweenService")
@@ -38,6 +39,11 @@ local SAVE_RED = Color3.fromRGB(200, 45, 55)
 local CONFIRM_GREEN = Color3.fromRGB(40, 180, 80)
 local LOAD_ORANGE = Color3.fromRGB(230, 120, 40)
 local SAVE_ICON = "rbxassetid://135557862832703"
+local FINGER_TUTORIAL_LOCK_ATTR = "OceanTD_FingerTutorialLock"
+local SLOT1_LOCK_OVERLAY = "_OceanTD_TutorialSaveLock"
+local SLOT1_LOCK_ICON = "_OceanTD_TutorialSaveLockIcon"
+local SLOT1_LOCK_IMAGE = "rbxassetid://105420423737825"
+local SLOT1_LOCK_RED = Color3.fromRGB(220, 40, 45)
 local OVERWRITE_SOUND_ID = "rbxassetid://138913815716094"
 local LOAD_SOUND_ID = "rbxassetid://95811011280020"
 local CLOSE_SOUND_ID = "rbxassetid://123373842476302"
@@ -133,6 +139,135 @@ local overwriteConfirm: TextButton? = nil
 local overwriteCancel: TextButton? = nil
 local overwriteTargetIndex = 1
 local pendingCounts: { { itemId: string, count: number, displayName: string, icon: string } } = {}
+
+local playerGui = Players.LocalPlayer:WaitForChild("PlayerGui") :: PlayerGui
+
+local function isFingerTutorialLocked(): boolean
+	return playerGui:GetAttribute(FINGER_TUTORIAL_LOCK_ATTR) == true
+end
+
+local function clearSlot1TutorialLock(host: GuiObject)
+	local ov = host:FindFirstChild(SLOT1_LOCK_OVERLAY)
+	if ov then
+		ov:Destroy()
+	end
+	local ic = host:FindFirstChild(SLOT1_LOCK_ICON)
+	if ic then
+		ic:Destroy()
+	end
+	local function restoreBtn(btn: GuiButton)
+		local wasActive = btn:GetAttribute("_OceanTD_TutorialLockActive")
+		local wasSel = btn:GetAttribute("_OceanTD_TutorialLockSelectable")
+		if typeof(wasActive) == "boolean" then
+			btn.Active = wasActive
+			btn:SetAttribute("_OceanTD_TutorialLockActive", nil)
+		end
+		if typeof(wasSel) == "boolean" then
+			btn.Selectable = wasSel
+			btn:SetAttribute("_OceanTD_TutorialLockSelectable", nil)
+		end
+		pcall(function()
+			(btn :: any).Interactable = btn.Active
+		end)
+	end
+	if host:IsA("GuiButton") then
+		restoreBtn(host)
+	end
+	for _, d in ipairs(host:GetDescendants()) do
+		if d:IsA("GuiButton") and d.Name ~= SLOT1_LOCK_OVERLAY then
+			restoreBtn(d)
+		end
+	end
+end
+
+local function ensureSlot1TutorialLock(host: GuiObject)
+	local function disarmBtn(btn: GuiButton)
+		if btn:GetAttribute("_OceanTD_TutorialLockActive") == nil then
+			btn:SetAttribute("_OceanTD_TutorialLockActive", btn.Active)
+			btn:SetAttribute("_OceanTD_TutorialLockSelectable", btn.Selectable)
+		end
+		btn.Active = false
+		btn.Selectable = false
+		pcall(function()
+			(btn :: any).Interactable = false
+		end)
+	end
+	if host:IsA("GuiButton") then
+		disarmBtn(host)
+	end
+	for _, d in ipairs(host:GetDescendants()) do
+		if d:IsA("GuiButton") and d.Name ~= SLOT1_LOCK_OVERLAY then
+			disarmBtn(d)
+		end
+	end
+
+	local overlay = host:FindFirstChild(SLOT1_LOCK_OVERLAY)
+	if not (overlay and overlay:IsA("GuiButton")) then
+		if overlay then
+			overlay:Destroy()
+		end
+		local f = Instance.new("TextButton")
+		f.Name = SLOT1_LOCK_OVERLAY
+		f.Text = ""
+		f.AutoButtonColor = false
+		f.BackgroundColor3 = SLOT1_LOCK_RED
+		f.BackgroundTransparency = 0.45
+		f.BorderSizePixel = 0
+		f.Size = UDim2.fromScale(1, 1)
+		f.Position = UDim2.fromScale(0, 0)
+		f.Active = true
+		f.Selectable = false
+		f.ZIndex = host.ZIndex + 80
+		f.Parent = host
+		local corner = Instance.new("UICorner")
+		corner.CornerRadius = UDim.new(1, 0)
+		corner.Parent = f
+		f.Activated:Connect(function() end)
+		overlay = f
+	else
+		overlay.Visible = true
+		overlay.Active = true
+		;(overlay :: GuiButton).ZIndex = host.ZIndex + 80
+	end
+	local icon = host:FindFirstChild(SLOT1_LOCK_ICON)
+	if not (icon and icon:IsA("ImageLabel")) then
+		local img = Instance.new("ImageLabel")
+		img.Name = SLOT1_LOCK_ICON
+		img.BackgroundTransparency = 1
+		img.Image = SLOT1_LOCK_IMAGE
+		img.Size = UDim2.fromScale(0.55, 0.55)
+		img.AnchorPoint = Vector2.new(0.5, 0.5)
+		img.Position = UDim2.fromScale(0.5, 0.5)
+		img.Active = false
+		img.ZIndex = host.ZIndex + 82
+		img.ScaleType = Enum.ScaleType.Fit
+		img.Parent = host
+	else
+		icon.Visible = true
+		;(icon :: ImageLabel).ZIndex = host.ZIndex + 82
+	end
+end
+
+local function syncSlot1FingerTutorialLock()
+	local locked = isFingerTutorialLocked()
+	if locked and uiOpen then
+		SavePlotSlot.hide()
+	end
+	if slot1 and slot1.Parent then
+		if locked then
+			ensureSlot1TutorialLock(slot1)
+		else
+			clearSlot1TutorialLock(slot1)
+		end
+	end
+	if helpSlot1 and helpSlot1.Parent then
+		if locked then
+			ensureSlot1TutorialLock(helpSlot1)
+		else
+			clearSlot1TutorialLock(helpSlot1)
+		end
+	end
+end
 
 local function stopSlot1IdleCycle()
 	if slot1IdleStop then
@@ -1285,6 +1420,9 @@ function SavePlotSlot.hide()
 end
 
 function SavePlotSlot.toggle()
+	if isFingerTutorialLocked() then
+		return
+	end
 	if uiOpen then
 		SavePlotSlot.hide()
 		return
@@ -1293,6 +1431,9 @@ function SavePlotSlot.toggle()
 end
 
 function SavePlotSlot.open()
+	if isFingerTutorialLocked() then
+		return
+	end
 	if not InventoryState.isOpen() then
 		return
 	end
@@ -1422,6 +1563,7 @@ function SavePlotSlot.playReveal()
 	if showHelp and helpSlot1 and helpSlot1HomePos then
 		helpSlot1.Position = helpSlot1HomePos
 	end
+	syncSlot1FingerTutorialLock()
 end
 
 function SavePlotSlot.playHide()
@@ -1502,6 +1644,7 @@ function SavePlotSlot.syncVisibility()
 			slot1Stroke.Enabled = false
 		end
 	end
+	syncSlot1FingerTutorialLock()
 end
 
 function SavePlotSlot.mount(d: Deps)
@@ -1635,6 +1778,9 @@ function SavePlotSlot.mount(d: Deps)
 			end)
 		end
 	end
+
+	playerGui:GetAttributeChangedSignal(FINGER_TUTORIAL_LOCK_ATTR):Connect(syncSlot1FingerTutorialLock)
+	task.defer(syncSlot1FingerTutorialLock)
 end
 
 return SavePlotSlot

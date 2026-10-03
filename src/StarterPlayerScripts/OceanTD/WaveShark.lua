@@ -84,9 +84,11 @@ local function startMusic()
 	end)
 end
 
-function WaveShark.onSpawned()
+function WaveShark.onSpawned(skipMusic: boolean?)
 	liveCount += 1
-	startMusic()
+	if skipMusic ~= true then
+		startMusic()
+	end
 end
 
 function WaveShark.onDespawned()

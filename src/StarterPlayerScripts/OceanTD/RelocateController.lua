@@ -417,6 +417,17 @@ local function keepCameraFrozen()
 	if cinematicHold then
 		return
 	end
+	local pg = Players.LocalPlayer:FindFirstChildOfClass("PlayerGui")
+	if pg
+		and (
+			pg:GetAttribute("OceanTD_SharkCamBusy") == true
+			or pg:GetAttribute("OceanTD_UrchinCamBusy") == true
+			or pg:GetAttribute("OceanTD_TangCamBusy") == true
+			or pg:GetAttribute("OceanTD_ReefDefeatCamBusy") == true
+		)
+	then
+		return
+	end
 	local cam = Workspace.CurrentCamera
 	if cam and savedCameraCFrame then
 		cam.CameraType = Enum.CameraType.Scriptable

@@ -17,6 +17,7 @@ Api.lastAwardedItemId = nil :: string?
 Api.lastAwardedColorIndex = nil :: number?
 
 local cycleFinishedEvent = Instance.new("BindableEvent")
+local slideToBackpackStartedEvent = Instance.new("BindableEvent")
 
 -- Permanent listeners (tutorial finger, etc.) — always fired after the one-shot slot.
 function Api.connectCycleFinished(cb: () -> ()): RBXScriptConnection
@@ -30,6 +31,15 @@ function Api.fireCycleFinished()
 		task.defer(done)
 	end
 	cycleFinishedEvent:Fire()
+end
+
+-- When the awarded coral/circle begins flying toward Slot4.
+function Api.connectSlideToBackpackStarted(cb: () -> ()): RBXScriptConnection
+	return slideToBackpackStartedEvent.Event:Connect(cb)
+end
+
+function Api.fireSlideToBackpackStarted()
+	slideToBackpackStartedEvent:Fire()
 end
 
 return Api

@@ -4,7 +4,7 @@
 ]]
 
 local FISH_SPEED = 16 -- 20 * 0.8
-local FOOD_RISE_MAX = 2.65 -- was 1.65 (+ lead)
+local FOOD_RISE_MAX = 1.85 -- was 2.65; snappier coral / tap orbs
 local TARGET_RANGE = 50 -- was 30; +20 studs
 local COMBAT_HZ = 10
 local HUNGER_BAR_STRIP_H = 6 * 0.8
@@ -14,8 +14,8 @@ local C = {
 	FISH_SPEED = FISH_SPEED,
 	FISH_SPEED_VAR = 0.15, -- ±15% smooth speed variation
 	-- Idea B: predict fish path-offset meet; food eases there (current sway). O(1)/shot.
-	FOOD_FIRE_LEAD_SEC = 1, -- release this much earlier so the float can be slower
-	FOOD_RISE_MIN = 2.15, -- was 1.15 (+ lead)
+	FOOD_FIRE_LEAD_SEC = 0.55, -- was 1; release closer to impact for faster shots
+	FOOD_RISE_MIN = 1.35, -- was 2.15
 	FOOD_RISE_MAX = FOOD_RISE_MAX,
 	FOOD_FRONT_LEAD = 2.4, -- meet at mouth, ahead along path tangent
 	FOOD_EAT_RADIUS_SQ = 81, -- 9^2 — was 7^2; covers speed-surge + school wander miss
@@ -28,7 +28,7 @@ local C = {
 	FOOD_CRAB_ARC_FRAC = 0.42,
 	FOOD_CRAB_ARC_MIN = 5,
 	FOOD_CRAB_ARC_MAX = 16,
-	DEFAULT_RELOAD = 6, -- matches BrainCoral (half as fast as previous 3s)
+	DEFAULT_RELOAD = 3, -- was 6; corals restock / shoot twice as often
 	TARGET_RANGE = TARGET_RANGE,
 	TARGET_RANGE_SQ = TARGET_RANGE * TARGET_RANGE,
 	-- Path-bucket targeting: corals only see fish in an arrival window along the route.
@@ -56,7 +56,7 @@ local C = {
 	-- Wave 1: wait until nest arm window finishes before first fish (smooth boot).
 	WAVE1_SPAWN_LEAD_SEC = 5,
 	-- Option 2: max food a fish drinks per second while stock lasts.
-	LANE_DRINK_PER_SEC = 5,
+	LANE_DRINK_PER_SEC = 7, -- was 5; keep pace with faster reload
 	-- Nest food stays parked; on feed pulse a copy may fly to the fish.
 	-- Rise share ramps from wave LANE_RISE_RAMP_START → LANE_RISE_RAMP_END (50/50 at end).
 	LANE_RISE_RAMP_START = 20,
@@ -92,6 +92,18 @@ local C = {
 	HUNGER_EVERY_WAVES = 5, -- +6 food every 5 waves
 	HUNGER_PER_TIER = 6,
 	FOOD_RADIUS = 0.52, -- was 0.65 (−20%)
+	-- Player tap-to-feed: click/tap near a critter → food orb from screen-bottom.
+	TAP_FEED_RADIUS = 5, -- was 10; tighter click/tap hit radius
+	TAP_FEED_COOLDOWN_SEC = 1,
+	TAP_FEED_DEBUG = false, -- translucent ball showing tap radius (dev)
+	-- Screen Y (0 top → 1 bottom) for tap-orb spawn; keep above HUD / fish-cam horizon.
+	TAP_FEED_SCREEN_Y = 0.72,
+	TAP_FEED_START_DEPTH_MIN = 10,
+	TAP_FEED_START_DEPTH_MAX = 20,
+	TAP_FEED_FLIGHT_MULT = 0.5, -- half duration = 2× travel speed vs coral orbs
+	TAP_FEED_FIRE_SOUND_ID = "rbxassetid://5852470908",
+	TAP_FEED_FIRE_PITCH_MIN = 0.85,
+	TAP_FEED_FIRE_PITCH_MAX = 1.2,
 	AMMO_RADIUS = 0.6, -- was 0.75 (−20%)
 	HUNGER_BAR_PX_W = 28 * 0.8, -- fill strip (was 40 * 0.8)
 	HUNGER_BAR_STRIP_H = HUNGER_BAR_STRIP_H,

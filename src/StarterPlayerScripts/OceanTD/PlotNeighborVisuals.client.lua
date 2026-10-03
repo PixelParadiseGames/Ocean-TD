@@ -17,6 +17,7 @@ local PlotOutlineWire = require(oceanRoot:WaitForChild("Shared"):WaitForChild("P
 local UiTheme = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiTheme"))
 
 local ClientPlot = require(script.Parent:WaitForChild("ClientPlot"))
+local JoinIntroGate = require(script.Parent:WaitForChild("JoinIntroGate"))
 
 local player = Players.LocalPlayer
 
@@ -221,19 +222,30 @@ local function refreshRoster()
 end
 
 rosterRemote.OnClientEvent:Connect(function(payload)
+	if JoinIntroGate.isBusy() then
+		applyRoster(payload)
+		return
+	end
 	applyRoster(payload)
 	rebuild()
 end)
 
 ClientPlot.onChanged(function()
+	if JoinIntroGate.isBusy() then
+		return
+	end
 	rebuild()
 end)
 
 player:GetAttributeChangedSignal(Constants.PLOT_ID_ATTR):Connect(function()
+	if JoinIntroGate.isBusy() then
+		return
+	end
 	rebuild()
 end)
 
 task.defer(function()
+	JoinIntroGate.waitUntilIdle(120)
 	refreshRoster()
 end)
 

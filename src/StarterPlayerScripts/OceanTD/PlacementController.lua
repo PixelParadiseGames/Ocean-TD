@@ -1307,6 +1307,13 @@ local function keepCameraFrozen()
 	if plotNudgeActive then
 		return
 	end
+	if playerGui:GetAttribute("OceanTD_SharkCamBusy") == true
+		or playerGui:GetAttribute("OceanTD_UrchinCamBusy") == true
+		or playerGui:GetAttribute("OceanTD_TangCamBusy") == true
+		or playerGui:GetAttribute("OceanTD_ReefDefeatCamBusy") == true
+	then
+		return
+	end
 	if camera and savedCameraCFrame then
 		camera.CFrame = savedCameraCFrame
 	end

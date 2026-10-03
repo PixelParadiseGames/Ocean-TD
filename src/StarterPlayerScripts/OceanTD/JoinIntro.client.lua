@@ -11,6 +11,7 @@ local ContextActionService = game:GetService("ContextActionService")
 local GuiService = game:GetService("GuiService")
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
+local SoundService = game:GetService("SoundService")
 local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
 local Workspace = game:GetService("Workspace")
@@ -33,8 +34,73 @@ local WHITE = Color3.new(1, 1, 1)
 local SKIP_GREEN = Color3.fromRGB(55, 200, 90)
 local LOAD_BAR_BG = Color3.fromRGB(28, 36, 48)
 local LOAD_BAR_FILL = Color3.fromRGB(70, 200, 255)
+local LOAD_WAVE_EMOJI = "🌊"
+local LOAD_WAVE_EMOJI_PX = 110
+local LOAD_WAVE_EMOJI_GAP = 18 -- space between emoji bottom and bar top
+local LOAD_TIP_GAP = 22 -- space between bar bottom and tip top
+local LOAD_TIP_DOT_SEC = 0.45
+local ATTR_LOAD_TIP_ORDER = "OceanTD_LoadTipOrder"
+local ATTR_LOAD_TIP_CURSOR = "OceanTD_LoadTipCursor"
+-- Phrases without trailing dots; addLoadTip animates "." / ".." / "..."
+local LOAD_TIPS = {
+	"Filling the ocean with water",
+	"Preparing the underwater buffet",
+	"Deflating the pufferfish",
+	"Teaching the crabs how to walk forwards",
+	"Stocking the kelp bar",
+	"Scrubbing the algae off the live rock",
+	"Convincing the dolphins to stay on Earth",
+	"Humbling the starfish",
+	"Chopping the chum",
+	"Stacking live rock",
+	"Waiting for the fishes school to get out",
+	"Re-hydrating the water",
+	"Splitting the anemones",
+	"Blowing bubbles",
+	"Counting octopus hearts",
+	"Inflating the swim bladders",
+	"Spawning a billion tiny krill you cant see",
+	"Polishing the pearls",
+	"Measuring the salinity",
+	"Herding the seahorses",
+	"Popping bubble algae",
+	"Convincing the parrotfish not to eat the scenery",
+	"Vacuuming cyanobacteria from the ocean floor",
+	"Telling the mantis shrimp to stop punching things",
+	"Figuring out how old an immortal jellyfish is",
+	"Sharpening the sea urchins",
+	"Painting on the clownfish stripes",
+	"Charging the electric eels",
+	"Fluffing the sea sponges",
+	"Sorting the seashells by shape and size",
+	"Stockpiling calcium for the coral",
+	"Adjusting the buoyancy of the user interface",
+	"Checking the underwater zoning laws",
+	"Convincing the clams to open up",
+	"Balancing the nitrogen cycle",
+	"Turning on the bioluminescence",
+	"Scraping coralline off the glass",
+	"Checking the pH levels",
+	"Upgrading hermit crabs shells",
+	"Topping off the evaporated water",
+	"Getting the gobies out of their caves",
+	"Emptying the protein skimmer",
+	"Acclimating the new arrivals",
+	"Giving the cuttlefish a new color palette",
+	"Getting the remoras to detach",
+	"Teaching the archerfish how to aim",
+	"Synchronizing the coral spawning to the moon",
+	"Siphoning the sand bed",
+	"Dialing in the light spectrum",
+	"Removing the aiptasia",
+	"Waiting for the snails to arrive",
+}
 local CAM_DOWN_SEC = 9
-local LOAD_BAR_FILL_SEC = 3 -- load pill never completes faster than this
+local LOAD_BAR_FILL_SEC = 4 -- player-facing fill: always a full 4s from empty, never less
+local INTRO_EXPLAINER_SOUND_ID = "rbxassetid://100453077391542"
+local INTRO_EXPLAINER_VOLUME = 0.9
+local INTRO_EXPLAINER_BGM_FACTOR = 0.2
+local INTRO_EXPLAINER_BGM_FADE_SEC = 0.4
 local CAM_HANDOFF_SEC = 1.05
 local CAM_HANDOFF_SKIP_SEC = 0.45
 local PAN_DOWN_SEC = 1.15
@@ -47,6 +113,7 @@ local INTRO_WAVE = 100
 local BLEACH_STARTS_PER_FRAME = 64
 local BLEACH_FALL_SEC = 1.0 * 0.7
 local BLEACH_HOLD_WHITE_SEC = 0.2 * 0.7
+local BLEACH_FADE_SEC = 0.55 -- half the reef fades instead of bleach+fall (cheaper)
 local BLEACH_WAIT_PAD_SEC = 0.12
 local BLEACH_WAIT_MIN_SEC = 1.5
 
@@ -61,16 +128,205 @@ local earlyLoadFill: Frame? = nil
 local loadBarStartedAt = 0
 local loadBarFillDone = false
 local loadBarAnimating = false
+local loadBarAnimGen = 0 -- bump to cancel any in-flight fill (bootstrap vs final)
+local loadTipToken = 0
+local introExplainerSound: Sound? = nil
+local introExplainerDucking = false
+
+local function getBgmController(): any?
+	local ok, mod = pcall(function()
+		return require(script.Parent:WaitForChild("BgmController"))
+	end)
+	return if ok then mod else nil
+end
+
+local function clearIntroExplainerDuck()
+	if not introExplainerDucking then
+		return
+	end
+	introExplainerDucking = false
+	local Bgm = getBgmController()
+	if Bgm and typeof(Bgm.clearBgmFactor) == "function" then
+		Bgm.clearBgmFactor(INTRO_EXPLAINER_BGM_FADE_SEC)
+	end
+end
+
+local function stopIntroExplainerSound()
+	local s = introExplainerSound
+	introExplainerSound = nil
+	clearIntroExplainerDuck()
+	if not s then
+		return
+	end
+	pcall(function()
+		s:Stop()
+		s:Destroy()
+	end)
+end
+
+local function playIntroExplainerSound()
+	stopIntroExplainerSound()
+	local Bgm = getBgmController()
+	if Bgm and typeof(Bgm.fadeBgmToFactor) == "function" then
+		introExplainerDucking = true
+		Bgm.fadeBgmToFactor(INTRO_EXPLAINER_BGM_FACTOR, INTRO_EXPLAINER_BGM_FADE_SEC)
+	end
+	local s = Instance.new("Sound")
+	s.Name = "OceanTD_JoinIntroExplainer"
+	s.SoundId = INTRO_EXPLAINER_SOUND_ID
+	s.Volume = INTRO_EXPLAINER_VOLUME
+	s.Looped = false
+	s.Parent = SoundService
+	introExplainerSound = s
+	s.Ended:Once(function()
+		if introExplainerSound == s then
+			introExplainerSound = nil
+		end
+		clearIntroExplainerDuck()
+		if s.Parent then
+			s:Destroy()
+		end
+	end)
+	s:Play()
+end
 
 local function setLoadFillProgress(fill: Frame, u: number)
+	-- Linear only — never ease/snap; scale-based so first layout frames stay continuous.
 	u = math.clamp(u, 0, 1)
-	local eased = u * u * (3 - 2 * u)
-	-- Scale-based so AbsoluteSize=0 during first layout frames doesn't stick the bar.
-	if eased <= 0 then
+	if u <= 0 then
 		fill.Size = UDim2.new(0, 0, 1, -8)
 	else
-		fill.Size = UDim2.new(eased, -8, 1, -8)
+		fill.Size = UDim2.new(u, -8, 1, -8)
 	end
+end
+
+-- Wait until the track has a real width so progress doesn't jump when layout resolves.
+local function waitLoadTrackLaidOut(fill: Frame, sg: ScreenGui): boolean
+	local track = fill.Parent
+	if not (track and track:IsA("GuiObject")) then
+		return false
+	end
+	local deadline = os.clock() + 2
+	while sg.Parent and fill.Parent and track.AbsoluteSize.X < 1 and os.clock() < deadline do
+		RunService.RenderStepped:Wait()
+	end
+	return sg.Parent ~= nil and fill.Parent ~= nil
+end
+
+local function addLoadWaveEmoji(sg: ScreenGui, track: Frame)
+	local wave = Instance.new("TextLabel")
+	wave.Name = "WaveEmoji"
+	wave.BackgroundTransparency = 1
+	wave.AnchorPoint = Vector2.new(0.5, 1)
+	wave.Position = UDim2.new(
+		track.Position.X.Scale,
+		track.Position.X.Offset,
+		track.Position.Y.Scale,
+		track.Position.Y.Offset - math.floor(track.Size.Y.Offset * 0.5 + 0.5) - LOAD_WAVE_EMOJI_GAP
+	)
+	wave.Size = UDim2.fromOffset(LOAD_WAVE_EMOJI_PX, LOAD_WAVE_EMOJI_PX)
+	wave.Font = Enum.Font.GothamBold
+	wave.Text = LOAD_WAVE_EMOJI
+	wave.TextScaled = true
+	wave.TextColor3 = WHITE
+	wave.ZIndex = track.ZIndex + 1
+	wave.Parent = sg
+end
+
+-- Shuffled deck via player attrs: every tip once, then reshuffle (no random repeats mid-cycle).
+local function nextLoadTip(): string
+	local n = #LOAD_TIPS
+	if n < 1 then
+		return "Loading"
+	end
+	local orderStr = playerGui:GetAttribute(ATTR_LOAD_TIP_ORDER)
+	local cursor = tonumber(playerGui:GetAttribute(ATTR_LOAD_TIP_CURSOR)) or 0
+	local order: { number } = {}
+	if typeof(orderStr) == "string" and orderStr ~= "" then
+		for part in string.gmatch(orderStr, "%d+") do
+			local v = tonumber(part)
+			if v then
+				table.insert(order, v)
+			end
+		end
+	end
+	if #order ~= n then
+		order = table.create(n)
+		for i = 1, n do
+			order[i] = i
+		end
+		for i = n, 2, -1 do
+			local j = math.random(1, i)
+			order[i], order[j] = order[j], order[i]
+		end
+		cursor = 0
+		playerGui:SetAttribute(ATTR_LOAD_TIP_ORDER, table.concat(order, ","))
+	end
+	cursor = math.clamp(cursor, 0, n - 1)
+	local tipIdx = order[cursor + 1]
+	local nextCursor = cursor + 1
+	if nextCursor >= n then
+		playerGui:SetAttribute(ATTR_LOAD_TIP_ORDER, "")
+		playerGui:SetAttribute(ATTR_LOAD_TIP_CURSOR, 0)
+	else
+		playerGui:SetAttribute(ATTR_LOAD_TIP_CURSOR, nextCursor)
+	end
+	return LOAD_TIPS[tipIdx] or LOAD_TIPS[1]
+end
+
+local function addLoadTip(sg: ScreenGui, track: Frame)
+	-- Two phrases: first half of the 4s fill beat, second half (+ any post-fill wait).
+	-- Clock starts when runLoadingBar sets loadBarStartedAt — not when the empty pill appears.
+	local phraseA = nextLoadTip()
+	local phraseB = nextLoadTip()
+	local tip = Instance.new("TextLabel")
+	tip.Name = "LoadTip"
+	tip.BackgroundTransparency = 1
+	tip.AnchorPoint = Vector2.new(0.5, 0)
+	tip.Position = UDim2.new(
+		track.Position.X.Scale,
+		track.Position.X.Offset,
+		track.Position.Y.Scale,
+		track.Position.Y.Offset + math.floor(track.Size.Y.Offset * 0.5 + 0.5) + LOAD_TIP_GAP
+	)
+	tip.Size = UDim2.new(0.85, 0, 0, 36)
+	tip.Font = Enum.Font.GothamMedium
+	tip.TextSize = 22
+	tip.TextColor3 = Color3.fromRGB(210, 230, 245)
+	tip.TextTransparency = 0.05
+	tip.TextXAlignment = Enum.TextXAlignment.Center
+	tip.TextYAlignment = Enum.TextYAlignment.Top
+	tip.TextWrapped = true
+	tip.Text = phraseA .. "."
+	tip.ZIndex = track.ZIndex + 1
+	tip.Parent = sg
+
+	loadTipToken += 1
+	local my = loadTipToken
+	local halfSec = LOAD_BAR_FILL_SEC * 0.5
+	task.spawn(function()
+		local dots = 1
+		local lastBase = phraseA
+		while my == loadTipToken and tip.Parent and sg.Parent do
+			local base = phraseA
+			local started = loadBarStartedAt
+			if typeof(started) == "number" and started > 0 then
+				base = if (os.clock() - started) < halfSec then phraseA else phraseB
+			end
+			if base ~= lastBase then
+				dots = 1
+				lastBase = base
+			end
+			tip.Text = base .. string.rep(".", dots)
+			dots = if dots >= 3 then 1 else dots + 1
+			task.wait(LOAD_TIP_DOT_SEC)
+		end
+	end)
+end
+
+local function adornLoadBarChrome(sg: ScreenGui, track: Frame)
+	addLoadWaveEmoji(sg, track)
+	addLoadTip(sg, track)
 end
 
 local function bootstrapImmediateLoadBar()
@@ -110,6 +366,7 @@ local function bootstrapImmediateLoadBar()
 	trackAspect.MinSize = Vector2.new(220, 28)
 	trackAspect.MaxSize = Vector2.new(720, 44)
 	trackAspect.Parent = track
+	adornLoadBarChrome(sg, track)
 
 	local fill = Instance.new("Frame")
 	fill.Name = "Fill"
@@ -123,26 +380,15 @@ local function bootstrapImmediateLoadBar()
 	fillCorner.CornerRadius = UDim.new(1, 0)
 	fillCorner.Parent = fill
 
-	-- Animate immediately so device module streaming isn't 10s of empty pill.
-	-- Fill takes LOAD_BAR_FILL_SEC; bar stays up (full) until intro dismisses it.
+	-- Show empty pill + tips immediately. Do NOT burn the 4s fill here — module
+	-- WaitForChild can take longer than LOAD_BAR_FILL_SEC, which made the bar
+	-- already-full by the time intro waited, then flash-dismiss.
 	earlyLoadGui = sg
 	earlyLoadFill = fill
-	loadBarStartedAt = os.clock()
+	loadBarStartedAt = 0
 	loadBarFillDone = false
-	loadBarAnimating = true
-	task.spawn(function()
-		local t0 = loadBarStartedAt
-		while earlyLoadGui == sg and sg.Parent and (os.clock() - t0) < LOAD_BAR_FILL_SEC do
-			local u = math.clamp((os.clock() - t0) / LOAD_BAR_FILL_SEC, 0, 1)
-			setLoadFillProgress(fill, u)
-			RunService.RenderStepped:Wait()
-		end
-		if earlyLoadGui == sg and sg.Parent then
-			setLoadFillProgress(fill, 1)
-			loadBarFillDone = true
-			loadBarAnimating = false
-		end
-	end)
+	loadBarAnimating = false
+	setLoadFillProgress(fill, 0)
 end
 
 bootstrapImmediateLoadBar()
@@ -243,30 +489,121 @@ local function watchHideIntroTemplate()
 	end)
 end
 
-local function collectIntroRoots(intro: Instance): { Instance }
-	local roots: { Instance } = {}
-	local function consider(inst: Instance)
-		if inst:IsA("Model") or inst:IsA("BasePart") then
-			table.insert(roots, inst)
+-- Placed dual-mesh corals rename the stem (Zoas / TreeCoral / LeatherCoral / SeaFan);
+-- Studio templates keep Main/Stem + Accent/Web as siblings.
+local INTRO_PRIMARY_EXACT: { [string]: boolean } = {
+	main = true,
+	stem = true,
+	seafanstem = true,
+	zoas = true,
+	treecoral = true,
+	leathercoral = true,
+	seafan = true,
+}
+
+local function isIntroAccentOrWebName(name: string): boolean
+	local lower = string.lower(name)
+	if lower == "accent" or lower == "web" or lower == "seafanweb" or lower == "fanweb" then
+		return true
+	end
+	if string.find(lower, "accent", 1, true) ~= nil then
+		return true
+	end
+	if string.find(lower, "web", 1, true) ~= nil and string.find(lower, "webbed", 1, true) == nil then
+		return true
+	end
+	return false
+end
+
+local function isIntroPrimaryName(name: string): boolean
+	local lower = string.lower(name)
+	if INTRO_PRIMARY_EXACT[lower] then
+		return true
+	end
+	if string.sub(lower, 1, 4) == "main" then
+		return true
+	end
+	if string.sub(lower, 1, 4) == "stem" and string.find(lower, "system", 1, true) == nil then
+		return true
+	end
+	return false
+end
+
+local function isIntroAttachedPartName(name: string): boolean
+	if isIntroAccentOrWebName(name) then
+		return true
+	end
+	local lower = string.lower(name)
+	if string.sub(lower, 1, 4) == "food" then
+		return true
+	end
+	if string.find(lower, "collider", 1, true) ~= nil then
+		return true
+	end
+	return false
+end
+
+local function isIntroPrimaryPart(part: BasePart): boolean
+	if isIntroPrimaryName(part.Name) then
+		return true
+	end
+	local speciesId = part:GetAttribute("OceanTD_SpeciesId")
+	if typeof(speciesId) == "string" and speciesId ~= "" then
+		if speciesId == "Zoas" or speciesId == "TreeCoral" or speciesId == "LeatherCoral" or speciesId == "SeaFan" then
+			return true
 		end
 	end
-	for _, ch in ipairs(intro:GetChildren()) do
-		if ch:IsA("Folder") then
-			for _, nested in ipairs(ch:GetChildren()) do
-				consider(nested)
+	return false
+end
+
+local function nestIntroAttachedUnderPrimaries(root: Instance)
+	local function processParent(parent: Instance)
+		local primaries: { BasePart } = {}
+		local attached: { BasePart } = {}
+		for _, ch in ipairs(parent:GetChildren()) do
+			if ch:IsA("BasePart") then
+				if isIntroPrimaryPart(ch) then
+					table.insert(primaries, ch)
+				elseif isIntroAttachedPartName(ch.Name) then
+					table.insert(attached, ch)
+				end
 			end
-		else
-			consider(ch)
 		end
-	end
-	if #roots == 0 then
-		for _, d in ipairs(intro:GetDescendants()) do
-			if d:IsA("BasePart") then
-				table.insert(roots, d)
+		if #attached < 1 or #primaries < 1 then
+			return
+		end
+		for _, a in ipairs(attached) do
+			local best: BasePart? = nil
+			local bestDist = math.huge
+			if #primaries == 1 then
+				best = primaries[1]
+			else
+				for _, p in ipairs(primaries) do
+					local d = (p.Position - a.Position).Magnitude
+					if d < bestDist then
+						best = p
+						bestDist = d
+					end
+				end
+			end
+			if best and a.Parent ~= best then
+				local rel = best.CFrame:ToObjectSpace(a.CFrame)
+				a.Anchored = true
+				a.CanCollide = false
+				a.Parent = best
+				a.CFrame = best.CFrame * rel
 			end
 		end
 	end
-	return roots
+	if root:IsA("BasePart") then
+		return
+	end
+	processParent(root)
+	for _, d in ipairs(root:GetDescendants()) do
+		if d:IsA("Model") or d:IsA("Folder") then
+			processParent(d)
+		end
+	end
 end
 
 -- Intro corals stream in over time on device — snapshot only after part count goes quiet.
@@ -562,6 +899,7 @@ local function makeLoadingUi(): (ScreenGui, Frame)
 	trackAspect.MinSize = Vector2.new(220, 28)
 	trackAspect.MaxSize = Vector2.new(720, 44)
 	trackAspect.Parent = track
+	adornLoadBarChrome(sg, track)
 
 	local fill = Instance.new("Frame")
 	fill.Name = "Fill"
@@ -578,52 +916,35 @@ local function makeLoadingUi(): (ScreenGui, Frame)
 	return sg, fill
 end
 
-local function runLoadingBar(fill: Frame, durationSec: number, cancelled: () -> boolean)
+-- Smooth linear fill over exactly durationSec. Never jumps to full; only stops if cancelled/gui gone.
+local function runLoadingBar(fill: Frame, sg: ScreenGui, durationSec: number, gen: number): boolean
+	if not waitLoadTrackLaidOut(fill, sg) or earlyLoadGui ~= sg or gen ~= loadBarAnimGen then
+		return false
+	end
 	local t0 = os.clock()
-	while os.clock() - t0 < durationSec do
-		if cancelled() then
-			return
-		end
+	loadBarStartedAt = t0
+	while earlyLoadGui == sg and sg.Parent and fill.Parent and gen == loadBarAnimGen and (os.clock() - t0) < durationSec do
 		local u = math.clamp((os.clock() - t0) / durationSec, 0, 1)
 		setLoadFillProgress(fill, u)
 		RunService.RenderStepped:Wait()
 	end
-	setLoadFillProgress(fill, 1)
+	if earlyLoadGui == sg and sg.Parent and fill.Parent and gen == loadBarAnimGen then
+		setLoadFillProgress(fill, 1)
+		return true
+	end
+	return false
 end
 
 local function destroyEarlyLoadBar()
+	loadBarAnimGen += 1
 	loadBarFillDone = true
 	loadBarAnimating = false
+	loadTipToken += 1
 	if earlyLoadGui and earlyLoadGui.Parent then
 		earlyLoadGui:Destroy()
 	end
 	earlyLoadGui = nil
 	earlyLoadFill = nil
-end
-
-local function startEarlyLoadBarFill()
-	local sg = earlyLoadGui
-	local fill = earlyLoadFill
-	if not (sg and sg.Parent and fill and fill.Parent) then
-		return
-	end
-	-- Don't restart if bootstrap already started the fill.
-	if loadBarAnimating or loadBarStartedAt > 0 then
-		return
-	end
-	loadBarAnimating = true
-	loadBarFillDone = false
-	loadBarStartedAt = os.clock()
-	setLoadFillProgress(fill, 0)
-	task.spawn(function()
-		runLoadingBar(fill, LOAD_BAR_FILL_SEC, function()
-			return earlyLoadGui ~= sg or not sg.Parent or playerGui:GetAttribute(ATTR_BUSY) ~= true
-		end)
-		if earlyLoadGui == sg then
-			loadBarFillDone = true
-			loadBarAnimating = false
-		end
-	end)
 end
 
 local function showEarlyLoadBar()
@@ -637,17 +958,30 @@ local function showEarlyLoadBar()
 	loadBarStartedAt = 0
 	loadBarFillDone = false
 	loadBarAnimating = false
-	startEarlyLoadBarFill()
+	setLoadFillProgress(fill, 0)
 end
 
+-- Guaranteed player-facing beat: always fill 0→1 over LOAD_BAR_FILL_SEC on this thread.
+-- Never returns early because a prior bootstrap fill already finished.
 local function waitEarlyLoadBarMin()
-	startEarlyLoadBarFill()
-	-- Don't dismiss until the fill has had time to play (may already be done from bootstrap).
-	while earlyLoadGui and earlyLoadGui.Parent do
-		if loadBarStartedAt > 0 and (os.clock() - loadBarStartedAt) >= LOAD_BAR_FILL_SEC then
-			break
+	showEarlyLoadBar()
+	local sg = earlyLoadGui
+	local fill = earlyLoadFill
+	if not (sg and sg.Parent and fill and fill.Parent) then
+		return
+	end
+	loadBarAnimGen += 1
+	local gen = loadBarAnimGen
+	loadBarAnimating = true
+	loadBarFillDone = false
+	setLoadFillProgress(fill, 0)
+	local ok = runLoadingBar(fill, sg, LOAD_BAR_FILL_SEC, gen)
+	if gen == loadBarAnimGen then
+		loadBarFillDone = ok
+		loadBarAnimating = false
+		if ok then
+			playIntroExplainerSound()
 		end
-		task.wait(0.05)
 	end
 end
 
@@ -666,9 +1000,9 @@ local function bleachPartLook(part: BasePart)
 end
 
 local function bleachAndFall(parts: { BasePart }, token: { cancelled: boolean }): number
-	-- One job per Model (or loose part) so accents bleach with the coral —
-	-- never destroy a Model while sibling accents are still colorful.
-	local jobs: { { parts: { BasePart }, drive: BasePart | Model } } = {}
+	-- One job per Model (or loose part) so accents leave with the coral.
+	type Job = { parts: { BasePart }, drive: BasePart | Model, fadeOnly: boolean }
+	local jobs: { Job } = {}
 	local seenModel: { [Model]: boolean } = {}
 	local seenLoose: { [BasePart]: boolean } = {}
 
@@ -677,7 +1011,18 @@ local function bleachAndFall(parts: { BasePart }, token: { cancelled: boolean })
 			continue
 		end
 		local model = part:FindFirstAncestorOfClass("Model")
-		if model and model.Parent and model.Parent.Name == "OceanTD_JoinIntroShowcase" then
+		local underShowcase = false
+		if model then
+			local p: Instance? = model.Parent
+			while p and p ~= Workspace do
+				if p.Name == "OceanTD_JoinIntroShowcase" then
+					underShowcase = true
+					break
+				end
+				p = p.Parent
+			end
+		end
+		if model and underShowcase then
 			if seenModel[model] then
 				continue
 			end
@@ -689,39 +1034,54 @@ local function bleachAndFall(parts: { BasePart }, token: { cancelled: boolean })
 				end
 			end
 			if #bundle > 0 then
-				table.insert(jobs, { parts = bundle, drive = model })
+				table.insert(jobs, { parts = bundle, drive = model, fadeOnly = false })
 			end
 		else
 			if seenLoose[part] then
+				continue
+			end
+			-- Skip Accent/Web/Food already parented under a stem — they leave with it.
+			if part.Parent and part.Parent:IsA("BasePart") then
 				continue
 			end
 			seenLoose[part] = true
 			local bundle: { BasePart } = { part }
 			for _, d in ipairs(part:GetDescendants()) do
 				if d:IsA("BasePart") then
+					seenLoose[d] = true
 					table.insert(bundle, d)
 				end
 			end
-			table.insert(jobs, { parts = bundle, drive = part })
+			table.insert(jobs, { parts = bundle, drive = part, fadeOnly = false })
 		end
 	end
 
 	local rng = Random.new()
 	local n = #jobs
-	-- Drain faster (64/frame); shrink stagger if needed so worst-case ≤ BLEACH_TOTAL_MAX_SEC.
+	-- Half bleach+fall, half fade-out (no white paint / no fall tweens — big CPU save).
+	for i = n, 2, -1 do
+		local j = rng:NextInteger(1, i)
+		jobs[i], jobs[j] = jobs[j], jobs[i]
+	end
+	local fadeCount = n // 2
+	for i = 1, fadeCount do
+		jobs[i].fadeOnly = true
+	end
+
 	local queueDrainSec = (n / math.max(1, BLEACH_STARTS_PER_FRAME)) * (1 / 60)
-	local fixedTail = BLEACH_HOLD_WHITE_SEC + BLEACH_FALL_SEC + BLEACH_WAIT_PAD_SEC
+	local fixedTail = math.max(BLEACH_HOLD_WHITE_SEC + BLEACH_FALL_SEC, BLEACH_FADE_SEC) + BLEACH_WAIT_PAD_SEC
 	local colorWindow = math.min(
 		COLOR_WINDOW_SEC,
 		math.max(0.2, BLEACH_TOTAL_MAX_SEC - fixedTail - queueDrainSec)
 	)
 	local maxEnd = math.min(BLEACH_TOTAL_MAX_SEC, colorWindow + queueDrainSec + fixedTail)
 
-	-- Pre-roll delays so wait duration is exact (not racing an async maxEnd).
 	local delays: { number } = table.create(n)
 	for i = 1, n do
 		delays[i] = rng:NextNumber(0, colorWindow)
 	end
+
+	local fadeInfo = TweenInfo.new(BLEACH_FADE_SEC, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
 
 	task.spawn(function()
 		local qi = 1
@@ -739,6 +1099,29 @@ local function bleachAndFall(parts: { BasePart }, token: { cancelled: boolean })
 					if token.cancelled then
 						return
 					end
+					if job.fadeOnly then
+						local anyAlive = false
+						for _, p in ipairs(job.parts) do
+							if p.Parent then
+								anyAlive = true
+								TweenService:Create(p, fadeInfo, { LocalTransparencyModifier = 1 }):Play()
+							end
+						end
+						if not anyAlive then
+							return
+						end
+						task.delay(BLEACH_FADE_SEC, function()
+							if token.cancelled then
+								return
+							end
+							local drive = job.drive
+							if drive.Parent then
+								drive:Destroy()
+							end
+						end)
+						return
+					end
+
 					local anyAlive = false
 					for _, p in ipairs(job.parts) do
 						if p.Parent then
@@ -1131,6 +1514,7 @@ local function runIntro()
 		finished = true
 		introAvatarShown = false
 		introStandCf = nil
+		stopIntroExplainerSound()
 		stopEarlyCamHold()
 		pcall(function()
 			WaveSim.stopJoinIntroDemo()
@@ -1259,6 +1643,9 @@ local function runIntro()
 		camState.hold = false
 		introAvatarShown = false
 		introStandCf = nil
+		if skipped then
+			stopIntroExplainerSound()
+		end
 
 		pcall(function()
 			WaveSim.stopJoinIntroDemo()
@@ -1334,8 +1721,14 @@ local function runIntro()
 		playerGui:SetAttribute(ATTR_ROLL_FINGER, "roll")
 		playerGui:SetAttribute("OceanTD_TutorialFreeUpgrade", true)
 		-- Tutorial gates: waves unlock after first place; left HUD after first wave session ends.
+		-- Backpack stays gated until first roll (unless they already rolled this session).
+		if playerGui:GetAttribute("OceanTD_HasRolledThisSession") ~= true then
+			playerGui:SetAttribute("OceanTD_TutorialGateBackpack", true)
+		end
 		playerGui:SetAttribute("OceanTD_TutorialGateWaves", true)
 		playerGui:SetAttribute("OceanTD_TutorialGateLeftHud", true)
+		-- Cam cycle locked until they close build mode after the first coral hue.
+		playerGui:SetAttribute("OceanTD_TutorialGateCam", true)
 		playerGui:SetAttribute("OceanTD_TutorialWavesSlotReady", false)
 	end
 
@@ -1355,7 +1748,8 @@ local function runIntro()
 	local demoStarted = false
 
 	-- (B) Intro package ready: sync + frozen package + cam markers.
-	waitEarlyLoadBarMin()
+	-- Keep the load UI up (tips visible) while assets stream; the 4s fill plays
+	-- immediately before dismiss so it never flash-completes early.
 	payload = waitForSync(12)
 	if finished then
 		return
@@ -1394,35 +1788,55 @@ local function runIntro()
 		warn("[JoinIntro] Intro package has 0 parts — showcase empty")
 	end
 
-	-- (C) Clone showcase from frozen package (blocking — no pan until done).
+	-- (C) Clone entire Intro package once — preserves Main+Accent hierarchy exactly.
+	-- Root-by-root collection previously dropped Accent/Web when naming/sibling rules missed.
 	local folder = Instance.new("Folder")
 	folder.Name = "OceanTD_JoinIntroShowcase"
 	folder.Parent = Workspace
 	showcase = folder
 	local sourceCf = payload.introSourceCFrame
-	local function cloneRoot(root: Instance)
-		local clone = root:Clone()
-		sanitizeVisual(clone)
-		if clone:IsA("Model") then
-			local pivot = (root :: Model):GetPivot()
-			;(clone :: Model):PivotTo(ClientPlot.remapCFrameFromSource(sourceCf, pivot))
-		elseif clone:IsA("BasePart") then
-			clone.CFrame = ClientPlot.remapCFrameFromSource(sourceCf, (root :: BasePart).CFrame)
-		end
-		clone.Parent = folder
-		for _, part in ipairs(gatherParts(clone)) do
-			part.LocalTransparencyModifier = 1
-			table.insert(showcaseParts, part)
-		end
-	end
-	local roots = collectIntroRoots(introInst)
-	for i, root in ipairs(roots) do
+	local reef = introInst:Clone()
+	reef.Name = "IntroReef"
+	sanitizeVisual(reef)
+	local rawParts = gatherParts(reef)
+	local accentInPackage = 0
+	for i, part in ipairs(rawParts) do
 		if token.cancelled or finished then
 			break
 		end
-		cloneRoot(root)
+		if isIntroAccentOrWebName(part.Name) then
+			accentInPackage += 1
+		end
+		part.CFrame = ClientPlot.remapCFrameFromSource(sourceCf, part.CFrame)
+		part.LocalTransparencyModifier = 1
 		if i % CLONE_BATCH == 0 then
 			RunService.Heartbeat:Wait()
+		end
+	end
+	if not token.cancelled and not finished then
+		nestIntroAttachedUnderPrimaries(reef)
+		reef.Parent = folder
+		table.clear(showcaseParts)
+		for _, part in ipairs(gatherParts(reef)) do
+			part.LocalTransparencyModifier = 1
+			table.insert(showcaseParts, part)
+		end
+		local accentInShowcase = 0
+		for _, part in ipairs(showcaseParts) do
+			if isIntroAccentOrWebName(part.Name) then
+				accentInShowcase += 1
+			end
+		end
+		print(
+			"[JoinIntro] showcase parts=",
+			#showcaseParts,
+			"accents in package=",
+			accentInPackage,
+			"accents nested=",
+			accentInShowcase
+		)
+		if accentInPackage < 1 then
+			warn("[JoinIntro] Intro package has 0 Accent/Web parts — authored reef may be stem-only")
 		end
 	end
 	if finished then
@@ -1441,6 +1855,11 @@ local function runIntro()
 		return
 	end
 
+	-- Always a full 4s 0→1 fill the player can watch, then dismiss.
+	waitEarlyLoadBarMin()
+	if finished then
+		return
+	end
 	destroyEarlyLoadBar()
 	WaveSign.beginJoinIntroDisplay(true)
 
@@ -1457,6 +1876,16 @@ local function runIntro()
 	for _, part in ipairs(showcaseParts) do
 		if part.Parent then
 			part.LocalTransparencyModifier = 0
+			-- Accents authored at Transparency=1 (or rest attr) must still read as coral color.
+			if isIntroAccentOrWebName(part.Name) then
+				local stem = part.Parent
+				local restT = if stem and stem:IsA("BasePart") then stem:GetAttribute("OceanTD_WebRestTransparency") else nil
+				if typeof(restT) == "number" then
+					part.Transparency = restT
+				elseif part.Transparency >= 0.99 then
+					part.Transparency = 0
+				end
+			end
 		end
 	end
 

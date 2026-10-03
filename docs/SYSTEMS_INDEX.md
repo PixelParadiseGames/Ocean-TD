@@ -25,7 +25,8 @@ Update this file in the **same change** when you add or rename a system. If inde
 | Plot neighbor visuals | Live | `PlotNeighborVisuals.client.lua` | PlotRoster, PlotOutlineWire | Thinner white wireframes in `OtherPlayersPlotVisuals`; skips own plot |
 | GridMath | Live | `src/ReplicatedStorage/OceanTD/Shared/GridMath.lua` | `Constants` | Cell size 4; plot-local helpers |
 | InventoryUI | Live | `src/StarterPlayerScripts/OceanTD/InventoryUI.client.lua` | `InventoryState`, `PlacementController`, `SavePlotSlot`, `ClearPlotSlot`, `UndoSlot`, `WaveSlot`, `SkipWaveSlot`, ItemCatalog, UiCircles | Slot4 backpack; mounts Slot1–3 + Slot5–6 waves; drag-scroll; drag-out place |
-| ReefReportUI | Live | `src/StarterPlayerScripts/OceanTD/ReefReportUI.client.lua` | ItemCatalog, PlacedCoralIndex, UiPieChart | Fullscreen reef report from dPad Cart; hue pie + S/M/L size bars per coral; hides right HUD like skills; DPadUp / X / B |
+| ReefReportUI | Live | `src/StarterPlayerScripts/OceanTD/ReefReportUI.client.lua` | ItemCatalog, PlacedCoralIndex, UiPieChart, StoreUI, InventoryState | Build-mode cart “i” / DPadUp → reef report; else cart → Store; hue pie + S/M/L size bars; hides right HUD like skills; X / B close |
+| StoreUI | Live | `src/StarterPlayerScripts/OceanTD/StoreUI.lua` | LeftHudLayout, UiTheme, ReefReportUI (cart routing) | Fullscreen store (empty placeholder); cart / DPadUp outside build mode; red X/B close chrome while open; inited by ReefReportUI |
 | UiPieChart | Live | `src/ReplicatedStorage/OceanTD/Shared/UiPieChart.lua` | UiCircles | Radial spoke pie for Reef Report hue rings |
 | SavePlotSlot | Live | `src/StarterPlayerScripts/OceanTD/SavePlotSlot.lua` | InventoryState, Remotes | Slot1 save UI / 2×2 presets / L3·V; blue `#0073ed` help |
 | ClearPlotSlot | Live | `src/StarterPlayerScripts/OceanTD/ClearPlotSlot.lua` | ClearPlotVfx, InventoryState | Slot2 clear-plot UI / confirm / shortcuts |
@@ -57,7 +58,7 @@ Update this file in the **same change** when you add or rename a system. If inde
 | Remove coral | Live | PlacementService.recycle + RelocateController | GridService, UndoService | Recycle credits seed; Slot3/Z/L2 undoes |
 | Clear plot | Live | PlacementService.clearPlot + InventoryUI Slot2 | ClearPlotVfx, UndoService | Full seed refund; Slot2/C/R3 + ✓/X; one undo step |
 | Save plots | Live | PlotSaveService + SavePlotSlot | Persistence plotSaves | 4 presets; active slot autosave; SAVE overwrite confirm; LOAD/NEW; wipe undo on load |
-| Feed waves | Live | WaveSlot + SkipWaveSlot + WaveSim + WaveWatch | WaveRoute.A, Tang, GreenArrows, PlotRoster, WaveFeedPayout | Solo client sim; hunger-full → `ReportFishFed` → $D (EarnMore ×); visitors get sparse ghost + HUD on host plot |
+| Feed waves | Live | WaveSlot + SkipWaveSlot + WaveSim + WaveWatch + WaveTapFeed | WaveRoute.A, Tang, GreenArrows, PlotRoster, WaveFeedPayout | Solo client sim; hunger-full → `ReportFishFed` → $D (EarnMore ×); visitors get sparse ghost + HUD on host plot; click/tap near critter → free food orb (1s CD; `TAP_FEED_DEBUG` radii) |
 | RNG coral rolls | Planned | — | — | Common → rare weights |
 | Shop / Robux | Live ($D packs) | `EconomyService.lua` | `SandDollarProducts`, Persistence receipts | Paste product IDs in `SandDollarProducts.lua`; ProcessReceipt grants $D |
 | Skill tree | Planned | — | — | Persist unlocks; server enforces caps |

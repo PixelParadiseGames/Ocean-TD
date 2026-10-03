@@ -717,9 +717,10 @@ task.spawn(function()
 			clearGuiSelection()
 			destroyCloseChrome()
 			local reportOpen = playerGui:GetAttribute("OceanTD_ReefReportOpen") == true
+			local storeOpen = playerGui:GetAttribute("OceanTD_StoreOpen") == true
 			if skillsBtn then
-				-- Report owns left HUD while open — don't force Skills back on.
-				skillsBtn.Visible = not reportOpen
+				-- Report / store own left HUD while open — don't force Skills back on.
+				skillsBtn.Visible = not reportOpen and not storeOpen
 			end
 			SkillsBubbleSim.stop(function()
 				if myToken ~= openToken then
@@ -734,7 +735,7 @@ task.spawn(function()
 			syncMovementFreeze(false)
 			-- Belt-and-suspenders: cinematic ForceClose can race HUD restore.
 			if skillsBtn then
-				skillsBtn.Visible = not reportOpen
+				skillsBtn.Visible = not reportOpen and not storeOpen
 			end
 			hideSkillsBtnContent(false)
 		end
@@ -955,8 +956,10 @@ task.spawn(function()
 	end
 
 	UserInputService.InputBegan:Connect(function(input, gameProcessed)
-		if playerGui:GetAttribute("OceanTD_ReefReportOpen") == true then
-			-- Reef Report owns DPadUp / X / B while open.
+		if playerGui:GetAttribute("OceanTD_ReefReportOpen") == true
+			or playerGui:GetAttribute("OceanTD_StoreOpen") == true
+		then
+			-- Reef Report / Store own DPadUp / X / B while open.
 			return
 		end
 		if input.KeyCode == Enum.KeyCode.DPadRight then

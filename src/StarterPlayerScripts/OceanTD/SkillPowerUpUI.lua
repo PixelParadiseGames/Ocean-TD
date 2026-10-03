@@ -1109,12 +1109,13 @@ local function doUnlockRemote()
 		if skillId == "PlotSize" then
 			local hint = playerGui:GetAttribute("OceanTD_RollFingerHint")
 			if hint == "plotSizeUpgrade" then
-				-- Guide CloseBTN on the power-up, then skills close — don't auto-tear UI down.
-				playerGui:SetAttribute("OceanTD_RollFingerHint", "closePlotSize")
+				-- Hide finger + skills UI for the grow shot; restore CloseBTN finger after cine.
+				playerGui:SetAttribute("OceanTD_PendingClosePlotSizeHint", true)
+				playerGui:SetAttribute("OceanTD_RollFingerHint", false)
 				pcall(function()
 					require(script.Parent:WaitForChild("SkillsAvatarCam")).releaseForCinematic()
 				end)
-				SkillsBubbleSim.refreshStageLayouts()
+				playerGui:SetAttribute("OceanTD_ForceCloseSkills", os.clock())
 			else
 				-- Drop avatar-cam ownership before ForceClose so its restore tween can't fight the cinematic.
 				pcall(function()

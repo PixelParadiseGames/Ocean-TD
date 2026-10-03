@@ -29,6 +29,7 @@ local InventoryState = require(script.Parent:WaitForChild("InventoryState"))
 local CoralColorUnlockState = require(script.Parent:WaitForChild("CoralColorUnlockState"))
 local SeedWheelAutoRollState = require(script.Parent:WaitForChild("SeedWheelAutoRollState"))
 local SeedWheelRevealApi = require(script.Parent:WaitForChild("SeedWheelRevealApi"))
+local JoinIntroGate = require(script.Parent:WaitForChild("JoinIntroGate"))
 
 local BASE_COLOR_PX = 65
 local BASE_CORAL_FINAL_PX = 52
@@ -60,6 +61,8 @@ local CORAL_POP_LEAD_SEC = 1
 local BASE_STROKE_CLIP_PAD = 4 -- UIStroke extends past bounds; hide before edge bleed
 local TICK_SOUND_ID = "rbxassetid://128707491647978"
 local TICK_VOLUME = 0.3
+local COLOR_BURST_SOUND_ID = "rbxassetid://138571475125488"
+local COLOR_BURST_VOLUME = 0.85
 local MIN_STEPS = 16
 local EXTRA_STEPS_MAX = 10
 local Z_COLOR = 10
@@ -75,6 +78,13 @@ tickTemplate.SoundId = TICK_SOUND_ID
 tickTemplate.Volume = TICK_VOLUME
 tickTemplate.RollOffMode = Enum.RollOffMode.InverseTapered
 tickTemplate.Parent = SoundService
+
+local colorBurstTemplate = Instance.new("Sound")
+colorBurstTemplate.Name = "OceanTD_SeedWheelColorBurst"
+colorBurstTemplate.SoundId = COLOR_BURST_SOUND_ID
+colorBurstTemplate.Volume = COLOR_BURST_VOLUME
+colorBurstTemplate.RollOffMode = Enum.RollOffMode.InverseTapered
+colorBurstTemplate.Parent = SoundService
 
 local overlay: ScreenGui? = nil
 local band: Frame? = nil
@@ -224,6 +234,21 @@ local function playTick()
 		s:Destroy()
 	end)
 	task.delay(2, function()
+		if s.Parent then
+			s:Destroy()
+		end
+	end)
+end
+
+local function playColorBurstSound()
+	local s = colorBurstTemplate:Clone()
+	s.Volume = COLOR_BURST_VOLUME
+	s.Parent = SoundService
+	s:Play()
+	s.Ended:Once(function()
+		s:Destroy()
+	end)
+	task.delay(4, function()
 		if s.Parent then
 			s:Destroy()
 		end
@@ -770,6 +795,7 @@ local function runColorFirework(
 	onDone: () -> (),
 	colorWasUnlocked: boolean
 )
+	playColorBurstSound()
 	local isLocked = not CoralColorUnlockState.isUnlocked(itemId, colorIndex)
 	local count = math.random(FIREWORK_MIN, FIREWORK_MAX)
 	if colorWasUnlocked then
@@ -898,6 +924,9 @@ local function flyBundle(
 	nameLabel: TextLabel?,
 	colorPx: number
 )
+	-- Unlock backpack as soon as the award begins flying to Slot4.
+	SeedWheelRevealApi.fireSlideToBackpackStarted()
+
 	local target = backpackOverlayCenter()
 	if not target then
 		local cam = workspace.CurrentCamera
@@ -1318,6 +1347,9 @@ playerGui:GetAttributeChangedSignal("OceanTD_ReefReportOpen"):Connect(function()
 	end
 end)
 
-task.spawn(preloadWheelIcons)
+task.spawn(function()
+	JoinIntroGate.waitUntilIdle(120)
+	preloadWheelIcons()
+end)
 
 print("[SEEDWHEEL] Ready")

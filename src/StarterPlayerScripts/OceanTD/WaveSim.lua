@@ -55,9 +55,15 @@ feedSound.SoundId = C.FEED_SOUND_ID
 feedSound.Volume = 0.85
 feedSound.Parent = SoundService
 
+local tapFeedFireSound = Instance.new("Sound")
+tapFeedFireSound.Name = "OceanTD_TapFeedFire"
+tapFeedFireSound.SoundId = C.TAP_FEED_FIRE_SOUND_ID or "rbxassetid://5852470908"
+tapFeedFireSound.Volume = 0.9
+tapFeedFireSound.Parent = SoundService
+
 task.defer(function()
 	pcall(function()
-		ContentProvider:PreloadAsync({ feedSound })
+		ContentProvider:PreloadAsync({ feedSound, tapFeedFireSound })
 	end)
 end)
 
@@ -140,6 +146,7 @@ type FishAgent = {
 	stunSkullPart: BasePart?,
 	crabSprint: any?,
 	swayPhase: number?,
+	tapDebugPart: BasePart?, -- TAP_FEED_DEBUG radius ball
 }
 
 type CoralAgent = {
@@ -186,7 +193,7 @@ type FoodShot = {
 	part: BasePart?, -- nil = logic-only flight (8b sparse VFX)
 	target: FishAgent?,
 	fill: number,
-	coral: CoralAgent,
+	coral: CoralAgent?,
 	alive: boolean,
 	age: number,
 	duration: number,
@@ -194,6 +201,7 @@ type FoodShot = {
 	meetPos: Vector3,
 	swayPhase: number,
 	visualOnly: boolean?, -- lane_stock feedback: fly to fish, no hunger / nest consume
+	playerTap: boolean?, -- manual click feed (no coral credit)
 }
 
 
@@ -1051,6 +1059,9 @@ function HungerUi.setDangerFlash(agent: FishAgent, enable: boolean)
 end
 
 function HungerUi.playFeedSound()
+	if joinIntroDemo then
+		return
+	end
 	local pitch = feedPitchCursor
 	feedPitchCursor += C.FEED_PITCH_STEP
 	if feedPitchCursor > C.FEED_PITCH_MAX then
@@ -1270,6 +1281,10 @@ function Feed.createAmmo(coral: CoralAgent, scale: number)
 	applySizeStats(coral)
 	local s = Feed.ammoFullDiameter(coral) * clamped
 	local n = coral.foodCount
+	-- Intro showcase: half the nest food (less ammo Parts + lighter feeding).
+	if joinIntroDemo then
+		n = math.max(1, math.floor(n * 0.5 + 0.5))
+	end
 	for _ = 1, n do
 		local p = WaveEntityPool.acquireAmmo(ensureFolder(), coral.color, s)
 		table.insert(coral.ammoSlots, p)
@@ -1780,9 +1795,22 @@ local function gatherPlotCoralParts(): { BasePart }
 	if demoCoralParts then
 		local parts: { BasePart } = {}
 		for _, inst in ipairs(demoCoralParts) do
-			if inst.Parent then
-				table.insert(parts, inst)
+			if not inst.Parent then
+				continue
 			end
+			-- Skip Accent/Web/Food — only stem/main parts feed (child or leftover sibling).
+			local lower = string.lower(inst.Name)
+			if lower == "accent" or lower == "web" or lower == "seafanweb" or lower == "fanweb"
+				or string.find(lower, "accent", 1, true) ~= nil
+				or (string.find(lower, "web", 1, true) ~= nil and string.find(lower, "webbed", 1, true) == nil)
+				or string.sub(lower, 1, 4) == "food"
+			then
+				continue
+			end
+			if inst.Parent:IsA("BasePart") then
+				continue
+			end
+			table.insert(parts, inst)
 		end
 		return parts
 	end
@@ -1920,6 +1948,11 @@ local function destroyFish(agent: FishAgent)
 	agent.pulseToken += 1
 	agent.dangerToken += 1
 	agent.dangerActive = false
+	local tapDbg = agent.tapDebugPart
+	if tapDbg then
+		agent.tapDebugPart = nil
+		tapDbg:Destroy()
+	end
 	if agent.isCrab then
 		WaveCrab.resetAnim(agent.crabAnim)
 		WaveEntityPool.releaseFish(WaveEntityPool.FISH_CRAB, agent.model)
@@ -1942,6 +1975,42 @@ local function pruneFinishedFish()
 		end
 	end
 	fishList = kept
+end
+
+local function attachTapFeedDebug(agent: FishAgent)
+	local existing = agent.tapDebugPart
+	if not C.TAP_FEED_DEBUG then
+		if existing then
+			agent.tapDebugPart = nil
+			existing:Destroy()
+		end
+		return
+	end
+	if existing and existing.Parent then
+		return
+	end
+	local root = agent.root
+	local diam = math.max(2, (C.TAP_FEED_RADIUS or 10) * 2)
+	local ball = Instance.new("Part")
+	ball.Name = "OceanTD_TapFeedDebug"
+	ball.Shape = Enum.PartType.Ball
+	ball.Size = Vector3.new(diam, diam, diam)
+	ball.Transparency = 0.82
+	ball.Color = Color3.fromRGB(40, 255, 200)
+	ball.Material = Enum.Material.ForceField
+	ball.CastShadow = false
+	ball.CanCollide = false
+	ball.CanQuery = false
+	ball.CanTouch = false
+	ball.Massless = true
+	ball.Anchored = false
+	ball.CFrame = root.CFrame
+	ball.Parent = agent.model
+	local weld = Instance.new("WeldConstraint")
+	weld.Part0 = root
+	weld.Part1 = ball
+	weld.Parent = ball
+	agent.tapDebugPart = ball
 end
 
 local function finishFish(agent: FishAgent, skipHappyVfx: boolean?)
@@ -2120,6 +2189,7 @@ local function spawnOneFish(spawnIndex: number)
 	agent.lastWorld = world0
 	setFishCFrame(agent, world0, tang, 1)
 	table.insert(fishList, agent)
+	attachTapFeedDebug(agent)
 end
 
 local function spawnOneCrab(startDist: number?)
@@ -2220,6 +2290,7 @@ local function spawnOneCrab(startDist: number?)
 	agent.lastWorld = pos
 	setFishCFrame(agent, pos, tang, 1)
 	table.insert(fishList, agent)
+	attachTapFeedDebug(agent)
 end
 
 local function spawnOneUrchin(startDist: number?)
@@ -2323,6 +2394,7 @@ local function spawnOneUrchin(startDist: number?)
 	-- Re-capture after first pose so locals match the grounded spawn orientation.
 	captureUrchinRigLocals(agent)
 	table.insert(fishList, agent)
+	attachTapFeedDebug(agent)
 
 	-- Wave 5 only: cinematic zoom onto the first urchin (same beat as shark wave 10).
 	if waveIndex == C.URCHIN_FIRST_WAVE and WaveUrchin.spawnedCount() == 1 then
@@ -2407,7 +2479,7 @@ local function spawnOneShark()
 		swayPhase = swayPhase,
 	}
 	nextFishId += 1
-	WaveShark.onSpawned()
+	WaveShark.onSpawned(joinIntroDemo)
 	notifyHud()
 	local bb, fill, barFrame, forkLabel, happyLabel, remainLabel, barScale = HungerUi.makeHungerBillboard(root, "🍴")
 	agent.billboard = bb
@@ -2431,6 +2503,7 @@ local function spawnOneShark()
 	agent.lastWorld = pos
 	setFishCFrame(agent, pos, tang, 1)
 	table.insert(fishList, agent)
+	attachTapFeedDebug(agent)
 
 	-- Wave 10 only: cinematic zoom onto the shark.
 	if waveIndex == C.SHARK_FIRST_WAVE then
@@ -2491,8 +2564,14 @@ local function beginWave(wave: number)
 	waveFishExpected = waveFishCount(wave)
 	waveFishSpawned = 0
 	waveFishFullyFed = 0
-	WaveCrab.beginWave(WaveCrab.rollCount(wave))
-	WaveUrchin.beginWave(WaveUrchin.rollCount(wave))
+	-- Join intro: fish + shark only (no crabs / urchins).
+	if joinIntroDemo then
+		WaveCrab.beginWave(0)
+		WaveUrchin.beginWave(0)
+	else
+		WaveCrab.beginWave(WaveCrab.rollCount(wave))
+		WaveUrchin.beginWave(WaveUrchin.rollCount(wave))
+	end
 	restoreStunnedCorals(wave > 1)
 	-- After W20: roll 20–40% of this wave's Tang onto A2.
 	fishA2Remaining = 0
@@ -2559,7 +2638,7 @@ local function beginWave(wave: number)
 	waveSpawning = true
 	spawnQueue = waveFishCount(wave)
 	spawnDelay = if wave == 1 then C.WAVE1_SPAWN_LEAD_SEC else C.ARROW_LEAD_SEC
-	local nUrchin = WaveUrchin.expectedCount()
+	local nUrchin = if joinIntroDemo then 0 else WaveUrchin.expectedCount()
 	urchinSpawnQueue = nUrchin
 	-- Wave 1: also hold urchins until after the nest-arm window.
 	urchinSpawnDelay = if nUrchin > 0
@@ -2793,7 +2872,30 @@ function Feed.finishShot(shot: FoodShot, fed: boolean)
 		Feed.releaseShotVisual(shot)
 		return
 	end
+	if shot.playerTap then
+		local target = shot.target
+		Feed.clearShotTarget(shot)
+		if fed and target and not target.finished and shot.fill > 0 and target.hunger < target.maxHunger then
+			target.hunger = math.min(target.maxHunger, target.hunger + shot.fill)
+			if (not target.payoutDone) and target.hunger >= target.maxHunger then
+				target.payoutDone = true
+				WaveFeedPayout.noteFilled(target.root.Position)
+			end
+			if target.hunger >= target.maxHunger then
+				markFishFullyFed(target, nil)
+			end
+			HungerUi.updateHungerVisual(target)
+			HungerUi.playFeedSound()
+		end
+		Feed.releaseShotVisual(shot)
+		return
+	end
 	local coral = shot.coral
+	if not coral then
+		Feed.clearShotTarget(shot)
+		Feed.releaseShotVisual(shot)
+		return
+	end
 	coral.shotsOut = math.max(0, coral.shotsOut - 1)
 	if coral.shotsOut <= 0 and #coral.ammoSlots == 0 then
 		coral.busy = false
@@ -2816,6 +2918,63 @@ function Feed.finishShot(shot: FoodShot, fed: boolean)
 		HungerUi.playFeedSound()
 	end
 	Feed.releaseShotVisual(shot)
+end
+
+-- Player click/tap: food orb from camera → fish (2× coral orb speed).
+function Feed.firePlayerTap(target: FishAgent, start: Vector3): boolean
+	if target.finished or not target.model.Parent then
+		return false
+	end
+	local hungry = target.hunger < target.maxHunger
+	local fill = if hungry then C.DEFAULT_FOOD_FILL else 0
+	local visualOnly = not hungry
+	local fp = target.root.Position
+	local flatX = fp.X - start.X
+	local flatZ = fp.Z - start.Z
+	local flat = math.sqrt(flatX * flatX + flatZ * flatZ)
+	local speedNow = (if target.isUrchin
+		then WaveUrchin.speedNow() * target.speedPhase
+		elseif target.isCrab then WaveCrab.speedNow(target.crabSprint, simClock)
+		elseif target.isShark then WaveShark.speed()
+		else C.FISH_SPEED) * math.max(0.55, Path.fishSpeedFactorAt(target, simClock))
+	local flightMult = C.TAP_FEED_FLIGHT_MULT or 0.5
+	local duration = math.clamp(flat / speedNow + C.FOOD_FIRE_LEAD_SEC, C.FOOD_RISE_MIN, C.FOOD_RISE_MAX) * flightMult
+	local meet = Path.predictFishMeetPos(target, duration, simClock, pathDataShark, pathDataGroundA, pathDataGroundB, fishSwimPath(target))
+	if not meet then
+		meet = Path.fishMouthWorld(target)
+		duration = math.clamp(duration * 0.65, (C.FOOD_RISE_MIN * 0.75) * flightMult, C.FOOD_RISE_MAX * flightMult)
+	end
+	if hungry then
+		target.incomingFood += fill
+	end
+	local part: BasePart? = nil
+	-- Always try to show player taps (feedback); fall back to logic-only at cap.
+	if Feed.shotWantsVisual(start, meet) or visibleShotCount < C.FOOD_VISIBLE_MAX then
+		part = Feed.acquireFoodPart()
+		part.Color = Color3.fromHSV(fishRng:NextNumber(), 0.9, 1)
+		part.Transparency = 0
+		part.CFrame = CFrame.new(start)
+		visibleShotCount += 1
+	end
+	table.insert(activeShots, {
+		part = part,
+		target = target,
+		fill = fill,
+		coral = nil,
+		alive = true,
+		age = 0,
+		duration = duration,
+		startPos = start,
+		meetPos = meet,
+		swayPhase = fishRng:NextNumber(0, math.pi * 2),
+		visualOnly = visualOnly,
+		playerTap = true,
+	})
+	if not joinIntroDemo then
+		local pitch = fishRng:NextNumber(C.TAP_FEED_FIRE_PITCH_MIN or 0.85, C.TAP_FEED_FIRE_PITCH_MAX or 1.2)
+		WaveEntityPool.playSound("tapFeedFire", tapFeedFireSound, pitch, 0.9)
+	end
+	return true
 end
 
 -- lane_stock: nest ammo stays parked; a copy flies to the fish that just drank this coral's stock.
@@ -3091,6 +3250,9 @@ function Feed.tickLaneStock(dt: number)
 	end
 
 	local drinkCap = C.LANE_DRINK_PER_SEC * dt
+	if joinIntroDemo then
+		drinkCap *= 0.5
+	end
 	local fedSound = false
 	CoralBuckets.eachHungryFrontFirst(function(f: any, route: number)
 		local agent = f :: FishAgent
@@ -3578,7 +3740,10 @@ local function hardCleanup(preserveAmmoFade: boolean?, preserveCritterFade: bool
 	for _, shot in ipairs(activeShots) do
 		Feed.releaseShotVisual(shot)
 		shot.alive = false
-		shot.coral.busy = false
+		local coral = shot.coral
+		if coral then
+			coral.busy = false
+		end
 		Feed.clearShotTarget(shot)
 	end
 	table.clear(activeShots)
@@ -3720,6 +3885,89 @@ end
 
 function WaveSim.isRunning(): boolean
 	return running
+end
+
+local lastPlayerTapAt = 0
+
+local function tapFeedStartFromCamera(cam: Camera, targetPos: Vector3): Vector3
+	local vp = cam.ViewportSize
+	local sy = math.clamp(C.TAP_FEED_SCREEN_Y or 0.72, 0.55, 0.9) * vp.Y
+	local ray = cam:ViewportPointToRay(vp.X * 0.5, sy)
+	local toTarget = (targetPos - cam.CFrame.Position).Magnitude
+	-- Keep the orb in-frame immediately (esp. FishCam): not under the HUD, not past the fish.
+	local depth = math.clamp(
+		toTarget * 0.28,
+		C.TAP_FEED_START_DEPTH_MIN or 10,
+		C.TAP_FEED_START_DEPTH_MAX or 20
+	)
+	return ray.Origin + ray.Direction.Unit * depth
+end
+
+-- Click/tap help-feed: screen-space pick vs fish root (matches WorldToViewportPoint /
+-- GetMouseLocation — same space as the debug ball). Avoids GuiInset ray offsets.
+function WaveSim.tryTapFeedAtScreen(screenPos: Vector2): boolean
+	if not running or speedMult <= 1e-6 then
+		return false
+	end
+	local now = os.clock()
+	local cd = C.TAP_FEED_COOLDOWN_SEC or 1
+	if now - lastPlayerTapAt < cd then
+		return false
+	end
+	local cam = Workspace.CurrentCamera
+	if not cam then
+		return false
+	end
+	local radius = C.TAP_FEED_RADIUS or 5
+	local right = cam.CFrame.RightVector
+	local best: FishAgent? = nil
+	local bestScore = math.huge
+	for _, f in ipairs(fishList) do
+		if f.finished or not f.model.Parent then
+			continue
+		end
+		local sp, _onScreen = cam:WorldToViewportPoint(f.root.Position)
+		if sp.Z <= 0 then
+			continue
+		end
+		local fishScreen = Vector2.new(sp.X, sp.Y)
+		local dPx = (fishScreen - screenPos).Magnitude
+		local edgeSp = cam:WorldToViewportPoint(f.root.Position + right * radius)
+		local rPx = (Vector2.new(edgeSp.X, edgeSp.Y) - fishScreen).Magnitude
+		if rPx < 6 then
+			rPx = 6
+		end
+		if dPx <= rPx and dPx < bestScore then
+			bestScore = dPx
+			best = f
+		end
+	end
+	if not best then
+		return false
+	end
+	local start = tapFeedStartFromCamera(cam, best.root.Position)
+	if not Feed.firePlayerTap(best, start) then
+		return false
+	end
+	lastPlayerTapAt = now
+	return true
+end
+
+-- Legacy ray entry (unused by WaveTapFeed; kept for callers).
+function WaveSim.tryTapFeed(origin: Vector3, direction: Vector3, _startPos: Vector3?): boolean
+	local cam = Workspace.CurrentCamera
+	if not cam then
+		return false
+	end
+	-- Approximate screen from ray hit of a plane in front of camera — prefer tryTapFeedAtScreen.
+	local dirLen = direction.Magnitude
+	if dirLen < 1e-4 then
+		return false
+	end
+	local dir = direction / dirLen
+	local probe = origin + dir * 40
+	local sp = cam:WorldToViewportPoint(probe)
+	return WaveSim.tryTapFeedAtScreen(Vector2.new(sp.X, sp.Y))
 end
 
 function WaveSim.areCritterHungerBarsVisible(): boolean
@@ -4017,7 +4265,7 @@ local function snapFishToDist(agent: FishAgent, dist: number)
 end
 
 local function seedJoinIntroHalfway()
-	-- Instantly dump the whole school (no spawn stagger).
+	-- Instantly dump the whole Tang school (no spawn stagger). No crabs/urchins in intro.
 	local nFish = spawnQueue
 	spawnDelay = 0
 	while spawnQueue > 0 do
@@ -4026,15 +4274,9 @@ local function seedJoinIntroHalfway()
 		spawnQueue -= 1
 	end
 	waveSpawning = false
-	local nCrab = WaveCrab.expectedCount()
-	for _ = 1, nCrab do
-		spawnOneCrab(0)
-	end
 	crabSpawnQueue = 0
-	while urchinSpawnQueue > 0 do
-		spawnOneUrchin(0)
-		urchinSpawnQueue -= 1
-	end
+	urchinSpawnQueue = 0
+	urchinSpawnDelay = 0
 
 	local tangs: { FishAgent } = {}
 	for _, f in ipairs(fishList) do
@@ -4055,10 +4297,6 @@ local function seedJoinIntroHalfway()
 		snapFishToDist(f, mid)
 		if not f.isShark and not Path.isGroundCritter(f) then
 			table.insert(tangs, f)
-		elseif not f.isShark then
-			-- Crabs/urchins: partial hunger so nests keep feeding.
-			f.hunger = f.maxHunger * fishRng:NextNumber(0.25, 0.55)
-			HungerUi.updateHungerVisual(f)
 		end
 	end
 
@@ -4304,7 +4542,8 @@ function WaveSim.startJoinIntroDemo(coralParts: { BasePart }, wave: number?): bo
 	end
 	pathData = Path.buildPath(SkillStages.MAX_STAGE)
 	pathDataA2 = Path.buildNamedPath(C.FISH_ROUTE_A2_NAME, SkillStages.MAX_STAGE)
-	pathDataGroundA, pathDataGroundB = WaveCrab.buildBothLocal()
+	-- Intro has no crabs/urchins — skip ground-route build.
+	pathDataGroundA, pathDataGroundB = nil, nil
 	pathDataShark = WaveShark.buildLocal()
 	if not pathData then
 		demoCoralParts = nil

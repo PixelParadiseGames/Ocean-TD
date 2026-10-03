@@ -116,6 +116,10 @@ local function watchCoralFolder()
 end
 
 WaveSim.onHud(function(snap)
+	-- Skip watch packets during join-intro demo (local showcase only).
+	if WaveSim.isJoinIntroDemo() then
+		return
+	end
 	if not ownedPlotId() then
 		return
 	end

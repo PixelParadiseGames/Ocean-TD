@@ -3,8 +3,10 @@
 	Reef Report — fullscreen coral breakdown UI (separate from skills).
 
 	Studio: MobileLeftUI.dPad.CartIcon (also Cart / CartBTN / Report).
-	While open: CartIcon becomes pulsing red close (X / B), same look as Skills.
-	Shortcuts: DPadUp toggle; X / ButtonB close; Cart button toggle.
+	Cart / DPadUp routing (shared with StoreUI):
+	  • Build mode (backpack open): cart shows black “i” info chrome → opens reef report.
+	  • Not build mode: shopping cart → opens Store (empty for now).
+	While report open: CartIcon becomes pulsing red close (X / B), same look as Skills.
 	Title shows live reef score N (abundance + mix bonuses); S/M/L bars tint by size balance.
 ]]
 
@@ -36,10 +38,14 @@ local InventoryState = require(script.Parent:WaitForChild("InventoryState"))
 local PlacedCoralIndex = require(script.Parent:WaitForChild("PlacedCoralIndex"))
 local RelocateController = require(script.Parent:WaitForChild("RelocateController"))
 local RelocateMultiSelect = require(script.Parent:WaitForChild("RelocateMultiSelect"))
+local StoreUI = require(script.Parent:WaitForChild("StoreUI"))
 
 local REPORT_OPEN_ATTR = "OceanTD_ReefReportOpen"
 local FORCE_CLOSE_ATTR = "OceanTD_ForceCloseReefReport"
 local SKILLS_OPEN_ATTR = "OceanTD_SkillsBubblesOpen"
+local STORE_OPEN_ATTR = "OceanTD_StoreOpen"
+local INFO_BG = Color3.fromRGB(0, 0, 0)
+local INFO_HOVER = Color3.fromRGB(58, 58, 62)
 local TOGGLE_COOLDOWN = 0.35
 local COLUMN_WIDTH = 200
 local COLUMN_GAP = 16
@@ -86,6 +92,9 @@ local closeChrome: GuiObject? = nil
 local closeLabel: TextLabel? = nil
 local closeScale: UIScale? = nil
 local closeSyncConn: RBXScriptConnection? = nil
+local infoChrome: Frame? = nil
+local infoHoverConns: { RBXScriptConnection } = {}
+local syncCartChrome: () -> ()
 local introScrollConn: RBXScriptConnection? = nil
 local stickScrollConn: RBXScriptConnection? = nil
 local introScrolling = false
@@ -151,7 +160,42 @@ local function ensureHitOverlay(btn: GuiObject): GuiButton
 	hit.Position = UDim2.fromScale(0, 0)
 	hit.ZIndex = btn.ZIndex + 20
 	hit.AutoButtonColor = false
+	hit.Active = true
+	hit.Selectable = false
+	pcall(function()
+		(hit :: any).Interactable = true
+	end)
 	hit.Parent = btn
+	return hit
+end
+
+-- Cart hit must always receive clicks for store / report / info. Tutorial locks may have
+-- saved Active=false; never leave Interactable false on this proxy.
+local function forceCartHitLive(btn: GuiObject?): GuiButton?
+	if not btn then
+		return nil
+	end
+	local lockOv = btn:FindFirstChild("_OceanTD_TutorialLeftLock")
+	if lockOv then
+		lockOv:Destroy()
+	end
+	local lockIc = btn:FindFirstChild("_OceanTD_TutorialLeftLockIcon")
+	if lockIc then
+		lockIc:Destroy()
+	end
+	local hit = ensureHitOverlay(btn)
+	hit:SetAttribute("_OceanTD_TutorialLockActive", nil)
+	hit:SetAttribute("_OceanTD_TutorialLockSelectable", nil)
+	hit.Visible = true
+	hit.Active = true
+	hit.Selectable = false
+	pcall(function()
+		(hit :: any).Interactable = true
+	end)
+	if btn:IsA("GuiButton") then
+		btn:SetAttribute("_OceanTD_TutorialLockActive", nil)
+		btn:SetAttribute("_OceanTD_TutorialLockSelectable", nil)
+	end
 	return hit
 end
 
@@ -201,7 +245,17 @@ local function hideCartBtnContent(hide: boolean)
 	if hide then
 		table.clear(hiddenCartKids)
 		for _, ch in ipairs(cartBtn:GetChildren()) do
-			if ch:IsA("GuiObject") and ch.Name ~= "_OceanTD_CartHit" and ch.Name ~= "_OceanTD_ReefReportClose" then
+			if ch:IsA("GuiObject")
+				and ch.Name ~= "_OceanTD_CartHit"
+				and ch.Name ~= "_OceanTD_ReefReportClose"
+				and ch.Name ~= "_OceanTD_StoreClose"
+				and ch.Name ~= "_OceanTD_CartInfoChrome"
+			then
+				-- Never keep tutorial locks under / over the info chrome.
+				if ch.Name == "_OceanTD_TutorialLeftLock" or ch.Name == "_OceanTD_TutorialLeftLockIcon" then
+					ch:Destroy()
+					continue
+				end
 				if ch.Visible then
 					table.insert(hiddenCartKids, ch)
 					ch.Visible = false
@@ -213,11 +267,19 @@ local function hideCartBtnContent(hide: boolean)
 		end
 	else
 		for _, ch in ipairs(hiddenCartKids) do
-			if ch.Parent then
+			if ch.Parent
+				and ch.Name ~= "_OceanTD_TutorialLeftLock"
+				and ch.Name ~= "_OceanTD_TutorialLeftLockIcon"
+				and ch.Name ~= "_OceanTD_CartInfoChrome"
+			then
 				ch.Visible = true
 			end
 		end
 		table.clear(hiddenCartKids)
+		-- Don't flash the shop glyph while build-mode info chrome is showing.
+		if infoChrome and infoChrome.Parent == cartBtn then
+			return
+		end
 		if cartBtn:IsA("ImageButton") or cartBtn:IsA("ImageLabel") then
 			(cartBtn :: ImageButton).ImageTransparency = 0
 		end
@@ -232,28 +294,13 @@ local function stopCloseSync()
 end
 
 local function restoreCartHitForToggle()
-	if not cartBtn then
-		cartHitWasActive = nil
-		cartBtnWasActive = nil
-		return
-	end
-	if cartBtnWasActive ~= nil then
-		cartBtn.Active = cartBtnWasActive
-		cartBtnWasActive = nil
-	end
-	local hitBtn = cartBtn:FindFirstChild("_OceanTD_CartHit")
-	if hitBtn and hitBtn:IsA("GuiObject") then
-		hitBtn.Visible = true
-		if cartHitWasActive ~= nil then
-			hitBtn.Active = cartHitWasActive
-			cartHitWasActive = nil
-		else
-			hitBtn.Active = true
-		end
-	end
+	cartHitWasActive = nil
+	cartBtnWasActive = nil
+	forceCartHitLive(cartBtn)
 end
 
-local function destroyCloseChrome()
+-- Tear down report close chrome only. restoreGlyph=false when immediately applying info chrome.
+local function destroyCloseChrome(restoreGlyph: boolean?)
 	stopClosePulse()
 	stopCloseSync()
 	if closeChrome then
@@ -262,7 +309,9 @@ local function destroyCloseChrome()
 	end
 	closeLabel = nil
 	closeScale = nil
-	hideCartBtnContent(false)
+	if restoreGlyph ~= false then
+		hideCartBtnContent(false)
+	end
 	restoreCartHitForToggle()
 end
 
@@ -270,7 +319,7 @@ local function ensureCloseChrome()
 	if not cartBtn then
 		return
 	end
-	destroyCloseChrome()
+	destroyCloseChrome(false)
 	hideCartBtnContent(true)
 
 	-- Parent to CartIcon (same as Skills close on Skills btn) so layout/UIScale always match.
@@ -286,15 +335,9 @@ local function ensureCloseChrome()
 	chrome.ZIndex = cartBtn.ZIndex + 50
 	chrome.Active = false
 	chrome.Parent = cartBtn
-	local hitBtn = cartBtn:FindFirstChild("_OceanTD_CartHit")
-	if hitBtn and hitBtn:IsA("GuiObject") then
-		hitBtn.Visible = true
-		hitBtn.Active = true
+	local hitBtn = forceCartHitLive(cartBtn)
+	if hitBtn then
 		hitBtn.ZIndex = chrome.ZIndex + 5
-	else
-		hitBtn = ensureHitOverlay(cartBtn)
-		hitBtn.ZIndex = chrome.ZIndex + 5
-		hitBtn.Active = true
 	end
 	local corner = Instance.new("UICorner")
 	corner.CornerRadius = UDim.new(1, 0)
@@ -334,6 +377,164 @@ local function ensureCloseChrome()
 	closeScale = scale
 	syncCloseLabel()
 	startClosePulse()
+end
+
+local function clearInfoHoverConns()
+	for _, conn in ipairs(infoHoverConns) do
+		conn:Disconnect()
+	end
+	table.clear(infoHoverConns)
+end
+
+local function destroyInfoChrome(restoreContent: boolean?)
+	clearInfoHoverConns()
+	if infoChrome then
+		infoChrome:Destroy()
+		infoChrome = nil
+	elseif cartBtn then
+		local orphan = cartBtn:FindFirstChild("_OceanTD_CartInfoChrome")
+		if orphan then
+			orphan:Destroy()
+		end
+	end
+	if restoreContent ~= false and not open and not closeChrome then
+		hideCartBtnContent(false)
+	end
+end
+
+local function wireInfoHover(hitBtn: GuiButton)
+	clearInfoHoverConns()
+	local function setHover(on: boolean)
+		if infoChrome then
+			infoChrome.BackgroundColor3 = if on then INFO_HOVER else INFO_BG
+		end
+	end
+	table.insert(infoHoverConns, hitBtn.MouseEnter:Connect(function()
+		setHover(true)
+	end))
+	table.insert(infoHoverConns, hitBtn.MouseLeave:Connect(function()
+		setHover(false)
+	end))
+	table.insert(infoHoverConns, hitBtn.SelectionGained:Connect(function()
+		setHover(true)
+	end))
+	table.insert(infoHoverConns, hitBtn.SelectionLost:Connect(function()
+		setHover(false)
+	end))
+end
+
+local function ensureInfoChrome()
+	if not cartBtn then
+		return
+	end
+	if open or StoreUI.isOpen() or not InventoryState.isOpen() then
+		destroyInfoChrome(true)
+		return
+	end
+
+	-- Reclaim orphan chrome StoreUI may have hidden without clearing our ref.
+	if not (infoChrome and infoChrome.Parent == cartBtn) then
+		infoChrome = nil
+		local orphan = cartBtn:FindFirstChild("_OceanTD_CartInfoChrome")
+		if orphan and orphan:IsA("Frame") then
+			infoChrome = orphan
+		end
+	end
+
+	if infoChrome and infoChrome.Parent == cartBtn then
+		infoChrome.Visible = true
+		infoChrome.BackgroundColor3 = INFO_BG
+		infoChrome.ZIndex = cartBtn.ZIndex + 40
+		hideCartBtnContent(true)
+		local hitBtn = forceCartHitLive(cartBtn)
+		if hitBtn then
+			hitBtn.ZIndex = infoChrome.ZIndex + 5
+			wireInfoHover(hitBtn)
+		end
+		return
+	end
+
+	destroyInfoChrome(false)
+	destroyCloseChrome(false)
+	-- Store close chrome (if any) must not sit under the info “i”.
+	local storeClose = cartBtn:FindFirstChild("_OceanTD_StoreClose")
+	if storeClose then
+		storeClose:Destroy()
+	end
+	hideCartBtnContent(true)
+
+	local chrome = Instance.new("Frame")
+	chrome.Name = "_OceanTD_CartInfoChrome"
+	chrome.BackgroundColor3 = INFO_BG
+	chrome.BorderSizePixel = 0
+	chrome.AnchorPoint = Vector2.new(0.5, 0.5)
+	chrome.Position = UDim2.fromScale(0.5, 0.5)
+	chrome.Size = UDim2.fromScale(1, 1)
+	chrome.ZIndex = cartBtn.ZIndex + 40
+	chrome.Active = false
+	chrome.Visible = true
+	chrome.Parent = cartBtn
+	local corner = Instance.new("UICorner")
+	corner.CornerRadius = UDim.new(1, 0)
+	corner.Parent = chrome
+	local stroke = Instance.new("UIStroke")
+	stroke.Thickness = 2
+	stroke.Color = Color3.fromRGB(255, 255, 255)
+	stroke.Transparency = 0.35
+	stroke.Parent = chrome
+
+	local lbl = Instance.new("TextLabel")
+	lbl.Name = "Glyph"
+	lbl.BackgroundTransparency = 1
+	lbl.Size = UDim2.fromScale(1, 1)
+	lbl.Font = Enum.Font.GothamBold
+	lbl.Text = "i"
+	lbl.TextScaled = true
+	lbl.TextColor3 = Color3.fromRGB(255, 255, 255)
+	lbl.TextXAlignment = Enum.TextXAlignment.Center
+	lbl.TextYAlignment = Enum.TextYAlignment.Center
+	lbl.ZIndex = chrome.ZIndex + 1
+	lbl.Active = false
+	lbl.Visible = true
+	lbl.Parent = chrome
+	local pad = Instance.new("UIPadding")
+	pad.PaddingTop = UDim.new(0.2, 0)
+	pad.PaddingBottom = UDim.new(0.2, 0)
+	pad.PaddingLeft = UDim.new(0.2, 0)
+	pad.PaddingRight = UDim.new(0.2, 0)
+	pad.Parent = lbl
+
+	infoChrome = chrome
+	local hitBtn = forceCartHitLive(cartBtn)
+	if hitBtn then
+		hitBtn.ZIndex = chrome.ZIndex + 5
+		wireInfoHover(hitBtn)
+	end
+end
+
+syncCartChrome = function()
+	if open then
+		destroyInfoChrome(false)
+		ensureCloseChrome()
+		return
+	end
+	if StoreUI.isOpen() then
+		-- Store owns the red close chrome on the cart.
+		destroyInfoChrome(false)
+		destroyCloseChrome(false)
+		forceCartHitLive(cartBtn)
+		return
+	end
+	destroyCloseChrome(false)
+	if InventoryState.isOpen() then
+		if cartBtn then
+			cartBtn.Visible = true
+		end
+		ensureInfoChrome()
+	else
+		destroyInfoChrome(true)
+		forceCartHitLive(cartBtn)
+	end
 end
 
 local function rememberHideGui(gui: GuiObject)
@@ -450,9 +651,17 @@ local function hideRightHud()
 	local p720 = playerGui:FindFirstChild(UiViewportTags.P720_RIGHT_HUD)
 	if mobile then
 		hideQuickbarSlotsOnHud(mobile)
+		local bp = mobile:FindFirstChild("BackpackHost")
+		if bp and bp:IsA("GuiObject") then
+			rememberHideGui(bp)
+		end
 	end
 	if p720 then
 		hideQuickbarSlotsOnHud(p720)
+		local bp = p720:FindFirstChild("BackpackHost")
+		if bp and bp:IsA("GuiObject") then
+			rememberHideGui(bp)
+		end
 	end
 	for _, ch in ipairs(playerGui:GetChildren()) do
 		if ch:IsA("GuiObject") and WAVE_HUD_NAMES[ch.Name] then
@@ -1631,8 +1840,10 @@ applyOpen = function(want: boolean)
 	sg.DisplayOrder = REPORT_DISPLAY_ORDER
 	hardenFullBleed(sg)
 	if want then
-		-- Close skills first — it forces Skills.Visible=true and resets left DisplayOrder.
+		-- Close skills / store first — they force Visible=true and reset left DisplayOrder.
 		playerGui:SetAttribute("OceanTD_ForceCloseSkills", os.clock())
+		playerGui:SetAttribute("OceanTD_ForceCloseStore", os.clock())
+		destroyInfoChrome(false)
 		setReportOpenHud(true)
 		raiseCloseLayer()
 		if cartBtn then
@@ -1679,7 +1890,7 @@ applyOpen = function(want: boolean)
 		if cartBtn then
 			cartBtn.Visible = true
 		end
-		hideCartBtnContent(false)
+		syncCartChrome()
 	end
 end
 
@@ -1692,27 +1903,16 @@ local function canToggle(): boolean
 	return true
 end
 
+-- Cart / DPadUp: build mode → reef report; otherwise → store. Same control closes whichever is open.
 local function toggle()
-	if playerGui:GetAttribute(SKILLS_OPEN_ATTR) == true and not open then
+	if StoreUI.isOpen() then
+		if not canToggle() then
+			return
+		end
+		StoreUI.close()
+		syncCartChrome()
 		return
 	end
-	if InventoryState.isOpen() and not open then
-		return
-	end
-	if not canToggle() then
-		return
-	end
-	applyOpen(not open)
-end
-
-local function closeOnly()
-	lastToggleAt = os.clock()
-	if open then
-		applyOpen(false)
-	end
-end
-
-local function openFromDPadUp()
 	if open then
 		if not canToggle() then
 			return
@@ -1723,23 +1923,41 @@ local function openFromDPadUp()
 	if playerGui:GetAttribute(SKILLS_OPEN_ATTR) == true then
 		return
 	end
-	if InventoryState.isOpen() then
-		return
-	end
 	if not canToggle() then
 		return
 	end
-	applyOpen(true)
+	if InventoryState.isOpen() then
+		applyOpen(true)
+	else
+		destroyInfoChrome(false)
+		StoreUI.open()
+		syncCartChrome()
+	end
+end
+
+local function closeOnly()
+	lastToggleAt = os.clock()
+	if open then
+		applyOpen(false)
+	end
+end
+
+local function openFromDPadUp()
+	toggle()
 end
 
 local function bindCart(btn: GuiObject)
 	cartBtn = btn
-	local hit = ensureHitOverlay(btn)
-	if hit:GetAttribute("_OceanTD_CartToggleBound") ~= true then
+	local hit = forceCartHitLive(btn)
+	if hit and hit:GetAttribute("_OceanTD_CartToggleBound") ~= true then
 		hit:SetAttribute("_OceanTD_CartToggleBound", true)
 		hit.Activated:Connect(toggle)
 	end
+	StoreUI.bindCart(btn)
+	syncCartChrome()
 end
+
+StoreUI.init()
 
 task.spawn(function()
 	local left = playerGui:WaitForChild("MobileLeftUI", 60)
@@ -1794,6 +2012,31 @@ playerGui:GetAttributeChangedSignal(SKILLS_OPEN_ATTR):Connect(function()
 	if playerGui:GetAttribute(SKILLS_OPEN_ATTR) == true then
 		closeOnly()
 	end
+end)
+
+playerGui:GetAttributeChangedSignal(STORE_OPEN_ATTR):Connect(function()
+	if playerGui:GetAttribute(STORE_OPEN_ATTR) == true then
+		closeOnly()
+	end
+	syncCartChrome()
+end)
+
+InventoryState.onOpenChanged(function(_isOpen: boolean)
+	if not InventoryState.isOpen() and open then
+		-- Leaving build mode while report is open — keep report usable, or close?
+		-- Spec: report is build-mode entry; closing backpack should close report.
+		closeOnly()
+	end
+	syncCartChrome()
+end)
+
+playerGui:GetAttributeChangedSignal("OceanTD_SyncCartChrome"):Connect(function()
+	syncCartChrome()
+end)
+
+playerGui:GetAttributeChangedSignal("OceanTD_TutorialGateLeftHud"):Connect(function()
+	-- Unlocking left HUD after tutorial skip/finish — refresh build-mode info chrome.
+	task.defer(syncCartChrome)
 end)
 
 UserInputService.LastInputTypeChanged:Connect(function()

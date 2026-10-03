@@ -437,4 +437,106 @@ function BgmController.stopOverlay(fadeSec: number?)
 	tweenVolume(bgm, savedBgmVolume > 0 and savedBgmVolume or 1, fade, my, nil)
 end
 
+-- Soft duck: fade BGM to a fraction of its current volume (e.g. intro VO), then restore.
+local softDuckToken = 0
+local softDuckActive = false
+local softDuckBaseVolume = 1
+
+local function tweenBgmSoft(toVol: number, fadeSec: number, token: number, onDone: (() -> ())?)
+	local sound = bgmSound
+	if not sound then
+		if onDone then
+			onDone()
+		end
+		return
+	end
+	local from = sound.Volume
+	if fadeSec <= 0 or math.abs(from - toVol) < 1e-4 then
+		sound.Volume = toVol
+		if onDone then
+			onDone()
+		end
+		return
+	end
+	local t0 = os.clock()
+	local conn: RBXScriptConnection? = nil
+	conn = RunService.Heartbeat:Connect(function()
+		if token ~= softDuckToken then
+			if conn then
+				conn:Disconnect()
+			end
+			return
+		end
+		if not sound.Parent then
+			if conn then
+				conn:Disconnect()
+			end
+			if onDone then
+				onDone()
+			end
+			return
+		end
+		local u = math.clamp((os.clock() - t0) / fadeSec, 0, 1)
+		sound.Volume = from + (toVol - from) * u
+		if u >= 1 then
+			if conn then
+				conn:Disconnect()
+			end
+			if onDone then
+				onDone()
+			end
+		end
+	end)
+end
+
+function BgmController.fadeBgmToFactor(factor: number, fadeSec: number?)
+	if paused then
+		return
+	end
+	local bgm = bgmSound
+	if not bgm then
+		return
+	end
+	local fade = if typeof(fadeSec) == "number" then math.max(0, fadeSec) else FADE_SEC
+	softDuckToken += 1
+	local my = softDuckToken
+	if not softDuckActive then
+		-- Prefer overlay's saved volume if shark theme already ducked BGM to 0.
+		softDuckBaseVolume = if duckActive then savedBgmVolume else bgm.Volume
+		if softDuckBaseVolume <= 0 then
+			softDuckBaseVolume = 1
+		end
+		softDuckActive = true
+	end
+	if duckActive then
+		-- Overlay owns audible BGM; remember base so clear restores correctly later.
+		return
+	end
+	local target = softDuckBaseVolume * math.clamp(factor, 0, 1)
+	tweenBgmSoft(target, fade, my, nil)
+end
+
+function BgmController.clearBgmFactor(fadeSec: number?)
+	if not softDuckActive then
+		return
+	end
+	local fade = if typeof(fadeSec) == "number" then math.max(0, fadeSec) else FADE_SEC
+	softDuckToken += 1
+	local my = softDuckToken
+	local base = softDuckBaseVolume
+	softDuckActive = false
+	if duckActive then
+		savedBgmVolume = base
+		return
+	end
+	if paused then
+		return
+	end
+	local bgm = bgmSound
+	if not bgm then
+		return
+	end
+	tweenBgmSoft(base, fade, my, nil)
+end
+
 return BgmController

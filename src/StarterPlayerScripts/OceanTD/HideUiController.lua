@@ -56,6 +56,7 @@ local PULSE_GREEN = Color3.fromRGB(110, 255, 150)
 local RED = Color3.fromRGB(200, 45, 55)
 local STROKE_DARK = Color3.fromRGB(24, 36, 52)
 local BLACK = Color3.fromRGB(0, 0, 0)
+local HOVER_GREY = Color3.fromRGB(58, 58, 62)
 local WHITE = Color3.new(1, 1, 1)
 local EYE_GLYPH = "👁"
 
@@ -68,6 +69,8 @@ local lockedHostImageTransparency: number? = nil
 local lockedBgColor: Color3? = nil
 local lockedBgTransparency: number? = nil
 local bgTween: Tween? = nil
+local hideHovered = false
+local hideHoverWired = false
 
 local confirmGui: ScreenGui? = nil
 local confirmStrokeConn: RBXScriptConnection? = nil
@@ -256,10 +259,12 @@ end
 local function ensureHideHit(host: GuiObject): GuiButton
 	host.Active = true
 	if host:IsA("GuiButton") then
+		host.AutoButtonColor = false
 		return host
 	end
 	local existing = host:FindFirstChild("_OceanTD_HideUiHit")
 	if existing and existing:IsA("GuiButton") then
+		existing.AutoButtonColor = false
 		return existing
 	end
 	if existing then
@@ -269,6 +274,7 @@ local function ensureHideHit(host: GuiObject): GuiButton
 	hit.Name = "_OceanTD_HideUiHit"
 	hit.BackgroundTransparency = 1
 	hit.BorderSizePixel = 0
+	hit.AutoButtonColor = false
 	hit.Size = UDim2.fromScale(1, 1)
 	hit.Text = ""
 	hit.ZIndex = host.ZIndex + 5
@@ -318,7 +324,7 @@ local function applyUnlockedIdleVisual()
 	host.BackgroundTransparency = 1
 	if bgDisk then
 		bgDisk.Visible = true
-		bgDisk.BackgroundColor3 = BLACK
+		bgDisk.BackgroundColor3 = if hideHovered then HOVER_GREY else BLACK
 		bgDisk.BackgroundTransparency = 0
 	end
 	setLockGraphicsVisible(false)
@@ -331,8 +337,44 @@ local function refreshButtonVisual()
 	if HideUiState.isUnlocked() then
 		applyUnlockedIdleVisual()
 	else
+		hideHovered = false
 		applyLockedVisual()
 	end
+end
+
+local function setHideHover(on: boolean)
+	hideHovered = on
+	if not HideUiState.isUnlocked() then
+		return
+	end
+	-- Don't fight green/red press flash mid-tween.
+	if bgTween then
+		return
+	end
+	local disk = bgDisk
+	if not disk or not disk.Visible then
+		return
+	end
+	disk.BackgroundColor3 = if on then HOVER_GREY else BLACK
+end
+
+local function wireHideHover(hit: GuiButton)
+	if hideHoverWired then
+		return
+	end
+	hideHoverWired = true
+	hit.MouseEnter:Connect(function()
+		setHideHover(true)
+	end)
+	hit.MouseLeave:Connect(function()
+		setHideHover(false)
+	end)
+	hit.SelectionGained:Connect(function()
+		setHideHover(true)
+	end)
+	hit.SelectionLost:Connect(function()
+		setHideHover(false)
+	end)
 end
 
 local function flashButtonBg(color: Color3, holdSec: number, fadeSec: number)
@@ -357,11 +399,22 @@ local function flashButtonBg(color: Color3, holdSec: number, fadeSec: number)
 		if hideAnchor ~= host or bgDisk ~= disk or not HideUiState.isUnlocked() then
 			return
 		end
+		local idle = if hideHovered then HOVER_GREY else BLACK
 		bgTween = TweenService:Create(disk, TweenInfo.new(fadeSec, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
-			BackgroundColor3 = BLACK,
+			BackgroundColor3 = idle,
 			BackgroundTransparency = 0,
 		})
-		bgTween:Play()
+		local tw = bgTween
+		tw:Play()
+		tw.Completed:Once(function()
+			if bgTween == tw then
+				bgTween = nil
+				-- Re-apply in case hover changed during the fade.
+				if HideUiState.isUnlocked() and bgDisk == disk and disk.Parent then
+					disk.BackgroundColor3 = if hideHovered then HOVER_GREY else BLACK
+				end
+			end
+		end)
 	end)
 end
 
@@ -1077,6 +1130,8 @@ local function wireStudioHideUiButton(leftOpt: Instance?)
 	end
 	lockedHostImage = nil
 	lockedHostImageTransparency = nil
+	hideHovered = false
+	hideHoverWired = false
 	hideAnchor = anchor
 	if anchor:IsA("GuiButton") then
 		anchor.AutoButtonColor = false
@@ -1095,6 +1150,7 @@ local function wireStudioHideUiButton(leftOpt: Instance?)
 	local hit = ensureHideHit(anchor)
 	hideHitBtn = hit
 	refreshButtonVisual()
+	wireHideHover(hit)
 	if not hit:GetAttribute("_OceanTD_HideUiWired") then
 		hit:SetAttribute("_OceanTD_HideUiWired", true)
 		hit.Activated:Connect(onHideUiPressed)

@@ -54,7 +54,7 @@ FreeCamConfig.MODE_LABEL_NAME = "_OceanTD_CamModeLabel"
 FreeCamConfig.MODE_LABEL_FADE_SEC = 5
 FreeCamConfig.MODE_LABEL_FADE_OUT = TweenInfo.new(0.55, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 FreeCamConfig.MODE_LABEL_STROKE = Color3.fromRGB(12, 72, 28)
-
+FreeCamConfig.HOVER_GREY = Color3.fromRGB(58, 58, 62)
 FreeCamConfig.ICON_SCALE_IN = TweenInfo.new(0.22, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 FreeCamConfig.ICON_SCALE_OUT = TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
 FreeCamConfig.DPAD_GLOW_SEC = 0.5

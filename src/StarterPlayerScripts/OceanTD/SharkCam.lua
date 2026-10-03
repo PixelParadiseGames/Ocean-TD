@@ -2,11 +2,13 @@
 --[[
 	Wave 10 only: zoom camera onto the shark (1s), hold (3s), restore prior
 	camera CFrame + mode (3s).
+
+	Owns the camera at RenderPriority.Last+1 for the whole shot so FishCam /
+	SkillsAvatarCam / PlayerModule cannot overwrite mid-frame.
 ]]
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
-local TweenService = game:GetService("TweenService")
 local Workspace = game:GetService("Workspace")
 
 local C = require(script.Parent:WaitForChild("WaveSimConsts"))
@@ -14,7 +16,9 @@ local C = require(script.Parent:WaitForChild("WaveSimConsts"))
 local SharkCam = {}
 
 local BIND_NAME = "OceanTD_SharkCam"
-local FOLLOW_RATE = 2.2
+-- After SkillsAvatarCam (Last) and default Camera — last writer wins.
+local BIND_PRIORITY = Enum.RenderPriority.Last.Value + 1
+local HOLD_FOLLOW_RATE = 1.1 -- gentle; shark sway shouldn't rattle the frame
 
 local busy = false
 local token = 0
@@ -72,9 +76,14 @@ local function claimCamera(cam: Camera)
 	cam.CameraType = Enum.CameraType.Scriptable
 	cam.CameraSubject = nil
 	local hum = getHumanoid()
-	if hum then
+	if hum and hum.CameraOffset.Magnitude > 1e-4 then
 		hum.CameraOffset = Vector3.zero
 	end
+end
+
+local function smoothstep(u: number): number
+	local t = math.clamp(u, 0, 1)
+	return t * t * (3 - 2 * t)
 end
 
 local function willResumeCycleCam(pg: PlayerGui?): boolean
@@ -85,7 +94,22 @@ local function willResumeCycleCam(pg: PlayerGui?): boolean
 	return typeof(m) == "string" and m ~= "" and m ~= "off"
 end
 
+local function kickOtherCamOwners(pg: PlayerGui?)
+	if not pg then
+		return
+	end
+	pg:SetAttribute("OceanTD_ForceCloseFreeCam", os.clock())
+	pg:SetAttribute("OceanTD_ForceCloseSkills", os.clock())
+	pcall(function()
+		local mod = script.Parent:FindFirstChild("SkillsAvatarCam")
+		if mod and mod:IsA("ModuleScript") then
+			require(mod).releaseForCinematic()
+		end
+	end)
+end
+
 local function finishAndResume(pg: PlayerGui?, cam: Camera?, savedCf: CFrame, savedType: Enum.CameraType, savedSubject: Instance?)
+	stopBind()
 	if cam then
 		cam.CFrame = savedCf
 	end
@@ -129,13 +153,23 @@ function SharkCam.play(getPose: () -> (Vector3?, Vector3?))
 
 	local pg = getPlayerGui()
 	if pg then
+		-- Busy first so FreeCam stashes FishCam instead of restoring Custom.
 		pg:SetAttribute("OceanTD_SharkCamBusy", true)
-		pg:SetAttribute("OceanTD_ForceCloseFreeCam", os.clock())
+		kickOtherCamOwners(pg)
 	end
 
 	task.defer(function()
 		if my ~= token then
 			return
+		end
+		-- Let ForceClose* handlers finish before snapshot / bind.
+		task.wait()
+		if my ~= token then
+			return
+		end
+		if pg then
+			-- Second kick in case FishCam / skills re-entered on the wait frame.
+			kickOtherCamOwners(pg)
 		end
 		local cam = Workspace.CurrentCamera
 		if not cam then
@@ -158,25 +192,20 @@ function SharkCam.play(getPose: () -> (Vector3?, Vector3?))
 			return
 		end
 		local lockedFlat = flatUnit(poseLook or Vector3.new(0, 0, -1))
-		local goalPos = focusOffset(posePos, lockedFlat)
-		local goalCf = lookAtShark(goalPos, posePos)
-
-		local tweenIn = TweenService:Create(
-			cam,
-			TweenInfo.new(C.SHARK_CAM_ZOOM_IN_SEC, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
-			{ CFrame = goalCf }
-		)
-		tweenIn:Play()
-		tweenIn.Completed:Wait()
-		if my ~= token then
-			return
-		end
-
-		local holdEnd = os.clock() + C.SHARK_CAM_HOLD_SEC
+		local fromCf = cam.CFrame
+		-- Fixed intro goal — don't chase live shark sway during the zoom-in.
+		local inGoalCf = lookAtShark(focusOffset(posePos, lockedFlat), posePos)
+		local zoomInDur = math.max(0.2, C.SHARK_CAM_ZOOM_IN_SEC)
+		local holdDur = math.max(0.2, C.SHARK_CAM_HOLD_SEC)
+		local zoomOutDur = math.max(0.2, C.SHARK_CAM_ZOOM_OUT_SEC)
+		local phaseT0 = os.clock()
+		local phase: "in" | "hold" | "out" = "in"
 		local dampPos = posePos
-		local dampCf = Workspace.CurrentCamera and Workspace.CurrentCamera.CFrame or goalCf
+		local holdCf = inGoalCf
+		local outFromCf = inGoalCf
+
 		stopBind()
-		RunService:BindToRenderStep(BIND_NAME, Enum.RenderPriority.Camera.Value + 1, function(dt)
+		RunService:BindToRenderStep(BIND_NAME, BIND_PRIORITY, function(dt)
 			if my ~= token then
 				return
 			end
@@ -185,43 +214,42 @@ function SharkCam.play(getPose: () -> (Vector3?, Vector3?))
 				return
 			end
 			claimCamera(c)
-			local p = select(1, getPose())
-			if p then
-				local a = 1 - math.exp(-FOLLOW_RATE * math.max(dt, 0))
-				dampPos = dampPos:Lerp(p, a)
+
+			local elapsed = os.clock() - phaseT0
+
+			if phase == "in" then
+				local u = smoothstep(elapsed / zoomInDur)
+				c.CFrame = fromCf:Lerp(inGoalCf, u)
+				if elapsed >= zoomInDur then
+					phase = "hold"
+					phaseT0 = os.clock()
+					holdCf = inGoalCf
+					dampPos = posePos
+					c.CFrame = holdCf
+				end
+			elseif phase == "hold" then
+				local p = select(1, getPose())
+				if p then
+					local a = 1 - math.exp(-HOLD_FOLLOW_RATE * math.max(dt, 0))
+					dampPos = dampPos:Lerp(p, a)
+				end
+				local goalHold = lookAtShark(focusOffset(dampPos, lockedFlat), dampPos)
+				local b = 1 - math.exp(-HOLD_FOLLOW_RATE * math.max(dt, 0))
+				holdCf = holdCf:Lerp(goalHold, b)
+				c.CFrame = holdCf
+				if elapsed >= holdDur then
+					phase = "out"
+					phaseT0 = os.clock()
+					outFromCf = c.CFrame
+				end
+			else
+				local u = smoothstep(elapsed / zoomOutDur)
+				c.CFrame = outFromCf:Lerp(savedCf, u)
+				if elapsed >= zoomOutDur then
+					finishAndResume(pg, c, savedCf, savedType, savedSubject)
+				end
 			end
-			local goal = lookAtShark(focusOffset(dampPos, lockedFlat), dampPos)
-			local b = 1 - math.exp(-FOLLOW_RATE * math.max(dt, 0))
-			dampCf = dampCf:Lerp(goal, b)
-			c.CFrame = dampCf
 		end)
-
-		while os.clock() < holdEnd and my == token do
-			task.wait(0.05)
-		end
-		stopBind()
-		if my ~= token then
-			return
-		end
-
-		local c2 = Workspace.CurrentCamera
-		if not c2 then
-			SharkCam.stopImmediate()
-			return
-		end
-		claimCamera(c2)
-		local tweenOut = TweenService:Create(
-			c2,
-			TweenInfo.new(C.SHARK_CAM_ZOOM_OUT_SEC, Enum.EasingStyle.Quad, Enum.EasingDirection.InOut),
-			{ CFrame = savedCf }
-		)
-		tweenOut:Play()
-		tweenOut.Completed:Wait()
-		if my ~= token then
-			return
-		end
-
-		finishAndResume(pg, Workspace.CurrentCamera, savedCf, savedType, savedSubject)
 	end)
 end
 

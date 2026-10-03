@@ -1,12 +1,14 @@
 --!strict
 --[[
-	While build mode (backpack) is open: bottom-center "N Of N Max" + green +
-	that opens skills bubbles and the Place More power-up.
-	Only the + button captures clicks; the count text passes through to corals.
+	Bottom-center build-mode HUD:
+	• First-roll plot finger (0 corals, RollFingerHint == "plot"): "Plant Coral In Plot" (no +).
+	• After ≥2 corals placed: "N Of N Max" + green + → Place More skill.
+	Only the + button captures clicks; the count / plant text passes through to corals.
 ]]
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local TweenService = game:GetService("TweenService")
 
 local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
@@ -23,10 +25,15 @@ local SkillPowerUpUI = require(script.Parent:WaitForChild("SkillPowerUpUI"))
 local WaveSlot = require(script.Parent:WaitForChild("WaveSlot"))
 
 local SKILLS_OPEN_ATTR = "OceanTD_SkillsBubblesOpen"
+local HINT_ATTR = "OceanTD_RollFingerHint"
+local PLANT_HINT_TEXT = "Plant Coral In Plot"
 local ROW_H = 44
 local PLUS_CIRCLE = math.floor(ROW_H * 0.6 + 0.5) -- 40% smaller green circle
 local PLUS_TEXT_SIZE = 30 -- keep glyph size when circle shrinks
 local GREEN = Color3.fromRGB(45, 190, 75)
+local PLANT_PULSE_SCALE = 1.12
+local PLANT_PULSE_SEC = 0.55
+local plantPulseToken = 0
 
 -- Text lives in its own ScreenGui so it never participates in button hit-tests.
 local textSg = Instance.new("ScreenGui")
@@ -54,6 +61,41 @@ countLabel.Text = "0 Of 30 Max"
 countLabel.Active = false
 countLabel.Interactable = false
 countLabel.Parent = textSg
+local countScale = Instance.new("UIScale")
+countScale.Scale = 1
+countScale.Parent = countLabel
+
+local function stopPlantPulse()
+	plantPulseToken += 1
+	countScale.Scale = 1
+end
+
+local function startPlantPulse()
+	plantPulseToken += 1
+	local my = plantPulseToken
+	countScale.Scale = 1
+	task.spawn(function()
+		while my == plantPulseToken and textSg.Enabled and countScale.Parent do
+			local up = TweenService:Create(
+				countScale,
+				TweenInfo.new(PLANT_PULSE_SEC, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut),
+				{ Scale = PLANT_PULSE_SCALE }
+			)
+			up:Play()
+			up.Completed:Wait()
+			if my ~= plantPulseToken then
+				return
+			end
+			local down = TweenService:Create(
+				countScale,
+				TweenInfo.new(PLANT_PULSE_SEC, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut),
+				{ Scale = 1 }
+			)
+			down:Play()
+			down.Completed:Wait()
+		end
+	end)
+end
 
 -- + button alone — only clickable surface.
 local btnSg = Instance.new("ScreenGui")
@@ -104,32 +146,80 @@ local function placeMax(): number
 	return SkillStages.placeMoreMaxAtStage(SkillPowerUpUI.getStage("PlaceMore"))
 end
 
-local function refreshCount()
-	local n = PlacedCoralIndex.countLocal()
-	local maxN = placeMax()
-	countLabel.Text = string.format("%d Of %d Max", n, maxN)
+local function chromeBlocked(): boolean
+	if playerGui:GetAttribute(SKILLS_OPEN_ATTR) == true then
+		return true
+	end
+	if WaveSlot.isSummaryOpen() then
+		return true
+	end
+	return false
 end
 
-local function shouldShow(): boolean
+-- First-roll plot finger: 0 corals + RollFingerHint == "plot".
+local function shouldShowPlantHint(): boolean
+	if chromeBlocked() then
+		return false
+	end
+	if PlacedCoralIndex.countLocal() > 0 then
+		return false
+	end
+	return playerGui:GetAttribute(HINT_ATTR) == "plot"
+end
+
+local function shouldShowPlaceMore(): boolean
 	if not InventoryState.isOpen() then
 		return false
 	end
-	if playerGui:GetAttribute(SKILLS_OPEN_ATTR) == true then
+	if chromeBlocked() then
 		return false
 	end
-	if WaveSlot.isSummaryOpen() then
+	-- Don't push Place More until the player has a small reef going.
+	if PlacedCoralIndex.countLocal() < 2 then
 		return false
 	end
 	return true
 end
 
+local function applyCountLabelLayout(plantHint: boolean)
+	if plantHint then
+		countLabel.AnchorPoint = Vector2.new(0.5, 1)
+		countLabel.Position = UDim2.new(0.5, 0, 1, -28)
+		countLabel.TextXAlignment = Enum.TextXAlignment.Center
+		countLabel.Text = PLANT_HINT_TEXT
+	else
+		countLabel.AnchorPoint = Vector2.new(1, 1)
+		countLabel.Position = UDim2.new(0.5, -6, 1, -28)
+		countLabel.TextXAlignment = Enum.TextXAlignment.Right
+		local n = PlacedCoralIndex.countLocal()
+		local maxN = placeMax()
+		countLabel.Text = string.format("%d Of %d Max", n, maxN)
+	end
+end
+
+local plantPulseActive = false
+
 local function refreshVisible()
-	local show = shouldShow()
+	if shouldShowPlantHint() then
+		applyCountLabelLayout(true)
+		textSg.Enabled = true
+		btnSg.Enabled = false
+		if not plantPulseActive then
+			plantPulseActive = true
+			startPlantPulse()
+		end
+		return
+	end
+	if plantPulseActive then
+		plantPulseActive = false
+		stopPlantPulse()
+	end
+	local show = shouldShowPlaceMore()
+	if show then
+		applyCountLabelLayout(false)
+	end
 	textSg.Enabled = show
 	btnSg.Enabled = show
-	if show then
-		refreshCount()
-	end
 end
 
 plusBtn.Activated:Connect(function()
@@ -140,14 +230,10 @@ end)
 
 PlacedCoralIndex.ensure()
 PlacedCoralIndex.onChanged(function()
-	if textSg.Enabled then
-		refreshCount()
-	end
+	refreshVisible()
 end)
 ClientPlot.onChanged(function()
-	if textSg.Enabled then
-		refreshCount()
-	end
+	refreshVisible()
 end)
 InventoryState.onOpenChanged(function()
 	refreshVisible()
@@ -155,14 +241,14 @@ end)
 playerGui:GetAttributeChangedSignal(SKILLS_OPEN_ATTR):Connect(function()
 	refreshVisible()
 end)
+playerGui:GetAttributeChangedSignal(HINT_ATTR):Connect(function()
+	refreshVisible()
+end)
 
 task.spawn(function()
 	while true do
 		task.wait(0.5)
-		if textSg.Enabled then
-			refreshCount()
-		end
-		if InventoryState.isOpen() then
+		if InventoryState.isOpen() or shouldShowPlantHint() or textSg.Enabled then
 			refreshVisible()
 		end
 	end

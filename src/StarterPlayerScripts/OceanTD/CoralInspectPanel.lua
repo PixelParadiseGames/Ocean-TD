@@ -48,6 +48,13 @@ local HUE_RESUME_ATTR = "OceanTD_TutorialHueResume"
 local pendingTutorialFreeInvoke = false
 local hueScrollToken = 0
 local focusColorIndex = 0
+-- Inspect root (assigned in bind). Forward-declared so upgrade→hue can see visibility.
+local root: Frame? = nil
+-- True while beginTutorialHueFinger has HINT cleared for swatch scroll — must not
+-- be treated as "inspect closed mid-hue" (that wrongly forces reselectCoral).
+local hueFingerArming = false
+-- Demo finger taps apply paint without advancing the hue tutorial hint.
+local tutorialHueDemoSuppressNote = false
 
 local function tutorialFreeUpgradeAvailable(): boolean
 	return playerGui:GetAttribute(TUTORIAL_FREE_ATTR) == true
@@ -97,7 +104,23 @@ local function rememberTutorialHueCoral()
 	end)
 end
 
+local function tutorialTrackedCoralSelected(): boolean
+	local part = RelocateController.getSelectedPart()
+	if not part then
+		return false
+	end
+	local wantPid = playerGui:GetAttribute(HUE_PLACE_ATTR)
+	if typeof(wantPid) ~= "string" or wantPid == "" then
+		return true
+	end
+	local pid = part:GetAttribute("OceanTD_PlaceId")
+	return pid == wantPid
+end
+
 local function noteTutorialHueApplied(appliedIdx: number?)
+	if tutorialHueDemoSuppressNote then
+		return
+	end
 	local hint = playerGui:GetAttribute(HINT_ATTR)
 	if hint ~= "hue" and hint ~= "hueReroll" then
 		return
@@ -106,13 +129,9 @@ local function noteTutorialHueApplied(appliedIdx: number?)
 	if typeof(want) == "number" and typeof(appliedIdx) == "number" and appliedIdx ~= want then
 		return
 	end
-	if hint == "hue" then
-		-- First paint applied — finger stays on the swatch for a shade re-roll click.
-		playerGui:SetAttribute(HINT_ATTR, "hueReroll")
-	else
-		clearTutorialHueTracking()
-		playerGui:SetAttribute(HINT_ATTR, "closeBackpack")
-	end
+	-- One real user hue press → close-backpack finger (demo taps don't call this).
+	clearTutorialHueTracking()
+	playerGui:SetAttribute(HINT_ATTR, "closeBackpack")
 end
 
 -- Forward-declared; assigned after colorScroll exists.
@@ -120,7 +139,8 @@ local animateScrollToSwatch: ((number, (() -> ())?) -> ())?
 local refreshColorSwatches: (() -> ())?
 
 local function beginTutorialHueFinger(resumeMode: string?)
-	local mode = if resumeMode == "hueReroll" then "hueReroll" else "hue"
+	-- Finger demo + one user hue press → closeBackpack (hueReroll step removed).
+	local mode = "hue"
 	rememberTutorialHueCoral()
 	playerGui:SetAttribute(HUE_RESUME_ATTR, mode)
 	local hue = resolveTutorialHueIndex()
@@ -132,6 +152,7 @@ local function beginTutorialHueFinger(resumeMode: string?)
 		end
 	end
 	if typeof(hue) ~= "number" then
+		hueFingerArming = false
 		clearTutorialHueTracking()
 		playerGui:SetAttribute(HINT_ATTR, "closeBackpack")
 		return
@@ -140,17 +161,23 @@ local function beginTutorialHueFinger(resumeMode: string?)
 	if refreshColorSwatches then
 		refreshColorSwatches()
 	end
+	-- Hide finger during scroll, but mark arming so a visibility flicker can't
+	-- reinterpret HINT=false as "closed mid-hue → reselect coral".
+	hueFingerArming = true
 	playerGui:SetAttribute(HINT_ATTR, false)
 	local scrollFn = animateScrollToSwatch
+	local function finishArming()
+		-- animateScrollToSwatch only calls this after the swatch is in the scroll viewport.
+		hueFingerArming = false
+		local cur = playerGui:GetAttribute(HINT_ATTR)
+		if cur == false or cur == nil then
+			playerGui:SetAttribute(HINT_ATTR, mode)
+		end
+	end
 	if scrollFn then
-		scrollFn(hue, function()
-			local cur = playerGui:GetAttribute(HINT_ATTR)
-			if cur == false or cur == nil then
-				playerGui:SetAttribute(HINT_ATTR, mode)
-			end
-		end)
+		scrollFn(hue, finishArming)
 	else
-		playerGui:SetAttribute(HINT_ATTR, mode)
+		finishArming()
 	end
 end
 
@@ -170,15 +197,27 @@ local function noteTutorialUpgradeSucceeded()
 	playerGui:SetAttribute(HUE_RESUME_ATTR, nil)
 	-- Let inspect / color row lay out after size cine before scrolling the swatch.
 	task.defer(function()
-		task.wait(0.05)
-		if not root or not root.Visible then
-			-- Panel closed mid-upgrade — point at coral, resume hue on reselect.
+		-- Mesh swap can leave PlaceId / panel visibility settling for a few frames.
+		for _ = 1, 24 do
 			rememberTutorialHueCoral()
-			playerGui:SetAttribute(HUE_RESUME_ATTR, "hue")
-			playerGui:SetAttribute(HINT_ATTR, "reselectCoral")
+			if RelocateController.getSelectedPart() and root and root.Visible then
+				beginTutorialHueFinger("hue")
+				return
+			end
+			if not RelocateController.getSelectedPart() and not RelocateController.isActive() then
+				break
+			end
+			task.wait(0.05)
+		end
+		rememberTutorialHueCoral()
+		-- Still selected after upgrade — go to hue even if panel visibility lagged;
+		-- never ask to "select" a coral that is already selected.
+		if RelocateController.getSelectedPart() then
+			beginTutorialHueFinger("hue")
 			return
 		end
-		beginTutorialHueFinger("hue")
+		playerGui:SetAttribute(HUE_RESUME_ATTR, "hue")
+		playerGui:SetAttribute(HINT_ATTR, "reselectCoral")
 	end)
 end
 
@@ -190,6 +229,21 @@ local function resumeTutorialAfterReselect(resume: string?)
 		return
 	end
 	beginTutorialHueFinger(if typeof(resume) == "string" then resume else "hue")
+end
+
+-- Prefer advancing the tutorial over pointing at an already-selected coral.
+local function requestReselectCoral(resume: string)
+	rememberTutorialHueCoral()
+	if hueFingerArming then
+		return
+	end
+	if tutorialTrackedCoralSelected() and root and root.Visible then
+		playerGui:SetAttribute(HUE_RESUME_ATTR, nil)
+		resumeTutorialAfterReselect(resume)
+		return
+	end
+	playerGui:SetAttribute(HUE_RESUME_ATTR, resume)
+	playerGui:SetAttribute(HINT_ATTR, "reselectCoral")
 end
 
 local function onInspectVisibilityForTutorial(visible: boolean)
@@ -222,28 +276,25 @@ local function onInspectVisibilityForTutorial(visible: boolean)
 	end
 
 	-- Inspect closed.
-	if RelocateController.isCinematicHold() then
+	if RelocateController.isCinematicHold() or hueFingerArming then
 		return
 	end
 	if hint == "upgrade" then
-		rememberTutorialHueCoral()
-		playerGui:SetAttribute(HUE_RESUME_ATTR, "upgrade")
-		playerGui:SetAttribute(HINT_ATTR, "reselectCoral")
+		requestReselectCoral("upgrade")
 		return
 	end
 
 	local midHue = hint == "hue" or hint == "hueReroll"
 		or (hasTrackedPlace and (hint == false or hint == nil) and resumeAttr ~= "upgrade")
 	if midHue then
-		rememberTutorialHueCoral()
-		if hint == "hue" or hint == "hueReroll" then
-			playerGui:SetAttribute(HUE_RESUME_ATTR, hint)
-		elseif playerGui:GetAttribute(HUE_RESUME_ATTR) == nil then
-			playerGui:SetAttribute(HUE_RESUME_ATTR, "hue")
-		end
+		local resume = if hint == "hue" or hint == "hueReroll"
+			then hint
+			elseif typeof(resumeAttr) == "string" then resumeAttr
+			else "hue"
 		-- Cancel in-flight swatch scroll so it can't restore the hue finger while closed.
 		hueScrollToken += 1
-		playerGui:SetAttribute(HINT_ATTR, "reselectCoral")
+		hueFingerArming = false
+		requestReselectCoral(if typeof(resume) == "string" then resume else "hue")
 	end
 end
 
@@ -261,7 +312,6 @@ local function easeQuad(u: number, easeIn: boolean): number
 	return 1 - (1 - u) * (1 - u)
 end
 
-local root: Frame? = nil
 local catalog: GuiObject? = nil
 local iconLbl: ImageLabel? = nil
 local headerSeedAmount: TextLabel? = nil
@@ -2393,6 +2443,42 @@ local function scrollFocusIntoView()
 	end
 end
 
+-- Layout-order estimate of swatch center in canvas space (reliable while AbsolutePosition is clipped/wrong).
+local function estimateSwatchCanvasCenterX(idx: number): (number, number)
+	local gap = 6
+	local pad = 4
+	local fallbackW = 36
+	local x = pad
+	local centerX = pad
+	local maxI = PlotOutlineColors.CORAL_MAX_INDEX
+	for i = Consts.DEFAULT_PALETTE_SWATCH, maxI do
+		local b = colorSwatchBtns[i]
+		local w = fallbackW
+		if b and b.AbsoluteSize.X >= 2 then
+			w = b.AbsoluteSize.X
+		end
+		if i == idx then
+			centerX = x + w * 0.5
+		end
+		x += w + gap
+	end
+	-- Drop trailing gap, add right pad.
+	local totalW = math.max(pad * 2, x - gap + pad)
+	return centerX, totalW
+end
+
+local function isSwatchVisibleInScroll(sc: ScrollingFrame, sw: GuiObject, pad: number): boolean
+	if sw.AbsoluteSize.X < 2 or sc.AbsoluteSize.X < 8 then
+		return false
+	end
+	local left = sw.AbsolutePosition.X
+	local right = left + sw.AbsoluteSize.X
+	local viewL = sc.AbsolutePosition.X + pad
+	local viewR = sc.AbsolutePosition.X + sc.AbsoluteSize.X - pad
+	-- Prefer fully inside; allow a little slop for stroke.
+	return left >= viewL - 2 and right <= viewR + 2
+end
+
 animateScrollToSwatch = function(idx: number, onDone: (() -> ())?)
 	hueScrollToken += 1
 	local my = hueScrollToken
@@ -2413,15 +2499,15 @@ animateScrollToSwatch = function(idx: number, onDone: (() -> ())?)
 		if my ~= hueScrollToken then
 			return
 		end
-		-- Wait until the color row has real layout (upgrade cinematic can leave AbsoluteSize 0).
-		local deadline = os.clock() + 1.5
+		-- Wait until the color row has real layout (upgrade cinematic / cam switch can leave AbsoluteSize 0).
+		local deadline = os.clock() + 2.5
 		while os.clock() < deadline do
 			if my ~= hueScrollToken then
 				return
 			end
 			local sc = colorScroll
 			local sw = colorSwatchBtns[idx]
-			if sc and sw and sc.AbsoluteSize.X >= 8 and sw.AbsoluteSize.X >= 2 then
+			if sc and sw and sc.AbsoluteSize.X >= 8 and sw.AbsoluteSize.X >= 2 and sc.AbsoluteSize.Y >= 8 then
 				break
 			end
 			task.wait()
@@ -2429,129 +2515,119 @@ animateScrollToSwatch = function(idx: number, onDone: (() -> ())?)
 		if my ~= hueScrollToken then
 			return
 		end
-		local sc = colorScroll
-		local sw = colorSwatchBtns[idx]
-		if not sc or not sw then
-			if onDone then
-				onDone()
-			end
-			return
-		end
 
-		-- Extra frames so AutomaticCanvasSize catches up.
-		for _ = 1, 3 do
+		-- Extra frames so AutomaticCanvasSize / UIListLayout catch up after upgrade restyle.
+		for _ = 1, 5 do
 			task.wait()
 			if my ~= hueScrollToken then
 				return
 			end
 		end
-		sc = colorScroll
-		sw = colorSwatchBtns[idx]
-		if not sc or not sw then
-			if onDone then
-				onDone()
-			end
-			return
-		end
 
-		local function computeTargetX(): number
-			local scrollSize = sc.AbsoluteSize
-			local canvas = sc.CanvasPosition
-			local maxX = math.max(0, sc.AbsoluteCanvasSize.X - scrollSize.X)
-			-- Button center in canvas space (works while clipped off-screen).
-			local btnInCanvas = canvas.X + (sw.AbsolutePosition.X - sc.AbsolutePosition.X) + sw.AbsoluteSize.X * 0.5
-			return math.clamp(btnInCanvas - scrollSize.X * 0.5, 0, maxX)
-		end
-
-		local targetX = computeTargetX()
-		-- If canvas still reports empty, estimate from layout order (default=0 … hues).
-		if sc.AbsoluteCanvasSize.X < sc.AbsoluteSize.X + 1 then
-			local gap = 6
-			local pad = 4
-			local x = pad
-			local swatchW = math.max(sw.AbsoluteSize.X, 36)
-			for i = Consts.DEFAULT_PALETTE_SWATCH, idx - 1 do
-				local prev = colorSwatchBtns[i]
-				if prev then
-					x += math.max(prev.AbsoluteSize.X, swatchW) + gap
-				end
+		local function ensureTargetAndScroll(instant: boolean, preferAbs: boolean): boolean
+			local sc = colorScroll
+			local sw = colorSwatchBtns[idx]
+			if not sc or not sw then
+				return false
 			end
-			x += swatchW * 0.5
-			local maxX = math.max(0, x + sc.AbsoluteSize.X) -- loose upper bound; clamp after
-			targetX = math.max(0, x - sc.AbsoluteSize.X * 0.5)
-			-- Grow canvas enough to allow the scroll (AutomaticCanvasSize may lag).
-			local need = targetX + sc.AbsoluteSize.X + pad
-			if sc.AbsoluteCanvasSize.X < need then
+			local centerX, totalW = estimateSwatchCanvasCenterX(idx)
+			local viewW = math.max(8, sc.AbsoluteSize.X)
+			local need = math.max(totalW, centerX + viewW * 0.5 + 8)
+			if sc.AbsoluteCanvasSize.X < need - 0.5 or sc.AbsoluteCanvasSize.X < viewW + 1 then
 				sc.AutomaticCanvasSize = Enum.AutomaticSize.None
 				sc.CanvasSize = UDim2.fromOffset(math.ceil(need), 0)
-				maxX = math.max(0, need - sc.AbsoluteSize.X)
-				targetX = math.clamp(targetX, 0, maxX)
 			end
-		end
+			local maxX = math.max(0, math.max(sc.AbsoluteCanvasSize.X, need) - viewW)
+			local targetX = math.clamp(centerX - viewW * 0.5, 0, maxX)
 
-		local startX = sc.CanvasPosition.X
-		if math.abs(targetX - startX) < 0.5 then
-			-- Still force a recompute after one frame in case layout settled late.
-			task.wait()
-			if my ~= hueScrollToken or not colorScroll then
-				if onDone then
-					onDone()
+			-- AbsolutePosition refine only after a prior scroll (clipped AbsolutePosition is unreliable).
+			if preferAbs and sw.AbsoluteSize.X >= 2 and sc.AbsoluteSize.X >= 8 then
+				local canvas = sc.CanvasPosition
+				local btnInCanvas = canvas.X + (sw.AbsolutePosition.X - sc.AbsolutePosition.X) + sw.AbsoluteSize.X * 0.5
+				if btnInCanvas == btnInCanvas then
+					targetX = math.clamp(btnInCanvas - viewW * 0.5, 0, maxX)
 				end
-				return
 			end
-			targetX = computeTargetX()
-			startX = colorScroll.CanvasPosition.X
+
+			if instant or math.abs(targetX - sc.CanvasPosition.X) < 0.5 then
+				sc.CanvasPosition = Vector2.new(targetX, 0)
+				return true
+			end
+
+			local startX = sc.CanvasPosition.X
+			local proxy = Instance.new("NumberValue")
+			proxy.Value = startX
+			local conn = proxy:GetPropertyChangedSignal("Value"):Connect(function()
+				if my ~= hueScrollToken or not colorScroll then
+					return
+				end
+				colorScroll.CanvasPosition = Vector2.new(proxy.Value, 0)
+			end)
+			local tw = TweenService:Create(
+				proxy,
+				TweenInfo.new(0.55, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+				{ Value = targetX }
+			)
+			tw:Play()
+			tw.Completed:Wait()
+			conn:Disconnect()
+			proxy:Destroy()
+			if my ~= hueScrollToken or not colorScroll then
+				return false
+			end
+			colorScroll.CanvasPosition = Vector2.new(targetX, 0)
+			return true
 		end
 
-		if math.abs(targetX - startX) < 0.5 then
+		if not ensureTargetAndScroll(false, false) then
 			if onDone then
 				onDone()
 			end
 			return
 		end
+		if my ~= hueScrollToken then
+			return
+		end
 
-		local proxy = Instance.new("NumberValue")
-		proxy.Value = startX
-		local conn = proxy:GetPropertyChangedSignal("Value"):Connect(function()
-			if my ~= hueScrollToken or not colorScroll then
-				return
-			end
-			colorScroll.CanvasPosition = Vector2.new(proxy.Value, 0)
-		end)
-		local tw = TweenService:Create(
-			proxy,
-			TweenInfo.new(0.65, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
-			{ Value = targetX }
-		)
-		tw:Play()
-		tw.Completed:Once(function()
-			conn:Disconnect()
-			proxy:Destroy()
+		-- Snap / retry until the awarded swatch is actually inside the scroll viewport.
+		for attempt = 1, 8 do
+			task.wait()
 			if my ~= hueScrollToken then
 				return
 			end
-			if colorScroll then
-				colorScroll.CanvasPosition = Vector2.new(targetX, 0)
+			local sc = colorScroll
+			local sw = colorSwatchBtns[idx]
+			if sc and sw and isSwatchVisibleInScroll(sc, sw, 4) then
+				break
 			end
-			-- Restore automatic canvas if we temporarily forced it.
-			if colorScroll and colorScroll.AutomaticCanvasSize == Enum.AutomaticSize.None then
-				colorScroll.AutomaticCanvasSize = Enum.AutomaticSize.X
+			ensureTargetAndScroll(true, attempt > 1)
+			if attempt >= 6 and sc and sw then
+				focusColorIndex = idx
+				scrollFocusIntoView()
 			end
-			-- Snap once more after AutomaticCanvasSize restores.
+		end
+
+		if colorScroll and colorScroll.AutomaticCanvasSize == Enum.AutomaticSize.None then
+			colorScroll.AutomaticCanvasSize = Enum.AutomaticSize.X
+		end
+		task.wait()
+		if my ~= hueScrollToken then
+			return
+		end
+		-- Final snap after AutomaticCanvasSize restores.
+		local sc = colorScroll
+		local sw = colorSwatchBtns[idx]
+		if sc and sw and not isSwatchVisibleInScroll(sc, sw, 4) then
+			ensureTargetAndScroll(true, true)
 			task.wait()
-			if my ~= hueScrollToken or not colorScroll or not colorSwatchBtns[idx] then
-				if onDone then
-					onDone()
-				end
-				return
+			if colorScroll and colorSwatchBtns[idx] then
+				focusColorIndex = idx
+				scrollFocusIntoView()
 			end
-			local finalX = computeTargetX()
-			colorScroll.CanvasPosition = Vector2.new(finalX, 0)
-			task.wait()
-			if onDone then
-				onDone()
-			end
-		end)
+		end
+		if onDone then
+			onDone()
+		end
 	end)
 end
 
@@ -3937,10 +4013,65 @@ function CoralInspectPanel.getTutorialHueSwatch(): GuiObject?
 		return nil
 	end
 	local btn = colorSwatchBtns[hue]
-	if btn and btn.Visible and btn.AbsoluteSize.X >= 2 then
-		return btn
+	-- Accept even if briefly clipped during paint refresh — RollFingerHint clamps aim.
+	if not (btn and btn.AbsoluteSize.X >= 2) then
+		return nil
 	end
-	return nil
+	return btn
+end
+
+-- Tutorial finger fake-taps: apply / shade-reroll the wheel hue without advancing
+-- OceanTD_RollFingerHint. Real user taps still advance via noteTutorialHueApplied.
+function CoralInspectPanel.tutorialDemoApplyHue(): boolean
+	local hue = resolveTutorialHueIndex()
+	if typeof(hue) ~= "number" then
+		local part = RelocateController.getSelectedPart()
+		local seed = if part then part:GetAttribute("OceanTD_SeedHue") else nil
+		if typeof(seed) == "number" then
+			hue = PlotOutlineColors.clampCoralIndex(seed)
+		end
+	end
+	if typeof(hue) ~= "number" then
+		return false
+	end
+	local parts = selectedParts()
+	local part = parts[1]
+	if not part then
+		part = RelocateController.getSelectedPart()
+	end
+	if not part then
+		-- Rebind tracked tutorial coral if selection briefly cleared mid-paint.
+		local wantPid = playerGui:GetAttribute(HUE_PLACE_ATTR)
+		if typeof(wantPid) == "string" and wantPid ~= "" and RelocateController.isActive() then
+			RelocateController.restoreSelectionByPlaceIds({ wantPid })
+			part = RelocateController.getSelectedPart()
+		end
+	end
+	if not part then
+		return false
+	end
+	local placeId = placeIdOf(part)
+	if not placeId then
+		return false
+	end
+	tutorialHueDemoSuppressNote = true
+	local ok = false
+	local okCall, err = pcall(function()
+		local paint: Color3
+		if activeColorIndex == hue then
+			spinColorDice()
+			paint = PlotOutlineColors.randomHueVariant(hue)
+		else
+			paint = PlotOutlineColors.coralColor(hue)
+		end
+		ok = applyCoralPaint(part, hue, paint, placeId, true)
+	end)
+	tutorialHueDemoSuppressNote = false
+	if not okCall then
+		warn("[CoralInspectPanel] tutorialDemoApplyHue failed:", err)
+		return false
+	end
+	return ok
 end
 
 return CoralInspectPanel

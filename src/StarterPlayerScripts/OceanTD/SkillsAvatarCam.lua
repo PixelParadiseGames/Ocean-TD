@@ -16,6 +16,14 @@ local SKILLS_OPEN_ATTR = "OceanTD_SkillsBubblesOpen"
 local CINEMATIC_BUSY_ATTR = "OceanTD_PlotSizeCinematicBusy"
 local RENDER_STEP = "OceanTD_SkillsAvatarCam"
 
+local function waveIntroCamBusy(): boolean
+	return playerGui:GetAttribute("OceanTD_SharkCamBusy") == true
+		or playerGui:GetAttribute("OceanTD_UrchinCamBusy") == true
+		or playerGui:GetAttribute("OceanTD_TangCamBusy") == true
+		or playerGui:GetAttribute("OceanTD_ReefDefeatCamBusy") == true
+		or playerGui:GetAttribute(CINEMATIC_BUSY_ATTR) == true
+end
+
 local TWEEN_IN_SEC = 0.4
 local TWEEN_OUT_SEC = 0.45
 local TURN_SEC = 0.35
@@ -264,6 +272,9 @@ local function tweenCameraTo(goal: CFrame, duration: number, my: number): boolea
 		if my ~= token then
 			return false
 		end
+		if waveIntroCamBusy() then
+			return false
+		end
 		local u = math.clamp((os.clock() - t0) / duration, 0, 1)
 		local e = u * u * (3 - 2 * u)
 		local c = getCamera()
@@ -442,6 +453,9 @@ function SkillsAvatarCam.start()
 		renderBound = true
 		RunService:BindToRenderStep(RENDER_STEP, Enum.RenderPriority.Last.Value, function(dt)
 			if my ~= token or not active then
+				return
+			end
+			if waveIntroCamBusy() then
 				return
 			end
 			if playerGui:GetAttribute(SKILLS_OPEN_ATTR) ~= true then

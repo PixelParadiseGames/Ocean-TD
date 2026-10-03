@@ -1888,6 +1888,10 @@ local function toggleWaves()
 	if deps.playerGui:GetAttribute("OceanTD_TutorialGateWaves") == true then
 		return
 	end
+	-- Block clicks while the center pop / settle tween is still playing.
+	if deps.playerGui:GetAttribute(SLOT5_READY_ATTR) ~= true then
+		return
+	end
 	local ok = WaveSim.start()
 	if ok then
 		applyIcon(true)
@@ -2325,10 +2329,13 @@ function WaveSlot.mount(d: Deps)
 		local scale = ensureSlot5PopScale()
 		local homePos = slot5.Position
 		local homeAnchor = slot5.AnchorPoint
+		deps.playerGui:SetAttribute(SLOT5_READY_ATTR, false)
+		setSlot5Interactable(false)
 		slot5.Visible = true
 		WaveSlot.refreshHelpBadge()
 		if not scale then
 			markSlot5TutorialReady()
+			setSlot5Interactable(not InventoryState.isOpen())
 			return
 		end
 
@@ -2385,6 +2392,7 @@ function WaveSlot.mount(d: Deps)
 			slot5.Position = homePos
 			scale.Scale = 1
 			markSlot5TutorialReady()
+			setSlot5Interactable(not InventoryState.isOpen())
 		end)
 	end
 

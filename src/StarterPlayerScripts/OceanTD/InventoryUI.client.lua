@@ -42,6 +42,7 @@ local WaveSlot = require(script.Parent:WaitForChild("WaveSlot"))
 local SkipWaveSlot = require(script.Parent:WaitForChild("SkipWaveSlot"))
 local WaveSpeedSlot = require(script.Parent:WaitForChild("WaveSpeedSlot"))
 local WaveSign = require(script.Parent:WaitForChild("WaveSign"))
+local SeedWheelRevealApi = require(script.Parent:WaitForChild("SeedWheelRevealApi"))
 
 local TWEEN_OPEN = TweenInfo.new(0.28, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
 local TWEEN_CLOSE = TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
@@ -54,6 +55,18 @@ local SLOT4_GAP_PX = 8
 -- Keep yellow panel stroke inside the HUD (ClipsDescendants + flush-right was cutting it off).
 local PANEL_STROKE_PAD = 3
 local PANEL_STROKE_THICKNESS = 1.5
+
+-- Locked until the player rolls once this session (cleared by StopAutoRoll).
+local GATE_BACKPACK = "OceanTD_TutorialGateBackpack"
+local HAS_ROLLED_SESSION = "OceanTD_HasRolledThisSession"
+local BP_LOCK_OVERLAY = "_OceanTD_TutorialBackpackLock"
+local BP_LOCK_ICON = "_OceanTD_TutorialBackpackLockIcon"
+local BP_LOCK_IMAGE = "rbxassetid://105420423737825"
+local BP_LOCK_RED = Color3.fromRGB(220, 40, 45)
+
+if playerGui:GetAttribute(HAS_ROLLED_SESSION) ~= true then
+	playerGui:SetAttribute(GATE_BACKPACK, true)
+end
 
 -- Left HUD chrome hidden while backpack is open (dPadIcon is owned by FreeCam).
 local hiddenLeftUiForBackpack: { { gui: GuiObject, wasVisible: boolean } } = {}
@@ -84,8 +97,23 @@ local function setLeftUiHiddenForBackpack(hide: boolean)
 		if dPad then
 			for _, ch in ipairs(dPad:GetChildren()) do
 				-- FreeCam syncs dPadIcon from InventoryState.isOpen().
-				if ch:IsA("GuiObject") and ch.Name ~= "dPadIcon" and not LeftHudLayout.isSandDollarChrome(ch) then
+				-- Keep cart visible in build mode (info “i” → reef report).
+				if ch:IsA("GuiObject")
+					and ch.Name ~= "dPadIcon"
+					and ch.Name ~= "CartIcon"
+					and ch.Name ~= "Cart"
+					and ch.Name ~= "CartBTN"
+					and ch.Name ~= "CartBtn"
+					and not LeftHudLayout.isSandDollarChrome(ch)
+				then
 					rememberHideLeftForBackpack(ch)
+				end
+			end
+			for _, name in ipairs({ "CartIcon", "Cart", "CartBTN", "CartBtn" }) do
+				local cart = dPad:FindFirstChild(name)
+				if cart and cart:IsA("GuiObject") then
+					cart.Visible = true
+					break
 				end
 			end
 		end
@@ -95,9 +123,10 @@ local function setLeftUiHiddenForBackpack(hide: boolean)
 			end
 		end
 	else
-		-- Skills owns left UI while bubbles are open — don't fight that restore.
+		-- Skills / report / store own left UI while open — don't fight that restore.
 		if playerGui:GetAttribute("OceanTD_SkillsBubblesOpen") == true
 			or playerGui:GetAttribute("OceanTD_ReefReportOpen") == true
+			or playerGui:GetAttribute("OceanTD_StoreOpen") == true
 		then
 			table.clear(hiddenLeftUiForBackpack)
 			return
@@ -129,13 +158,17 @@ local function reefReportOpen(): boolean
 	return playerGui:GetAttribute(REPORT_OPEN_ATTR) == true
 end
 
+local function storeOpen(): boolean
+	return playerGui:GetAttribute("OceanTD_StoreOpen") == true
+end
+
 local function skillsDismissKeyRecentlyConsumed(): boolean
 	local t = playerGui:GetAttribute(SKILLS_DISMISS_KEY_ATTR)
 	return typeof(t) == "number" and os.clock() - t < SKILLS_DISMISS_BLOCK_SEC
 end
 
 local function backpackToggleBlockedBySkills(): boolean
-	return skillsBubblesOpen() or reefReportOpen() or skillsDismissKeyRecentlyConsumed()
+	return skillsBubblesOpen() or reefReportOpen() or storeOpen() or skillsDismissKeyRecentlyConsumed()
 end
 
 local function log(...: any)
@@ -357,6 +390,136 @@ UiCircles.forceOnDescendants(slot4)
 passthroughDecor(slot4, slotButton)
 disarmTouchBlockingOverlays(mainHUD, slot4)
 
+local function clearBackpackLockOn(host: GuiObject)
+	local ov = host:FindFirstChild(BP_LOCK_OVERLAY)
+	if ov then
+		ov:Destroy()
+	end
+	local ic = host:FindFirstChild(BP_LOCK_ICON)
+	if ic then
+		ic:Destroy()
+	end
+	local function restoreBtn(btn: GuiButton)
+		local wasActive = btn:GetAttribute("_OceanTD_TutorialLockActive")
+		local wasSel = btn:GetAttribute("_OceanTD_TutorialLockSelectable")
+		if typeof(wasActive) == "boolean" then
+			btn.Active = wasActive
+			btn:SetAttribute("_OceanTD_TutorialLockActive", nil)
+		end
+		if typeof(wasSel) == "boolean" then
+			btn.Selectable = wasSel
+			btn:SetAttribute("_OceanTD_TutorialLockSelectable", nil)
+		end
+		pcall(function()
+			(btn :: any).Interactable = btn.Active
+		end)
+	end
+	if host:IsA("GuiButton") then
+		restoreBtn(host)
+	end
+	for _, d in ipairs(host:GetDescendants()) do
+		if d:IsA("GuiButton") and d.Name ~= BP_LOCK_OVERLAY then
+			restoreBtn(d)
+		end
+	end
+end
+
+local function ensureBackpackLockOn(host: GuiObject)
+	local function disarmBtn(btn: GuiButton)
+		if btn:GetAttribute("_OceanTD_TutorialLockActive") == nil then
+			btn:SetAttribute("_OceanTD_TutorialLockActive", btn.Active)
+			btn:SetAttribute("_OceanTD_TutorialLockSelectable", btn.Selectable)
+		end
+		btn.Active = false
+		btn.Selectable = false
+		pcall(function()
+			(btn :: any).Interactable = false
+		end)
+	end
+	if host:IsA("GuiButton") then
+		disarmBtn(host)
+	end
+	for _, d in ipairs(host:GetDescendants()) do
+		if d:IsA("GuiButton") and d.Name ~= BP_LOCK_OVERLAY then
+			disarmBtn(d)
+		end
+	end
+
+	local overlay = host:FindFirstChild(BP_LOCK_OVERLAY)
+	if not (overlay and overlay:IsA("GuiButton")) then
+		if overlay then
+			overlay:Destroy()
+		end
+		local f = Instance.new("TextButton")
+		f.Name = BP_LOCK_OVERLAY
+		f.Text = ""
+		f.AutoButtonColor = false
+		f.BackgroundColor3 = BP_LOCK_RED
+		f.BackgroundTransparency = 0.45
+		f.BorderSizePixel = 0
+		f.Size = UDim2.fromScale(1, 1)
+		f.Position = UDim2.fromScale(0, 0)
+		f.Active = true
+		f.Selectable = false
+		f.ZIndex = host.ZIndex + 80
+		f.Parent = host
+		local corner = Instance.new("UICorner")
+		corner.CornerRadius = UDim.new(1, 0)
+		corner.Parent = f
+		f.Activated:Connect(function() end)
+		overlay = f
+	else
+		overlay.Visible = true
+		overlay.Active = true
+		;(overlay :: GuiButton).ZIndex = host.ZIndex + 80
+	end
+	local icon = host:FindFirstChild(BP_LOCK_ICON)
+	if not (icon and icon:IsA("ImageLabel")) then
+		local img = Instance.new("ImageLabel")
+		img.Name = BP_LOCK_ICON
+		img.BackgroundTransparency = 1
+		img.Image = BP_LOCK_IMAGE
+		img.Size = UDim2.fromScale(0.55, 0.55)
+		img.AnchorPoint = Vector2.new(0.5, 0.5)
+		img.Position = UDim2.fromScale(0.5, 0.5)
+		img.Active = false
+		img.ZIndex = host.ZIndex + 82
+		img.ScaleType = Enum.ScaleType.Fit
+		img.Parent = host
+	else
+		icon.Visible = true
+		;(icon :: ImageLabel).ZIndex = host.ZIndex + 82
+	end
+end
+
+local backpackLockHosts: { GuiObject } = { slot4 }
+
+local function syncBackpackGate()
+	local gated = playerGui:GetAttribute(GATE_BACKPACK) == true
+		and playerGui:GetAttribute(HAS_ROLLED_SESSION) ~= true
+	if gated and InventoryState.isOpen() then
+		InventoryState.setOpen(false)
+	end
+	for _, host in ipairs(backpackLockHosts) do
+		if host.Parent then
+			if gated then
+				ensureBackpackLockOn(host)
+			else
+				clearBackpackLockOn(host)
+			end
+		end
+	end
+end
+
+playerGui:GetAttributeChangedSignal(GATE_BACKPACK):Connect(syncBackpackGate)
+playerGui:GetAttributeChangedSignal(HAS_ROLLED_SESSION):Connect(syncBackpackGate)
+task.defer(syncBackpackGate)
+
+-- Unlock when the awarded coral starts sliding into Slot4 (not on roll press).
+SeedWheelRevealApi.connectSlideToBackpackStarted(function()
+	playerGui:SetAttribute(HAS_ROLLED_SESSION, true)
+	playerGui:SetAttribute(GATE_BACKPACK, false)
+end)
 
 -- QuickbarHelp.Slot4 — shortcut badge (Y / Q). Click/tap opens backpack like Slot4.
 local quickbarHelp = mainHUD:FindFirstChild("QuickbarHelp")
@@ -2025,6 +2188,8 @@ end
 
 InventoryState.onOpenChanged(function(isOpen)
 	setLeftUiHiddenForBackpack(isOpen)
+	-- ReefReport / Store cart chrome (info “i” vs shop glyph) must refresh with build mode.
+	playerGui:SetAttribute("OceanTD_SyncCartChrome", os.clock())
 	if isOpen then
 		if SkipWaveSlot.isConfirmActive() then
 			SkipWaveSlot.cancelConfirm()
@@ -2037,6 +2202,13 @@ InventoryState.onOpenChanged(function(isOpen)
 		end
 		task.spawn(function()
 			-- Reveal Slot1/2/3 as the backpack opens so they slide out from behind the panel.
+			-- Skip when report/skills own the right HUD.
+			if playerGui:GetAttribute(REPORT_OPEN_ATTR) == true
+				or playerGui:GetAttribute("OceanTD_SkillsBubblesOpen") == true
+			then
+				host.Visible = false
+				return
+			end
 			task.spawn(SavePlotSlot.playReveal)
 			task.spawn(ClearPlotSlot.playReveal)
 			task.spawn(UndoSlot.playReveal)
@@ -2096,7 +2268,7 @@ playerGui:GetAttributeChangedSignal("OceanTD_SkillsBubblesOpen"):Connect(functio
 	else
 		slot4.Visible = true
 		refreshHelpSlotBadge()
-		if InventoryState.isOpen() then
+		if InventoryState.isOpen() and playerGui:GetAttribute(REPORT_OPEN_ATTR) ~= true then
 			host.Visible = true
 			applyDockedLayout()
 			task.spawn(SavePlotSlot.playReveal)
@@ -2109,6 +2281,29 @@ playerGui:GetAttributeChangedSignal("OceanTD_SkillsBubblesOpen"):Connect(functio
 			if skills and skills:IsA("GuiObject") then
 				rememberHideLeftForBackpack(skills)
 			end
+		end
+	end
+end)
+
+-- Reef report opens from build mode — keep InventoryState open but hide backpack chrome.
+playerGui:GetAttributeChangedSignal(REPORT_OPEN_ATTR):Connect(function()
+	local reportOpen = playerGui:GetAttribute(REPORT_OPEN_ATTR) == true
+	if reportOpen then
+		if InventoryState.isOpen() then
+			host.Visible = false
+			task.spawn(SavePlotSlot.playHide)
+			task.spawn(ClearPlotSlot.playHide)
+			task.spawn(UndoSlot.playHide)
+		end
+	else
+		if InventoryState.isOpen()
+			and playerGui:GetAttribute("OceanTD_SkillsBubblesOpen") ~= true
+		then
+			host.Visible = true
+			applyDockedLayout()
+			task.spawn(SavePlotSlot.playReveal)
+			task.spawn(ClearPlotSlot.playReveal)
+			task.spawn(UndoSlot.playReveal)
 		end
 	end
 end)
@@ -2133,6 +2328,11 @@ end)
 
 local lastToggleClock = 0
 local function toggleFromUser(fromGamepad: boolean?)
+	if playerGui:GetAttribute(GATE_BACKPACK) == true
+		and playerGui:GetAttribute(HAS_ROLLED_SESSION) ~= true
+	then
+		return
+	end
 	if backpackToggleBlockedBySkills() then
 		return
 	end
@@ -2181,6 +2381,8 @@ do
 		otherBtn.Activated:Connect(function()
 			toggleFromUser(false)
 		end)
+		table.insert(backpackLockHosts, otherSlot4)
+		task.defer(syncBackpackGate)
 		log("Also bound Slot4 on", otherHud.Name)
 	end
 end
@@ -2399,9 +2601,6 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
 		elseif input.KeyCode == Enum.KeyCode.DPadRight then
 			setGamepadFocus(gamepadFocusIndex + 1)
 			return
-		elseif input.KeyCode == Enum.KeyCode.DPadUp then
-			setGamepadFocus(gamepadFocusIndex - GRID_COLS)
-			return
 		elseif input.KeyCode == Enum.KeyCode.DPadDown then
 			setGamepadFocus(gamepadFocusIndex + GRID_COLS)
 			return
@@ -2409,6 +2608,7 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
 			activateGamepadFocusedItem()
 			return
 		end
+		-- DPadUp: owned by ReefReportUI / StoreUI (info → report in build mode).
 	end
 
 	if gameProcessed then

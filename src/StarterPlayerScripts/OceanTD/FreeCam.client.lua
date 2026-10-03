@@ -276,6 +276,7 @@ end
 local function skillsBubblesOpen(): boolean
 	return playerGui:GetAttribute("OceanTD_SkillsBubblesOpen") == true
 		or playerGui:GetAttribute("OceanTD_ReefReportOpen") == true
+		or playerGui:GetAttribute("OceanTD_StoreOpen") == true
 end
 
 -- Skills / backpack own the left HUD â€” never force cam triangle icons back on.
@@ -1373,6 +1374,9 @@ setMode = function(nextMode: CamMode)
 end
 
 local function cycleMode()
+	if playerGui:GetAttribute("OceanTD_TutorialGateCam") == true then
+		return
+	end
 	setMode(nextCamMode(mode))
 end
 
@@ -1380,6 +1384,9 @@ end
 ContextActionService:BindActionAtPriority(FC.DPAD_ACTION, function(_name, state, _input)
 	if state ~= Enum.UserInputState.Begin then
 		return Enum.ContextActionResult.Pass
+	end
+	if playerGui:GetAttribute("OceanTD_TutorialGateCam") == true then
+		return Enum.ContextActionResult.Sink
 	end
 	if InventoryState.isOpen() then
 		return Enum.ContextActionResult.Pass
@@ -1592,20 +1599,53 @@ end)
 
 local function ensureHitButton(btn: GuiObject): GuiButton
 	if btn:IsA("GuiButton") then
+		btn.AutoButtonColor = false
 		return btn
 	end
 	local existing = btn:FindFirstChildWhichIsA("GuiButton", true)
 	if existing then
+		existing.AutoButtonColor = false
 		return existing
 	end
 	local made = Instance.new("TextButton")
 	made.Name = "_OceanTD_CamCycleHit"
 	made.Text = ""
 	made.BackgroundTransparency = 1
+	made.AutoButtonColor = false
 	made.Size = UDim2.fromScale(1, 1)
 	made.ZIndex = 100
 	made.Parent = btn
 	return made
+end
+
+-- Studio circles default to AutoButtonColor black on hover — use dark grey instead.
+local function wireCamHoverGrey(root: GuiObject, hit: GuiButton)
+	if root:GetAttribute("_OceanTD_CamHoverGrey") == true then
+		return
+	end
+	root:SetAttribute("_OceanTD_CamHoverGrey", true)
+	local target = strokeTarget(root)
+	if target:IsA("GuiButton") then
+		target.AutoButtonColor = false
+	end
+	hit.AutoButtonColor = false
+	local idleColor = target.BackgroundColor3
+	local idleTrans = target.BackgroundTransparency
+	-- Opaque black disks are common; keep idle, lighten to grey on hover.
+	local function enter()
+		if idleTrans >= 0.95 then
+			target.BackgroundTransparency = 0
+		end
+		target.BackgroundColor3 = FC.HOVER_GREY
+	end
+	local function leave()
+		target.BackgroundColor3 = idleColor
+		target.BackgroundTransparency = idleTrans
+	end
+	hit.MouseEnter:Connect(enter)
+	hit.MouseLeave:Connect(leave)
+	hit.SelectionGained:Connect(enter)
+	hit.SelectionLost:Connect(leave)
 end
 
 local function ensureIconScale(gui: GuiObject): UIScale
@@ -1668,6 +1708,7 @@ local function wireModeIcon(btn: GuiObject, camMode: CamMode)
 			cycleMode()
 		end)
 	end
+	wireCamHoverGrey(btn, hit)
 	if camMode == "dronecam" then
 		freeCamButton = hit
 		btnStroke = stroke
@@ -1844,6 +1885,10 @@ local function bindMobileLeftUi(left: Instance)
 			syncDPadIcon()
 			syncCamModeIconsForHud()
 		end)
+		playerGui:GetAttributeChangedSignal("OceanTD_StoreOpen"):Connect(function()
+			syncDPadIcon()
+			syncCamModeIconsForHud()
+		end)
 
 		playerGui:GetAttributeChangedSignal("OceanTD_SyncCamCycleFromView"):Connect(function()
 			if mode ~= "off" then
@@ -1874,6 +1919,26 @@ local function bindMobileLeftUi(left: Instance)
 				forceModeOverride = false
 			end
 		end)
+
+		-- Hard stop FishCam/PlotCam writes the instant shark/urchin/tang intro claims the cam.
+		local function onWaveIntroCamBusy()
+			if playerGui:GetAttribute("OceanTD_SharkCamBusy") == true
+				or playerGui:GetAttribute("OceanTD_UrchinCamBusy") == true
+				or playerGui:GetAttribute("OceanTD_TangCamBusy") == true
+			then
+				stopRender()
+				if mode ~= "off" then
+					cinematicResumeMode = mode
+					playerGui:SetAttribute(FC.ATTR_CINEMATIC_RESUME_MODE, mode)
+					forceModeOverride = true
+					setMode("off")
+					forceModeOverride = false
+				end
+			end
+		end
+		playerGui:GetAttributeChangedSignal("OceanTD_SharkCamBusy"):Connect(onWaveIntroCamBusy)
+		playerGui:GetAttributeChangedSignal("OceanTD_UrchinCamBusy"):Connect(onWaveIntroCamBusy)
+		playerGui:GetAttributeChangedSignal("OceanTD_TangCamBusy"):Connect(onWaveIntroCamBusy)
 
 		playerGui:GetAttributeChangedSignal("OceanTD_ForceCamMode"):Connect(function()
 			local raw = playerGui:GetAttribute("OceanTD_ForceCamMode")

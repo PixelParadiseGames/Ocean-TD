@@ -118,6 +118,17 @@ local function cameraShake(durationSec: number)
 			end
 			return
 		end
+		local pg = player:FindFirstChildOfClass("PlayerGui")
+		if pg
+			and (
+				pg:GetAttribute("OceanTD_SharkCamBusy") == true
+				or pg:GetAttribute("OceanTD_UrchinCamBusy") == true
+				or pg:GetAttribute("OceanTD_TangCamBusy") == true
+			)
+		then
+			hum.CameraOffset = Vector3.zero
+			return
+		end
 		local u = (os.clock() - t0) / durationSec
 		if u >= 1 then
 			hum.CameraOffset = Vector3.zero
