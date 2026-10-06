@@ -41,6 +41,14 @@ local function stopConn()
 	end
 end
 
+local function willResumeCycleCam(pg: PlayerGui?): boolean
+	if not pg then
+		return false
+	end
+	local m = pg:GetAttribute("OceanTD_CinematicResumeMode")
+	return typeof(m) == "string" and m ~= "" and m ~= "off"
+end
+
 function TangCam.isBusy(): boolean
 	return busy
 end
@@ -51,7 +59,17 @@ function TangCam.stopImmediate()
 	stopConn()
 	local pg = getPlayerGui()
 	if pg then
+		local resume = willResumeCycleCam(pg)
 		pg:SetAttribute("OceanTD_TangCamBusy", false)
+		-- Waves stopped mid-shot: hand camera back to Plot/Fish/Drone stash.
+		if resume then
+			local cam = Workspace.CurrentCamera
+			if cam then
+				cam.CameraType = Enum.CameraType.Scriptable
+				cam.CameraSubject = nil
+			end
+			pg:SetAttribute("OceanTD_ResumeCinematicCam", os.clock())
+		end
 	end
 end
 
@@ -215,14 +233,6 @@ local function waitWhile(my: number, pred: () -> boolean)
 	while my == token and pred() do
 		task.wait(0.05)
 	end
-end
-
-local function willResumeCycleCam(pg: PlayerGui?): boolean
-	if not pg then
-		return false
-	end
-	local m = pg:GetAttribute("OceanTD_CinematicResumeMode")
-	return typeof(m) == "string" and m ~= "" and m ~= "off"
 end
 
 local function smoothRestore(

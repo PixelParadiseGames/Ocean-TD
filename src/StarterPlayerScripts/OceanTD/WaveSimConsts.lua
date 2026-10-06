@@ -129,7 +129,8 @@ local C = {
 	ARROW_SPEED_MULT = 4, -- GreenArrows travel this × fish speed
 	ARROW_LEAD_SEC = 1, -- fish spawn this long after arrows start
 	ARROW_SOUND_ID = "rbxassetid://1845466760",
-	ARROW_PATH_SPACING = 16, -- studs along path between arrow sets (full route)
+	ARROW_PATH_SPACING = 16, -- studs along path between arrow sets in the train
+	ARROW_TRAIN_COUNT = 12, -- green fish train length (emerge from path start)
 	ARROW_LABEL_EVERY = 4, -- "Wave N" on every Nth arrow set
 	ARROW_SPIN_RAD_PER_SEC = 2.2, -- slow corkscrew roll
 	-- Crab GroundA/B preview: red arrows; fixed short train.

@@ -275,6 +275,10 @@ local reefHealth = C.REEF_START_HEALTH
 -- Join-intro Wave-100 showcase (no reef damage, no summary, custom coral list).
 local joinIntroDemo = false
 local demoCoralParts: { BasePart }? = nil
+-- Green fish-train before the player's first Start Waves this session (finger tutorial planning).
+local hasStartedWavesThisSession = false
+local planningArrows = false
+local planningArrowConn: RBXScriptConnection? = nil
 
 -- Sharks linger after wave clear and never gate wave completion.
 local function isWaveLingerer(f: FishAgent): boolean
@@ -4377,6 +4381,13 @@ local function attachSimLoop(myToken: number)
 		end
 
 		WaveArrowPreview.tick(simDt)
+		-- Wave 1: keep green path trains looping until the round ends.
+		if not joinIntroDemo
+			and waveIndex == C.TANG_FIRST_WAVE
+			and not WaveArrowPreview.hasActiveGreenTrains()
+		then
+			WaveArrowPreview.startGreen({ playSound = false })
+		end
 		Feed.tickPathStamp()
 		Feed.tickAmmoArm(simClock)
 		Feed.tickAmmoFade(simClock)
@@ -4480,10 +4491,102 @@ function WaveSim.continueWithHearts(hearts: number, retrySameWave: boolean?): bo
 	return true
 end
 
+local function stopPlanningArrowLoop()
+	planningArrows = false
+	if planningArrowConn then
+		planningArrowConn:Disconnect()
+		planningArrowConn = nil
+	end
+end
+
+function WaveSim.stopPlanningArrowPreview()
+	stopPlanningArrowLoop()
+	WaveArrowPreview.setPlanningLegendVisible(false)
+	WaveArrowPreview.setTickSpeedMult(1)
+	if not running then
+		WaveArrowPreview.destroy()
+	end
+end
+
+local function introStillBusy(): boolean
+	local pg = Players.LocalPlayer:FindFirstChildOfClass("PlayerGui")
+	return pg ~= nil and pg:GetAttribute("OceanTD_JoinIntroBusy") == true
+end
+
+-- Green (and route) arrow trains before the first Start Waves of a session.
+-- Only after intro is over and the player has control; loops until Start Waves.
+function WaveSim.startPlanningArrowPreview(): boolean
+	if hasStartedWavesThisSession or running or joinIntroDemo then
+		return false
+	end
+	if introStillBusy() then
+		return false
+	end
+	if not ClientPlot.get() then
+		return false
+	end
+	pathData = Path.buildPath()
+	pathDataA2 = Path.buildNamedPath(C.FISH_ROUTE_A2_NAME)
+	pathDataGroundA, pathDataGroundB = WaveCrab.buildBothLocal()
+	pathDataShark = WaveShark.buildLocal()
+	if not pathData then
+		return false
+	end
+	waveIndex = math.max(1, waveIndex)
+	ensureFolder()
+	planningArrows = true
+	local planningOpts = {
+		playSound = false,
+		includeShark = false,
+		forceGroundTrains = true,
+		greenLabelText = "Friendly Fish",
+		redLabelText = "Dangerous Critters",
+	}
+	WaveArrowPreview.setTickSpeedMult(0.5)
+	WaveArrowPreview.start(planningOpts)
+	WaveArrowPreview.setPlanningLegendVisible(true)
+	if not planningArrowConn then
+		planningArrowConn = RunService.Heartbeat:Connect(function(dt)
+			if not planningArrows or running or hasStartedWavesThisSession then
+				return
+			end
+			if introStillBusy() then
+				return
+			end
+			WaveArrowPreview.tick(dt)
+			-- Independent loops: each color finishes its own path before restarting.
+			if not WaveArrowPreview.hasActiveGreenTrains() then
+				WaveArrowPreview.startGreen(planningOpts)
+			end
+			if not WaveArrowPreview.hasActiveRedTrains() then
+				WaveArrowPreview.startRed(planningOpts)
+			end
+		end)
+	end
+	return true
+end
+
+function WaveSim.isPlanningArrowPreview(): boolean
+	return planningArrows == true
+end
+
+local function tryStartPlanningAfterIntro()
+	if hasStartedWavesThisSession or running or joinIntroDemo or introStillBusy() then
+		return
+	end
+	if not ClientPlot.get() then
+		return
+	end
+	WaveSim.startPlanningArrowPreview()
+end
+
 function WaveSim.start(): boolean
 	if running then
 		return false
 	end
+	-- Real waves replace the pre-start planning train.
+	hasStartedWavesThisSession = true
+	WaveSim.stopPlanningArrowPreview()
 	pathData = Path.buildPath()
 	pathDataA2 = Path.buildNamedPath(C.FISH_ROUTE_A2_NAME)
 	pathDataGroundA, pathDataGroundB = WaveCrab.buildBothLocal()
@@ -4527,6 +4630,7 @@ function WaveSim.startJoinIntroDemo(coralParts: { BasePart }, wave: number?): bo
 	if running then
 		WaveSim.stop({ silent = true })
 	end
+	WaveSim.stopPlanningArrowPreview()
 	local w = math.max(1, math.floor(tonumber(wave) or 100))
 	demoCoralParts = coralParts
 	joinIntroDemo = true
@@ -4631,6 +4735,22 @@ function WaveSim.rebuildRouteForPlotSize(plotSizeStage: number?): boolean
 		refreshCoralPathProjections()
 		notifyHud()
 		flushHud()
+	elseif planningArrows then
+		local planningOpts = {
+			playSound = false,
+			includeShark = false,
+			forceGroundTrains = true,
+			greenLabelText = "Friendly Fish",
+			redLabelText = "Dangerous Critters",
+		}
+		WaveArrowPreview.setTickSpeedMult(0.5)
+		if not WaveArrowPreview.hasActiveGreenTrains() then
+			WaveArrowPreview.startGreen(planningOpts)
+		end
+		if not WaveArrowPreview.hasActiveRedTrains() then
+			WaveArrowPreview.startRed(planningOpts)
+		end
+		WaveArrowPreview.setPlanningLegendVisible(true)
 	end
 	return true
 end
@@ -4700,5 +4820,38 @@ function WaveSim.formatClock(sec: number): string
 	local r = s % 60
 	return string.format("%02d:%02d:%02d", h, m, r)
 end
+
+-- After intro ends (player in control): show planning trains until Start Waves.
+do
+	local pg = Players.LocalPlayer:WaitForChild("PlayerGui") :: PlayerGui
+	local function onIntroBusyChanged()
+		if pg:GetAttribute("OceanTD_JoinIntroBusy") == true then
+			-- Intro claimed control — never show planning trains during it.
+			WaveSim.stopPlanningArrowPreview()
+			return
+		end
+		-- Busy cleared: finishCam / freeze unlock settle, then spawn trains.
+		task.defer(function()
+			task.wait(0.2)
+			tryStartPlanningAfterIntro()
+		end)
+	end
+	pg:GetAttributeChangedSignal("OceanTD_JoinIntroBusy"):Connect(onIntroBusyChanged)
+	-- Give JoinIntro a moment to set Busy=true; only auto-start if intro never claims it.
+	task.defer(function()
+		task.wait(1)
+		if pg:GetAttribute("OceanTD_JoinIntroBusy") == true then
+			return
+		end
+		tryStartPlanningAfterIntro()
+	end)
+end
+
+ClientPlot.onChanged(function()
+	if planningArrows or introStillBusy() then
+		return
+	end
+	task.defer(tryStartPlanningAfterIntro)
+end)
 
 return WaveSim

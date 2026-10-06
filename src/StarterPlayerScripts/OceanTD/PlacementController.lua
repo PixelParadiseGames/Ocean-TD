@@ -268,6 +268,11 @@ local function setTouchControlsEnabled(enabled: boolean)
 	end
 end
 
+local function freecamOwnsCamera(): boolean
+	local camMode = playerGui:GetAttribute("OceanTD_CamCycleMode")
+	return camMode == "fishcam" or camMode == "plotcam" or camMode == "dronecam"
+end
+
 local function unfreeze()
 	ContextActionService:UnbindAction(FREEZE_ACTION)
 	setTouchControlsEnabled(true)
@@ -281,6 +286,7 @@ local function unfreeze()
 
 	local character = player.Character
 	local hum = character and character:FindFirstChildOfClass("Humanoid")
+	local keepFreecam = freecamOwnsCamera()
 
 	if frozen then
 		frozen = false
@@ -292,11 +298,12 @@ local function unfreeze()
 			hum.JumpPower = jumpP
 			hum.JumpHeight = jumpH
 		end
-		local camType = savedCameraType
-		if camType == nil or camType == Enum.CameraType.Scriptable then
-			camType = Enum.CameraType.Custom
-		end
-		if camera then
+		-- Never yank Scriptable away from Plot/Fish/Drone.
+		if not keepFreecam and camera then
+			local camType = savedCameraType
+			if camType == nil or camType == Enum.CameraType.Scriptable then
+				camType = Enum.CameraType.Custom
+			end
 			camera.CameraType = camType
 			if camType == Enum.CameraType.Custom and hum then
 				camera.CameraSubject = hum
@@ -308,10 +315,7 @@ local function unfreeze()
 			hum.JumpPower = DEFAULT_JUMP_POWER
 			hum.JumpHeight = DEFAULT_JUMP_HEIGHT
 		end
-		-- Don't steal FishCam/PlotCam/DroneCam Scriptable ownership when we never froze.
-		local camMode = playerGui:GetAttribute("OceanTD_CamCycleMode")
-		local freecamOwns = camMode == "fishcam" or camMode == "plotcam" or camMode == "dronecam"
-		if not freecamOwns and camera and camera.CameraType == Enum.CameraType.Scriptable then
+		if not keepFreecam and camera and camera.CameraType == Enum.CameraType.Scriptable then
 			camera.CameraType = Enum.CameraType.Custom
 			if hum then
 				camera.CameraSubject = hum
@@ -324,13 +328,14 @@ local function unfreeze()
 end
 
 local function freeze()
-	-- FreeCam/FishCam own Scriptable cam; release them first so place freeze/restore is Custom.
-	if not frozen then
+	local keepFreecam = freecamOwnsCamera()
+	-- Avatar-cam place: release FreeCam first. Plot/Fish/Drone stay live (RTS seat).
+	if not frozen and not keepFreecam then
 		playerGui:SetAttribute("OceanTD_ForceCloseFreeCam", os.clock())
 	end
-	-- Lock walk + camera look while armed / placing.
+	-- Lock walk while armed / placing.
 	if frozen then
-		if camera and savedCameraCFrame then
+		if not keepFreecam and camera and savedCameraCFrame then
 			camera.CameraType = Enum.CameraType.Scriptable
 			camera.CFrame = savedCameraCFrame
 		end
@@ -371,7 +376,11 @@ local function freeze()
 	end
 	setTouchControlsEnabled(false)
 
-	if camera then
+	if keepFreecam then
+		-- Leave Scriptable ownership with Plot/Fish/Drone.
+		savedCameraType = nil
+		savedCameraCFrame = nil
+	elseif camera then
 		local currentType = camera.CameraType
 		if currentType ~= Enum.CameraType.Scriptable then
 			savedCameraType = currentType
@@ -384,9 +393,12 @@ local function freeze()
 	end
 
 	-- Keyboard only — do NOT bind Thumbstick1 (breaks mobile move after unbind).
-	ContextActionService:BindActionAtPriority(FREEZE_ACTION, function()
-		return Enum.ContextActionResult.Sink
-	end, false, Enum.ContextActionPriority.High.Value, Enum.KeyCode.W, Enum.KeyCode.A, Enum.KeyCode.S, Enum.KeyCode.D, Enum.KeyCode.Space)
+	-- When Plot Cam owns the seat, allow WASD through for pan (do not sink move keys).
+	if not keepFreecam then
+		ContextActionService:BindActionAtPriority(FREEZE_ACTION, function()
+			return Enum.ContextActionResult.Sink
+		end, false, Enum.ContextActionPriority.High.Value, Enum.KeyCode.W, Enum.KeyCode.A, Enum.KeyCode.S, Enum.KeyCode.D, Enum.KeyCode.Space)
+	end
 end
 
 local function getSpeciesIdForItem(itemId: string): string?
@@ -1676,9 +1688,8 @@ local function exitPlacement(clearArmed: boolean)
 	end
 	log("Placement off")
 	-- Restore Fish/Plot/Drone if place/build ForceClosed FreeCam.
-	if not InventoryState.isOpen() then
-		playerGui:SetAttribute("OceanTD_ResumeBuildCam", os.clock())
-	end
+	-- Always signal — FreeCam keeps the stash until place/relocate are both idle.
+	playerGui:SetAttribute("OceanTD_ResumeBuildCam", os.clock())
 end
 
 local function isShiftKeepPlacing(): boolean

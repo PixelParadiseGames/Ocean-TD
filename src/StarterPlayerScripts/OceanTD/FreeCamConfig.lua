@@ -34,6 +34,9 @@ FreeCamConfig.LOOK_SENS_KEYS = 1.8
 FreeCamConfig.ATTR_MODE = "OceanTD_CamCycleMode"
 FreeCamConfig.ATTR_CINEMATIC_RESUME_MODE = "OceanTD_CinematicResumeMode"
 
+-- PlotCam cycle: 1 = legacy SkyCam free-fly (Plot Cam 1), 2 = locked RTS god-cam (Plot Cam 2).
+FreeCamConfig.PLOT_CAM_VARIANT = 2
+
 FreeCamConfig.MODE_ORDER = { "off", "plotcam", "fishcam", "dronecam" } :: { CamMode }
 
 FreeCamConfig.MODE_GRAPHICS = {
@@ -51,6 +54,8 @@ FreeCamConfig.MODE_LABELS = {
 } :: { [CamMode]: string }
 
 FreeCamConfig.MODE_LABEL_NAME = "_OceanTD_CamModeLabel"
+-- True after inactive cam icons finish collapsing (Plot Cam quick pad waits on this).
+FreeCamConfig.ATTR_CAROUSEL_COLLAPSED = "OceanTD_CamCarouselCollapsed"
 FreeCamConfig.MODE_LABEL_FADE_SEC = 5
 FreeCamConfig.MODE_LABEL_FADE_OUT = TweenInfo.new(0.55, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 FreeCamConfig.MODE_LABEL_STROKE = Color3.fromRGB(12, 72, 28)

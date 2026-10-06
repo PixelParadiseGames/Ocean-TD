@@ -21,6 +21,7 @@ local playerGui = player:WaitForChild("PlayerGui") :: PlayerGui
 local oceanRoot = ReplicatedStorage:WaitForChild("OceanTD")
 local UiViewportTags = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiViewportTags"))
 local UiTheme = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiTheme"))
+local LeftHudLayout = require(oceanRoot:WaitForChild("Shared"):WaitForChild("LeftHudLayout"))
 
 local ClientPlot = require(script.Parent:WaitForChild("ClientPlot"))
 local InventoryState = require(script.Parent:WaitForChild("InventoryState"))
@@ -1466,6 +1467,35 @@ local function ensureTutorialLockOn(host: GuiObject)
 	end
 end
 
+local SAND_DOLLAR_HIDDEN_ATTR = "_OceanTD_HiddenForSkillsLock"
+
+local function setSandDollarChromeVisible(left: Instance, visible: boolean)
+	local targets: { GuiObject } = {}
+	local dCount = LeftHudLayout.findDCount(left)
+	local dLabel = LeftHudLayout.findDLabel(left)
+	if dCount then
+		table.insert(targets, dCount)
+	end
+	if dLabel then
+		table.insert(targets, dLabel)
+	end
+	local row = left:FindFirstChild(LeftHudLayout.ROW_NAME)
+	if row and row:IsA("GuiObject") then
+		table.insert(targets, row)
+	end
+	for _, gui in ipairs(targets) do
+		if not visible then
+			if gui.Visible or gui:GetAttribute(SAND_DOLLAR_HIDDEN_ATTR) == true then
+				gui:SetAttribute(SAND_DOLLAR_HIDDEN_ATTR, true)
+				gui.Visible = false
+			end
+		elseif gui:GetAttribute(SAND_DOLLAR_HIDDEN_ATTR) == true then
+			gui:SetAttribute(SAND_DOLLAR_HIDDEN_ATTR, nil)
+			gui.Visible = true
+		end
+	end
+end
+
 local function applyLeftHudGate()
 	local gate = playerGui:GetAttribute("OceanTD_TutorialGateLeftHud") == true
 	local gateCam = playerGui:GetAttribute("OceanTD_TutorialGateCam") == true
@@ -1483,6 +1513,9 @@ local function applyLeftHudGate()
 			ch.Visible = true
 		end
 	end
+	-- $D / $DCount stay hidden while Skills is tutorial-locked.
+	local skillsLocked = gate and not skillsOpen
+	setSandDollarChromeVisible(left, not skillsLocked)
 	local dPad = left:FindFirstChild("dPad")
 	if not (dPad and dPad:IsA("GuiObject")) then
 		return

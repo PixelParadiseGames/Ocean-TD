@@ -39,13 +39,30 @@ function UrchinCam.isBusy(): boolean
 	return busy
 end
 
+local function willResumeCycleCam(pg: PlayerGui?): boolean
+	if not pg then
+		return false
+	end
+	local m = pg:GetAttribute("OceanTD_CinematicResumeMode")
+	return typeof(m) == "string" and m ~= "" and m ~= "off"
+end
+
 function UrchinCam.stopImmediate()
 	token += 1
 	busy = false
 	stopBind()
 	local pg = getPlayerGui()
 	if pg then
+		local resume = willResumeCycleCam(pg)
 		pg:SetAttribute("OceanTD_UrchinCamBusy", false)
+		if resume then
+			local cam = Workspace.CurrentCamera
+			if cam then
+				cam.CameraType = Enum.CameraType.Scriptable
+				cam.CameraSubject = nil
+			end
+			pg:SetAttribute("OceanTD_ResumeCinematicCam", os.clock())
+		end
 	end
 end
 
@@ -79,14 +96,6 @@ local function claimCamera(cam: Camera)
 	if hum then
 		hum.CameraOffset = Vector3.zero
 	end
-end
-
-local function willResumeCycleCam(pg: PlayerGui?): boolean
-	if not pg then
-		return false
-	end
-	local m = pg:GetAttribute("OceanTD_CinematicResumeMode")
-	return typeof(m) == "string" and m ~= "" and m ~= "off"
 end
 
 local function finishAndResume(pg: PlayerGui?, cam: Camera?, savedCf: CFrame, savedType: Enum.CameraType, savedSubject: Instance?)

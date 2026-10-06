@@ -2,7 +2,7 @@
 --[[
 	Bottom-center build-mode HUD:
 	• First-roll plot finger (0 corals, RollFingerHint == "plot"): "Plant Coral In Plot" (no +).
-	• After ≥2 corals placed: "N Of N Max" + green + → Place More skill.
+	• After ≥4 corals placed: "N Of N Max" + green + → Place More skill.
 	Only the + button captures clicks; the count / plant text passes through to corals.
 ]]
 
@@ -175,7 +175,7 @@ local function shouldShowPlaceMore(): boolean
 		return false
 	end
 	-- Don't push Place More until the player has a small reef going.
-	if PlacedCoralIndex.countLocal() < 2 then
+	if PlacedCoralIndex.countLocal() < 4 then
 		return false
 	end
 	return true

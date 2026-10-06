@@ -1,14 +1,15 @@
 --!strict
 --[[
 	Cam cycle (DPadDown / revolver icons):
-	  Off â†’ PlotCam â†’ FishCam â†’ DroneCam â†’ Off
+	  Off → PlotCam → FishCam → DroneCam → Off
 
-	  Off       â€” Roblox default / player follow cam
-	  PlotCam   â€” fly inside plot SkyCam volume, always looking at SkyCamFocus
-	                (formerly called FreeCam / attr "freecam")
-	  FishCam   â€” always orbit furthest unfed fish; if none during waves, orbit W1;
-	                idle (no waves): orbit while focus patrols W1â†’W2â†’â€¦â†’Wn then reverses
-	  DroneCam  â€” free-look fly (old FishCam-idle). Studio instance stays named FreeCam.
+	  Off       — Roblox default / player follow cam
+	  PlotCam   — Plot Cam 2 by default (locked RTS / isometric over plot).
+	                FreeCamConfig.PLOT_CAM_VARIANT = 1 restores Plot Cam 1
+	                (SkyCam volume free-fly → SkyCamFocus).
+	  FishCam   — always orbit furthest unfed fish; if none during waves, orbit W1;
+	                idle (no waves): orbit while focus patrols W1→W2→…→Wn then reverses
+	  DroneCam  — free-look fly (old FishCam-idle). Studio instance stays named FreeCam.
 	                Attr value is "dronecam" (say "drone" if you mean this; "freecam" = old PlotCam).
 
 	Plot1: Workspace.MasterPlotDecor.SkyCam (+ .SkyCamFocus)
@@ -39,11 +40,17 @@ local Wave1FishCam = require(script.Parent:WaitForChild("Wave1FishCam"))
 local SkyCamParts = require(script.Parent:WaitForChild("SkyCamParts"))
 local FC = require(script.Parent:WaitForChild("FreeCamConfig"))
 local FreeCamModeLabel = require(script.Parent:WaitForChild("FreeCamModeLabel"))
+local PlotCam2 = require(script.Parent:WaitForChild("PlotCam2"))
+local PlotCam2Tune = require(script.Parent:WaitForChild("PlotCam2Tune"))
 
--- Studio FreeCam button = DroneCam mode. PlotCam = old SkyCam free-fly.
+playerGui:SetAttribute(FC.ATTR_CAROUSEL_COLLAPSED, false)
+
+-- Studio FreeCam button = DroneCam mode. PlotCam = Plot Cam 1 or 2 via PLOT_CAM_VARIANT.
 type CamMode = FC.CamMode
 
 local mode: CamMode = "off"
+-- Enter Plot Cam once as the default seat (cleared after first successful enter / any non-off mode).
+local startPlotCamPending = true
 -- FishCam/PlotCam/DroneCam to restore after defeat / wave intro cinematics / build mode.
 local cinematicResumeMode: CamMode? = nil
 local buildResumeMode: CamMode? = nil
@@ -396,6 +403,10 @@ local function snapIconsToLayout(relativeTo: CamMode, collapsed: boolean)
 	raiseDPadIconLayer()
 end
 
+local function setCarouselCollapsedAttr(collapsed: boolean)
+	playerGui:SetAttribute(FC.ATTR_CAROUSEL_COLLAPSED, collapsed == true)
+end
+
 local function scheduleCollapse(token: number, relativeTo: CamMode)
 	task.delay(FC.COLLAPSE_WAIT_SEC, function()
 		if token ~= carouselToken or not carouselReady then
@@ -405,9 +416,15 @@ local function scheduleCollapse(token: number, relativeTo: CamMode)
 		-- doesn't snap the full diamond of cam icons.
 		carouselCollapsed = true
 		if camModeIconsSuppressed() then
+			setCarouselCollapsedAttr(true)
 			return
 		end
-		tweenIconsToLayout(relativeTo, true, FC.COLLAPSE_INFO, token, nil)
+		tweenIconsToLayout(relativeTo, true, FC.COLLAPSE_INFO, token, function()
+			if token ~= carouselToken then
+				return
+			end
+			setCarouselCollapsedAttr(true)
+		end)
 	end)
 end
 
@@ -419,6 +436,7 @@ local function playCamCarousel(fromMode: CamMode, toMode: CamMode, animate: bool
 		-- Keep mode/layout state, but never force triangle icons over skills HUD.
 		carouselToken += 1
 		carouselCollapsed = true
+		setCarouselCollapsedAttr(true)
 		for _, icon in ipairs(camIcons) do
 			applyIconChrome(icon, toMode, true)
 		end
@@ -426,6 +444,8 @@ local function playCamCarousel(fromMode: CamMode, toMode: CamMode, animate: bool
 	end
 	carouselToken += 1
 	local my = carouselToken
+	-- Expanding / revolving — hide Plot Cam quick pad until collapse finishes again.
+	setCarouselCollapsedAttr(false)
 
 	if not animate or fromMode == toMode then
 		snapIconsToLayout(toMode, false)
@@ -461,13 +481,15 @@ local function syncCamModeIconsForHud()
 	if camModeIconsSuppressed() then
 		carouselToken += 1
 		carouselCollapsed = true
+		setCarouselCollapsedAttr(true)
 		FreeCamModeLabel.hide()
 		return
 	end
 	if carouselReady and #camIcons > 0 then
-		-- Always snap collapsed after skills/backpack â€” never leave the full diamond up.
+		-- Always snap collapsed after skills/backpack — never leave the full diamond up.
 		carouselCollapsed = true
 		snapIconsToLayout(mode, true)
+		setCarouselCollapsedAttr(true)
 	end
 end
 
@@ -894,6 +916,8 @@ end
 
 local function restoreDefaultCamera()
 	stopRender()
+	PlotCam2.stop()
+	PlotCam2Tune.setVisible(false)
 	bindSink(false)
 	clearTouchMove()
 	if controlsDisabled then
@@ -1055,7 +1079,8 @@ end
 local setMode: (CamMode) -> ()
 local forceModeOverride = false
 
-local function tickPlotCam(dt: number)
+local function tickPlotCam1(dt: number)
+	-- Plot Cam 1 — legacy SkyCam free-fly, always looking at SkyCamFocus.
 	local cam = getCamera()
 	local pose = resolveSkyPose()
 	if not cam or not pose then
@@ -1078,6 +1103,57 @@ local function tickPlotCam(dt: number)
 	camPos = clampToSkyPose(camPos + wish * moveSpeedForWish() * dt, pose)
 	cam.CameraType = Enum.CameraType.Scriptable
 	cam.CFrame = lookAtFocus(focusPos)
+end
+
+local function tickPlotCam2(dt: number)
+	local cam = getCamera()
+	if not cam then
+		PlotCam2Tune.setVisible(false)
+		setMode("off")
+		return
+	end
+	-- Join-intro still owns framing when it supplies a forced SkyCam pose.
+	if playerGui:GetAttribute("OceanTD_JoinIntroBusy") == true then
+		PlotCam2Tune.setVisible(false)
+		tickPlotCam1(dt)
+		return
+	end
+	keepCharacterStill()
+	if not PlotCam2.isActive() then
+		if not PlotCam2.begin(nil) then
+			PlotCam2Tune.setVisible(false)
+			setMode("off")
+			return
+		end
+	end
+	PlotCam2Tune.setVisible(true)
+	local preview = PlotCam2.getCFrame()
+	-- Finger is moving a coral — don't pan Plot Cam with the same drag.
+	local coralDrag = RelocateController.isDragging()
+	if coralDrag then
+		clearTouchMove()
+	end
+	local wish = if coralDrag then Vector3.zero elseif preview then readMoveWish(preview) else Vector3.zero
+	local cf = PlotCam2.tick(dt, {
+		wish = wish,
+		panSpeed = moveSpeedForWish(),
+	})
+	if not cf then
+		PlotCam2Tune.setVisible(false)
+		setMode("off")
+		return
+	end
+	cam.CameraType = Enum.CameraType.Scriptable
+	cam.CFrame = cf
+	camPos = cf.Position
+end
+
+local function tickPlotCam(dt: number)
+	if FC.PLOT_CAM_VARIANT == 2 then
+		tickPlotCam2(dt)
+	else
+		tickPlotCam1(dt)
+	end
 end
 
 local function tickFishFollow(dt: number)
@@ -1194,21 +1270,13 @@ local function startRenderLoop()
 				return
 			end
 		end
-		if PlacementController.isActive() or RelocateController.isActive() then
-			if mode ~= "off" then
-				if buildResumeMode == nil then
-					buildResumeMode = mode
-				end
-				forceModeOverride = true
-				setMode("off")
-				forceModeOverride = false
-			end
-			return
-		end
-
+		-- Plot Cam stays live while placing/relocating (default RTS seat).
 		if mode == "plotcam" then
 			setDroneLookCapture(false)
 			tickPlotCam(dt)
+			return
+		end
+		if PlacementController.isActive() or RelocateController.isActive() then
 			return
 		end
 		if mode == "fishcam" then
@@ -1251,10 +1319,16 @@ setMode = function(nextMode: CamMode)
 			return
 		end
 		if nextMode == "plotcam" then
-			local pose = resolveSkyPose()
-			if not pose then
-				warn("[CamCycle] SkyCam / SkyCamFocus missing for local plot â€” PlotCam unavailable")
-				return
+			if FC.PLOT_CAM_VARIANT == 2 then
+				if not ClientPlot.get() then
+					return
+				end
+			else
+				local pose = resolveSkyPose()
+				if not pose then
+					warn("[CamCycle] SkyCam / SkyCamFocus missing for local plot — PlotCam unavailable")
+					return
+				end
 			end
 		end
 		if not getCamera() then
@@ -1276,12 +1350,18 @@ setMode = function(nextMode: CamMode)
 	end)
 
 	if nextMode == "off" then
+		PlotCam2.stop()
+		PlotCam2Tune.setVisible(false)
 		restoreDefaultCamera()
 		return
 	end
 
 	-- Entering / switching into an override mode.
 	Wave1FishCam.stopImmediate()
+	if nextMode ~= "plotcam" then
+		PlotCam2.stop()
+		PlotCam2Tune.setVisible(false)
+	end
 	if prev == "off" then
 		if not ensureScriptableFromCurrent() then
 			mode = "off"
@@ -1289,7 +1369,7 @@ setMode = function(nextMode: CamMode)
 			playCamCarousel(nextMode, "off", false)
 			return
 		end
-		if nextMode == "plotcam" and not resumePreserveView then
+		if nextMode == "plotcam" and not resumePreserveView and FC.PLOT_CAM_VARIANT ~= 2 then
 			local pose = resolveSkyPose()
 			if pose then
 				camPos = clampToSkyPose(camPos, pose)
@@ -1299,17 +1379,38 @@ setMode = function(nextMode: CamMode)
 	end
 
 	if nextMode == "plotcam" then
-		local pose = resolveSkyPose()
 		local cam = getCamera()
-		if pose and cam then
-			cam.CameraType = Enum.CameraType.Scriptable
-			if resumePreserveView then
-				camPos = clampToSkyPose(cam.CFrame.Position, pose)
-				syncLookFromCFrame(cam.CFrame)
-				cam.CFrame = CFrame.new(camPos) * (cam.CFrame - cam.CFrame.Position)
-			else
-				camPos = clampToSkyPose(camPos, pose)
-				cam.CFrame = lookAtFocus(pose.focusPos)
+		if FC.PLOT_CAM_VARIANT == 2 then
+			local resumeCf = if resumePreserveView and cam then cam.CFrame else nil
+			if not PlotCam2.begin(resumeCf) then
+				mode = "off"
+				publishMode()
+				PlotCam2.stop()
+				PlotCam2Tune.setVisible(false)
+				restoreDefaultCamera()
+				return
+			end
+			local cf = PlotCam2.getCFrame()
+			if cam and cf then
+				cam.CameraType = Enum.CameraType.Scriptable
+				cam.CFrame = cf
+				camPos = cf.Position
+			end
+			PlotCam2Tune.setVisible(true)
+			PlotCam2Tune.refresh()
+		else
+			PlotCam2Tune.setVisible(false)
+			local pose = resolveSkyPose()
+			if pose and cam then
+				cam.CameraType = Enum.CameraType.Scriptable
+				if resumePreserveView then
+					camPos = clampToSkyPose(cam.CFrame.Position, pose)
+					syncLookFromCFrame(cam.CFrame)
+					cam.CFrame = CFrame.new(camPos) * (cam.CFrame - cam.CFrame.Position)
+				else
+					camPos = clampToSkyPose(camPos, pose)
+					cam.CFrame = lookAtFocus(pose.focusPos)
+				end
 			end
 		end
 		setDroneLookCapture(false)
@@ -1582,6 +1683,20 @@ player.CharacterAdded:Connect(function()
 	end
 end)
 
+local function tryEnterStartPlotCam()
+	if not startPlotCamPending or not carouselReady then
+		return
+	end
+	if mode ~= "off" then
+		startPlotCamPending = false
+		return
+	end
+	setMode("plotcam")
+	if mode == "plotcam" then
+		startPlotCamPending = false
+	end
+end
+
 ClientPlot.onChanged(function()
 	clearSkyCache()
 	table.clear(route.waypoints)
@@ -1595,6 +1710,7 @@ ClientPlot.onChanged(function()
 	elseif mode == "fishcam" then
 		resetRoutePatrol(fishSt.focusPos)
 	end
+	tryEnterStartPlotCam()
 end)
 
 local function ensureHitButton(btn: GuiObject): GuiButton
@@ -1755,8 +1871,11 @@ local function wireCamCarousel(dPad: Instance)
 	wireModeIcon(fishGui, "fishcam")
 	wireModeIcon(droneGui, "dronecam")
 	carouselReady = true
-	-- Default Off on top; PlotCam left; FishCam bottom; DroneCam right.
-	playCamCarousel("off", "off", false)
+	-- Default seat: Plot Cam (icons + camera). Fall back to icon layout if blocked.
+	tryEnterStartPlotCam()
+	if mode ~= "plotcam" then
+		playCamCarousel("plotcam", "plotcam", false)
+	end
 end
 
 local function syncDPadIcon()
@@ -1901,23 +2020,28 @@ local function bindMobileLeftUi(left: Instance)
 		end)
 
 		playerGui:GetAttributeChangedSignal("OceanTD_ForceCloseFreeCam"):Connect(function()
-			if mode ~= "off" then
-				-- Busy is set before ForceClose so we can restore Plot/Fish/Drone after the shot.
-				if playerGui:GetAttribute("OceanTD_ReefDefeatCamBusy") == true
-					or playerGui:GetAttribute("OceanTD_TangCamBusy") == true
-					or playerGui:GetAttribute("OceanTD_SharkCamBusy") == true
-					or playerGui:GetAttribute("OceanTD_UrchinCamBusy") == true
-				then
-					cinematicResumeMode = mode
-					playerGui:SetAttribute(FC.ATTR_CINEMATIC_RESUME_MODE, mode)
-				else
-					-- Build / place / relocate: stash so closing backpack restores Fish/Plot/Drone.
-					buildResumeMode = mode
-				end
-				forceModeOverride = true
-				setMode("off")
-				forceModeOverride = false
+			if mode == "off" then
+				return
 			end
+			-- Plot Cam is the default RTS seat — stay on it through place/build.
+			-- Cinematics still stash + close.
+			if playerGui:GetAttribute("OceanTD_ReefDefeatCamBusy") == true
+				or playerGui:GetAttribute("OceanTD_TangCamBusy") == true
+				or playerGui:GetAttribute("OceanTD_SharkCamBusy") == true
+				or playerGui:GetAttribute("OceanTD_UrchinCamBusy") == true
+				or playerGui:GetAttribute("OceanTD_PlotSizeCinematicBusy") == true
+			then
+				cinematicResumeMode = mode
+				playerGui:SetAttribute(FC.ATTR_CINEMATIC_RESUME_MODE, mode)
+			elseif mode == "plotcam" then
+				return
+			else
+				-- Fish/Drone: stash so closing backpack restores them.
+				buildResumeMode = mode
+			end
+			forceModeOverride = true
+			setMode("off")
+			forceModeOverride = false
 		end)
 
 		-- Hard stop FishCam/PlotCam writes the instant shark/urchin/tang intro claims the cam.
@@ -1955,6 +2079,16 @@ local function bindMobileLeftUi(left: Instance)
 			forceModeOverride = false
 		end)
 
+		playerGui:GetAttributeChangedSignal("OceanTD_JoinIntroBusy"):Connect(function()
+			if playerGui:GetAttribute("OceanTD_JoinIntroBusy") == true then
+				return
+			end
+			-- Defer so we run after JoinIntro's same-frame ForceCamMode write.
+			task.defer(function()
+				tryEnterStartPlotCam()
+			end)
+		end)
+
 		local function onResumeCinematicCam()
 			local resume = cinematicResumeMode
 			cinematicResumeMode = nil
@@ -1981,31 +2115,43 @@ local function bindMobileLeftUi(left: Instance)
 			end
 		end
 
-		local function onResumeBuildCam()
+		local function tryResumeBuildCam()
 			local resume = buildResumeMode
-			buildResumeMode = nil
 			if not resume or resume == "off" then
 				return
 			end
-			task.defer(function()
-				if mode ~= "off" then
-					return
-				end
-				if PlacementController.isActive() or RelocateController.isActive() then
-					return
-				end
-				if InventoryState.isOpen() then
-					return
-				end
-				forceModeOverride = true
-				setMode(resume)
-				forceModeOverride = false
-			end)
+			if mode ~= "off" then
+				buildResumeMode = nil
+				return
+			end
+			if PlacementController.isActive() or RelocateController.isActive() then
+				return
+			end
+			buildResumeMode = nil
+			forceModeOverride = true
+			setMode(resume)
+			forceModeOverride = false
+		end
+
+		local function onResumeBuildCam()
+			task.defer(tryResumeBuildCam)
 		end
 
 		playerGui:GetAttributeChangedSignal("OceanTD_ResumeDefeatCam"):Connect(onResumeCinematicCam)
 		playerGui:GetAttributeChangedSignal("OceanTD_ResumeCinematicCam"):Connect(onResumeCinematicCam)
 		playerGui:GetAttributeChangedSignal("OceanTD_ResumeBuildCam"):Connect(onResumeBuildCam)
+
+		InventoryState.onOpenChanged(function(open)
+			if not open then
+				task.defer(tryResumeBuildCam)
+			end
+		end)
+
+		RelocateController.onActiveChanged(function(active)
+			if not active then
+				task.defer(tryResumeBuildCam)
+			end
+		end)
 
 		playerGui:GetAttributeChangedSignal("OceanTD_ClearDefeatCamStash"):Connect(function()
 			cinematicResumeMode = nil

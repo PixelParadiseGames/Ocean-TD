@@ -298,6 +298,15 @@ local function applySavedJump(hum: Humanoid)
 	hum.JumpHeight = if savedJumpHeight > 0 then savedJumpHeight else 10.8
 end
 
+local function freecamOwnsCamera(): boolean
+	local pg = Players.LocalPlayer:FindFirstChildOfClass("PlayerGui")
+	if not pg then
+		return false
+	end
+	local camMode = pg:GetAttribute("OceanTD_CamCycleMode")
+	return camMode == "fishcam" or camMode == "plotcam" or camMode == "dronecam"
+end
+
 local function unfreeze()
 	ContextActionService:UnbindAction(C.FREEZE_ACTION)
 	setTouchControlsEnabled(true)
@@ -309,6 +318,7 @@ local function unfreeze()
 	end
 	local character = player.Character
 	local hum = character and character:FindFirstChildOfClass("Humanoid")
+	local keepFreecam = freecamOwnsCamera()
 	if frozen then
 		frozen = false
 		if hum then
@@ -336,7 +346,7 @@ local function unfreeze()
 				applySavedJump(hum)
 			end
 		end
-		if camera then
+		if not keepFreecam and camera then
 			local camType = savedCameraType
 			if camType == nil or camType == Enum.CameraType.Scriptable then
 				camType = Enum.CameraType.Custom
@@ -348,19 +358,22 @@ local function unfreeze()
 	savedCameraCFrame = nil
 end
 
-local function bindFreezeAction()
+local function bindFreezeAction(keepFreecam: boolean)
 	ContextActionService:UnbindAction(C.FREEZE_ACTION)
 	local sinkKeys: { Enum.KeyCode } = {
-		Enum.KeyCode.W,
-		Enum.KeyCode.A,
-		Enum.KeyCode.S,
-		Enum.KeyCode.D,
 		Enum.KeyCode.Space,
 	}
+	-- Plot Cam needs WASD for pan; only sink move keys on avatar cam.
+	if not keepFreecam then
+		table.insert(sinkKeys, Enum.KeyCode.W)
+		table.insert(sinkKeys, Enum.KeyCode.A)
+		table.insert(sinkKeys, Enum.KeyCode.S)
+		table.insert(sinkKeys, Enum.KeyCode.D)
+	end
 	if not inspectModal then
 		table.insert(sinkKeys, Enum.KeyCode.ButtonA)
 	end
-	if gamepadRelocate then
+	if gamepadRelocate and not keepFreecam then
 		table.insert(sinkKeys, Enum.KeyCode.Thumbstick1)
 	end
 	ContextActionService:BindActionAtPriority(C.FREEZE_ACTION, function()
@@ -369,8 +382,9 @@ local function bindFreezeAction()
 end
 
 local function freeze()
+	local keepFreecam = freecamOwnsCamera()
 	if frozen then
-		if camera and savedCameraCFrame then
+		if not keepFreecam and camera and savedCameraCFrame then
 			camera.CameraType = Enum.CameraType.Scriptable
 			camera.CFrame = savedCameraCFrame
 		end
@@ -401,7 +415,10 @@ local function freeze()
 		end)
 	end
 	setTouchControlsEnabled(false)
-	if camera then
+	if keepFreecam then
+		savedCameraType = nil
+		savedCameraCFrame = nil
+	elseif camera then
 		if camera.CameraType ~= Enum.CameraType.Scriptable then
 			savedCameraType = camera.CameraType
 		else
@@ -410,7 +427,7 @@ local function freeze()
 		savedCameraCFrame = camera.CFrame
 		camera.CameraType = Enum.CameraType.Scriptable
 	end
-	bindFreezeAction()
+	bindFreezeAction(keepFreecam)
 end
 
 local function keepCameraFrozen()
@@ -1542,6 +1559,11 @@ end
 
 function RelocateController.isActive(): boolean
 	return active
+end
+
+-- True while the player is actively dragging a selected coral (past drag threshold).
+function RelocateController.isDragging(): boolean
+	return active and dragging
 end
 
 function RelocateController.getSelectedPart(): BasePart?

@@ -16,14 +16,6 @@ local SKILLS_OPEN_ATTR = "OceanTD_SkillsBubblesOpen"
 local CINEMATIC_BUSY_ATTR = "OceanTD_PlotSizeCinematicBusy"
 local RENDER_STEP = "OceanTD_SkillsAvatarCam"
 
-local function waveIntroCamBusy(): boolean
-	return playerGui:GetAttribute("OceanTD_SharkCamBusy") == true
-		or playerGui:GetAttribute("OceanTD_UrchinCamBusy") == true
-		or playerGui:GetAttribute("OceanTD_TangCamBusy") == true
-		or playerGui:GetAttribute("OceanTD_ReefDefeatCamBusy") == true
-		or playerGui:GetAttribute(CINEMATIC_BUSY_ATTR) == true
-end
-
 local TWEEN_IN_SEC = 0.4
 local TWEEN_OUT_SEC = 0.45
 local TURN_SEC = 0.35
@@ -31,7 +23,15 @@ local VERTICAL_FILL = 0.88
 local LEFT_THIRD_CENTER = 1 / 6
 
 local player = Players.LocalPlayer
-local playerGui = player:WaitForChild("PlayerGui")
+local playerGui = player:WaitForChild("PlayerGui") :: PlayerGui
+
+local function waveIntroCamBusy(): boolean
+	return playerGui:GetAttribute("OceanTD_SharkCamBusy") == true
+		or playerGui:GetAttribute("OceanTD_UrchinCamBusy") == true
+		or playerGui:GetAttribute("OceanTD_TangCamBusy") == true
+		or playerGui:GetAttribute("OceanTD_ReefDefeatCamBusy") == true
+		or playerGui:GetAttribute(CINEMATIC_BUSY_ATTR) == true
+end
 
 local active = false
 local token = 0

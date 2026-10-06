@@ -39,6 +39,14 @@ local function stopBind()
 	end)
 end
 
+local function willResumeCycleCam(pg: PlayerGui?): boolean
+	if not pg then
+		return false
+	end
+	local m = pg:GetAttribute("OceanTD_CinematicResumeMode")
+	return typeof(m) == "string" and m ~= "" and m ~= "off"
+end
+
 function SharkCam.isBusy(): boolean
 	return busy
 end
@@ -49,7 +57,16 @@ function SharkCam.stopImmediate()
 	stopBind()
 	local pg = getPlayerGui()
 	if pg then
+		local resume = willResumeCycleCam(pg)
 		pg:SetAttribute("OceanTD_SharkCamBusy", false)
+		if resume then
+			local cam = Workspace.CurrentCamera
+			if cam then
+				cam.CameraType = Enum.CameraType.Scriptable
+				cam.CameraSubject = nil
+			end
+			pg:SetAttribute("OceanTD_ResumeCinematicCam", os.clock())
+		end
 	end
 end
 
@@ -84,14 +101,6 @@ end
 local function smoothstep(u: number): number
 	local t = math.clamp(u, 0, 1)
 	return t * t * (3 - 2 * t)
-end
-
-local function willResumeCycleCam(pg: PlayerGui?): boolean
-	if not pg then
-		return false
-	end
-	local m = pg:GetAttribute("OceanTD_CinematicResumeMode")
-	return typeof(m) == "string" and m ~= "" and m ~= "off"
 end
 
 local function kickOtherCamOwners(pg: PlayerGui?)

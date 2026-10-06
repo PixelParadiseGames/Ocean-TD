@@ -1187,18 +1187,10 @@ local function destroyFolder(folder: Folder?)
 end
 
 local function finishCamToFollow()
+	-- Default seat after intro: Plot Cam (not avatar follow / Off).
 	playerGui:SetAttribute(ATTR_CAM_POS, nil)
 	playerGui:SetAttribute(ATTR_BUSY, false)
-	playerGui:SetAttribute(ATTR_FORCE_CAM, "off")
-	playerGui:SetAttribute("OceanTD_ForceCloseFreeCam", os.clock())
-	local cam = Workspace.CurrentCamera
-	local hum = player.Character and player.Character:FindFirstChildOfClass("Humanoid")
-	if cam then
-		cam.CameraType = Enum.CameraType.Custom
-		if hum then
-			cam.CameraSubject = hum
-		end
-	end
+	playerGui:SetAttribute(ATTR_FORCE_CAM, "plotcam")
 end
 
 local function followHandoffCFrame(hrp: BasePart): CFrame
@@ -1730,6 +1722,7 @@ local function runIntro()
 		-- Cam cycle locked until they close build mode after the first coral hue.
 		playerGui:SetAttribute("OceanTD_TutorialGateCam", true)
 		playerGui:SetAttribute("OceanTD_TutorialWavesSlotReady", false)
+		-- Planning arrow trains start from WaveSim when JoinIntroBusy clears (player in control).
 	end
 
 	local function requestSkip()
@@ -2034,6 +2027,7 @@ task.spawn(function()
 		destroyEarlyLoadBar()
 		playerGui:SetAttribute(ATTR_BUSY, false)
 		notifyIntroComplete()
+		-- Planning trains: WaveSim listens for JoinIntroBusy clear.
 		return
 	end
 
@@ -2079,5 +2073,6 @@ task.spawn(function()
 		finishCamToFollow()
 		running = false
 		notifyIntroComplete()
+		-- Planning trains: WaveSim listens for JoinIntroBusy clear.
 	end
 end)
