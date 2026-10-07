@@ -114,11 +114,27 @@ local function currentTrackId(): string?
 	return trackIds[idx]
 end
 
+local function applySoftDuckToSound(bgm: Sound)
+	if not softDuckActive then
+		return
+	end
+	local factor = softDuckPendingFactor
+	if typeof(factor) ~= "number" then
+		return
+	end
+	local target = softDuckBaseVolume * math.clamp(factor, 0, 1)
+	bgm.Volume = target
+end
+
 local function applyTrack(soundId: string)
 	local s = ensureSound()
 	s:Stop()
 	s.SoundId = soundId
 	s.TimePosition = 0
+	-- Keep VO duck if dialogue is already playing when a track starts / skips.
+	if softDuckActive then
+		applySoftDuckToSound(s)
+	end
 	s:Play()
 	paused = false
 	fireState()
@@ -441,6 +457,7 @@ end
 local softDuckToken = 0
 local softDuckActive = false
 local softDuckBaseVolume = 1
+local softDuckPendingFactor: number? = nil -- applied when BGM starts mid-VO
 
 local function tweenBgmSoft(toVol: number, fadeSec: number, token: number, onDone: (() -> ())?)
 	local sound = bgmSound
@@ -493,26 +510,29 @@ function BgmController.fadeBgmToFactor(factor: number, fadeSec: number?)
 	if paused then
 		return
 	end
-	local bgm = bgmSound
-	if not bgm then
-		return
-	end
 	local fade = if typeof(fadeSec) == "number" then math.max(0, fadeSec) else FADE_SEC
+	local clamped = math.clamp(factor, 0, 1)
+	softDuckPendingFactor = clamped
 	softDuckToken += 1
 	local my = softDuckToken
+	local bgm = bgmSound
 	if not softDuckActive then
 		-- Prefer overlay's saved volume if shark theme already ducked BGM to 0.
-		softDuckBaseVolume = if duckActive then savedBgmVolume else bgm.Volume
+		softDuckBaseVolume = if duckActive then savedBgmVolume elseif bgm then bgm.Volume else 1
 		if softDuckBaseVolume <= 0 then
 			softDuckBaseVolume = 1
 		end
 		softDuckActive = true
 	end
+	if not bgm then
+		-- VO often starts before BGM; duck applies when play()/applyTrack runs.
+		return
+	end
 	if duckActive then
 		-- Overlay owns audible BGM; remember base so clear restores correctly later.
 		return
 	end
-	local target = softDuckBaseVolume * math.clamp(factor, 0, 1)
+	local target = softDuckBaseVolume * clamped
 	tweenBgmSoft(target, fade, my, nil)
 end
 
@@ -525,6 +545,7 @@ function BgmController.clearBgmFactor(fadeSec: number?)
 	local my = softDuckToken
 	local base = softDuckBaseVolume
 	softDuckActive = false
+	softDuckPendingFactor = nil
 	if duckActive then
 		savedBgmVolume = base
 		return

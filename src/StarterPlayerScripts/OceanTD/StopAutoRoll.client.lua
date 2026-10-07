@@ -10,6 +10,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 local SoundService = game:GetService("SoundService")
 local TweenService = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
 
 local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
@@ -24,6 +25,9 @@ local UiCircles = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiCircl
 local SeedWheelAutoRollState = require(script.Parent:WaitForChild("SeedWheelAutoRollState"))
 local SeedWheelRevealApi = require(script.Parent:WaitForChild("SeedWheelRevealApi"))
 local SkillStages = require(oceanRoot:WaitForChild("Shared"):WaitForChild("SkillStages"))
+local InventoryState = require(script.Parent:WaitForChild("InventoryState"))
+local PlacementController = require(script.Parent:WaitForChild("PlacementController"))
+local RelocateController = require(script.Parent:WaitForChild("RelocateController"))
 
 local STUDIO_ANCHOR_NAME = "StopAutoRoll"
 local HIT_NAME = "_OceanTD_StopAutoRollHit"
@@ -31,6 +35,8 @@ local DISK_NAME = "_OceanTD_StopAutoRollDisk"
 local DICE_NAME = "_OceanTD_StopAutoRollDice"
 local CORAL_NAME = "_OceanTD_StopAutoRollCoral"
 local LABEL_NAME = "_OceanTD_StopAutoRollLabel"
+local HELP_TIP_NAME = "_OceanTD_RollHelpTip"
+local HELP_LETTER_NAME = "_OceanTD_HelpLetter"
 local BUTTON_SCALE_NAME = "_OceanTD_StopAutoRollScale"
 local LABEL_SCALE_NAME = "_OceanTD_StopAutoRollLabelScale"
 local DICE_IMAGE = "rbxassetid://77867192113507"
@@ -39,6 +45,9 @@ local START_GREEN = Color3.fromRGB(29, 140, 46)
 local BRIGHT_GREEN = Color3.fromRGB(90, 255, 110)
 local STOP_RED = Color3.fromRGB(200, 45, 50)
 local BRIGHT_RED = Color3.fromRGB(255, 70, 75)
+local HELP_BLUE = Color3.fromRGB(40, 130, 220)
+local STORE_OPEN_ATTR = "OceanTD_StoreOpen"
+local LABEL_HEIGHT = 10 -- one size smaller than prior 11
 local STROKE_NAME = "_OceanTD_StopAutoRollStroke"
 local REST_SCALE = 1.2 -- 20% bigger than Studio anchor
 local ICON_SWAP_SEC = 1.35
@@ -61,11 +70,19 @@ local COUNT_SLIDE_PX = 36
 local INFINITY_GLYPH = "∞"
 
 local function clearRollFingerHint()
-	-- After roll: hide finger and wait for coral→backpack slide, then backpack tutorial.
 	local v = playerGui:GetAttribute(ROLL_FINGER_ATTR)
-	if v == true or v == "roll" then
-		playerGui:SetAttribute(ROLL_FINGER_ATTR, "await")
+	if v ~= true and v ~= "roll" then
+		return
 	end
+	-- Post-defeat reminder: starting a roll advances to the skills finger.
+	if playerGui:GetAttribute("OceanTD_TutorialRollThenSkills") == true then
+		playerGui:SetAttribute("OceanTD_TutorialRollThenSkills", nil)
+		playerGui:SetAttribute("OceanTD_TutorialGateLeftHud", false)
+		playerGui:SetAttribute(ROLL_FINGER_ATTR, "skills")
+		return
+	end
+	-- First join roll: wait for coral→backpack slide, then backpack tutorial.
+	playerGui:SetAttribute(ROLL_FINGER_ATTR, "await")
 end
 
 local rollPressSound = Instance.new("Sound")
@@ -89,6 +106,8 @@ local outerStroke: UIStroke? = nil
 local diceIcon: ImageLabel? = nil
 local coralIcon: ImageLabel? = nil
 local label: TextLabel? = nil
+local helpTip: Frame? = nil
+local helpLetter: TextLabel? = nil
 local iconSwapConn: RBXScriptConnection? = nil
 local flashToken = 0
 local showDice = true
@@ -100,12 +119,36 @@ local labelScale: UIScale? = nil
 local fountainHoldGen = 0
 local fountainRng = Random.new()
 local countAnimToken = 0
+local pressHolding = false
+local pressGen = 0
 
 local function uiHidesRoll(): boolean
 	return playerGui:GetAttribute(SKILLS_OPEN_ATTR) == true
 		or playerGui:GetAttribute(POWERUP_OPEN_ATTR) == true
 		or playerGui:GetAttribute(REPORT_OPEN_ATTR) == true
 		or playerGui:GetAttribute(HIDE_UI_ACTIVE_ATTR) == true
+		or InventoryState.isOpen()
+end
+
+local function isGamepadMode(): boolean
+	local t = UserInputService:GetLastInputType()
+	return t == Enum.UserInputType.Gamepad1
+end
+
+local function refreshHelpTip()
+	if not helpTip or not helpLetter then
+		return
+	end
+	local show = isGamepadMode() and not uiHidesRoll() and not presenting
+	helpTip.Visible = show
+	helpLetter.Visible = show
+	if show then
+		helpTip.BackgroundColor3 = HELP_BLUE
+		helpTip.BackgroundTransparency = 0
+		helpLetter.Text = "A"
+		helpLetter.TextColor3 = Color3.new(1, 1, 1)
+		UiCircles.ensure(helpTip)
+	end
 end
 
 local function refreshRollButtonVisibility()
@@ -125,6 +168,7 @@ local function refreshRollButtonVisibility()
 			(hitBtn :: any).Interactable = show
 		end)
 	end
+	refreshHelpTip()
 end
 
 local function buttonScreenCenter(): Vector2?
@@ -624,7 +668,7 @@ end
 local function ensureLabel(host: GuiObject): TextLabel
 	local existing = host:FindFirstChild(LABEL_NAME)
 	if existing and existing:IsA("TextLabel") then
-		existing.Size = UDim2.new(1, -4, 0, 11)
+		existing.Size = UDim2.new(1, -4, 0, LABEL_HEIGHT)
 		label = existing
 		return existing
 	end
@@ -636,7 +680,7 @@ local function ensureLabel(host: GuiObject): TextLabel
 	lbl.BackgroundTransparency = 1
 	lbl.AnchorPoint = Vector2.new(0.5, 1)
 	lbl.Position = UDim2.new(0.5, 0, 1, -2)
-	lbl.Size = UDim2.new(1, -4, 0, 11)
+	lbl.Size = UDim2.new(1, -4, 0, LABEL_HEIGHT)
 	lbl.Font = UiTheme.Font
 	lbl.TextScaled = true
 	lbl.TextColor3 = Color3.new(1, 1, 1)
@@ -646,6 +690,70 @@ local function ensureLabel(host: GuiObject): TextLabel
 	lbl.Parent = host
 	label = lbl
 	return lbl
+end
+
+-- Gamepad tip bubble (same style as backpack/wave help badges; blue for ROLL / A).
+local function ensureHelpTip(host: GuiObject)
+	local existing = host:FindFirstChild(HELP_TIP_NAME)
+	local tip: Frame
+	if existing and existing:IsA("Frame") then
+		tip = existing
+	else
+		if existing then
+			existing:Destroy()
+		end
+		tip = Instance.new("Frame")
+		tip.Name = HELP_TIP_NAME
+		tip.Parent = host
+	end
+	tip.AnchorPoint = Vector2.new(1, 0)
+	tip.Position = UDim2.new(1, 2, 0, -2)
+	tip.Size = UDim2.fromScale(0.42, 0.42)
+	tip.BackgroundColor3 = HELP_BLUE
+	tip.BackgroundTransparency = 0
+	tip.BorderSizePixel = 0
+	tip.ZIndex = host.ZIndex + 25
+	tip.Active = false
+	tip.Selectable = false
+	local aspect = tip:FindFirstChildOfClass("UIAspectRatioConstraint")
+	if not aspect then
+		aspect = Instance.new("UIAspectRatioConstraint")
+		aspect.AspectRatio = 1
+		aspect.Parent = tip
+	end
+	UiCircles.ensure(tip)
+
+	local letterExisting = tip:FindFirstChild(HELP_LETTER_NAME)
+	local letter: TextLabel
+	if letterExisting and letterExisting:IsA("TextLabel") then
+		letter = letterExisting
+	else
+		if letterExisting then
+			letterExisting:Destroy()
+		end
+		letter = Instance.new("TextLabel")
+		letter.Name = HELP_LETTER_NAME
+		letter.Parent = tip
+		local pad = Instance.new("UIPadding")
+		pad.PaddingTop = UDim.new(0.15, 0)
+		pad.PaddingBottom = UDim.new(0.15, 0)
+		pad.PaddingLeft = UDim.new(0.15, 0)
+		pad.PaddingRight = UDim.new(0.15, 0)
+		pad.Parent = letter
+	end
+	letter.BackgroundTransparency = 1
+	letter.Size = UDim2.fromScale(1, 1)
+	letter.Font = UiTheme.Font
+	letter.Text = "A"
+	letter.TextColor3 = Color3.new(1, 1, 1)
+	letter.TextScaled = true
+	letter.Active = false
+	letter.Selectable = false
+	letter.ZIndex = tip.ZIndex + 1
+
+	helpTip = tip
+	helpLetter = letter
+	refreshHelpTip()
 end
 
 local function ensureScale(parent: Instance, name: string): UIScale
@@ -846,6 +954,7 @@ local function ensureChrome(host: GuiObject)
 				and n ~= DICE_NAME
 				and n ~= CORAL_NAME
 				and n ~= LABEL_NAME
+				and n ~= HELP_TIP_NAME
 				and not ch:IsA("UICorner")
 				and not ch:IsA("UIStroke")
 				and not ch:IsA("UIAspectRatioConstraint")
@@ -861,6 +970,7 @@ local function ensureChrome(host: GuiObject)
 	coralIcon = ensureIcon(host, CORAL_NAME, CORAL_IMAGE, 3, 0.48)
 	coralIcon.Visible = false
 	ensureLabel(host)
+	ensureHelpTip(host)
 	buttonScale = ensureScale(host, BUTTON_SCALE_NAME)
 	if not presenting then
 		buttonScale.Scale = REST_SCALE
@@ -871,14 +981,45 @@ local function ensureChrome(host: GuiObject)
 end
 
 local HOLD_SEC = 0.45
-local pressGen = 0
 
 local function isPointerPress(input: InputObject): boolean
 	local t = input.UserInputType
-	if t == Enum.UserInputType.MouseButton1 or t == Enum.UserInputType.Touch then
-		return true
+	return t == Enum.UserInputType.MouseButton1 or t == Enum.UserInputType.Touch
+end
+
+local function canAcceptRollPress(): boolean
+	return not uiHidesRoll() and not busyAnim and not presenting and anchor ~= nil
+end
+
+-- A is shared with backpack select / place / relocate / fish-feed aim — only claim it when idle.
+local function canAcceptGamepadRoll(): boolean
+	if not canAcceptRollPress() then
+		return false
 	end
-	return input.KeyCode == Enum.KeyCode.ButtonA
+	if playerGui:GetAttribute(STORE_OPEN_ATTR) == true then
+		return false
+	end
+	if playerGui:GetAttribute("OceanTD_JoinIntroBusy") == true then
+		return false
+	end
+	if InventoryState.isOpen() then
+		return false
+	end
+	if PlacementController.isActive() or RelocateController.isActive() then
+		return false
+	end
+	-- FishCam mid-wave: A aims food via WaveTapFeed crosshair.
+	if playerGui:GetAttribute("OceanTD_CamCycleMode") == "fishcam" then
+		local ok, WaveSim = pcall(function()
+			return require(script.Parent:WaitForChild("WaveSim"))
+		end)
+		if ok and typeof(WaveSim) == "table" and typeof((WaveSim :: any).isRunning) == "function" then
+			if (WaveSim :: any).isRunning() then
+				return false
+			end
+		end
+	end
+	return true
 end
 
 local function canStartAutoRoll(): boolean
@@ -1035,56 +1176,67 @@ local function rollOnce()
 	end)
 end
 
+local function beginRollPress()
+	if not canAcceptRollPress() then
+		return false
+	end
+	clearRollFingerHint()
+	flashPressGreen()
+	playRollPressSound()
+	UiHaptics.pulseDouble()
+	startHoldFountain()
+	pressGen += 1
+	local gen = pressGen
+	pressHolding = true
+	local wasAuto = SeedWheelAutoRollState.isEnabled()
+	task.delay(HOLD_SEC, function()
+		if gen ~= pressGen or not pressHolding then
+			return
+		end
+		pressHolding = false
+		pressGen += 1
+		-- Hold completed — stop spray before toggling auto-roll.
+		stopHoldFountain()
+		UiHaptics.pulseLong()
+		if wasAuto then
+			stopAutoRoll()
+		else
+			startAutoRoll()
+		end
+	end)
+	return true
+end
+
+local function endRollPress()
+	if not pressHolding then
+		return
+	end
+	pressHolding = false
+	pressGen += 1
+	stopHoldFountain()
+	if SeedWheelAutoRollState.isEnabled() then
+		stopAutoRoll()
+	else
+		rollOnce()
+	end
+end
+
 local function wireHit(hit: GuiButton)
 	if hit:GetAttribute("_OceanTD_StopAutoRollWired") == true then
 		return
 	end
 	hit:SetAttribute("_OceanTD_StopAutoRollWired", true)
-	local holding = false
 	hit.InputBegan:Connect(function(input)
 		if not isPointerPress(input) then
 			return
 		end
-		if uiHidesRoll() or busyAnim or presenting then
-			return
-		end
-		clearRollFingerHint()
-		flashPressGreen()
-		playRollPressSound()
-		UiHaptics.pulseDouble()
-		startHoldFountain()
-		pressGen += 1
-		local gen = pressGen
-		holding = true
-		local wasAuto = SeedWheelAutoRollState.isEnabled()
-		task.delay(HOLD_SEC, function()
-			if gen ~= pressGen or not holding then
-				return
-			end
-			holding = false
-			pressGen += 1
-			-- Hold completed — stop spray before toggling auto-roll.
-			stopHoldFountain()
-			UiHaptics.pulseLong()
-			if wasAuto then
-				stopAutoRoll()
-			else
-				startAutoRoll()
-			end
-		end)
+		beginRollPress()
 	end)
 	hit.InputEnded:Connect(function(input)
-		if not isPointerPress(input) or not holding then
+		if not isPointerPress(input) then
 			return
 		end
-		holding = false
-		pressGen += 1
-		stopHoldFountain()
-		if SeedWheelAutoRollState.isEnabled() then
-			stopAutoRoll()
-		else
-			rollOnce()
-		end
+		endRollPress()
 	end)
 end
 
@@ -1173,6 +1325,31 @@ playerGui:GetAttributeChangedSignal(SKILLS_OPEN_ATTR):Connect(onOverlayUiAttrCha
 playerGui:GetAttributeChangedSignal(POWERUP_OPEN_ATTR):Connect(onOverlayUiAttrChanged)
 playerGui:GetAttributeChangedSignal(REPORT_OPEN_ATTR):Connect(onOverlayUiAttrChanged)
 playerGui:GetAttributeChangedSignal(HIDE_UI_ACTIVE_ATTR):Connect(onOverlayUiAttrChanged)
+InventoryState.onOpenChanged(function()
+	refreshRollButtonVisibility()
+end)
+
+-- Joystick A: tap rolls once, hold starts auto-roll (same as pressing the button).
+UserInputService.InputBegan:Connect(function(input, _gameProcessed)
+	if input.KeyCode ~= Enum.KeyCode.ButtonA then
+		return
+	end
+	if not canAcceptGamepadRoll() then
+		return
+	end
+	beginRollPress()
+end)
+
+UserInputService.InputEnded:Connect(function(input, _gameProcessed)
+	if input.KeyCode ~= Enum.KeyCode.ButtonA then
+		return
+	end
+	endRollPress()
+end)
+
+UserInputService.LastInputTypeChanged:Connect(function()
+	refreshHelpTip()
+end)
 
 LeftHudLayout.watchMobileLeftUi(playerGui, wireStopAutoRoll)
 

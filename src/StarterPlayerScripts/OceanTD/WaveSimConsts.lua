@@ -97,7 +97,7 @@ local C = {
 	TAP_FEED_COOLDOWN_SEC = 1,
 	TAP_FEED_DEBUG = false, -- translucent ball showing tap radius (dev)
 	-- Screen Y (0 top → 1 bottom) for tap-orb spawn; keep above HUD / fish-cam horizon.
-	TAP_FEED_SCREEN_Y = 0.72,
+	TAP_FEED_SCREEN_Y = 0.5, -- food orb starts mid-screen (was lower ~0.72)
 	TAP_FEED_START_DEPTH_MIN = 10,
 	TAP_FEED_START_DEPTH_MAX = 20,
 	TAP_FEED_FLIGHT_MULT = 0.5, -- half duration = 2× travel speed vs coral orbs
@@ -154,7 +154,7 @@ local C = {
 	FISH_A2_FRAC_MAX = 0.40,
 	FISH_ROUTE_A2_NAME = "A2",
 	-- Hungry crabs on WaveRoute.GroundA / GroundB (wave 5+); 50/50 per crab.
-	CRAB_FIRST_WAVE = 5,
+	CRAB_FIRST_WAVE = 7,
 	CRAB_HUNGER_MULT = 0.84, -- × tang hunger (crabs + urchins); −50% from 1.68
 	CRAB_SPEED_MULT = 0.75, -- 25% slower than Tang (between sprints)
 	CRAB_SPRINT_MULT_MIN = 1.55,

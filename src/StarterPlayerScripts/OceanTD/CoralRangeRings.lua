@@ -4,7 +4,7 @@
 
 	Range Preview A — orbiting green dashes (original).
 	Range Preview B — tall vertical disc that rotates about Y (sphere slice).
-	Preview B size lerps to the current range so upgrades tween instead of vanishing.
+	Preview B size lerps to the current range; stays visible through upgrade mesh swaps.
 ]]
 
 local RunService = game:GetService("RunService")
@@ -37,15 +37,11 @@ local RANGE_NORMALS = {
 -- ── Preview B (tall disc) ───────────────────────────────────────────────────
 local DISC_THICK = 0.22
 local GROW_SEC_A = 2
--- Prior ~0.7975; +30% more transparent (of remaining opacity).
 local TALL_TRANSPARENCY = 0.7975 + (1 - 0.7975) * 0.3 -- ≈0.858
 local BREATHE_AMP = 0.04
 local BREATHE_HZ = 0.55
 local TALL_SPIN_RAD_PER_SEC = 0.55
--- Smooth size changes (intro + upgrades). Higher = snappier.
-local RANGE_LERP_RATE = 6.5
--- Coral mesh swap on upgrade briefly nils the part — keep disc alive.
-local PART_MISSING_GRACE_SEC = 0.45
+local RANGE_LERP_RATE = 5.5
 
 local rangeFolder: Folder? = nil
 local rangeFollow: RBXScriptConnection? = nil
@@ -55,8 +51,8 @@ local activeStyle: string? = nil
 
 -- Preview B displayed radius (studs); lerps toward target each frame.
 local displayRange = 0
+local lastKnownTargetRange = 0
 local lastTallCenter: Vector3? = nil
-local missingPartT = 0
 local spinA = 0
 local timeB = 0
 local yawB = 0
@@ -83,6 +79,17 @@ local function makeDisc(name: string, transparency: number): BasePart
 	disc.Transparency = transparency
 	disc.Size = Vector3.new(DISC_THICK, 1, 1)
 	return disc
+end
+
+local function rangeFromTallDisc(folder: Folder?): number
+	if not folder then
+		return 0
+	end
+	local tall = folder:FindFirstChild("Tall")
+	if tall and tall:IsA("BasePart") then
+		return math.max(tall.Size.Y, tall.Size.Z) * 0.5
+	end
+	return 0
 end
 
 -- ── Preview A ───────────────────────────────────────────────────────────────
@@ -173,7 +180,10 @@ end
 
 -- ── Public API ──────────────────────────────────────────────────────────────
 
-function CoralRangeRings.hide()
+-- resetSize=true clears lerp state (inspect close / placement cancel).
+-- resetSize=false keeps displayed size so the next show can continue from it.
+function CoralRangeRings.hide(resetSize: boolean?)
+	local keep = math.max(displayRange, rangeFromTallDisc(rangeFolder), lastKnownTargetRange)
 	if rangeFollow then
 		rangeFollow:Disconnect()
 		rangeFollow = nil
@@ -185,13 +195,22 @@ function CoralRangeRings.hide()
 	getPartFn = nil
 	getRangeFn = nil
 	activeStyle = nil
-	displayRange = 0
-	lastTallCenter = nil
-	missingPartT = 0
 	spinA = 0
-	timeB = 0
-	yawB = 0
 	growT_A = 0
+	if resetSize == true or resetSize == nil then
+		-- Default: full clear (placement cancel, inspect close).
+		displayRange = 0
+		lastKnownTargetRange = 0
+		lastTallCenter = nil
+		timeB = 0
+		yawB = 0
+	else
+		-- Soft hide: remember size for upgrade continuity.
+		if keep > 0.05 then
+			displayRange = keep
+			lastKnownTargetRange = keep
+		end
+	end
 end
 
 function CoralRangeRings.isShowing(): boolean
@@ -215,13 +234,13 @@ local function ensureHeartbeat()
 	rangeFollow = RunService.Heartbeat:Connect(function(dt)
 		local f = rangeFolder
 		if not f or not f.Parent then
-			CoralRangeRings.hide()
+			CoralRangeRings.hide(false)
 			return
 		end
 		local p = if getPartFn then getPartFn() else nil
 		if PREVIEW_STYLE == "A" then
 			if not p or not p.Parent then
-				CoralRangeRings.hide()
+				CoralRangeRings.hide(true)
 				return
 			end
 			growT_A += dt
@@ -231,25 +250,23 @@ local function ensureHeartbeat()
 			return
 		end
 
-		-- Preview B: grace through mesh swap; lerp size to new range.
+		-- Preview B: never tear down during mesh swap — keep posing at last center.
 		timeB += dt
 		yawB += dt * TALL_SPIN_RAD_PER_SEC
-		local targetRange = displayRange
+		local targetRange = lastKnownTargetRange
 		local center = lastTallCenter
 		if p and p.Parent then
-			missingPartT = 0
 			center = CoralSize.visualCenter(p)
 			lastTallCenter = center
 			targetRange = if getRangeFn then getRangeFn() else defaultRange(p)
-		else
-			missingPartT += dt
-			if missingPartT > PART_MISSING_GRACE_SEC or not center then
-				CoralRangeRings.hide()
-				return
-			end
+			lastKnownTargetRange = targetRange
 		end
+		if not center then
+			return
+		end
+		-- First appearance only: grow from 0. Upgrades lerp from current displayRange.
 		displayRange = lerpRange(displayRange, targetRange, dt)
-		poseRangePreviewB(f, center :: Vector3, displayRange, timeB, yawB)
+		poseRangePreviewB(f, center, displayRange, timeB, yawB)
 	end)
 end
 
@@ -261,18 +278,22 @@ function CoralRangeRings.show(part: BasePart, getPart: (() -> BasePart?)?, getRa
 	getRangeFn = getRange
 	local target = if getRange then getRange() else defaultRange(part)
 	lastTallCenter = CoralSize.visualCenter(part)
+	lastKnownTargetRange = target
+
+	-- Prefer live disc size, then remembered displayRange (never restart from 0 on upgrade).
+	local liveSize = rangeFromTallDisc(rangeFolder)
+	if liveSize > 0.05 then
+		displayRange = liveSize
+	elseif displayRange < 0.05 and lastKnownTargetRange > 0.05 and rangeFolder ~= nil then
+		-- folder exists but size unread — keep whatever we have
+	end
 
 	if rangeFolder and rangeFolder.Parent and activeStyle == PREVIEW_STYLE then
-		-- Keep existing disc; only retarget size (upgrade path).
-		if PREVIEW_STYLE == "B" and displayRange < 0.05 then
-			displayRange = 0
-		end
 		ensureHeartbeat()
 		return
 	end
 
-	-- Fresh folder. Preserve displayRange if we already had a size (rebuild mid-tween).
-	local keepSize = displayRange
+	local keepSize = math.max(displayRange, liveSize)
 	if rangeFolder then
 		if rangeFollow then
 			rangeFollow:Disconnect()
@@ -292,10 +313,9 @@ function CoralRangeRings.show(part: BasePart, getPart: (() -> BasePart?)?, getRa
 		poseRangeRingsA(part, folder, target, 0, 0)
 	else
 		buildPreviewB(folder)
-		-- Intro: grow from 0. Upgrade rebuild: continue from keepSize.
+		-- Intro only grows from 0; upgrade / re-show continues from keepSize.
 		displayRange = if keepSize > 0.05 then keepSize else 0
-		missingPartT = 0
-		poseRangePreviewB(folder, lastTallCenter :: Vector3, displayRange, timeB, yawB)
+		poseRangePreviewB(folder, lastTallCenter :: Vector3, math.max(displayRange, 0.05), timeB, yawB)
 	end
 	rangeFolder = folder
 	activeStyle = PREVIEW_STYLE

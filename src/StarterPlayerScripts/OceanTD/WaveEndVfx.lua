@@ -29,6 +29,7 @@ local HEART_LOSS_MAX_STUDS = 100 * 1.4 -- happy exit base size
 local HEART_LOSS_END_SCALE = 3 -- broken heart grows to 3× this max
 local HEART_FALL_STUDS = 360
 local HEART_FALL_SEC = 2.55
+local HEART_SPRAY_STUDS = 95 -- lateral fan so multi-heart losses don't stack straight down
 local HEART_LIGHT_RANGE = 50
 local HEART_LIGHT_BRIGHTNESS = 0.9
 local HEART_GUI_ORDER = 2600 -- above happy-exit billboards
@@ -544,9 +545,15 @@ function WaveEndVfx.notifyUnderfedArrival()
 	end)
 end
 
-local function pulseReefHeartLoss(at: Vector3, tintHeart: boolean?)
+local function pulseReefHeartLoss(at: Vector3, tintHeart: boolean?, sprayIndex: number?, sprayCount: number?)
 	local folder = resolveFolder()
 	local startPos = at + Vector3.new(0, 2, 0)
+	-- Fan sideways as they fall (evenly spaced when several tick at once, plus a little jitter).
+	local n = math.max(1, sprayCount or 1)
+	local i = math.clamp(sprayIndex or 1, 1, n)
+	local baseAngle = ((i - 1) / n) * math.pi * 2 + rng:NextNumber(-0.35, 0.35)
+	local sprayReach = HEART_SPRAY_STUDS * rng:NextNumber(0.65, 1.15)
+	local sprayDir = Vector3.new(math.cos(baseAngle), 0, math.sin(baseAngle))
 	local anchor = Instance.new("Part")
 	anchor.Name = "OceanTD_HeartLoss"
 	anchor.Anchored = true
@@ -623,7 +630,11 @@ local function pulseReefHeartLoss(at: Vector3, tintHeart: boolean?)
 	conn = RunService.RenderStepped:Connect(function()
 		local u = math.clamp((os.clock() - t0) / HEART_FALL_SEC, 0, 1)
 		local ease = u * u
-		local worldPos = startPos - Vector3.new(0, HEART_FALL_STUDS * ease, 0)
+		-- Ease out sideways faster than the fall so they read as a spray, not a column.
+		local sprayU = 1 - (1 - u) * (1 - u)
+		local worldPos = startPos
+			+ sprayDir * (sprayReach * sprayU)
+			- Vector3.new(0, HEART_FALL_STUDS * ease, 0)
 		anchor.CFrame = CFrame.new(worldPos)
 
 		local cam = Workspace.CurrentCamera
@@ -884,6 +895,7 @@ function WaveEndVfx.playReefHealthTicks(amount: number, endPos: Vector3?, tintHe
 		local pitch = math.max(REEF_TICK_PITCH_MIN, REEF_TICK_PITCH_START - reefTickStreak * REEF_TICK_PITCH_STEP)
 		reefTickStreak += 1
 		local delaySec = (i - 1) * REEF_TICK_GAP
+		local sprayI = i
 		task.delay(delaySec, function()
 			local snd = reefTickSound:Clone()
 			snd.PlaybackSpeed = pitch
@@ -897,7 +909,7 @@ function WaveEndVfx.playReefHealthTicks(amount: number, endPos: Vector3?, tintHe
 				end
 			end)
 			if at then
-				pulseReefHeartLoss(at, tintHeart)
+				pulseReefHeartLoss(at, tintHeart, sprayI, amount)
 			end
 		end)
 	end

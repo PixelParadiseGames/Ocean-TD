@@ -32,13 +32,15 @@ export type Tune = {
 local DEFAULT_PITCH_DEG = 52
 local DEFAULT_YAW_DEG = -180
 local DEFAULT_YAW_BIAS_DEG = 0
-local DEFAULT_FOCUS_HEIGHT = 40
+local DEFAULT_FOCUS_HEIGHT = 30
 local DEFAULT_DIST_FRONT = 28
 local DEFAULT_DIST_BACK = 200
-local DEFAULT_DIST_OFFSET = -35
+local DEFAULT_DIST_OFFSET = -35 -- max zoom-in (DistOff floor)
+-- Session start / pre-BUILD: pulled back; first BUILD eases to DEFAULT_DIST_OFFSET.
+local START_DIST_OFFSET = 55
 local DEFAULT_PAN_OUT = 200
-local DEFAULT_PAN_IN = 0
-local DEFAULT_PAN_SIDE = 5
+local DEFAULT_PAN_IN = 20
+local DEFAULT_PAN_SIDE = 90
 local PITCH_MIN = 15
 local PITCH_MAX = 80
 local DIST_OFFSET_MIN = -35
@@ -56,6 +58,8 @@ local focus = Vector3.zero
 local wheelAccum = 0
 local wheelConn: RBXScriptConnection? = nil
 local liveDist = DEFAULT_DIST_FRONT -- smoothed effective distance
+-- Until the player opens BUILD once this session, keep the pulled-back start zoom.
+local awaitingBuildZoom = true
 
 -- Live tune (also mirrored per plotId while debugging).
 local tune: Tune = {
@@ -64,7 +68,7 @@ local tune: Tune = {
 	pitchDeg = DEFAULT_PITCH_DEG,
 	distFront = DEFAULT_DIST_FRONT,
 	distBack = DEFAULT_DIST_BACK,
-	distOffset = DEFAULT_DIST_OFFSET,
+	distOffset = START_DIST_OFFSET,
 	focusHeight = DEFAULT_FOCUS_HEIGHT,
 	panOut = DEFAULT_PAN_OUT,
 	panIn = DEFAULT_PAN_IN,
@@ -88,6 +92,10 @@ local function copyTune(t: Tune): Tune
 	}
 end
 
+local function defaultDistOffset(): number
+	return if awaitingBuildZoom then START_DIST_OFFSET else DEFAULT_DIST_OFFSET
+end
+
 local function defaultTune(): Tune
 	return {
 		yawDeg = DEFAULT_YAW_DEG,
@@ -95,7 +103,7 @@ local function defaultTune(): Tune
 		pitchDeg = DEFAULT_PITCH_DEG,
 		distFront = DEFAULT_DIST_FRONT,
 		distBack = DEFAULT_DIST_BACK,
-		distOffset = DEFAULT_DIST_OFFSET,
+		distOffset = defaultDistOffset(),
 		focusHeight = DEFAULT_FOCUS_HEIGHT,
 		panOut = DEFAULT_PAN_OUT,
 		panIn = DEFAULT_PAN_IN,
@@ -318,6 +326,10 @@ local function loadTuneForPlot(plotId: string, plotSize: Vector3)
 	else
 		tune = base
 	end
+	-- Fresh join: prefer start zoom even if a prior session baked DistOff in.
+	if awaitingBuildZoom then
+		tune.distOffset = START_DIST_OFFSET
+	end
 end
 
 function PlotCam2.isActive(): boolean
@@ -418,6 +430,17 @@ function PlotCam2.resetTune()
 	tune = defaultTune()
 	liveDist = tune.distFront + tune.distOffset
 	persistTune()
+end
+
+-- First BUILD open this session: ease DistOff to max zoom-in.
+function PlotCam2.notifyBuildOpened()
+	if not awaitingBuildZoom then
+		return
+	end
+	awaitingBuildZoom = false
+	tune.distOffset = DEFAULT_DIST_OFFSET
+	persistTune()
+	-- liveDist keeps easing via DIST_TWEEN_RATE in tick().
 end
 
 function PlotCam2.begin(resumeCf: CFrame?): boolean

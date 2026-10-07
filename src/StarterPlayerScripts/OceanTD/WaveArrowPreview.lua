@@ -271,6 +271,11 @@ local function playArrowStartSound()
 	WaveEntityPool.playSound("arrow", arrowSound, 1, 0.9, true)
 end
 
+-- Fade the wave-start arrow sting (used while wave-explainer VO is speaking on wave 1).
+function WaveArrowPreview.fadeOutStartSound(fadeSec: number?)
+	WaveEntityPool.fadeLiveSound("arrow", fadeSec or 0.45)
+end
+
 local function createWavePathLabel(text: string, pos: Vector3, parent: Instance, color: Color3?, stroke: Color3?): BasePart
 	local part = Instance.new("Part")
 	part.Name = "OceanTD_WaveLabel"

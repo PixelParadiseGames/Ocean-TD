@@ -38,6 +38,7 @@ local InventoryState = require(script.Parent:WaitForChild("InventoryState"))
 local SeedWheelRevealApi = require(script.Parent:WaitForChild("SeedWheelRevealApi"))
 
 local Consts = require(script.Parent:WaitForChild("CoralInspectPanelConsts"))
+local HuePad = require(script.Parent:WaitForChild("CoralInspectPanelHuePad"))
 
 local CoralInspectPanel = {}
 
@@ -131,11 +132,12 @@ local function noteTutorialHueApplied(appliedIdx: number?)
 	end
 	-- One real user hue press → close-backpack finger (demo taps don't call this).
 	clearTutorialHueTracking()
+	HuePad.hideDpadPrompt()
 	playerGui:SetAttribute(HINT_ATTR, "closeBackpack")
 end
 
 -- Forward-declared; assigned after colorScroll exists.
-local animateScrollToSwatch: ((number, (() -> ())?) -> ())?
+local animateScrollToSwatch: ((number, (() -> ())?, boolean?) -> ())?
 local refreshColorSwatches: (() -> ())?
 
 local function beginTutorialHueFinger(resumeMode: string?)
@@ -157,7 +159,21 @@ local function beginTutorialHueFinger(resumeMode: string?)
 		playerGui:SetAttribute(HINT_ATTR, "closeBackpack")
 		return
 	end
-	focusColorIndex = hue
+	local lastInput = UserInputService:GetLastInputType()
+	local onGamepad = lastInput == Enum.UserInputType.Gamepad1
+		or lastInput == Enum.UserInputType.Gamepad2
+		or lastInput == Enum.UserInputType.Gamepad3
+		or lastInput == Enum.UserInputType.Gamepad4
+	-- Joystick: start focus one swatch left of the finger target so D-Pad is required to match it.
+	if onGamepad then
+		local startFocus = hue - 1
+		if startFocus < Consts.DEFAULT_PALETTE_SWATCH then
+			startFocus = PlotOutlineColors.CORAL_MAX_INDEX
+		end
+		focusColorIndex = startFocus
+	else
+		focusColorIndex = hue
+	end
 	if refreshColorSwatches then
 		refreshColorSwatches()
 	end
@@ -166,16 +182,86 @@ local function beginTutorialHueFinger(resumeMode: string?)
 	hueFingerArming = true
 	playerGui:SetAttribute(HINT_ATTR, false)
 	local scrollFn = animateScrollToSwatch
+	local startFocus = focusColorIndex
 	local function finishArming()
 		-- animateScrollToSwatch only calls this after the swatch is in the scroll viewport.
 		hueFingerArming = false
+		-- Re-assert D-Pad start (scroll must not leave selection on the finger hue).
+		if onGamepad then
+			focusColorIndex = startFocus
+			if refreshColorSwatches then
+				refreshColorSwatches()
+			end
+			HuePad.syncOverlays()
+			HuePad.armDpadPrompt()
+		end
 		local cur = playerGui:GetAttribute(HINT_ATTR)
 		if cur == false or cur == nil then
 			playerGui:SetAttribute(HINT_ATTR, mode)
 		end
 	end
 	if scrollFn then
-		scrollFn(hue, finishArming)
+		if onGamepad then
+			-- Scroll to the start of the row first, then to the finger's coral hue.
+			hueScrollToken += 1
+			local my = hueScrollToken
+			task.spawn(function()
+				local sc = colorScroll
+				if sc then
+					local deadline = os.clock() + 2.0
+					while os.clock() < deadline do
+						if my ~= hueScrollToken then
+							return
+						end
+						if sc.AbsoluteSize.X >= 8 then
+							break
+						end
+						task.wait()
+					end
+					if my ~= hueScrollToken or not colorScroll then
+						return
+					end
+					sc = colorScroll
+					local startX = sc.CanvasPosition.X
+					if startX > 0.5 then
+						local proxy = Instance.new("NumberValue")
+						proxy.Value = startX
+						local conn = proxy:GetPropertyChangedSignal("Value"):Connect(function()
+							if my ~= hueScrollToken or not colorScroll then
+								return
+							end
+							colorScroll.CanvasPosition = Vector2.new(proxy.Value, 0)
+						end)
+						local tw = TweenService:Create(
+							proxy,
+							TweenInfo.new(0.45, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+							{ Value = 0 }
+						)
+						tw:Play()
+						tw.Completed:Wait()
+						conn:Disconnect()
+						proxy:Destroy()
+						if my ~= hueScrollToken or not colorScroll then
+							return
+						end
+						colorScroll.CanvasPosition = Vector2.new(0, 0)
+						task.wait(0.12)
+					else
+						sc.CanvasPosition = Vector2.new(0, 0)
+					end
+					if my ~= hueScrollToken then
+						return
+					end
+				end
+				if my ~= hueScrollToken then
+					return
+				end
+				-- Scroll finger hue into view, but keep D-Pad focus one left so the player must nudge onto it.
+				scrollFn(hue, finishArming, true)
+			end)
+		else
+			scrollFn(hue, finishArming)
+		end
 	else
 		finishArming()
 	end
@@ -378,6 +464,40 @@ local function isGamepad(): boolean
 		or t == Enum.UserInputType.Gamepad4
 end
 
+local function isHueTutorialHint(): boolean
+	local hint = playerGui:GetAttribute(HINT_ATTR)
+	return hint == "hue" or hint == "hueReroll"
+end
+
+HuePad.bind({
+	getRoot = function()
+		return root
+	end,
+	getFocusIndex = function()
+		return focusColorIndex
+	end,
+	getActiveIndex = function()
+		return activeColorIndex
+	end,
+	getSwatchBtns = function()
+		return colorSwatchBtns
+	end,
+	getSwatchStrokes = function()
+		return colorSwatchStrokes
+	end,
+	getSwatchCounts = function()
+		return colorSwatchCounts
+	end,
+	getDice = function()
+		return colorDice
+	end,
+	isGamepad = isGamepad,
+	isHueTutorialHint = isHueTutorialHint,
+	getDefaultStrokeFlashUntil = function()
+		return defaultStrokeFlashUntil
+	end,
+})
+
 local function applyUnlockStroke(btn: GuiObject)
 	local stroke = btn:FindFirstChild("_OceanTD_UnlockStroke")
 	if not (stroke and stroke:IsA("UIStroke")) then
@@ -424,7 +544,8 @@ local function shuffleInPlace(list: { any }, rng: Random)
 end
 
 local function hideRangeRing()
-	CoralRangeRings.hide()
+	-- Full reset only when leaving inspect — upgrades must not clear the disc size.
+	CoralRangeRings.hide(true)
 end
 
 local function showRangeRing(part: BasePart)
@@ -2366,18 +2487,18 @@ local function startUpgradeFx()
 end
 
 refreshColorSwatches = function()
+	HuePad.ensureCycle()
+	-- RGB focus stroke is joystick-only (touch/mouse just tap the swatch).
 	local showFocus = isGamepad()
-		or playerGui:GetAttribute(HINT_ATTR) == "hue"
-		or playerGui:GetAttribute(HINT_ATTR) == "hueReroll"
-	local dice = colorDice
 	local activeBtn: GuiButton? = nil
+	local cycle = HuePad.rgbCycleColor()
 	local defaultStroke = colorSwatchStrokes[Consts.DEFAULT_PALETTE_SWATCH]
 	if defaultStroke then
 		local defaultActive = activeColorIndex == nil
 		local defaultFocus = showFocus and focusColorIndex == Consts.DEFAULT_PALETTE_SWATCH
 		defaultStroke.Enabled = true
 		if os.clock() >= defaultStrokeFlashUntil then
-			defaultStroke.Color = Consts.DEFAULT_SWATCH_STROKE
+			defaultStroke.Color = if defaultFocus then cycle else Consts.DEFAULT_SWATCH_STROKE
 		end
 		defaultStroke.Thickness = if defaultActive or defaultFocus then 3 else 2.5
 		if defaultActive then
@@ -2403,21 +2524,19 @@ refreshColorSwatches = function()
 		elseif isFocus then
 			stroke.Enabled = true
 			stroke.Thickness = 2
-			stroke.Color = Consts.COLOR_FOCUS
+			stroke.Color = cycle
 		else
 			stroke.Enabled = false
 			stroke.Thickness = 0
 		end
 	end
-	if dice then
-		if activeBtn then
-			dice.Visible = true
-			dice.Parent = activeBtn
-		else
-			dice.Visible = false
-		end
-	end
 	refreshColorSeedLabels()
+	if not isGamepad() then
+		HuePad.applyNonGamepadDice(activeBtn)
+	else
+		-- After seed labels refresh so A ↔ N can override the focused count.
+		HuePad.syncOverlays()
+	end
 end
 
 local function scrollFocusIntoView()
@@ -2479,7 +2598,7 @@ local function isSwatchVisibleInScroll(sc: ScrollingFrame, sw: GuiObject, pad: n
 	return left >= viewL - 2 and right <= viewR + 2
 end
 
-animateScrollToSwatch = function(idx: number, onDone: (() -> ())?)
+animateScrollToSwatch = function(idx: number, onDone: (() -> ())?, keepFocus: boolean?)
 	hueScrollToken += 1
 	local my = hueScrollToken
 	local scroll = colorScroll
@@ -2490,7 +2609,10 @@ animateScrollToSwatch = function(idx: number, onDone: (() -> ())?)
 		end
 		return
 	end
-	focusColorIndex = idx
+	-- keepFocus: scroll the finger target into view without moving D-Pad selection onto it.
+	if not keepFocus then
+		focusColorIndex = idx
+	end
 	if refreshColorSwatches then
 		refreshColorSwatches()
 	end
@@ -2601,7 +2723,7 @@ animateScrollToSwatch = function(idx: number, onDone: (() -> ())?)
 				break
 			end
 			ensureTargetAndScroll(true, attempt > 1)
-			if attempt >= 6 and sc and sw then
+			if not keepFocus and attempt >= 6 and sc and sw then
 				focusColorIndex = idx
 				scrollFocusIntoView()
 			end
@@ -2620,7 +2742,7 @@ animateScrollToSwatch = function(idx: number, onDone: (() -> ())?)
 		if sc and sw and not isSwatchVisibleInScroll(sc, sw, 4) then
 			ensureTargetAndScroll(true, true)
 			task.wait()
-			if colorScroll and colorSwatchBtns[idx] then
+			if not keepFocus and colorScroll and colorSwatchBtns[idx] then
 				focusColorIndex = idx
 				scrollFocusIntoView()
 			end
@@ -2643,8 +2765,10 @@ local function nudgeColorFocus(delta: number)
 		next = Consts.DEFAULT_PALETTE_SWATCH
 	end
 	focusColorIndex = next
+	HuePad.noteFocusChanged()
 	refreshColorSwatches()
 	scrollFocusIntoView()
+	HuePad.syncOverlays()
 	UiHaptics.pulseShort()
 end
 
@@ -2689,7 +2813,10 @@ end
 
 local function applyCoralPaint(part: BasePart, idx: number, paint: Color3, placeId: string, skipHaptic: boolean?): boolean
 	activeColorIndex = idx
-	focusColorIndex = idx
+	-- Finger demo taps must not yank D-pad focus back to the tutorial hue.
+	if not tutorialHueDemoSuppressNote then
+		focusColorIndex = idx
+	end
 	local prevAttr = part:GetAttribute("OceanTD_ColorIndex")
 	local prevIdx = if typeof(prevAttr) == "number" then PlotOutlineColors.clampCoralIndex(prevAttr) else nil
 	local webPaint: Color3? = nil
@@ -2833,6 +2960,15 @@ local function selectCoralColor(index: number)
 			return false
 		end
 		local itemId = part:GetAttribute("OceanTD_ItemId")
+		-- Already on this hue: reshade (and advance tutorial) even if no free slots remain.
+		if activeColorIndex == idx then
+			spinColorDice()
+			local ok = applyCoralPaint(part, idx, PlotOutlineColors.randomHueVariant(idx), placeId)
+			if not ok then
+				showToast("All slots in use")
+			end
+			return true
+		end
 		local partSeedHue = part:GetAttribute("OceanTD_SeedHue")
 		local canUseOwnSeed = activeColorIndex == nil
 			and typeof(partSeedHue) == "number"
@@ -2841,19 +2977,7 @@ local function selectCoralColor(index: number)
 			then getHueAvailableSlots(itemId, idx, placeId)
 			else 0
 		if typeof(itemId) == "string" and itemId ~= "" and not canUseOwnSeed and available <= 0 then
-			if activeColorIndex ~= idx then
-				showConfirmColorUnlock(itemId, idx)
-				return true
-			end
-			showToast("All slots in use")
-			return true
-		end
-		if activeColorIndex == idx then
-			spinColorDice()
-			local ok = applyCoralPaint(part, idx, PlotOutlineColors.randomHueVariant(idx), placeId)
-			if not ok then
-				showToast("All slots in use")
-			end
+			showConfirmColorUnlock(itemId, idx)
 			return true
 		end
 		local ok = applyCoralPaint(part, idx, PlotOutlineColors.coralColor(idx), placeId)
@@ -3127,7 +3251,12 @@ local function setVisible(on: boolean)
 		onInspectVisibilityForTutorial(true)
 	else
 		stopPulses()
-		hideRangeRing()
+		-- Size cinematic briefly rebinds selection; don't wipe disc size mid-upgrade.
+		if RelocateController.isCinematicHold() then
+			CoralRangeRings.hide(false)
+		else
+			hideRangeRing()
+		end
 		hideConfirm()
 		hideStatsKey()
 		RelocateController.setInspectPanelVisible(false)
@@ -4001,6 +4130,7 @@ function CoralInspectPanel.getTutorialHueSwatch(): GuiObject?
 	if not root or not root.Visible then
 		return nil
 	end
+	-- Always the hue the player needs to pick (not the D-pad highlight).
 	local hue = resolveTutorialHueIndex()
 	if typeof(hue) ~= "number" then
 		local part = RelocateController.getSelectedPart()

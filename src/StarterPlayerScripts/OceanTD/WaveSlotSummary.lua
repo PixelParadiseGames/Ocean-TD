@@ -416,14 +416,17 @@ local function closeSummaryPanelUi()
 end
 
 function WaveSlotSummary.hide()
+	-- Capture before closeSummaryPanelUi() clears summaryIsDefeat.
+	local wasDefeat = summaryIsDefeat == true
 	if not closeSummaryPanelUi() then
 		return
 	end
 	-- Finish / dismiss: restore follow cam, do not re-enter FishCam.
 	releaseDefeatCam(false)
-	-- Join-intro: skills finger starts on Finish, not when waves stop.
+	-- Join-intro: post-summary finger (roll-then-skills on defeat, or skills on win).
 	local pg = Players.LocalPlayer:FindFirstChild("PlayerGui")
 	if pg and pg:IsA("PlayerGui") then
+		pg:SetAttribute("OceanTD_TutorialSummaryWasDefeat", wasDefeat)
 		pg:SetAttribute("OceanTD_TutorialSummaryFinished", os.clock())
 	end
 end

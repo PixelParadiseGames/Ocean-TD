@@ -943,6 +943,39 @@ function WaveEntityPool.playSound(
 	end)
 end
 
+-- Soft-stop a live pooled SFX (e.g. wave-start arrows under tutorial VO).
+function WaveEntityPool.fadeLiveSound(key: string, fadeSec: number?)
+	local snd = liveSounds[key]
+	if not (snd and snd.Parent) then
+		return
+	end
+	local fade = math.max(0.05, fadeSec or 0.4)
+	local from = snd.Volume
+	local gen = soundGen[snd]
+	local t0 = os.clock()
+	task.spawn(function()
+		while snd.Parent and soundGen[snd] == gen do
+			local u = math.clamp((os.clock() - t0) / fade, 0, 1)
+			snd.Volume = from * (1 - u)
+			if u >= 1 then
+				break
+			end
+			task.wait()
+		end
+		if soundGen[snd] ~= gen then
+			return
+		end
+		soundGen[snd] = nil
+		if liveSounds[key] == snd then
+			liveSounds[key] = nil
+		end
+		pcall(function()
+			snd:Stop()
+			snd:Destroy()
+		end)
+	end)
+end
+
 function WaveEntityPool.debugCounts(): { [string]: number }
 	local out: { [string]: number } = {
 		food = #foodPool,

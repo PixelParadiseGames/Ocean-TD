@@ -449,6 +449,7 @@ local function setQuickVisible(on: boolean)
 end
 
 local function syncQuickVisibility()
+	-- Yaw / DistOff quick pad under Plot Cam — keep these even when the full tuner panel is off.
 	setQuickVisible(visible and carouselCollapsedReady())
 end
 

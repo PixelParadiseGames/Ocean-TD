@@ -1,9 +1,9 @@
 --!strict
 --[[
 	Wave 1 only:
-	1) Tween to near-center overview (path + heart)
-	2) ~1s before fish spawn: shift focus toward the path start / fish and track them
-	3) Hold until fed (min 3s), then smooth-restore
+	1) Tween to near-center overview (path + heart) — Fish Cam stays selected (UI/lock)
+	2) ~1s before fish spawn: brief blend toward the path start / fish
+	3) Hand camera back to Fish Cam cycle (aim crosshair / follow)
 ]]
 
 local Players = game:GetService("Players")
@@ -79,15 +79,6 @@ local function flatUnit(look: Vector3): Vector3
 		return Vector3.new(0, 0, -1)
 	end
 	return flat.Unit
-end
-
-local function getHrp(): BasePart?
-	local char = Players.LocalPlayer.Character
-	local hrp = char and char:FindFirstChild("HumanoidRootPart")
-	if hrp and hrp:IsA("BasePart") then
-		return hrp
-	end
-	return nil
 end
 
 local function getHumanoid(): Humanoid?
@@ -235,91 +226,6 @@ local function waitWhile(my: number, pred: () -> boolean)
 	end
 end
 
-local function smoothRestore(
-	my: number,
-	savedType: Enum.CameraType,
-	savedSubject: Instance?,
-	savedRel: CFrame?,
-	savedCf: CFrame?,
-	pg: PlayerGui?
-)
-	local cam = Workspace.CurrentCamera
-	if not cam or my ~= token then
-		return
-	end
-	cam.CameraType = Enum.CameraType.Scriptable
-
-	local resumeCycle = willResumeCycleCam(pg)
-	local goalCf = cam.CFrame
-	if resumeCycle and savedCf then
-		goalCf = savedCf
-	else
-		local hrp = getHrp()
-		if hrp and savedRel then
-			goalCf = hrp.CFrame * savedRel
-		elseif hrp then
-			local flat = flatUnit(hrp.CFrame.LookVector)
-			local from = hrp.Position - flat * 16 + Vector3.new(0, 6, 0)
-			goalCf = CFrame.lookAt(from, hrp.Position + Vector3.new(0, 1.5, 0), Vector3.yAxis)
-		elseif savedCf then
-			goalCf = savedCf
-		end
-	end
-
-	local dur = math.max(0.4, C.TANG_CAM_OVERVIEW_RESTORE_SEC)
-	local tween = TweenService:Create(
-		cam,
-		TweenInfo.new(dur, Enum.EasingStyle.Quad, Enum.EasingDirection.InOut),
-		{ CFrame = goalCf }
-	)
-	tween:Play()
-	tween.Completed:Wait()
-	if my ~= token then
-		return
-	end
-
-	cam = Workspace.CurrentCamera
-	if not cam then
-		return
-	end
-	if resumeCycle and savedCf then
-		cam.CFrame = savedCf
-	else
-		local hrp = getHrp()
-		if hrp and savedRel then
-			cam.CFrame = hrp.CFrame * savedRel
-		else
-			cam.CFrame = goalCf
-		end
-	end
-
-	if resumeCycle then
-		cam.CameraType = Enum.CameraType.Scriptable
-		cam.CameraSubject = nil
-		if pg and pg.Parent then
-			pg:SetAttribute("OceanTD_TangCamBusy", false)
-			pg:SetAttribute("OceanTD_ResumeCinematicCam", os.clock())
-		end
-		return
-	end
-
-	local restore = savedType
-	if restore == Enum.CameraType.Scriptable then
-		restore = Enum.CameraType.Custom
-	end
-	local subject = savedSubject
-	if not (subject and subject.Parent) then
-		subject = getHumanoid()
-	end
-	if subject then
-		cam.CameraSubject = subject
-	end
-	cam.CameraType = restore
-	if pg and pg.Parent then
-		pg:SetAttribute("OceanTD_TangCamBusy", false)
-	end
-end
-
 function TangCam.play(args: PlayArgs)
 	if busy then
 		return
@@ -330,9 +236,11 @@ function TangCam.play(args: PlayArgs)
 
 	local pg = getPlayerGui()
 	if pg then
-		-- Claim ownership before ForceClose so FreeCam/WaveSlot restore won't steal Scriptable.
+		-- Pause FreeCam writes while overview runs; keep CamCycleMode (Fish Cam) for UI/lock/crosshair.
 		pg:SetAttribute("OceanTD_TangCamBusy", true)
-		pg:SetAttribute("OceanTD_ForceCloseFreeCam", os.clock())
+		-- Re-stamp Fish Cam after busy so ForceCamMode applies even if the string was already "fishcam".
+		pg:SetAttribute("OceanTD_ForceCamMode", "fishcam")
+		pg:SetAttribute("OceanTD_ForceCamStamp", os.clock())
 	end
 
 	task.defer(function()
@@ -350,20 +258,6 @@ function TangCam.play(args: PlayArgs)
 			local hum = getHumanoid()
 			if hum then
 				hum.CameraOffset = Vector3.zero
-			end
-		end
-
-		local savedType = cam.CameraType
-		local savedSubject = cam.CameraSubject
-		local savedCf = cam.CFrame
-		if savedType == Enum.CameraType.Scriptable then
-			savedType = Enum.CameraType.Custom
-		end
-		local savedRel: CFrame? = nil
-		do
-			local hrp = getHrp()
-			if hrp then
-				savedRel = hrp.CFrame:ToObjectSpace(cam.CFrame)
 			end
 		end
 
@@ -399,7 +293,7 @@ function TangCam.play(args: PlayArgs)
 			return
 		end
 
-		-- Smooth XZ reposition behind fish (facing heart). Pre-spawn uses path start as stand-in.
+		-- Brief blend toward fish, then hand the camera back to Fish Cam cycle (full UI/lock/aim).
 		local pathStart = args.samplePath(0)
 		local cFish = Workspace.CurrentCamera
 		if not cFish then
@@ -423,7 +317,6 @@ function TangCam.play(args: PlayArgs)
 			if not c then
 				return
 			end
-			-- Re-assert ownership every frame — PlayerModule / RestoreWaveCam must not win.
 			if c.CameraType ~= Enum.CameraType.Scriptable then
 				c.CameraType = Enum.CameraType.Scriptable
 			end
@@ -436,7 +329,6 @@ function TangCam.play(args: PlayArgs)
 			if not goal then
 				return
 			end
-			-- Damp goal so school motion / spawn handoff doesn't rattle the frame.
 			if not dampGoal then
 				dampGoal = goal
 			else
@@ -444,39 +336,23 @@ function TangCam.play(args: PlayArgs)
 				dampGoal = dampGoal:Lerp(goal, ga)
 			end
 			local u = math.clamp((os.clock() - blendT0) / blendDur, 0, 1)
-			if u < 1 then
-				local e = u * u * (3 - 2 * u)
-				c.CFrame = blendStartCf:Lerp(dampGoal, e)
-			else
-				local a = 1 - math.exp(-followRate * math.max(dt, 0))
-				c.CFrame = c.CFrame:Lerp(dampGoal, a)
-			end
+			local e = u * u * (3 - 2 * u)
+			c.CFrame = blendStartCf:Lerp(dampGoal :: CFrame, e)
 		end)
 
-		-- Hold until fed, then keep fish focus for 3 more seconds before restore.
 		waitWhile(my, function()
-			return not args.areFishFed()
-		end)
-		if my ~= token then
-			return
-		end
-		local postFedHoldEnd = os.clock() + C.TANG_CAM_FISH_FOCUS_MIN_HOLD_SEC
-		waitWhile(my, function()
-			return os.clock() < postFedHoldEnd
+			return (os.clock() - blendT0) < blendDur
 		end)
 		stopConn()
 		if my ~= token then
 			return
 		end
 
-		smoothRestore(my, savedType, savedSubject, savedRel, savedCf, pg)
-		if my ~= token then
-			return
-		end
 		busy = false
-		-- Busy cleared inside smoothRestore when resuming cycle cam / Custom path.
-		if pg and pg.Parent and pg:GetAttribute("OceanTD_TangCamBusy") == true then
+		if pg and pg.Parent then
 			pg:SetAttribute("OceanTD_TangCamBusy", false)
+			pg:SetAttribute("OceanTD_ForceCamMode", "fishcam")
+			pg:SetAttribute("OceanTD_ForceCamStamp", os.clock())
 		end
 	end)
 end

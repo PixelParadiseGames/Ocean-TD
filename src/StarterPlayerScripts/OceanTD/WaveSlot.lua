@@ -666,6 +666,15 @@ function WaveSlot.isFinishReady(): boolean
 	return feedCompleteUi and WaveSim.isRunning() and not InventoryState.isOpen()
 end
 
+-- NEXT WAVE hit target (for tutorial finger).
+function WaveSlot.getNextWaveHit(): GuiObject?
+	local hit = hudWaveHit
+	if hit and hit.Parent and hit.Visible then
+		return hit
+	end
+	return nil
+end
+
 function WaveSlot.tryFinishFromShortcut(): boolean
 	if not WaveSlot.isFinishReady() then
 		return false

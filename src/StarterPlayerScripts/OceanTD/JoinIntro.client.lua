@@ -11,7 +11,6 @@ local ContextActionService = game:GetService("ContextActionService")
 local GuiService = game:GetService("GuiService")
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
-local SoundService = game:GetService("SoundService")
 local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
 local Workspace = game:GetService("Workspace")
@@ -32,6 +31,8 @@ local SKIP_ACTION = "OceanTD_JoinIntroSkip"
 
 local WHITE = Color3.new(1, 1, 1)
 local SKIP_GREEN = Color3.fromRGB(55, 200, 90)
+local SKIP_STROKE_BRIGHT = Color3.fromRGB(90, 255, 110)
+local SKIP_BTN_SIZE = Vector2.new(70, 26) -- half of prior 140×52
 local LOAD_BAR_BG = Color3.fromRGB(28, 36, 48)
 local LOAD_BAR_FILL = Color3.fromRGB(70, 200, 255)
 local LOAD_WAVE_EMOJI = "🌊"
@@ -97,10 +98,7 @@ local LOAD_TIPS = {
 }
 local CAM_DOWN_SEC = 9
 local LOAD_BAR_FILL_SEC = 4 -- player-facing fill: always a full 4s from empty, never less
-local INTRO_EXPLAINER_SOUND_ID = "rbxassetid://100453077391542"
-local INTRO_EXPLAINER_VOLUME = 0.9
-local INTRO_EXPLAINER_BGM_FACTOR = 0.2
-local INTRO_EXPLAINER_BGM_FADE_SEC = 0.4
+local INTRO_EXPLAINER_SOUND_ID = "rbxassetid://75344299140384"
 local CAM_HANDOFF_SEC = 1.05
 local CAM_HANDOFF_SKIP_SEC = 0.45
 local PAN_DOWN_SEC = 1.15
@@ -130,64 +128,14 @@ local loadBarFillDone = false
 local loadBarAnimating = false
 local loadBarAnimGen = 0 -- bump to cancel any in-flight fill (bootstrap vs final)
 local loadTipToken = 0
-local introExplainerSound: Sound? = nil
-local introExplainerDucking = false
-
-local function getBgmController(): any?
-	local ok, mod = pcall(function()
-		return require(script.Parent:WaitForChild("BgmController"))
-	end)
-	return if ok then mod else nil
-end
-
-local function clearIntroExplainerDuck()
-	if not introExplainerDucking then
-		return
-	end
-	introExplainerDucking = false
-	local Bgm = getBgmController()
-	if Bgm and typeof(Bgm.clearBgmFactor) == "function" then
-		Bgm.clearBgmFactor(INTRO_EXPLAINER_BGM_FADE_SEC)
-	end
-end
+local TutorialVo = require(script.Parent:WaitForChild("TutorialVo"))
 
 local function stopIntroExplainerSound()
-	local s = introExplainerSound
-	introExplainerSound = nil
-	clearIntroExplainerDuck()
-	if not s then
-		return
-	end
-	pcall(function()
-		s:Stop()
-		s:Destroy()
-	end)
+	TutorialVo.stop()
 end
 
 local function playIntroExplainerSound()
-	stopIntroExplainerSound()
-	local Bgm = getBgmController()
-	if Bgm and typeof(Bgm.fadeBgmToFactor) == "function" then
-		introExplainerDucking = true
-		Bgm.fadeBgmToFactor(INTRO_EXPLAINER_BGM_FACTOR, INTRO_EXPLAINER_BGM_FADE_SEC)
-	end
-	local s = Instance.new("Sound")
-	s.Name = "OceanTD_JoinIntroExplainer"
-	s.SoundId = INTRO_EXPLAINER_SOUND_ID
-	s.Volume = INTRO_EXPLAINER_VOLUME
-	s.Looped = false
-	s.Parent = SoundService
-	introExplainerSound = s
-	s.Ended:Once(function()
-		if introExplainerSound == s then
-			introExplainerSound = nil
-		end
-		clearIntroExplainerDuck()
-		if s.Parent then
-			s:Destroy()
-		end
-	end)
-	s:Play()
+	TutorialVo.play(INTRO_EXPLAINER_SOUND_ID, "OceanTD_JoinIntroExplainer")
 end
 
 local function setLoadFillProgress(fill: Frame, u: number)
@@ -857,7 +805,7 @@ local function makeUi(): (ScreenGui, TextButton)
 	btn.Name = "Skip"
 	btn.AnchorPoint = Vector2.new(1, 1)
 	btn.Position = UDim2.new(1, -28, 1, -28)
-	btn.Size = UDim2.fromOffset(140, 52)
+	btn.Size = UDim2.fromOffset(SKIP_BTN_SIZE.X, SKIP_BTN_SIZE.Y)
 	btn.BackgroundColor3 = SKIP_GREEN
 	btn.Font = UiTheme.Font
 	btn.Text = "SKIP"
@@ -869,10 +817,47 @@ local function makeUi(): (ScreenGui, TextButton)
 	btn.ZIndex = 3
 	btn.Parent = sg
 	local corner = Instance.new("UICorner")
-	corner.CornerRadius = UDim.new(0, 10)
+	corner.CornerRadius = UDim.new(0, 8)
 	corner.Parent = btn
+	local stroke = Instance.new("UIStroke")
+	stroke.Name = "_OceanTD_SkipStroke"
+	stroke.Color = SKIP_STROKE_BRIGHT
+	stroke.Thickness = 2.5
+	stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+	stroke.Parent = btn
+	local pad = Instance.new("UIPadding")
+	pad.PaddingTop = UDim.new(0.08, 0)
+	pad.PaddingBottom = UDim.new(0.08, 0)
+	pad.PaddingLeft = UDim.new(0.1, 0)
+	pad.PaddingRight = UDim.new(0.1, 0)
+	pad.Parent = btn
 
 	return sg, btn
+end
+
+local skipFlashToken = 0
+local function flashSkipButton(btn: TextButton)
+	local stroke = btn:FindFirstChild("_OceanTD_SkipStroke")
+	skipFlashToken += 1
+	local token = skipFlashToken
+	local restoreBg = SKIP_GREEN
+	btn.BackgroundColor3 = SKIP_STROKE_BRIGHT
+	if stroke and stroke:IsA("UIStroke") then
+		stroke.Color = Color3.new(1, 1, 1)
+	end
+	task.delay(0.12, function()
+		if token ~= skipFlashToken or not btn.Parent then
+			return
+		end
+		TweenService:Create(btn, TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+			BackgroundColor3 = restoreBg,
+		}):Play()
+		if stroke and stroke:IsA("UIStroke") and stroke.Parent then
+			TweenService:Create(stroke, TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+				Color = SKIP_STROKE_BRIGHT,
+			}):Play()
+		end
+	end)
 end
 
 local function makeLoadingUi(): (ScreenGui, Frame)
@@ -1730,7 +1715,10 @@ local function runIntro()
 			return
 		end
 		skipRequested = true
-		task.spawn(function()
+		if skipBtn then
+			flashSkipButton(skipBtn)
+		end
+		task.delay(0.1, function()
 			finishIntro(true)
 		end)
 	end

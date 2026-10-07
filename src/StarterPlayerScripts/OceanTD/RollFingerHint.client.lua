@@ -4,7 +4,8 @@
 	roll → await → backpack → equip → plot → upgrade → hue (finger stays on swatch, cycles colors until user taps)
 	→ closeBackpack → waves
 	(reselectCoral if inspect closes mid-upgrade / mid-hue) → …
-	→ (after wave summary Finish) skills → plotSize → plotSizeUpgrade → closePlotSize → closeSkills
+	→ (after first wave-session Finish) if defeat: roll again → skills; if win: skills
+	→ plotSize → plotSizeUpgrade → closePlotSize → closeSkills → cam
 
 	After join intro ends (intro SKIP gone): bottom-left SKIP clears all finger steps + tutorial gates.
 ]]
@@ -36,6 +37,15 @@ local HINT_ATTR = "OceanTD_RollFingerHint"
 local HUE_PLACE_ATTR = "OceanTD_TutorialHuePlaceId"
 local GUI_NAME = "OceanTD_RollFingerHint"
 local FINGER_PATH = "Plots.IntroElements.Finger"
+local PLANT_FIRST_CORAL_SOUND_ID = "rbxassetid://139678980175457"
+local HOW_MANY_WAVES_SOUND_ID = "rbxassetid://135876579370482"
+local WAVE_EXPLAINER_SOUND_ID = "rbxassetid://72069463774995"
+local FINGER_CAM_SOUND_ID = "rbxassetid://80359058869110"
+local FINGER_SKILLS_SOUND_ID = "rbxassetid://125491130885745"
+local TRY_WAVES_AGAIN_SOUND_ID = "rbxassetid://107210999893937"
+local TRY_WAVES_AGAIN_DELAY_SEC = 3
+local TutorialVo = require(script.Parent:WaitForChild("TutorialVo"))
+local WaveArrowPreview = require(script.Parent:WaitForChild("WaveArrowPreview"))
 
 local SKILLS_OPEN_ATTR = "OceanTD_SkillsBubblesOpen"
 local POWERUP_OPEN_ATTR = "OceanTD_SkillPowerUpOpen"
@@ -85,6 +95,7 @@ export type HintMode =
 	| "plotSizeUpgrade"
 	| "closePlotSize"
 	| "closeSkills"
+	| "cam"
 
 local MODE_SET: { [string]: boolean } = {
 	roll = true,
@@ -102,6 +113,7 @@ local MODE_SET: { [string]: boolean } = {
 	plotSizeUpgrade = true,
 	closePlotSize = true,
 	closeSkills = true,
+	cam = true,
 }
 
 local SLOW_TRAVEL_MODES: { [string]: boolean } = {
@@ -112,6 +124,7 @@ local SLOW_TRAVEL_MODES: { [string]: boolean } = {
 	closeBackpack = true,
 	closePlotSize = true,
 	closeSkills = true,
+	cam = true,
 }
 
 local gen = 0
@@ -127,9 +140,102 @@ local tapBurstRng = Random.new()
 local fingerTutorialSkipped = false
 local skipTutorialGui: ScreenGui? = nil
 local skipTutorialBtn: TextButton? = nil
+local plantFirstCoralSoundPlayed = false
+local howManyWavesSoundPlayed = false
+local waveExplainerSoundPlayed = false
+local fingerCamSoundPlayed = false
+local fingerSkillsSoundPlayed = false
+local tryWavesAgainSoundPlayed = false
+local tryWavesAgainGen = 0
+local camVoFinished = false
+local camButtonClicked = false
+local wavesHudWasRunning = false
 local JOIN_INTRO_BUSY_ATTR = "OceanTD_JoinIntroBusy"
 local SKIP_TUTORIAL_GUI = "OceanTD_FingerTutorialSkip"
 local SKIP_GREEN = Color3.fromRGB(55, 200, 90)
+local SKIP_STROKE_BRIGHT = Color3.fromRGB(90, 255, 110)
+local SKIP_BTN_SIZE = Vector2.new(70, 26) -- half of prior 140×52
+
+local function playPlantFirstCoralSoundOnce()
+	if plantFirstCoralSoundPlayed or fingerTutorialSkipped then
+		return
+	end
+	plantFirstCoralSoundPlayed = true
+	TutorialVo.play(PLANT_FIRST_CORAL_SOUND_ID, "OceanTD_PlantFirstCoral")
+end
+
+local function playHowManyWavesSoundOnce()
+	if howManyWavesSoundPlayed or fingerTutorialSkipped then
+		return
+	end
+	howManyWavesSoundPlayed = true
+	TutorialVo.play(HOW_MANY_WAVES_SOUND_ID, "OceanTD_HowManyWaves")
+end
+
+local function playWaveExplainerSoundOnce()
+	if waveExplainerSoundPlayed or fingerTutorialSkipped then
+		return
+	end
+	waveExplainerSoundPlayed = true
+	-- Never cut off "how many waves" — queue until that clip finishes.
+	TutorialVo.playWhenIdle(WAVE_EXPLAINER_SOUND_ID, "OceanTD_WaveExplainer", {
+		onStart = function()
+			-- Wave 1 arrow sting under the VO.
+			WaveArrowPreview.fadeOutStartSound(0.45)
+		end,
+	})
+end
+
+-- After cam button click AND cam VO ends: wait 3s, then "try waves again".
+local function tryScheduleTryWavesAgain()
+	if tryWavesAgainSoundPlayed or fingerTutorialSkipped then
+		return
+	end
+	if not (camButtonClicked and camVoFinished) then
+		return
+	end
+	tryWavesAgainGen += 1
+	local my = tryWavesAgainGen
+	task.spawn(function()
+		task.wait(TRY_WAVES_AGAIN_DELAY_SEC)
+		if my ~= tryWavesAgainGen or fingerTutorialSkipped or tryWavesAgainSoundPlayed then
+			return
+		end
+		tryWavesAgainSoundPlayed = true
+		TutorialVo.play(TRY_WAVES_AGAIN_SOUND_ID, "OceanTD_TryWavesAgain", { volume = 4 })
+	end)
+end
+
+local function playFingerCamSoundOnce()
+	if fingerCamSoundPlayed or fingerTutorialSkipped then
+		-- Already played earlier this session — don't block "try waves again".
+		camVoFinished = true
+		tryScheduleTryWavesAgain()
+		return
+	end
+	fingerCamSoundPlayed = true
+	camVoFinished = false
+	TutorialVo.play(FINGER_CAM_SOUND_ID, "OceanTD_FingerCam", {
+		volume = 4,
+		onEnded = function()
+			camVoFinished = true
+			tryScheduleTryWavesAgain()
+		end,
+	})
+end
+
+local function playFingerSkillsSoundOnce()
+	if fingerSkillsSoundPlayed or fingerTutorialSkipped then
+		return
+	end
+	fingerSkillsSoundPlayed = true
+	TutorialVo.play(FINGER_SKILLS_SOUND_ID, "OceanTD_FingerSkills", { volume = 4 })
+end
+
+local function onCamButtonClickedForTryWaves()
+	camButtonClicked = true
+	tryScheduleTryWavesAgain()
+end
 
 local function uiHidesChrome(): boolean
 	return playerGui:GetAttribute(SKILLS_OPEN_ATTR) == true
@@ -228,6 +334,32 @@ local function findSkillsButton(): GuiObject?
 		return hit
 	end
 	return skills
+end
+
+local function findCamButton(): GuiObject?
+	local left = playerGui:FindFirstChild("MobileLeftUI")
+	local dPad = left and left:FindFirstChild("dPad")
+	if not dPad then
+		return nil
+	end
+	-- Prefer the active mode icon; fall back to PlotCam (main RTS seat).
+	local mode = playerGui:GetAttribute("OceanTD_CamCycleMode")
+	local preferName = if mode == "fishcam"
+		then "FishCam"
+		elseif mode == "dronecam" then "FreeCam"
+		elseif mode == "off" then "OffCam"
+		else "PlotCam"
+	local prefer = dPad:FindFirstChild(preferName)
+	if prefer and prefer:IsA("GuiObject") and prefer.Visible and prefer.AbsoluteSize.X >= 2 then
+		return prefer
+	end
+	for _, name in ipairs({ "PlotCam", "FishCam", "FreeCam", "OffCam" }) do
+		local g = dPad:FindFirstChild(name)
+		if g and g:IsA("GuiObject") and g.Visible and g.AbsoluteSize.X >= 2 then
+			return g
+		end
+	end
+	return nil
 end
 
 local function findUpgradeButton(): GuiObject?
@@ -628,7 +760,9 @@ local function skipEntireFingerTutorial()
 	fingerTutorialSkipped = true
 	waitingWaveEnd = false
 	wavesFingerDelayGen += 1
+	tryWavesAgainGen += 1
 	wavesFingerConsumed = true
+	TutorialVo.stop()
 	stopHint()
 	playerGui:SetAttribute(HINT_ATTR, false)
 	playerGui:SetAttribute(HUE_PLACE_ATTR, nil)
@@ -639,6 +773,7 @@ local function skipEntireFingerTutorial()
 	playerGui:SetAttribute("OceanTD_TutorialGateCam", false)
 	playerGui:SetAttribute("OceanTD_TutorialWavesSlotReady", true)
 	playerGui:SetAttribute("OceanTD_TutorialSummaryFinished", nil)
+	playerGui:SetAttribute("OceanTD_TutorialRollThenSkills", nil)
 	playerGui:SetAttribute("OceanTD_FingerTutorialLock", false)
 	destroySkipTutorialBtn()
 	-- Drop any leftover tutorial lock overlays on the cart, then refresh info/cart chrome.
@@ -706,7 +841,7 @@ local function ensureSkipTutorialBtn()
 	btn.Name = "Skip"
 	btn.AnchorPoint = Vector2.new(0, 1)
 	btn.Position = UDim2.new(0, 28, 1, -28)
-	btn.Size = UDim2.fromOffset(140, 52)
+	btn.Size = UDim2.fromOffset(SKIP_BTN_SIZE.X, SKIP_BTN_SIZE.Y)
 	btn.BackgroundColor3 = SKIP_GREEN
 	btn.Font = UiTheme.Font
 	btn.Text = "SKIP"
@@ -718,11 +853,34 @@ local function ensureSkipTutorialBtn()
 	btn.ZIndex = 3
 	btn.Parent = sg
 	local corner = Instance.new("UICorner")
-	corner.CornerRadius = UDim.new(0, 10)
+	corner.CornerRadius = UDim.new(0, 8)
 	corner.Parent = btn
+	local stroke = Instance.new("UIStroke")
+	stroke.Name = "_OceanTD_SkipStroke"
+	stroke.Color = SKIP_STROKE_BRIGHT
+	stroke.Thickness = 2.5
+	stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+	stroke.Parent = btn
+	local pad = Instance.new("UIPadding")
+	pad.PaddingTop = UDim.new(0.08, 0)
+	pad.PaddingBottom = UDim.new(0.08, 0)
+	pad.PaddingLeft = UDim.new(0.1, 0)
+	pad.PaddingRight = UDim.new(0.1, 0)
+	pad.Parent = btn
 
-	btn.Activated:Connect(skipEntireFingerTutorial)
-	btn.MouseButton1Click:Connect(skipEntireFingerTutorial)
+	local skipping = false
+	local function flashThenSkip()
+		if skipping then
+			return
+		end
+		skipping = true
+		btn.BackgroundColor3 = SKIP_STROKE_BRIGHT
+		stroke.Color = Color3.new(1, 1, 1)
+		task.delay(0.1, skipEntireFingerTutorial)
+	end
+
+	btn.Activated:Connect(flashThenSkip)
+	btn.MouseButton1Click:Connect(flashThenSkip)
 
 	skipTutorialGui = sg
 	skipTutorialBtn = btn
@@ -864,6 +1022,9 @@ local function resolveTarget(mode: HintMode): Vector2?
 	elseif mode == "skills" or mode == "closeSkills" then
 		local a = findSkillsButton()
 		return if a and a.Visible and a.AbsoluteSize.X >= 2 then guiCenterInsetInclusive(a) else nil
+	elseif mode == "cam" then
+		local a = findCamButton()
+		return if a and a.Visible and a.AbsoluteSize.X >= 2 then guiCenterInsetInclusive(a) else nil
 	elseif mode == "plotSize" then
 		local a = findPlotSizeButton()
 		return if a then guiCenterInsetInclusive(a) else nil
@@ -906,7 +1067,7 @@ local function restOf(mode: HintMode, btn: Vector2): Vector2
 		return plotCoralSlotRest(btn)
 	elseif mode == "reselectCoral" then
 		return Vector2.new(btn.X, btn.Y + PLOT_REST_DOWN_PX)
-	elseif mode == "skills" or mode == "closeSkills" or mode == "roll" then
+	elseif mode == "skills" or mode == "closeSkills" or mode == "cam" or mode == "roll" then
 		return btn:Lerp(viewportCenter(), WAVE_REST_TOWARD_CENTER)
 	end
 	return Vector2.new(btn.X, btn.Y + BELOW_PAD_PX)
@@ -942,6 +1103,9 @@ local function startHint(mode: HintMode)
 		if playerGui:GetAttribute("OceanTD_TutorialGateCam") == true then
 			playerGui:SetAttribute("OceanTD_TutorialGateCam", false)
 		end
+		playFingerSkillsSoundOnce()
+	elseif mode == "cam" then
+		playFingerCamSoundOnce()
 	end
 	-- closeSkills: wait for Skills open in the heartbeat (don't clear the hint early).
 
@@ -1085,15 +1249,16 @@ local function startHint(mode: HintMode)
 					return
 				end
 			elseif mode == "closeSkills" and playerGui:GetAttribute(SKILLS_OPEN_ATTR) ~= true then
-				-- Wait for skills chrome; clear only once skills are gone after a real close.
-				f.Visible = false
-				laidOut = false
+				-- Skills fully closed after plot-size tutorial → point at camera cycle.
+				playerGui:SetAttribute(HINT_ATTR, "cam")
 				return
+			elseif mode == "cam" then
+				-- Cleared when the player changes cam mode (see CamCycleMode listener).
 			end
 
 			local hideChrome = uiHidesChrome()
 			-- Skills/powerup open is expected for later tutorial steps.
-			if mode == "plotSize" or mode == "plotSizeUpgrade" or mode == "closePlotSize" or mode == "closeSkills" or mode == "upgrade" or mode == "hue" or mode == "hueReroll" then
+			if mode == "plotSize" or mode == "plotSizeUpgrade" or mode == "closePlotSize" or mode == "closeSkills" or mode == "upgrade" or mode == "hue" or mode == "hueReroll" or mode == "cam" then
 				hideChrome = playerGui:GetAttribute(REPORT_OPEN_ATTR) == true
 					or playerGui:GetAttribute(HIDE_UI_ACTIVE_ATTR) == true
 			elseif mode == "plot" or mode == "reselectCoral" then
@@ -1224,6 +1389,10 @@ local function applyAttr(raw: any)
 	end
 	local mode = parseMode(raw)
 	if mode then
+		if mode == "backpack" then
+			-- First coral rolled → finger on BUILD: VO once.
+			playPlantFirstCoralSoundOnce()
+		end
 		startHint(mode)
 	else
 		waitingWaveEnd = false
@@ -1254,6 +1423,7 @@ InventoryState.onOpenChanged(function(isOpen: boolean)
 		playerGui:SetAttribute(HINT_ATTR, "backpack")
 	elseif v == "closeBackpack" then
 		-- Closed backpack after hue tutorial → unlock cam cycle, wait for Slot5 pop, then point at Start Waves.
+		playHowManyWavesSoundOnce()
 		if playerGui:GetAttribute("OceanTD_TutorialGateCam") == true then
 			playerGui:SetAttribute("OceanTD_TutorialGateCam", false)
 		end
@@ -1302,11 +1472,22 @@ playerGui:GetAttributeChangedSignal(SKILLS_OPEN_ATTR):Connect(function()
 		playerGui:SetAttribute(HINT_ATTR, "plotSize")
 	elseif not open then
 		if v == "closeSkills" then
-			playerGui:SetAttribute(HINT_ATTR, false)
+			-- After plot-size upgrade + closing skills, teach the cam cycle button.
+			if playerGui:GetAttribute("OceanTD_TutorialGateCam") == true then
+				playerGui:SetAttribute("OceanTD_TutorialGateCam", false)
+			end
+			playerGui:SetAttribute(HINT_ATTR, "cam")
 		elseif v == "plotSize" or v == "plotSizeUpgrade" or v == "closePlotSize" then
 			-- Closed skills without finishing the plot-size tutorial — back to Skills finger.
 			playerGui:SetAttribute(HINT_ATTR, "skills")
 		end
+	end
+end)
+
+playerGui:GetAttributeChangedSignal("OceanTD_CamCycleMode"):Connect(function()
+	if playerGui:GetAttribute(HINT_ATTR) == "cam" then
+		playerGui:SetAttribute(HINT_ATTR, false)
+		onCamButtonClickedForTryWaves()
 	end
 end)
 
@@ -1330,10 +1511,20 @@ local function tryStartSkillsFingerFromTutorial()
 		return
 	end
 	waitingWaveEnd = false
-	playerGui:SetAttribute("OceanTD_TutorialGateLeftHud", false)
 	if playerGui:GetAttribute("OceanTD_TutorialGateCam") == true then
 		playerGui:SetAttribute("OceanTD_TutorialGateCam", false)
 	end
+	-- First loss: point at roll again so they grab more corals, then skills.
+	-- First win (or non-defeat summary): go straight to skills.
+	local wasDefeat = playerGui:GetAttribute("OceanTD_TutorialSummaryWasDefeat") == true
+	playerGui:SetAttribute("OceanTD_TutorialSummaryWasDefeat", nil)
+	if wasDefeat then
+		playerGui:SetAttribute("OceanTD_TutorialRollThenSkills", true)
+		-- Keep LeftHud gated so Skills stays locked until they start a roll.
+		playerGui:SetAttribute(HINT_ATTR, "roll")
+		return
+	end
+	playerGui:SetAttribute("OceanTD_TutorialGateLeftHud", false)
 	playerGui:SetAttribute(HINT_ATTR, "skills")
 end
 
@@ -1582,6 +1773,21 @@ end
 task.defer(applyLeftHudGate)
 
 applyAttr(playerGui:GetAttribute(HINT_ATTR))
+
+-- First real Start Waves: wave explainer VO (waits if "how many waves" is still playing).
+WaveSim.onHud(function(snap)
+	if WaveSim.isJoinIntroDemo() then
+		return
+	end
+	if snap.running and not wavesHudWasRunning then
+		wavesHudWasRunning = true
+		if (snap.wave or 0) <= 1 then
+			playWaveExplainerSoundOnce()
+		end
+	elseif not snap.running then
+		wavesHudWasRunning = false
+	end
+end)
 
 playerGui:GetAttributeChangedSignal(JOIN_INTRO_BUSY_ATTR):Connect(syncSkipTutorialBtn)
 playerGui:GetAttributeChangedSignal("OceanTD_TutorialGateBackpack"):Connect(syncSkipTutorialBtn)

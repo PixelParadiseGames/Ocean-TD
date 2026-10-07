@@ -2604,11 +2604,13 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
 		elseif input.KeyCode == Enum.KeyCode.DPadDown then
 			setGamepadFocus(gamepadFocusIndex + GRID_COLS)
 			return
+		elseif input.KeyCode == Enum.KeyCode.DPadUp then
+			setGamepadFocus(gamepadFocusIndex - GRID_COLS)
+			return
 		elseif input.KeyCode == Enum.KeyCode.ButtonA then
 			activateGamepadFocusedItem()
 			return
 		end
-		-- DPadUp: owned by ReefReportUI / StoreUI (info → report in build mode).
 	end
 
 	if gameProcessed then

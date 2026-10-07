@@ -4,8 +4,8 @@
 
 	Studio: MobileLeftUI.dPad.CartIcon (also Cart / CartBTN / Report).
 	Cart / DPadUp routing (shared with StoreUI):
-	  • Build mode (backpack open): cart shows black “i” info chrome → opens reef report.
-	  • Not build mode: shopping cart → opens Store (empty for now).
+	  • Build mode (backpack open): cart “i” opens reef report; DPadUp browses the backpack list.
+	  • Not build mode: DPadUp / cart → Store (empty for now).
 	While report open: CartIcon becomes pulsing red close (X / B), same look as Skills.
 	Title shows live reef score N (abundance + mix bonuses); S/M/L bars tint by size balance.
 ]]
@@ -2055,6 +2055,10 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
 		end
 		if helpOpen then
 			hideHelpPopup()
+			return
+		end
+		-- Backpack open: DPadUp owns list navigation (InventoryUI), not reef report / store.
+		if InventoryState.isOpen() and not open then
 			return
 		end
 		openFromDPadUp()

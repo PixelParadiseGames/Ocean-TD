@@ -596,7 +596,8 @@ local function bindSink(on: boolean)
 		Enum.KeyCode.S,
 		Enum.KeyCode.D,
 		Enum.KeyCode.Space,
-		Enum.KeyCode.ButtonA
+		Enum.KeyCode.ButtonA,
+		Enum.KeyCode.Thumbstick1
 	)
 end
 
@@ -727,7 +728,8 @@ local function readDroneMoveWish(cf: CFrame): Vector3
 		wish -= Vector3.yAxis
 	end
 
-	if moveStick.Magnitude > 0.12 then
+	-- Fish Cam free-aim steals left stick; Free/Plot cam keep full / slow move with center reticle.
+	if playerGui:GetAttribute("OceanTD_FishFeedAimActive") ~= true and moveStick.Magnitude > 0.12 then
 		wish += look * moveStick.Y + right * moveStick.X
 	end
 
@@ -776,6 +778,13 @@ local function readMoveWish(cf: CFrame): Vector3
 		wish -= Vector3.yAxis
 	end
 
+	-- Only Fish Cam free-aim owns left stick; Plot/Free keep stick for camera move.
+	if playerGui:GetAttribute("OceanTD_FishFeedAimActive") == true then
+		if wish.Magnitude > 1e-4 then
+			return wish.Unit
+		end
+		return Vector3.zero
+	end
 	-- Gamepad left stick: Y+ is up â€” do not negate (was inverted).
 	if moveStick.Magnitude > 0.12 then
 		wish += flatLook * moveStick.Y + right * moveStick.X
@@ -884,7 +893,9 @@ end
 
 local function tickLookInput(dt: number)
 	if lookStick.Magnitude > 0.12 then
-		applyLookDelta(lookStick.X * FC.LOOK_SENS_STICK * dt, lookStick.Y * FC.LOOK_SENS_STICK * dt)
+		-- Free/Drone cam: stick Y+ is up — negate so lookPitch matches (mouse path stays as-is).
+		local stickY = if mode == "dronecam" then -lookStick.Y else lookStick.Y
+		applyLookDelta(lookStick.X * FC.LOOK_SENS_STICK * dt, stickY * FC.LOOK_SENS_STICK * dt)
 	end
 	tickMouseDragLook()
 	if keysDown[Enum.KeyCode.Left] then
@@ -910,6 +921,13 @@ local function moveSpeedForWish(): number
 		speed *= math.clamp(touchMoveVec.Magnitude, 0.08, 1)
 	elseif moveStick.Magnitude > 0.08 then
 		speed *= math.clamp(moveStick.Magnitude, 0.08, 1)
+	end
+	-- Joystick pan while placing: half normal speed for finer aim.
+	-- Plot Cam + center feed reticle: same slow pan (aim by moving the camera).
+	if PlacementController.isActive()
+		or (mode == "plotcam" and playerGui:GetAttribute("OceanTD_FishFeedAimCenter") == true)
+	then
+		speed *= 0.5
 	end
 	return speed
 end
@@ -1306,7 +1324,8 @@ setMode = function(nextMode: CamMode)
 		if playerGui:GetAttribute("OceanTD_UrchinCamBusy") == true then
 			return
 		end
-		if playerGui:GetAttribute("OceanTD_TangCamBusy") == true then
+		-- Wave-1 Tang overview may already be busy; ForceCamMode still needs to select Fish Cam UI.
+		if not forceModeOverride and playerGui:GetAttribute("OceanTD_TangCamBusy") == true then
 			return
 		end
 		if playerGui:GetAttribute("OceanTD_ReefDefeatCamBusy") == true then
@@ -1315,7 +1334,7 @@ setMode = function(nextMode: CamMode)
 		if not forceModeOverride and playerGui:GetAttribute("OceanTD_JoinIntroBusy") == true then
 			return
 		end
-		if PlacementController.isActive() or RelocateController.isActive() then
+		if not forceModeOverride and (PlacementController.isActive() or RelocateController.isActive()) then
 			return
 		end
 		if nextMode == "plotcam" then
@@ -1375,8 +1394,9 @@ setMode = function(nextMode: CamMode)
 				camPos = clampToSkyPose(camPos, pose)
 			end
 		end
-		lockAvatarForMode()
 	end
+	-- Always re-lock when entering any override cam (incl. Off → Fish / Plot → Fish).
+	lockAvatarForMode()
 
 	if nextMode == "plotcam" then
 		local cam = getCamera()
@@ -1434,6 +1454,9 @@ setMode = function(nextMode: CamMode)
 			else
 				resetFishFollowState(camPos)
 			end
+			-- Keep TangCam / cinematic side (behind school, reef heart ahead) — don't flip orbit.
+			fishSt.switching = false
+			resetFishOrbitClock()
 		else
 			resetRoutePatrol(camPos)
 			local spawnFocus = resolveFishSpawnFocus()
@@ -1989,7 +2012,10 @@ local function bindMobileLeftUi(left: Instance)
 
 	if not leftHudListenersBound then
 		leftHudListenersBound = true
-		InventoryState.onOpenChanged(function()
+		InventoryState.onOpenChanged(function(open)
+			if open then
+				PlotCam2.notifyBuildOpened()
+			end
 			syncDPadIcon()
 			syncCamModeIconsForHud()
 		end)
@@ -2023,6 +2049,15 @@ local function bindMobileLeftUi(left: Instance)
 			if mode == "off" then
 				return
 			end
+			-- Wave-1 Tang overview keeps Fish Cam selected; only pause the render loop.
+			if playerGui:GetAttribute("OceanTD_TangCamBusy") == true
+				and playerGui:GetAttribute("OceanTD_SharkCamBusy") ~= true
+				and playerGui:GetAttribute("OceanTD_UrchinCamBusy") ~= true
+				and playerGui:GetAttribute("OceanTD_ReefDefeatCamBusy") ~= true
+			then
+				stopRender()
+				return
+			end
 			-- Plot Cam is the default RTS seat — stay on it through place/build.
 			-- Cinematics still stash + close.
 			if playerGui:GetAttribute("OceanTD_ReefDefeatCamBusy") == true
@@ -2046,25 +2081,72 @@ local function bindMobileLeftUi(left: Instance)
 
 		-- Hard stop FishCam/PlotCam writes the instant shark/urchin/tang intro claims the cam.
 		local function onWaveIntroCamBusy()
-			if playerGui:GetAttribute("OceanTD_SharkCamBusy") == true
-				or playerGui:GetAttribute("OceanTD_UrchinCamBusy") == true
-				or playerGui:GetAttribute("OceanTD_TangCamBusy") == true
-			then
-				stopRender()
-				if mode ~= "off" then
-					cinematicResumeMode = mode
-					playerGui:SetAttribute(FC.ATTR_CINEMATIC_RESUME_MODE, mode)
-					forceModeOverride = true
-					setMode("off")
-					forceModeOverride = false
-				end
+			local tangBusy = playerGui:GetAttribute("OceanTD_TangCamBusy") == true
+			local sharkBusy = playerGui:GetAttribute("OceanTD_SharkCamBusy") == true
+			local urchinBusy = playerGui:GetAttribute("OceanTD_UrchinCamBusy") == true
+			if not (tangBusy or sharkBusy or urchinBusy) then
+				return
+			end
+			stopRender()
+			-- Tang overview: keep CamCycleMode (Fish Cam UI / locomotion lock / crosshair).
+			if tangBusy and not sharkBusy and not urchinBusy then
+				return
+			end
+			if mode ~= "off" then
+				cinematicResumeMode = mode
+				playerGui:SetAttribute(FC.ATTR_CINEMATIC_RESUME_MODE, mode)
+				forceModeOverride = true
+				setMode("off")
+				forceModeOverride = false
 			end
 		end
+
+		local function onTangCamBusyChanged()
+			if playerGui:GetAttribute("OceanTD_TangCamBusy") == true then
+				onWaveIntroCamBusy()
+				return
+			end
+			-- Overview handed back: resume Fish/Plot/Drone drive from the current pose.
+			if mode == "off" then
+				return
+			end
+			if playerGui:GetAttribute("OceanTD_SharkCamBusy") == true
+				or playerGui:GetAttribute("OceanTD_UrchinCamBusy") == true
+				or playerGui:GetAttribute("OceanTD_ReefDefeatCamBusy") == true
+				or playerGui:GetAttribute("OceanTD_PlotSizeCinematicBusy") == true
+			then
+				return
+			end
+			local cam = getCamera()
+			if cam then
+				camPos = cam.CFrame.Position
+				syncLookFromCFrame(cam.CFrame)
+				if mode == "fishcam" then
+					local fish = WaveSim.getFurthestUnfedFish()
+					local spawnFocus = resolveFishSpawnFocus()
+					if fish then
+						fishSt.focusPos = fish.position
+						fishSt.dampPos = fish.position
+						fishSt.targetId = fish.id
+					elseif spawnFocus then
+						fishSt.focusPos = spawnFocus
+						fishSt.dampPos = spawnFocus
+						fishSt.targetId = nil
+					end
+					fishSt.switching = false
+					-- Inherit TangCam pose: sit behind the school looking toward the reef heart.
+					resetFishOrbitClock()
+				end
+			end
+			lockAvatarForMode()
+			startRenderLoop()
+		end
+
 		playerGui:GetAttributeChangedSignal("OceanTD_SharkCamBusy"):Connect(onWaveIntroCamBusy)
 		playerGui:GetAttributeChangedSignal("OceanTD_UrchinCamBusy"):Connect(onWaveIntroCamBusy)
-		playerGui:GetAttributeChangedSignal("OceanTD_TangCamBusy"):Connect(onWaveIntroCamBusy)
+		playerGui:GetAttributeChangedSignal("OceanTD_TangCamBusy"):Connect(onTangCamBusyChanged)
 
-		playerGui:GetAttributeChangedSignal("OceanTD_ForceCamMode"):Connect(function()
+		local function applyForcedCamMode()
 			local raw = playerGui:GetAttribute("OceanTD_ForceCamMode")
 			if raw ~= "off" and raw ~= "plotcam" and raw ~= "fishcam" and raw ~= "dronecam" then
 				return
@@ -2074,10 +2156,19 @@ local function bindMobileLeftUi(left: Instance)
 					return
 				end
 			end
+			-- Wave-1 Tang handoff: keep the behind-fish / heart-ahead framing.
+			local preserve = raw == "fishcam"
 			forceModeOverride = true
+			if preserve then
+				resumePreserveView = true
+			end
 			setMode(raw :: CamMode)
+			resumePreserveView = false
 			forceModeOverride = false
-		end)
+		end
+		playerGui:GetAttributeChangedSignal("OceanTD_ForceCamMode"):Connect(applyForcedCamMode)
+		-- Stamp re-applies even when ForceCamMode string is unchanged (e.g. already "fishcam").
+		playerGui:GetAttributeChangedSignal("OceanTD_ForceCamStamp"):Connect(applyForcedCamMode)
 
 		playerGui:GetAttributeChangedSignal("OceanTD_JoinIntroBusy"):Connect(function()
 			if playerGui:GetAttribute("OceanTD_JoinIntroBusy") == true then
@@ -2142,7 +2233,9 @@ local function bindMobileLeftUi(left: Instance)
 		playerGui:GetAttributeChangedSignal("OceanTD_ResumeBuildCam"):Connect(onResumeBuildCam)
 
 		InventoryState.onOpenChanged(function(open)
-			if not open then
+			if open then
+				PlotCam2.notifyBuildOpened()
+			else
 				task.defer(tryResumeBuildCam)
 			end
 		end)
