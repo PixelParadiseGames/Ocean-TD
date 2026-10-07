@@ -39,6 +39,7 @@ local SeedWheelRevealApi = require(script.Parent:WaitForChild("SeedWheelRevealAp
 
 local Consts = require(script.Parent:WaitForChild("CoralInspectPanelConsts"))
 local HuePad = require(script.Parent:WaitForChild("CoralInspectPanelHuePad"))
+local InspectRecycle = require(script.Parent:WaitForChild("CoralInspectPanelRecycle"))
 
 local CoralInspectPanel = {}
 
@@ -402,7 +403,6 @@ local catalog: GuiObject? = nil
 local iconLbl: ImageLabel? = nil
 local headerSeedAmount: TextLabel? = nil
 local nameLbl: TextLabel? = nil
-local recycleBtn: TextButton? = nil
 local upgradeBtn: TextButton? = nil
 local colorScroll: ScrollingFrame? = nil
 local colorSwatchBtns: { [number]: GuiButton } = {}
@@ -3157,16 +3157,6 @@ local function fillHeader(part: BasePart)
 	syncColorFromPart(part)
 end
 
-local function onDeletePressed()
-	if not RelocateController.isActive() then
-		return
-	end
-	hideStatsKey()
-	hideConfirm()
-	UiHaptics.pulseShort()
-	RelocateController.beginRecycleConfirm()
-end
-
 local function refreshLifeRows(part: BasePart?)
 	if not fedLbl or not wavesLbl then
 		return
@@ -3259,6 +3249,7 @@ local function setVisible(on: boolean)
 		end
 		hideConfirm()
 		hideStatsKey()
+		InspectRecycle.exit(false)
 		RelocateController.setInspectPanelVisible(false)
 		clearLifeConns()
 		cineToken += 1
@@ -3366,41 +3357,13 @@ function CoralInspectPanel.bind(panel: GuiObject, catalogFrame: GuiObject)
 	nm.Parent = row1
 	nameLbl = nm
 
-	local recycle = Instance.new("TextButton")
-	recycle.Name = "Recycle"
-	recycle.Text = ""
-	recycle.Font = UiTheme.Font
-	recycle.TextScaled = true
-	recycle.TextColor3 = Consts.WHITE
-	recycle.BackgroundColor3 = Consts.REC_GREEN
-	recycle.BorderSizePixel = 0
-	recycle.AnchorPoint = Vector2.new(1, 0.5)
-	recycle.Position = UDim2.new(1, 0, 0.5, 2)
-	recycle.Size = UDim2.fromOffset(40, 40)
-	recycle.AutoButtonColor = false
-	recycle.Parent = row1
-	UiCircles.ensure(recycle)
-	local edge = Instance.new("UIStroke")
-	edge.Color = Consts.WHITE
-	edge.Thickness = 2
-	edge.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
-	edge.Parent = recycle
-
-	local recycleIcon = Instance.new("ImageLabel")
-	recycleIcon.Name = "Icon"
-	recycleIcon.BackgroundTransparency = 1
-	recycleIcon.AnchorPoint = Vector2.new(0.5, 0.5)
-	recycleIcon.Position = UDim2.fromScale(0.5, 0.5)
-	-- ~20% smaller than prior 0.62 so the logo sits inside the green circle.
-	recycleIcon.Size = UDim2.fromScale(0.5, 0.5)
-	recycleIcon.Image = Consts.RECYCLE_ICON_IMAGE
-	recycleIcon.ScaleType = Enum.ScaleType.Fit
-	recycleIcon.ZIndex = 2
-	recycleIcon.Active = false
-	recycleIcon.Parent = recycle
-
-	recycleBtn = recycle
-	recycle.Activated:Connect(onDeletePressed)
+	InspectRecycle.mount(row1, nm, {
+		getRoot = function()
+			return root
+		end,
+		hideStatsKey = hideStatsKey,
+		hideConfirm = hideConfirm,
+	})
 
 	local function refreshHeaderRow()
 		local h = row1.AbsoluteSize.Y
@@ -3412,10 +3375,9 @@ function CoralInspectPanel.bind(panel: GuiObject, catalogFrame: GuiObject)
 		if iconLbl then
 			iconLbl.Size = UDim2.fromOffset(side, side)
 		end
-		if recycleBtn then
-			recycleBtn.Size = UDim2.fromOffset(side, side)
-		end
+		InspectRecycle.refreshHeader(side)
 		nm.Position = UDim2.new(0, side + 12, 0.5, 2)
+		-- Keep name under the cancel disc so it covers the label partially when slid out.
 		nm.Size = UDim2.new(1, -(side * 2 + 20), 0.42, 0)
 		if lifePad then
 			-- Align Fed/Waves under the coral name.

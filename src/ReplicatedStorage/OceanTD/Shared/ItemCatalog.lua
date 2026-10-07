@@ -7,6 +7,13 @@ export type ItemDef = {
 	category: string, -- "Coral" | "Sponge" | "Seagrass" | "Critter" | ...
 	sortOrder: number,
 	speciesId: string?,
+	-- Backpack class group title (Long Range / Fast Reload / Balanced).
+	coralClass: string?,
+}
+
+export type CoralSection = {
+	title: string,
+	ids: { string },
 }
 
 local ItemCatalog = {}
@@ -14,70 +21,85 @@ local ItemCatalog = {}
 local BRAIN_ICON = "rbxassetid://137897292847744"
 local SPONGE_ICON = "rbxassetid://130951757133075"
 
+-- Backpack section order + membership (stats per class come later).
+ItemCatalog.CORAL_SECTIONS = {
+	{ title = "Long Range", ids = { "TreeCoral", "SeaGrass" } },
+	{ title = "Fast Reload", ids = { "Zoas", "FireCoral" } },
+	{ title = "Balanced", ids = { "SeaFan", "LeatherCoral", "BrainCoral", "Sponge" } },
+} :: { CoralSection }
+
 local BY_ID: { [string]: ItemDef } = {
-	BrainCoral = {
-		id = "BrainCoral",
-		displayName = "Brain Coral",
-		icon = BRAIN_ICON,
+	TreeCoral = {
+		id = "TreeCoral",
+		displayName = "Tree Coral",
+		icon = "rbxassetid://114115102333521",
 		category = "Coral",
 		sortOrder = 10,
-		speciesId = "BrainCoral",
-	},
-	Sponge = {
-		id = "Sponge",
-		displayName = "Sponge",
-		icon = SPONGE_ICON,
-		category = "Sponge",
-		sortOrder = 20,
-		speciesId = "Sponge",
+		speciesId = "TreeCoral",
+		coralClass = "Long Range",
 	},
 	SeaGrass = {
 		id = "SeaGrass",
 		displayName = "Sea Grass",
 		icon = "rbxassetid://112749189598621",
 		category = "Seagrass",
-		sortOrder = 30,
+		sortOrder = 20,
 		speciesId = "SeaGrass",
-	},
-	FireCoral = {
-		id = "FireCoral",
-		displayName = "Fire Coral",
-		icon = "rbxassetid://131053731672950",
-		category = "Coral",
-		sortOrder = 35, -- before Sea Fan
-		speciesId = "FireCoral",
+		coralClass = "Long Range",
 	},
 	Zoas = {
 		id = "Zoas",
 		displayName = "Zoas",
 		icon = "rbxassetid://109884804548206",
 		category = "Coral",
-		sortOrder = 36,
+		sortOrder = 30,
 		speciesId = "Zoas",
+		coralClass = "Fast Reload",
 	},
-	TreeCoral = {
-		id = "TreeCoral",
-		displayName = "Tree Coral",
-		icon = "rbxassetid://114115102333521",
+	FireCoral = {
+		id = "FireCoral",
+		displayName = "Fire Coral",
+		icon = "rbxassetid://131053731672950",
 		category = "Coral",
-		sortOrder = 37,
-		speciesId = "TreeCoral",
-	},
-	LeatherCoral = {
-		id = "LeatherCoral",
-		displayName = "Leather Coral",
-		icon = "rbxassetid://136151370827546",
-		category = "Coral",
-		sortOrder = 38,
-		speciesId = "LeatherCoral",
+		sortOrder = 40,
+		speciesId = "FireCoral",
+		coralClass = "Fast Reload",
 	},
 	SeaFan = {
 		id = "SeaFan",
 		displayName = "Sea Fan",
 		icon = "rbxassetid://105276585485138",
 		category = "Coral",
-		sortOrder = 40,
+		sortOrder = 50,
 		speciesId = "SeaFan",
+		coralClass = "Balanced",
+	},
+	LeatherCoral = {
+		id = "LeatherCoral",
+		displayName = "Leather Coral",
+		icon = "rbxassetid://136151370827546",
+		category = "Coral",
+		sortOrder = 60,
+		speciesId = "LeatherCoral",
+		coralClass = "Balanced",
+	},
+	BrainCoral = {
+		id = "BrainCoral",
+		displayName = "Brain Coral",
+		icon = BRAIN_ICON,
+		category = "Coral",
+		sortOrder = 70,
+		speciesId = "BrainCoral",
+		coralClass = "Balanced",
+	},
+	Sponge = {
+		id = "Sponge",
+		displayName = "Sponge",
+		icon = SPONGE_ICON,
+		category = "Sponge",
+		sortOrder = 80,
+		speciesId = "Sponge",
+		coralClass = "Balanced",
 	},
 }
 

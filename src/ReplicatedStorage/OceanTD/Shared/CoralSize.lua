@@ -139,48 +139,48 @@ export type SizeStats = {
 	defense: number,
 }
 
--- Default / BrainCoral
-CoralSize.STATS = {
-	[1] = { range = 30, reload = 6, food = 1, defense = 2 },
-	[2] = { range = 60, reload = 4, food = 2, defense = 3 },
-	[3] = { range = 80, reload = 2, food = 3, defense = 4 },
+-- Class combat tables (backpack groups). Food/defense still per-species where noted.
+-- Long Range: range 35/60/90 · reload 8/6/4
+-- Fast Reload: range 20/30/50 · reload 4/2/1
+-- Balanced: range 25/40/70 · reload 6/4/2
+local LONG_RANGE = {
+	[1] = { range = 35, reload = 8, food = 1, defense = 2 },
+	[2] = { range = 60, reload = 6, food = 2, defense = 3 },
+	[3] = { range = 90, reload = 4, food = 3, defense = 4 },
+}
+local FAST_RELOAD = {
+	[1] = { range = 20, reload = 4, food = 1, defense = 1 },
+	[2] = { range = 30, reload = 2, food = 2, defense = 2 },
+	[3] = { range = 50, reload = 1, food = 4, defense = 3 },
+}
+local BALANCED = {
+	[1] = { range = 25, reload = 6, food = 1, defense = 2 },
+	[2] = { range = 40, reload = 4, food = 2, defense = 3 },
+	[3] = { range = 70, reload = 2, food = 3, defense = 4 },
 }
 
+-- Default fallback = Balanced (BrainCoral).
+CoralSize.STATS = BALANCED
+
 CoralSize.STATS_BY_SPECIES = {
-	BrainCoral = CoralSize.STATS,
-	-- Same as Brain for now (will be tuned later).
-	SeaGrass = CoralSize.STATS,
-	-- Brain-like range/reload/defense; food matches Food orb counts (1 / 3 / 4).
-	SeaFan = {
-		[1] = { range = 30, reload = 6, food = 1, defense = 2 },
-		[2] = { range = 60, reload = 4, food = 3, defense = 3 },
-		[3] = { range = 80, reload = 2, food = 4, defense = 4 },
-	},
+	-- Long Range
+	TreeCoral = LONG_RANGE,
+	SeaGrass = LONG_RANGE,
+	-- Fast Reload
+	Zoas = FAST_RELOAD,
+	FireCoral = FAST_RELOAD,
+	-- Balanced (Sea Fan keeps higher food at M/L)
+	BrainCoral = BALANCED,
+	LeatherCoral = BALANCED,
 	Sponge = {
-		[1] = { range = 40, reload = 6, food = 1, defense = 1 },
-		[2] = { range = 70, reload = 4, food = 2, defense = 2 },
-		[3] = { range = 90, reload = 2, food = 4, defense = 3 },
+		[1] = { range = 25, reload = 6, food = 1, defense = 1 },
+		[2] = { range = 40, reload = 4, food = 2, defense = 2 },
+		[3] = { range = 70, reload = 2, food = 4, defense = 3 },
 	},
-	-- Same as Sponge for now.
-	FireCoral = {
-		[1] = { range = 40, reload = 6, food = 1, defense = 1 },
-		[2] = { range = 70, reload = 4, food = 2, defense = 2 },
-		[3] = { range = 90, reload = 2, food = 4, defense = 3 },
-	},
-	Zoas = {
-		[1] = { range = 40, reload = 6, food = 1, defense = 1 },
-		[2] = { range = 70, reload = 4, food = 2, defense = 2 },
-		[3] = { range = 90, reload = 2, food = 4, defense = 3 },
-	},
-	TreeCoral = {
-		[1] = { range = 40, reload = 6, food = 1, defense = 1 },
-		[2] = { range = 70, reload = 4, food = 2, defense = 2 },
-		[3] = { range = 90, reload = 2, food = 4, defense = 3 },
-	},
-	LeatherCoral = {
-		[1] = { range = 40, reload = 6, food = 1, defense = 1 },
-		[2] = { range = 70, reload = 4, food = 2, defense = 2 },
-		[3] = { range = 90, reload = 2, food = 4, defense = 3 },
+	SeaFan = {
+		[1] = { range = 25, reload = 6, food = 1, defense = 2 },
+		[2] = { range = 40, reload = 4, food = 3, defense = 3 },
+		[3] = { range = 70, reload = 2, food = 4, defense = 4 },
 	},
 }
 

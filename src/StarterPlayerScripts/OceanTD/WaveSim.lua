@@ -4658,9 +4658,17 @@ local function stopPlanningArrowLoop()
 	end
 end
 
+local function syncPlanningLegendVisible(want: boolean)
+	-- Hide DANGEROUS/FRIENDLY legend after the player places their first coral.
+	if want and L.PlacedCoralIndex.countLocal() > 0 then
+		want = false
+	end
+	L.WaveArrowPreview.setPlanningLegendVisible(want)
+end
+
 function WaveSim.stopPlanningArrowPreview()
 	stopPlanningArrowLoop()
-	L.WaveArrowPreview.setPlanningLegendVisible(false)
+	syncPlanningLegendVisible(false)
 	L.WaveArrowPreview.setTickSpeedMult(1)
 	if not running then
 		L.WaveArrowPreview.destroy()
@@ -4703,7 +4711,7 @@ function WaveSim.startPlanningArrowPreview(): boolean
 	}
 	L.WaveArrowPreview.setTickSpeedMult(0.5)
 	L.WaveArrowPreview.start(planningOpts)
-	L.WaveArrowPreview.setPlanningLegendVisible(true)
+	syncPlanningLegendVisible(true)
 	if not planningArrowConn then
 		planningArrowConn = L.RunService.Heartbeat:Connect(function(dt)
 			if not planningArrows or running or hasStartedWavesThisSession then
@@ -4909,7 +4917,7 @@ function WaveSim.rebuildRouteForPlotSize(plotSizeStage: number?): boolean
 		if not L.WaveArrowPreview.hasActiveRedTrains() then
 			L.WaveArrowPreview.startRed(planningOpts)
 		end
-		L.WaveArrowPreview.setPlanningLegendVisible(true)
+		syncPlanningLegendVisible(true)
 	end
 	return true
 end
@@ -5011,6 +5019,15 @@ ClientPlot.onChanged(function()
 		return
 	end
 	task.defer(tryStartPlanningAfterIntro)
+end)
+
+task.defer(function()
+	L.PlacedCoralIndex.ensure()
+	L.PlacedCoralIndex.onChanged(function()
+		if L.PlacedCoralIndex.countLocal() > 0 then
+			L.WaveArrowPreview.setPlanningLegendVisible(false)
+		end
+	end)
 end)
 
 return WaveSim

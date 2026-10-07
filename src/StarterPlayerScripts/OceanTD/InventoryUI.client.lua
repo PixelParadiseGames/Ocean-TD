@@ -833,12 +833,14 @@ scroll.Parent = scrollRoot
 
 CoralInspectPanel.bind(panel, scrollRoot)
 
-local grid = Instance.new("UIGridLayout")
-grid.Name = "Grid2"
-grid.CellPadding = UDim2.fromOffset(10, 14)
-grid.SortOrder = Enum.SortOrder.LayoutOrder
-grid.FillDirectionMaxCells = 2
-grid.Parent = scroll
+-- Vertical sections (class titles + 2-col grids). Replaces a flat UIGridLayout.
+local scrollList = Instance.new("UIListLayout")
+scrollList.Name = "SectionList"
+scrollList.FillDirection = Enum.FillDirection.Vertical
+scrollList.HorizontalAlignment = Enum.HorizontalAlignment.Center
+scrollList.SortOrder = Enum.SortOrder.LayoutOrder
+scrollList.Padding = UDim.new(0, 10)
+scrollList.Parent = scroll
 
 local gridPad = Instance.new("UIPadding")
 gridPad.PaddingTop = UDim.new(0, 6)
@@ -848,6 +850,7 @@ gridPad.PaddingRight = UDim.new(0, 6)
 gridPad.Parent = scroll
 
 local itemButtons: { ImageButton } = {}
+local sectionGrids: { UIGridLayout } = {}
 
 local function backpackItemLabelHeight(): number
 	-- Mobile (<720): fixed 14px — looks correct; do not change.
@@ -884,7 +887,10 @@ local function refreshGridCellSize()
 		cell = math.clamp(cell, 56, 120)
 	end
 	local labelRoom = backpackItemLabelRoom()
-	grid.CellSize = UDim2.fromOffset(cell, cell + labelRoom)
+	local cellSize = UDim2.fromOffset(cell, cell + labelRoom)
+	for _, grid in ipairs(sectionGrids) do
+		grid.CellSize = cellSize
+	end
 	local labelH = backpackItemLabelHeight()
 	for _, btn in ipairs(itemButtons) do
 		local nameLbl = btn:FindFirstChild("Name")
@@ -1602,7 +1608,7 @@ clearBackpackFocusForSave = function()
 	GuiService.SelectedObject = nil
 end
 
-local function makeItemButton(def, layoutOrder: number, instanceSuffix: string?): ImageButton
+local function makeItemButton(def, layoutOrder: number, instanceSuffix: string?, parentFrame: Instance?): ImageButton
 	local btnName = if instanceSuffix then def.id .. instanceSuffix else def.id
 	local btn = Instance.new("ImageButton")
 	btn.Name = btnName
@@ -1796,11 +1802,11 @@ local function makeItemButton(def, layoutOrder: number, instanceSuffix: string?)
 	end)
 
 	table.insert(itemButtons, btn)
-	btn.Parent = scroll
+	btn.Parent = parentFrame or scroll
 	return btn
 end
 
-local function makeLockedPlaceholder(layoutOrder: number): ImageButton
+local function makeLockedPlaceholder(layoutOrder: number, parentFrame: Instance?): ImageButton
 	local btn = Instance.new("ImageButton")
 	btn.Name = "_LockedSlot" .. tostring(layoutOrder)
 	btn.BackgroundTransparency = 1
@@ -1858,35 +1864,107 @@ local function makeLockedPlaceholder(layoutOrder: number): ImageButton
 	task.defer(placeLabelUnderIcon)
 
 	table.insert(itemButtons, btn)
-	btn.Parent = scroll
+	btn.Parent = parentFrame or scroll
 	return btn
+end
+
+local function makeSection(title: string, layoutOrder: number): (Frame, Frame)
+	local section = Instance.new("Frame")
+	section.Name = "Section_" .. title:gsub("%s+", "")
+	section.BackgroundTransparency = 1
+	section.Size = UDim2.new(1, 0, 0, 0)
+	section.AutomaticSize = Enum.AutomaticSize.Y
+	section.LayoutOrder = layoutOrder
+	section.Parent = scroll
+
+	local list = Instance.new("UIListLayout")
+	list.FillDirection = Enum.FillDirection.Vertical
+	list.HorizontalAlignment = Enum.HorizontalAlignment.Center
+	list.SortOrder = Enum.SortOrder.LayoutOrder
+	list.Padding = UDim.new(0, 4)
+	list.Parent = section
+
+	local header = Instance.new("TextLabel")
+	header.Name = "SectionTitle"
+	header.BackgroundTransparency = 1
+	header.Size = UDim2.new(1, -4, 0, 32)
+	header.Font = UiTheme.Font
+	header.Text = string.upper(title)
+	header.TextColor3 = Color3.new(1, 1, 1)
+	header.TextStrokeTransparency = 0.4
+	header.TextStrokeColor3 = Color3.new(0, 0, 0)
+	header.TextScaled = true
+	header.TextXAlignment = Enum.TextXAlignment.Center
+	header.LayoutOrder = 1
+	header.Parent = section
+	local headerSize = Instance.new("UITextSizeConstraint")
+	headerSize.MaxTextSize = 23
+	headerSize.MinTextSize = 17
+	headerSize.Parent = header
+
+	local gridHost = Instance.new("Frame")
+	gridHost.Name = "Grid"
+	gridHost.BackgroundTransparency = 1
+	gridHost.Size = UDim2.new(1, 0, 0, 0)
+	gridHost.AutomaticSize = Enum.AutomaticSize.Y
+	gridHost.LayoutOrder = 2
+	gridHost.Parent = section
+
+	local grid = Instance.new("UIGridLayout")
+	grid.Name = "Grid2"
+	grid.CellPadding = UDim2.fromOffset(10, 14)
+	grid.SortOrder = Enum.SortOrder.LayoutOrder
+	grid.FillDirectionMaxCells = 2
+	grid.HorizontalAlignment = Enum.HorizontalAlignment.Center
+	grid.Parent = gridHost
+	table.insert(sectionGrids, grid)
+
+	return section, gridHost
 end
 
 local function rebuildItems()
 	for _, child in ipairs(scroll:GetChildren()) do
-		if child:IsA("GuiButton") then
+		if child:IsA("GuiObject") and child.Name ~= "UIPadding" then
+			-- Keep layout/padding; wipe sections + legacy buttons.
+			if child:IsA("UIListLayout") or child:IsA("UIPadding") then
+				continue
+			end
 			child:Destroy()
 		end
 	end
 	table.clear(itemButtons)
+	table.clear(sectionGrids)
 	clearAllPulses()
 
 	if TEMP_BRAIN_CORAL_SLOT_COUNT > 0 then
 		local brain = ItemCatalog.get("BrainCoral")
 		assert(brain, "[INV] TEMP fill needs BrainCoral in ItemCatalog")
+		local _, gridHost = makeSection("Temp", 1)
 		for i = 1, TEMP_BRAIN_CORAL_SLOT_COUNT do
-			makeItemButton(brain, i, "_temp" .. tostring(i))
+			makeItemButton(brain, i, "_temp" .. tostring(i), gridHost)
 		end
 		log("TEMP grid fill", TEMP_BRAIN_CORAL_SLOT_COUNT, "x BrainCoral — set TEMP_BRAIN_CORAL_SLOT_COUNT=0 for real catalog")
 	else
-		local order = 1
-		for _, def in ipairs(ItemCatalog.all()) do
-			makeItemButton(def, order, nil)
-			order += 1
+		local sectionOrder = 1
+		local lastGridHost: Frame? = nil
+		for _, section in ipairs(ItemCatalog.CORAL_SECTIONS) do
+			local _, gridHost = makeSection(section.title, sectionOrder)
+			sectionOrder += 1
+			lastGridHost = gridHost
+			local slot = 1
+			for _, id in ipairs(section.ids) do
+				local def = ItemCatalog.get(id)
+				if def then
+					makeItemButton(def, slot, nil, gridHost)
+					slot += 1
+				end
+			end
 		end
-		while order <= BACKPACK_SLOT_COUNT do
-			makeLockedPlaceholder(order)
-			order += 1
+		-- Coming-soon ? slots under Balanced so players know more corals are on the way.
+		if lastGridHost then
+			for i = 1, 6 do
+				makeLockedPlaceholder(100 + i, lastGridHost)
+			end
 		end
 	end
 	refreshGridCellSize()

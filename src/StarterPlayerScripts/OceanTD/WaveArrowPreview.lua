@@ -263,6 +263,11 @@ function WaveArrowPreview.setPlanningLegendVisible(visible: boolean)
 	sg.Enabled = visible == true
 end
 
+function WaveArrowPreview.isPlanningLegendVisible(): boolean
+	local sg = planningLegendSg
+	return sg ~= nil and sg.Parent ~= nil and sg.Enabled == true
+end
+
 function WaveArrowPreview.setTickSpeedMult(mult: number)
 	tickSpeedMult = math.max(0.05, mult)
 end

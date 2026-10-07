@@ -53,6 +53,13 @@ local inspectPanelVisible = false
 local activeChanged = Instance.new("BindableEvent")
 local r1WhileActive: (() -> boolean)? = nil
 local aWhileIdle: (() -> boolean)? = nil
+-- Coral inspect header owns recycle confirm UI when registered.
+local inspectRecycle = {
+	uiHandler = nil :: ((boolean) -> ())?,
+	btn = nil :: TextButton?,
+	flyCenter = nil :: Vector2?,
+	flySize = nil :: number?,
+}
 local busy = false
 local active = false
 local introAnimating = false
@@ -1133,14 +1140,16 @@ local function syncChrome()
 
 	-- Idle close (exit tool): keyboard/mouse instantly; gamepad after 3s.
 	-- After recycle confirm: always show cancel for that action. Move/rotate auto-commit (no ✓).
+	-- Inspect header owns recycle confirm (cancel slides beside Recycle → Confirm).
+	local inspectOwnsRecycleConfirm = inspectPanelVisible and recyclePending
 	local idleCloseReady = (not gamepadRelocate) or ((os.clock() - relocateShownAt) >= C.IDLE_CLOSE_DELAY_SEC)
 	local showIdleClose = (not hasMoved) and (not hasRotated) and (not recyclePending) and idleCloseReady
-	local showCancel = hasMoved or recyclePending or showIdleClose
+	local showCancel = hasMoved or (recyclePending and not inspectOwnsRecycleConfirm) or showIdleClose
 	cancelBtn.Visible = showCancel
 	local tipLetter = if gamepadRelocate then "B" else "X"
 	local showWord = (math.floor((os.clock() - gamepadChromeT0) / C.HOVER_HINT_PERIOD) % 2) == 1
 	-- Recycle confirm only: move/rotate save immediately on release (undo covers mistakes).
-	checkBtn.Visible = recyclePending
+	checkBtn.Visible = recyclePending and not inspectOwnsRecycleConfirm
 
 	-- Keep button size fixed — shrinking on rotate made the whole chrome jump.
 	layoutWaistChrome(C.BTN_SIZE, checkBtn.Visible)
@@ -1169,8 +1178,8 @@ local function syncChrome()
 	if recycleBtn then
 		-- Hide recycle while dragging a move / rotating; show again after confirm, or during recycle confirm.
 		local showRecycle = (not hasMoved and not hasRotated) or recyclePending
-		-- Coral inspect UI owns the recycle affordance; hide the in-world one while idle.
-		if inspectPanelVisible and not recyclePending then
+		-- Coral inspect UI owns recycle (idle + confirm); hide the avatar/world recycle chrome.
+		if inspectPanelVisible then
 			showRecycle = false
 		end
 		recycleBtn.Visible = showRecycle
@@ -1534,10 +1543,13 @@ local function clearState()
 	originFacingYaw = nil
 	validSpot = true
 	rejectReason = nil
+	local wasRecyclePending = recyclePending
 	recyclePending = false
 	recycleFlying = false
 	recycleSlideU = 0
 	recycleSlideActive = false
+	inspectRecycle.flyCenter = nil
+	inspectRecycle.flySize = nil
 	chromeBtnDown = false
 	chromePressTarget = nil
 	chromeClaimSource = nil
@@ -1554,6 +1566,9 @@ local function clearState()
 	moveIconInspectBlend = 0
 	inspectModal = false
 	unfreeze()
+	if wasRecyclePending and inspectRecycle.uiHandler then
+		inspectRecycle.uiHandler(false)
+	end
 	activeChanged:Fire(false, nil)
 end
 
@@ -1620,6 +1635,18 @@ function RelocateController.setInspectPanelVisible(on: boolean)
 		tweenMoveIconInspectBlend(0)
 		syncChrome()
 	end
+end
+
+function RelocateController.setInspectRecycleBtn(btn: TextButton?)
+	inspectRecycle.btn = btn
+end
+
+function RelocateController.setRecycleConfirmUiHandler(cb: ((boolean) -> ())?)
+	inspectRecycle.uiHandler = cb
+end
+
+function RelocateController.isRecyclePending(): boolean
+	return recyclePending
 end
 
 function RelocateController.setHueColorEditing(on: boolean)
@@ -1905,12 +1932,37 @@ function RelocateController.clearHoverHighlight()
 	clearHover()
 end
 
+local function cancelRecycleConfirm()
+	if not recyclePending or busy or recycleFlying then
+		return
+	end
+	recyclePending = false
+	recycleSlideU = 0
+	recycleSlideActive = false
+	inspectRecycle.flyCenter = nil
+	inspectRecycle.flySize = nil
+	syncChrome()
+	if inspectRecycle.uiHandler then
+		inspectRecycle.uiHandler(false)
+	end
+	log("Recycle confirm cancelled")
+end
+
+function RelocateController.cancelRecycleConfirm()
+	cancelRecycleConfirm()
+end
+
 -- instant=true snaps home (used when arming a new backpack coral).
 function RelocateController.cancel(instant: boolean?)
 	if not active then
 		return
 	end
 	if busy and not instant then
+		return
+	end
+	-- First B/Esc/X aborts recycle confirm; second closes the tool.
+	if recyclePending and not instant then
+		cancelRecycleConfirm()
 		return
 	end
 	BrainSnapPreview.hide()
@@ -2004,6 +2056,9 @@ function RelocateController.beginRecycleConfirm()
 	pressOrigin = nil
 	grabFromMoveIcon = false
 	syncChrome()
+	if inspectRecycle.uiHandler then
+		inspectRecycle.uiHandler(true)
+	end
 	log("Recycle confirm")
 end
 
@@ -2024,10 +2079,16 @@ local function flyRecycleToBackpack(creditedItemId: string, onDone: () -> ())
 		moveBillboard.Enabled = false
 	end
 
-	local startPos = Vector2.new(
-		recycleBtn.AbsolutePosition.X + recycleBtn.AbsoluteSize.X * 0.5,
-		recycleBtn.AbsolutePosition.Y + recycleBtn.AbsoluteSize.Y * 0.5
-	)
+	local startPos = inspectRecycle.flyCenter
+	local startSize = inspectRecycle.flySize or C.REC_BTN_SIZE
+	inspectRecycle.flyCenter = nil
+	inspectRecycle.flySize = nil
+	if not startPos then
+		startPos = Vector2.new(
+			recycleBtn.AbsolutePosition.X + recycleBtn.AbsoluteSize.X * 0.5,
+			recycleBtn.AbsolutePosition.Y + recycleBtn.AbsoluteSize.Y * 0.5
+		)
+	end
 	local target = InventoryState.getItemSlotScreenCenter(creditedItemId)
 	if not target then
 		local vp = if camera then camera.ViewportSize else Vector2.new(800, 600)
@@ -2043,12 +2104,13 @@ local function flyRecycleToBackpack(creditedItemId: string, onDone: () -> ())
 		recyclePlus.TextTransparency = 0
 		recyclePlus.Visible = true
 	end
+	recycleBtn.Visible = true
 	recycleBtn.AnchorPoint = Vector2.new(0.5, 0.5)
 	recycleBtn.Position = UDim2.fromOffset(startPos.X, startPos.Y)
+	recycleBtn.Size = UDim2.fromOffset(startSize, startSize)
 	recycleBtn.BackgroundColor3 = C.REC_GREEN
 	recycleBtn.Active = false
 
-	local startSize = C.REC_BTN_SIZE
 	local t0 = os.clock()
 	local conn: RBXScriptConnection
 	conn = RunService.RenderStepped:Connect(function()
@@ -2091,6 +2153,15 @@ local function commitRecycle()
 	local id = placeId
 	local p = part
 	local creditedId = itemId
+	-- Capture inspect Recycle screen pos before the panel closes on activeChanged.
+	inspectRecycle.flyCenter = nil
+	inspectRecycle.flySize = nil
+	local flySrc = inspectRecycle.btn
+	if flySrc and flySrc.Parent then
+		local sz = flySrc.AbsoluteSize
+		inspectRecycle.flyCenter = Vector2.new(flySrc.AbsolutePosition.X + sz.X * 0.5, flySrc.AbsolutePosition.Y + sz.Y * 0.5)
+		inspectRecycle.flySize = math.max(sz.X, sz.Y)
+	end
 	busy = true
 	PlaceVfx.playCancelSound(fromPos)
 	local rf = Remotes.getFunction("RequestRecycle")
@@ -2123,6 +2194,9 @@ local function commitRecycle()
 		unfreeze()
 		SelectRing.destroy(selectRing)
 		inspectModal = false
+		if inspectRecycle.uiHandler then
+			inspectRecycle.uiHandler(false)
+		end
 		activeChanged:Fire(false, nil)
 		flyRecycleToBackpack(creditedId, function()
 			recycleFlying = false
@@ -2158,7 +2232,12 @@ local function commitRecycle()
 		recyclePending = false
 		recycleSlideU = 0
 		recycleSlideActive = false
+		inspectRecycle.flyCenter = nil
+		inspectRecycle.flySize = nil
 		syncChrome()
+		if inspectRecycle.uiHandler then
+			inspectRecycle.uiHandler(false)
+		end
 	end
 end
 

@@ -14,6 +14,11 @@ return {
 	PANEL_BG = Color3.fromRGB(12, 28, 36),
 	-- Match RelocateController recycle chrome.
 	REC_GREEN = Color3.fromRGB(48, 145, 70),
+	REC_GREEN_DIM = Color3.fromRGB(28, 88, 44),
+	REC_CONFIRM_BRIGHT = Color3.fromRGB(90, 255, 120),
+	REC_CONFIRM_DARK = Color3.fromRGB(35, 85, 45),
+	REC_CANCEL_GAP = 6,
+	REC_SLIDE_SEC = 0.3,
 	DEFAULT_SWATCH_STROKE = Color3.fromRGB(220, 45, 45),
 	COLOR_FOCUS = Color3.fromRGB(255, 220, 40),
 
