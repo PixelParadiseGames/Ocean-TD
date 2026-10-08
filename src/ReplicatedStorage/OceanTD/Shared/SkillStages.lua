@@ -26,6 +26,8 @@ local DEFS: { SkillDef } = {
 	{ id = "WaveSpeed", displayName = "Wave Speed", buttonName = "WaveSpeedBTN" },
 	-- Studio: MobileSkillsA LuckBTN (dice). Locked until Plot Size stage 2 like other skills.
 	{ id = "AutoRoll", displayName = "Auto\nRoll", buttonName = "LuckBTN" },
+	-- Studio: MobileSkillsA RollSpeedBTN (was layout-only stage-5 template; now playable).
+	{ id = "ReloadSpeed", displayName = "Reload\nSpeed", buttonName = "RollSpeedBTN" },
 }
 
 -- Shown on skill bubbles once stage layout templates include an Icon ImageLabel (larger stages).
@@ -37,6 +39,7 @@ local ICON_IMAGE_BY_SKILL: { [string]: string } = {
 	PlaceMore = "rbxassetid://78740084531049",
 	AutoRoll = "rbxassetid://77867192113507", -- dice
 	WaveSpeed = "rbxassetid://125774374435124",
+	ReloadSpeed = "rbxassetid://93609737899259",
 }
 
 function SkillStages.iconImageFor(skillId: string): string?
@@ -183,9 +186,9 @@ function SkillStages.sanitizeActiveMap(rawActive: any, unlockedMap: { [string]: 
 	return m
 end
 
--- $D cost to unlock `stage` (the stage being purchased). 0 for testing.
+-- $D cost to unlock `stage` (the stage being purchased).
 function SkillStages.stageCost(_skillId: string, _stage: number): number
-	return 0
+	return 1
 end
 
 function SkillStages.nextStage(current: number): number?
@@ -294,6 +297,66 @@ function SkillStages.plotSizePartNames(): { [number]: string }
 	return PLOT_SIZE_PART_BY_STAGE
 end
 
+-- Player tap-feed reload. Stage 1 = baseline; 7 = semi (0s); 8 = full-auto hold.
+-- Stage 8 value is fire interval (shots/sec cap), not a "reload" feel.
+local RELOAD_SPEED_COOLDOWN_BY_STAGE: { [number]: number } = {
+	[1] = 1.10,
+	[2] = 0.92, -- ~20% faster than L1
+	[3] = 0.73, -- ~26% faster than L2
+	[4] = 0.56, -- ~30% faster than L3
+	[5] = 0.42, -- ~33% faster than L4
+	[6] = 0.30, -- ~40% faster than L5
+	[7] = 0, -- semi-auto: no reload between taps
+	[8] = 0.10, -- full-auto: hold-to-fire interval (~10/s)
+}
+
+SkillStages.RELOAD_SPEED_FULL_AUTO_STAGE = 8
+SkillStages.RELOAD_SPEED_SEMI_STAGE = 7
+
+function SkillStages.reloadSpeedCooldownSec(stage: number): number
+	local s = SkillStages.clampStage(stage)
+	return RELOAD_SPEED_COOLDOWN_BY_STAGE[s] or RELOAD_SPEED_COOLDOWN_BY_STAGE[1]
+end
+
+function SkillStages.reloadSpeedIsFullAuto(stage: number): boolean
+	return SkillStages.clampStage(stage) >= SkillStages.RELOAD_SPEED_FULL_AUTO_STAGE
+end
+
+function SkillStages.reloadSpeedIsSemiInstant(stage: number): boolean
+	return SkillStages.clampStage(stage) >= SkillStages.RELOAD_SPEED_SEMI_STAGE
+end
+
+-- Fire-rate gain vs `fromStage` (higher stage = shorter reload). nil when not a timed step.
+function SkillStages.reloadSpeedFasterPercent(fromStage: number, toStage: number): number?
+	local fromS = SkillStages.clampStage(fromStage)
+	local toS = SkillStages.clampStage(toStage)
+	if SkillStages.reloadSpeedIsFullAuto(toS) or SkillStages.reloadSpeedIsSemiInstant(toS) then
+		return nil
+	end
+	local fromCd = SkillStages.reloadSpeedCooldownSec(fromS)
+	local toCd = SkillStages.reloadSpeedCooldownSec(toS)
+	if fromCd <= 1e-4 or toCd <= 1e-4 or toCd >= fromCd then
+		return nil
+	end
+	return math.floor((fromCd / toCd - 1) * 100 + 0.5)
+end
+
+local function reloadSpeedDesc(stage: number, vsPrev: boolean?): string
+	local s = SkillStages.clampStage(stage)
+	if SkillStages.reloadSpeedIsFullAuto(s) then
+		return "Full Auto — hold to shoot"
+	end
+	if s >= SkillStages.RELOAD_SPEED_SEMI_STAGE then
+		return "Semi Auto — no reload"
+	end
+	local from = if vsPrev == true then math.max(SkillStages.MIN_STAGE, s - 1) else SkillStages.MIN_STAGE
+	local pct = SkillStages.reloadSpeedFasterPercent(from, s)
+	if pct == nil or pct <= 0 then
+		return "Base reload speed"
+	end
+	return tostring(pct) .. "% Faster"
+end
+
 --[[
 	UnlockDesc copy for a skill at `stage` (usually the next unlock; if maxed, current).
 ]]
@@ -359,6 +422,10 @@ function SkillStages.unlockDesc(skillId: string, stage: number): string
 			return "Unlock stage 2 for limited auto roll"
 		end
 		return "+" .. tostring(inc) .. " auto rolls"
+	end
+	if skillId == "ReloadSpeed" then
+		-- Unlock preview: gain vs the stage you're leaving.
+		return reloadSpeedDesc(s, true)
 	end
 	return ""
 end
@@ -518,6 +585,10 @@ function SkillStages.activeStatusDesc(skillId: string, stage: number): string
 			return "Auto roll off"
 		end
 		return tostring(n) .. " auto rolls"
+	end
+	if skillId == "ReloadSpeed" then
+		-- Active status: cumulative gain vs baseline (stage 1).
+		return reloadSpeedDesc(s, false)
 	end
 	if skillId == "PlotSize" then
 		return SkillStages.unlockDesc(skillId, s)

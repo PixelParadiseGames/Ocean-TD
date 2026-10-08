@@ -11,6 +11,7 @@
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
+local SoundService = game:GetService("SoundService")
 local TweenService = game:GetService("TweenService")
 local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -19,6 +20,7 @@ local oceanRoot = ReplicatedStorage:WaitForChild("OceanTD")
 local Constants = require(oceanRoot:WaitForChild("Shared"):WaitForChild("Constants"))
 local SkillStages = require(oceanRoot:WaitForChild("Shared"):WaitForChild("SkillStages"))
 local Remotes = require(oceanRoot:WaitForChild("Remotes"))
+local CoralInspectPanelConsts = require(script.Parent:WaitForChild("CoralInspectPanelConsts"))
 
 local ClientPlot = require(script.Parent:WaitForChild("ClientPlot"))
 
@@ -30,6 +32,25 @@ local CAM_OUT_SEC = 1.0
 local GROW_SEC = 1.15
 local DIAL_GROW_SEC = 0.9
 local GROW_COLOR = Color3.fromRGB(80, 220, 160)
+-- Same inflate sting as coral size unlock grow.
+local GROW_SOUND_ID = CoralInspectPanelConsts.GROW_SOUND_ID or "rbxassetid://134057288"
+
+local function playGrowSound()
+	local s = Instance.new("Sound")
+	s.Name = "OceanTD_PlotSizeGrow"
+	s.SoundId = GROW_SOUND_ID
+	s.Volume = 0.85
+	s.Parent = SoundService
+	s:Play()
+	s.Ended:Connect(function()
+		s:Destroy()
+	end)
+	task.delay(4, function()
+		if s.Parent then
+			s:Destroy()
+		end
+	end)
+end
 
 local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
@@ -435,6 +456,7 @@ function PlotSizeCinematic.play(
 	local heartFrom = WaveEndVfx.getRouteEndWorldPosForStage(prevStage)
 	local heartTo = WaveEndVfx.getRouteEndWorldPosForStage(newStage)
 	local box = makeGrowBox(fromCf, fromSize)
+	playGrowSound()
 	tweenGrowBox(box, fromSize, toSize, fromCf, toCf, growSec, my, heartFrom, heartTo)
 	if box.Parent then
 		local fade = TweenService:Create(box, TweenInfo.new(0.35), { Transparency = 1 })

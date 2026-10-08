@@ -1844,6 +1844,15 @@ local function wireModeIcon(btn: GuiObject, camMode: CamMode)
 	if hit:GetAttribute("_OceanTD_CamCycleBound") ~= true then
 		hit:SetAttribute("_OceanTD_CamCycleBound", true)
 		hit.Activated:Connect(function()
+			-- Expanded carousel: tap an inactive option to rotate that mode active.
+			-- Active slot (or collapsed stack) still cycles forward.
+			if camMode ~= mode and not carouselCollapsed then
+				if playerGui:GetAttribute("OceanTD_TutorialGateCam") == true then
+					return
+				end
+				setMode(camMode)
+				return
+			end
 			cycleMode()
 		end)
 	end

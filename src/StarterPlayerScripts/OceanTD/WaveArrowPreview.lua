@@ -80,12 +80,18 @@ local crabPathLabels: { WavePathLabel } = {}
 local arrowSound = Instance.new("Sound")
 arrowSound.Name = "OceanTD_WaveArrows"
 arrowSound.SoundId = C.ARROW_SOUND_ID
-arrowSound.Volume = 0.9
+arrowSound.Volume = C.ARROW_ROUND_START_VOLUME or 0.45
 arrowSound.Parent = SoundService
+
+local waveAdvanceSound = Instance.new("Sound")
+waveAdvanceSound.Name = "OceanTD_WaveAdvance"
+waveAdvanceSound.SoundId = C.WAVE_ADVANCE_SOUND_ID or "rbxassetid://78266353371882"
+waveAdvanceSound.Volume = C.WAVE_ADVANCE_VOLUME or 1
+waveAdvanceSound.Parent = SoundService
 
 task.defer(function()
 	pcall(function()
-		ContentProvider:PreloadAsync({ arrowSound })
+		ContentProvider:PreloadAsync({ arrowSound, waveAdvanceSound })
 	end)
 end)
 
@@ -273,7 +279,14 @@ function WaveArrowPreview.setTickSpeedMult(mult: number)
 end
 
 local function playArrowStartSound()
-	WaveEntityPool.playSound("arrow", arrowSound, 1, 0.9, true)
+	local vol = C.ARROW_ROUND_START_VOLUME or 0.45
+	WaveEntityPool.playSound("arrow", arrowSound, 1, vol, true)
+end
+
+-- Wave 2+: next-wave sting at full volume (not the half-vol round-start arrow).
+function WaveArrowPreview.playWaveAdvanceSound()
+	local vol = C.WAVE_ADVANCE_VOLUME or 1
+	WaveEntityPool.playSound("waveAdvance", waveAdvanceSound, 1, vol, true)
 end
 
 -- Fade the wave-start arrow sting (used while wave-explainer VO is speaking on wave 1).

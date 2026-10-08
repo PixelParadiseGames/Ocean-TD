@@ -1,8 +1,9 @@
 --!strict
 --[[
 	During a live wave: click/tap near a critter to lob a free food orb
-	from mid-screen → fish (+1 hunger, cooldown).
-	Successful taps get instant juice: white sphere spray + short haptic.
+	from top-center → fish (+1 hunger, cooldown).
+	Successful taps get instant juice: green sphere spray + short haptic.
+	Touch/mouse: help text above the finger, tap crosshair fades over reload.
 	TAP_FEED_DEBUG draws a translucent ball = clickable world radius.
 
 	Joystick + FishCam while waves run: on-screen crosshair (left stick aim, A feed).
@@ -14,15 +15,18 @@ local GuiService = game:GetService("GuiService")
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local SoundService = game:GetService("SoundService")
 local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
 
 local oceanRoot = ReplicatedStorage:WaitForChild("OceanTD")
 local UiHaptics = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiHaptics"))
 local UiTheme = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiTheme"))
+local SkillStages = require(oceanRoot:WaitForChild("Shared"):WaitForChild("SkillStages"))
 
 local WaveSim = require(script.Parent:WaitForChild("WaveSim"))
 local WaveSimConsts = require(script.Parent:WaitForChild("WaveSimConsts"))
+local SkillPowerUpUI = require(script.Parent:WaitForChild("SkillPowerUpUI"))
 local InventoryState = require(script.Parent:WaitForChild("InventoryState"))
 local PlacementController = require(script.Parent:WaitForChild("PlacementController"))
 local RelocateController = require(script.Parent:WaitForChild("RelocateController"))
@@ -38,13 +42,44 @@ local tapBurstRng = Random.new()
 local juiceGui: ScreenGui? = nil
 local juiceLayer: Frame? = nil
 
+local tapFailSound = Instance.new("Sound")
+tapFailSound.Name = "OceanTD_TapFeedFail"
+tapFailSound.SoundId = WaveSimConsts.TAP_FEED_FAIL_SOUND_ID or "rbxassetid://85774123067486"
+tapFailSound.Volume = 0.85
+tapFailSound.Parent = SoundService
+
+local lastFailSfxAt = 0
+
+local function reloadSpeedStage(): number
+	return SkillPowerUpUI.getStage("ReloadSpeed")
+end
+
+local function isFullAuto(): boolean
+	return SkillStages.reloadSpeedIsFullAuto(reloadSpeedStage())
+end
+
+local function playTapFailSound()
+	-- Full auto can spam miss/reload fails while held — cap to once per second.
+	if isFullAuto() then
+		local now = os.clock()
+		local gap = WaveSimConsts.TAP_FEED_FULL_AUTO_MISS_SFX_SEC or 1
+		if now - lastFailSfxAt < gap then
+			return
+		end
+		lastFailSfxAt = now
+	end
+	tapFailSound.TimePosition = 0
+	tapFailSound:Play()
+end
+
 local AIM_GUI_NAME = "OceanTD_FishFeedAim"
 local AIM_SINK_ACTION = "OceanTD_FishFeedAimSink"
 local AIM_SPEED_PX = 720
 local AIM_DEADZONE = 0.18
 local CROSS_SIZE = 44
+local CROSS_IMAGE_OK = "rbxassetid://106909951351068" -- green: shot fired
+local CROSS_IMAGE_RELOAD = "rbxassetid://75102643555969" -- red: reloading / no shot
 local CROSS_COLOR = Color3.fromRGB(255, 255, 255)
-local CROSS_STROKE = Color3.fromRGB(20, 160, 70)
 local A_TIP_IDLE = Color3.fromRGB(40, 130, 220)
 local A_TIP_HIT = Color3.fromRGB(40, 180, 80)
 local A_TIP_FAIL = Color3.fromRGB(200, 45, 55)
@@ -64,6 +99,10 @@ local aTipFlashToken = 0
 local aStatusToken = 0
 local aimConn: RBXScriptConnection? = nil
 local aHeld = false
+local pointerHeld = false
+local pointerScreenPos = Vector2.zero
+local fullAutoConn: RBXScriptConnection? = nil
+local stickyCross: ImageLabel? = nil
 local locoLocked = false
 local savedWalkSpeed = 16
 local savedJumpPower = 50
@@ -311,6 +350,92 @@ local function flashATip(kind: "hit" | "fail", statusText: string?)
 	end)
 end
 
+local function ensureStickyCrosshair(): ImageLabel?
+	if stickyCross and stickyCross.Parent then
+		return stickyCross
+	end
+	local layer = ensureJuiceLayer()
+	if not layer then
+		return nil
+	end
+	local img = Instance.new("ImageLabel")
+	img.Name = "TapCrosshairSticky"
+	img.BackgroundTransparency = 1
+	img.AnchorPoint = Vector2.new(0.5, 0.5)
+	img.Size = UDim2.fromOffset(CROSS_SIZE, CROSS_SIZE)
+	img.Image = CROSS_IMAGE_OK
+	img.ImageColor3 = CROSS_COLOR
+	img.ImageTransparency = 0
+	img.ScaleType = Enum.ScaleType.Fit
+	img.Active = false
+	img.Visible = false
+	img.ZIndex = 19
+	pcall(function()
+		(img :: any).Interactable = false
+	end)
+	img.Parent = layer
+	stickyCross = img
+	return img
+end
+
+local function setStickyCrosshair(on: boolean, screenPos: Vector2?, kind: ("ok" | "reload")?)
+	if not on then
+		if stickyCross then
+			stickyCross.Visible = false
+		end
+		return
+	end
+	local img = ensureStickyCrosshair()
+	if not img then
+		return
+	end
+	if screenPos then
+		img.Position = UDim2.fromOffset(screenPos.X, screenPos.Y)
+	end
+	img.Image = if kind == "reload" then CROSS_IMAGE_RELOAD else CROSS_IMAGE_OK
+	img.ImageTransparency = 0
+	img.Visible = true
+end
+
+local function flashTapCrosshair(screenPos: Vector2, kind: "ok" | "reload")
+	-- Full-auto hold uses a sticky reticle that follows the finger — don't spawn fade copies.
+	if pointerHeld and isFullAuto() then
+		setStickyCrosshair(true, screenPos, kind)
+		return
+	end
+	local layer = ensureJuiceLayer()
+	if not layer then
+		return
+	end
+	local cd = SkillStages.reloadSpeedCooldownSec(reloadSpeedStage())
+	local fadeSec = math.max(0.35, if cd > 0 then cd else (WaveSimConsts.TAP_FEED_COOLDOWN_SEC or 1))
+	local img = Instance.new("ImageLabel")
+	img.Name = if kind == "ok" then "TapCrosshairOk" else "TapCrosshairReload"
+	img.BackgroundTransparency = 1
+	img.AnchorPoint = Vector2.new(0.5, 0.5)
+	img.Position = UDim2.fromOffset(screenPos.X, screenPos.Y)
+	img.Size = UDim2.fromOffset(CROSS_SIZE, CROSS_SIZE)
+	img.Image = if kind == "ok" then CROSS_IMAGE_OK else CROSS_IMAGE_RELOAD
+	img.ImageColor3 = CROSS_COLOR
+	img.ImageTransparency = 0
+	img.ScaleType = Enum.ScaleType.Fit
+	img.Active = false
+	img.ZIndex = 18
+	pcall(function()
+		(img :: any).Interactable = false
+	end)
+	img.Parent = layer
+
+	local info = TweenInfo.new(fadeSec, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+	local tw = TweenService:Create(img, info, { ImageTransparency = 1 })
+	tw:Play()
+	tw.Completed:Once(function()
+		if img.Parent then
+			img:Destroy()
+		end
+	end)
+end
+
 local function flashScreenStatus(screenPos: Vector2, kind: "hit" | "fail", statusText: string)
 	local layer = ensureJuiceLayer()
 	if not layer then
@@ -320,8 +445,9 @@ local function flashScreenStatus(screenPos: Vector2, kind: "hit" | "fail", statu
 	local status = Instance.new("TextLabel")
 	status.Name = "TapStatus"
 	status.BackgroundTransparency = 1
-	status.AnchorPoint = Vector2.new(0.5, 0)
-	status.Position = UDim2.fromOffset(screenPos.X, screenPos.Y + 10)
+	-- Sit just above the finger / pointer (was below).
+	status.AnchorPoint = Vector2.new(0.5, 1)
+	status.Position = UDim2.fromOffset(screenPos.X, screenPos.Y - 14)
 	status.Size = UDim2.fromOffset(A_STATUS_BASE.X, A_STATUS_BASE.Y)
 	status.Font = UiTheme.Font
 	status.Text = statusText
@@ -372,7 +498,7 @@ local function flashScreenStatus(screenPos: Vector2, kind: "hit" | "fail", statu
 	end)
 end
 
-local function tryFeedAtScreen(screenPos: Vector2, flashTip: boolean?): boolean
+local function tryFeedAtScreen(screenPos: Vector2, flashTip: boolean?, heldRepeat: boolean?): boolean
 	if not WaveSim.isRunning() then
 		return false
 	end
@@ -383,17 +509,34 @@ local function tryFeedAtScreen(screenPos: Vector2, flashTip: boolean?): boolean
 		return false
 	end
 	local result = WaveSim.tryTapFeedAtScreen(screenPos)
+	local quietFail = heldRepeat == true and isFullAuto()
 	local function showResult(kind: "hit" | "fail", text: string)
+		if quietFail and kind == "fail" then
+			return
+		end
 		if flashTip then
 			flashATip(kind, text)
 		else
-			-- Mouse / touch: float the same help text under the tap spot.
+			-- Mouse / touch: float the same help text above the tap spot.
 			flashScreenStatus(screenPos, kind, text)
+		end
+	end
+	-- Touch / mouse: green reticle on fire, red when reloading (didn't shoot).
+	-- Full-auto hold keeps a sticky reticle; still refresh its color on each shot.
+	if not flashTip then
+		if result == "hit" or result == "miss" then
+			flashTapCrosshair(screenPos, "ok")
+		elseif result == "cooldown" and not quietFail then
+			flashTapCrosshair(screenPos, "reload")
+		elseif result == "cooldown" and quietFail then
+			setStickyCrosshair(true, screenPos, "reload")
 		end
 	end
 	if result == "hit" then
 		playTapJuice(screenPos)
-		showResult("hit", "+1 Food")
+		if not quietFail then
+			showResult("hit", "+1 Food")
+		end
 		if WaveSim.getWaveIndex() == WaveSimConsts.TANG_FIRST_WAVE then
 			-- Dismiss the wave-1 "tap fish to feed" finger after the first successful tap.
 			playerGui:SetAttribute("OceanTD_Wave1TapFeedOk", os.clock())
@@ -401,10 +544,14 @@ local function tryFeedAtScreen(screenPos: Vector2, flashTip: boolean?): boolean
 		return true
 	end
 	if result == "cooldown" then
+		playTapFailSound()
 		showResult("fail", "Reloading")
 	elseif result == "full" then
-		showResult("hit", "Full")
+		if not quietFail then
+			showResult("hit", "Full")
+		end
 	elseif result == "miss" then
+		playTapFailSound()
 		showResult("fail", "Miss!")
 	end
 	return false
@@ -616,23 +763,18 @@ local function ensureAimCrosshair(): Frame
 	f.ZIndex = 10
 	f.Parent = sg
 
-	local function makeBar(name: string, size: UDim2, pos: UDim2)
-		local bar = Instance.new("Frame")
-		bar.Name = name
-		bar.BorderSizePixel = 0
-		bar.BackgroundColor3 = CROSS_COLOR
-		bar.AnchorPoint = Vector2.new(0.5, 0.5)
-		bar.Position = pos
-		bar.Size = size
-		bar.ZIndex = 11
-		bar.Parent = f
-		local stroke = Instance.new("UIStroke")
-		stroke.Color = CROSS_STROKE
-		stroke.Thickness = 2
-		stroke.Parent = bar
-	end
-	makeBar("H", UDim2.fromOffset(CROSS_SIZE, 4), UDim2.fromScale(0.5, 0.5))
-	makeBar("V", UDim2.fromOffset(4, CROSS_SIZE), UDim2.fromScale(0.5, 0.5))
+	local graphic = Instance.new("ImageLabel")
+	graphic.Name = "Graphic"
+	graphic.BackgroundTransparency = 1
+	graphic.AnchorPoint = Vector2.new(0.5, 0.5)
+	graphic.Position = UDim2.fromScale(0.5, 0.5)
+	graphic.Size = UDim2.fromScale(1, 1)
+	graphic.Image = CROSS_IMAGE_OK
+	graphic.ImageColor3 = CROSS_COLOR
+	graphic.ScaleType = Enum.ScaleType.Fit
+	graphic.Active = false
+	graphic.ZIndex = 11
+	graphic.Parent = f
 
 	local tip = Instance.new("TextLabel")
 	tip.Name = "ATip"
@@ -783,6 +925,41 @@ local function refreshAimMode()
 	end
 end
 
+local function bindFullAutoLoop(want: boolean)
+	if want then
+		if fullAutoConn then
+			return
+		end
+		fullAutoConn = RunService.RenderStepped:Connect(function()
+			if not isFullAuto() or not WaveSim.isRunning() then
+				setStickyCrosshair(false)
+				return
+			end
+			if aHeld and canShowAimCrosshair() then
+				setStickyCrosshair(false)
+				tryFeedAtScreen(aimPos, true, true)
+				return
+			end
+			if pointerHeld then
+				-- Keep reticle under the finger while dragging (don't let fade flashes vanish).
+				setStickyCrosshair(true, pointerScreenPos, "ok")
+				tryFeedAtScreen(pointerScreenPos, canShowAimCrosshair(), true)
+			else
+				setStickyCrosshair(false)
+			end
+		end)
+		return
+	end
+	if fullAutoConn then
+		fullAutoConn:Disconnect()
+		fullAutoConn = nil
+	end
+end
+
+local function refreshFullAutoLoop()
+	bindFullAutoLoop(isFullAuto() and WaveSim.isRunning())
+end
+
 local function onInput(input: InputObject, gameProcessed: boolean)
 	if input.KeyCode == Enum.KeyCode.Thumbstick1 then
 		if usesStickMovedAim() then
@@ -794,7 +971,8 @@ local function onInput(input: InputObject, gameProcessed: boolean)
 	if input.KeyCode == shootKey and input.UserInputState == Enum.UserInputState.Begin then
 		if canShowAimCrosshair() and not aHeld then
 			aHeld = true
-			tryFeedAtScreen(aimPos, true)
+			refreshFullAutoLoop()
+			tryFeedAtScreen(aimPos, true, false)
 			return
 		end
 	end
@@ -806,8 +984,11 @@ local function onInput(input: InputObject, gameProcessed: boolean)
 	then
 		-- Same pointer space as place/relocate (touch +inset → GetMouseLocation space).
 		local screenPos = PlaceConfirmHitTest.pointerScreenPos(input)
+		pointerHeld = true
+		pointerScreenPos = screenPos
+		refreshFullAutoLoop()
 		-- Flash tip when aim HUD is up; touch/mouse still feed without requiring gamepad.
-		tryFeedAtScreen(screenPos, canShowAimCrosshair())
+		tryFeedAtScreen(screenPos, canShowAimCrosshair(), false)
 	end
 end
 
@@ -815,6 +996,13 @@ UserInputService.InputBegan:Connect(onInput)
 UserInputService.InputChanged:Connect(function(input)
 	if input.KeyCode == Enum.KeyCode.Thumbstick1 then
 		aimStick = Vector2.new(input.Position.X, input.Position.Y)
+	elseif pointerHeld
+		and (
+			input.UserInputType == Enum.UserInputType.MouseMovement
+			or input.UserInputType == Enum.UserInputType.Touch
+		)
+	then
+		pointerScreenPos = PlaceConfirmHitTest.pointerScreenPos(input)
 	end
 end)
 UserInputService.InputEnded:Connect(function(input)
@@ -822,6 +1010,11 @@ UserInputService.InputEnded:Connect(function(input)
 		aimStick = Vector2.zero
 	elseif input.KeyCode == Enum.KeyCode.ButtonA or input.KeyCode == Enum.KeyCode.ButtonR1 then
 		aHeld = false
+	elseif input.UserInputType == Enum.UserInputType.MouseButton1
+		or input.UserInputType == Enum.UserInputType.Touch
+	then
+		pointerHeld = false
+		setStickyCrosshair(false)
 	end
 end)
 
@@ -830,11 +1023,19 @@ playerGui:GetAttributeChangedSignal("OceanTD_CamCycleMode"):Connect(refreshAimMo
 InventoryState.onOpenChanged(refreshAimMode)
 WaveSim.onHud(function()
 	refreshAimMode()
+	refreshFullAutoLoop()
 end)
 WaveSim.onStopped(function()
 	refreshAimMode()
+	aHeld = false
+	pointerHeld = false
+	setStickyCrosshair(false)
+	refreshFullAutoLoop()
 end)
-task.defer(refreshAimMode)
+task.defer(function()
+	refreshAimMode()
+	refreshFullAutoLoop()
+end)
 
 -- Debug radii are attached by WaveSim when TAP_FEED_DEBUG is true.
 if WaveSimConsts.TAP_FEED_DEBUG then

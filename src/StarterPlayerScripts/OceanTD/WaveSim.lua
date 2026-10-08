@@ -211,6 +211,8 @@ local coralStatsByPlaceId: { [string]: CoralStats } = {}
 local fishPathBuckets: { { FishAgent } } = {}
 local activeShots: { FoodShot } = {}
 local visibleShotCount = 0 -- concurrent flying food Parts (≤ FOOD_VISIBLE_MAX)
+-- Cached for food-visual cull gate (hot path); refreshed on PlacedCoralIndex changes.
+local placedCoralCount = 0
 -- Ammo / shots / lane feed + hunger UI live on tables so WaveSim stays under Luau's 200 locals.
 local Feed = {}
 local HungerUi = {}
@@ -255,6 +257,8 @@ local firstVoPlayed = { reefEmpty = false, urchin = false, crab = false, shark =
 local demoCoralParts: { BasePart }? = nil
 -- Green fish-train before the player's first Start Waves this session (finger tutorial planning).
 local hasStartedWavesThisSession = false
+-- Counts real Start Waves presses; round-start SFX skips the first (explainer VO).
+local wavesStartCount = 0
 local planningArrows = false
 local planningArrowConn: RBXScriptConnection? = nil
 
@@ -1052,6 +1056,9 @@ function HungerUi.setDangerFlash(agent: FishAgent, enable: boolean)
 end
 
 -- Player tap-feed: brief green outer stroke on the hunger bar.
+-- Always flash from / restore to base thickness so rapid auto-fire can't stack thick strokes.
+local HUNGER_STROKE_BASE = 1
+local HUNGER_STROKE_FLASH = 2
 function HungerUi.flashTapStroke(agent: FishAgent)
 	local stroke = agent.barStroke
 	if not stroke or not stroke.Parent or agent.finished then
@@ -1059,14 +1066,13 @@ function HungerUi.flashTapStroke(agent: FishAgent)
 	end
 	agent.tapStrokeToken += 1
 	local my = agent.tapStrokeToken
-	local prevThick = stroke.Thickness
 	stroke.Color = C.FILL_GREEN
-	stroke.Thickness = prevThick + 1
+	stroke.Thickness = HUNGER_STROKE_FLASH
 	task.delay(0.2, function()
 		if agent.tapStrokeToken ~= my or not stroke.Parent then
 			return
 		end
-		stroke.Thickness = prevThick
+		stroke.Thickness = HUNGER_STROKE_BASE
 		if agent.dangerActive then
 			-- Danger loop will recolor on its next tick.
 			return
@@ -1687,6 +1693,11 @@ function Feed.acquireFoodPart(): BasePart
 	return WaveEntityPool.acquireFood(ensureFolder(), C.FOOD_RADIUS)
 end
 
+function Feed.acquireTapFoodPart(): BasePart
+	local r = (C.FOOD_RADIUS or 0.52) * (C.TAP_FEED_SIZE_MULT or 2.6)
+	return WaveEntityPool.acquireFood(ensureFolder(), r)
+end
+
 function Feed.releaseFoodPart(p: BasePart)
 	WaveEntityPool.releaseFood(p)
 end
@@ -1702,6 +1713,10 @@ function Feed.releaseShotVisual(shot: FoodShot)
 end
 
 function Feed.shotWantsVisual(start: Vector3, meet: Vector3): boolean
+	-- Under/at gate: always show flying food. Over gate: cap + camera distance cull.
+	if placedCoralCount <= (C.FOOD_CULL_MIN_CORALS or 100) then
+		return true
+	end
 	if visibleShotCount >= C.FOOD_VISIBLE_MAX then
 		return false
 	end
@@ -2009,7 +2024,12 @@ local function attachTapFeedDebug(agent: FishAgent)
 		return
 	end
 	local root = agent.root
-	local diam = math.max(2, (C.TAP_FEED_RADIUS or 10) * 2)
+	local baseR = C.TAP_FEED_RADIUS or 10
+	local mult = if waveIndex <= 10
+		then (C.TAP_FEED_RADIUS_MULT_W1_10 or 1.2)
+		elseif waveIndex <= 20 then (C.TAP_FEED_RADIUS_MULT_W11_20 or 1.1)
+		else 1
+	local diam = math.max(2, baseR * mult * 2)
 	local ball = Instance.new("Part")
 	ball.Name = "OceanTD_TapFeedDebug"
 	ball.Shape = Enum.PartType.Ball
@@ -2660,7 +2680,13 @@ local function beginWave(wave: number)
 	end
 	-- Path preview: GreenArrows race the full route; fish follow after lead (longer on wave 1).
 	if not joinIntroDemo then
-		L.WaveArrowPreview.start()
+		if wave <= 1 then
+			-- Round-start sting only on 2nd+ Start Waves (first overlaps explainer VO).
+			L.WaveArrowPreview.start({ playSound = wavesStartCount > 1 })
+		else
+			L.WaveArrowPreview.start({ playSound = false })
+			L.WaveArrowPreview.playWaveAdvanceSound()
+		end
 	end
 	-- Wave 1: enter Fish Cam first so UI/lock/crosshair match; L.TangCam then drives a short overview.
 	if wave == C.TANG_FIRST_WAVE and not joinIntroDemo then
@@ -3037,7 +3063,7 @@ function Feed.firePlayerTap(target: FishAgent, start: Vector3): boolean
 	local part: BasePart? = nil
 	-- Always try to show player taps (feedback); fall back to logic-only at cap.
 	if Feed.shotWantsVisual(start, meet) or visibleShotCount < C.FOOD_VISIBLE_MAX then
-		part = Feed.acquireFoodPart()
+		part = Feed.acquireTapFoodPart()
 		part.Color = Color3.fromHSV(fishRng:NextNumber(), 0.9, 1)
 		part.Transparency = 0
 		part.CFrame = CFrame.new(start)
@@ -3229,7 +3255,12 @@ function Feed.tickNestRisePulses()
 end
 
 -- Rise share ramps wave LANE_RISE_RAMP_START → END (all fish-aim → 50/50).
+-- Under FOOD_CULL_MIN_CORALS: always tween food to the fish (no nest-rise substitute).
 function Feed.triggerLaneFeedVisual(coral: CoralAgent, target: FishAgent)
+	if placedCoralCount <= (C.FOOD_CULL_MIN_CORALS or 100) then
+		Feed.fireLaneFeedVisual(coral, target)
+		return
+	end
 	local w0 = C.LANE_RISE_RAMP_START or 20
 	local w1 = math.max(w0 + 1, C.LANE_RISE_RAMP_END or 50)
 	local fishEnd = math.clamp(C.LANE_FISH_AIM_FRAC_END or 0.5, 0, 1)
@@ -3490,7 +3521,29 @@ function Feed.tickShots(dt: number)
 			continue
 		end
 		local target = shot.target
-		if not target or target.finished or not target.model.Parent then
+		-- Miss / aim visuals: fly start → meetPos for duration, then fade out (many can be airborne).
+		if not target then
+			shot.age += dt
+			local flightDur = math.max(0.05, shot.duration)
+			local fadeDur = math.max(0.05, C.TAP_FEED_MISS_FADE_SEC or 0.45)
+			local u = shot.age / flightDur
+			local foodPos = Path.foodFlightPos(shot, math.min(u, 1), shot.meetPos)
+			local vis = shot.part
+			if vis then
+				vis.CFrame = CFrame.new(foodPos)
+				if shot.age > flightDur then
+					vis.Transparency = math.clamp((shot.age - flightDur) / fadeDur, 0, 1)
+				end
+			end
+			if shot.age >= flightDur + fadeDur then
+				Feed.finishShot(shot, false)
+				table.remove(activeShots, i)
+			else
+				i += 1
+			end
+			continue
+		end
+		if target.finished or not target.model.Parent then
 			Feed.finishShot(shot, false)
 			table.remove(activeShots, i)
 			continue
@@ -3982,7 +4035,7 @@ local lastPlayerTapAt = 0
 
 local function tapFeedStartFromCamera(cam: Camera, targetPos: Vector3): Vector3
 	local vp = cam.ViewportSize
-	local sy = math.clamp(C.TAP_FEED_SCREEN_Y or 0.72, 0.55, 0.9) * vp.Y
+	local sy = math.clamp(C.TAP_FEED_SCREEN_Y or 0.08, 0.02, 0.9) * vp.Y
 	local ray = cam:ViewportPointToRay(vp.X * 0.5, sy)
 	local toTarget = (targetPos - cam.CFrame.Position).Magnitude
 	-- Keep the orb in-frame immediately (esp. FishCam): not under the HUD, not past the fish.
@@ -3994,6 +4047,83 @@ local function tapFeedStartFromCamera(cam: Camera, targetPos: Vector3): Vector3
 	return ray.Origin + ray.Direction.Unit * depth
 end
 
+-- Terrain / plot under the finger (FishCam-safe). Falls back to a long ray if nothing hits.
+local function tapFeedTerrainFromScreen(cam: Camera, screenPos: Vector2): Vector3
+	local ray = cam:ViewportPointToRay(screenPos.X, screenPos.Y)
+	local dir = ray.Direction.Unit
+	local params = RaycastParams.new()
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	local exclude: { Instance } = {}
+	local char = Players.LocalPlayer.Character
+	if char then
+		table.insert(exclude, char)
+	end
+	if folder then
+		table.insert(exclude, folder)
+	end
+	params.FilterDescendantsInstances = exclude
+	local hit = Workspace:Raycast(ray.Origin, dir * 1200, params)
+	if hit then
+		return hit.Position
+	end
+	local plot = ClientPlot.get()
+	if plot then
+		local dy = dir.Y
+		if math.abs(dy) > 1e-4 then
+			local t = (plot.cframe.Position.Y - ray.Origin.Y) / dy
+			if t > 0 then
+				return ray.Origin + dir * t
+			end
+		end
+	end
+	return ray.Origin + dir * 120
+end
+
+-- Miss / empty tap: lob a large orb from top-center toward terrain under the finger.
+-- Skipped when coral cull is active and the shot wouldn't get a visual slot.
+function Feed.fireMissTapVisual(meet: Vector3)
+	local cam = Workspace.CurrentCamera
+	if not cam then
+		return
+	end
+	local start = tapFeedStartFromCamera(cam, meet)
+	local allow = placedCoralCount <= (C.FOOD_CULL_MIN_CORALS or 100)
+		or Feed.shotWantsVisual(start, meet)
+	if not allow then
+		return
+	end
+	local flatX = meet.X - start.X
+	local flatZ = meet.Z - start.Z
+	local flat = math.sqrt(flatX * flatX + flatZ * flatZ)
+	-- Match hit-food timing (or snappier): distance / fish speed × miss flight mult.
+	local flightMult = C.TAP_FEED_MISS_FLIGHT_MULT or C.TAP_FEED_FLIGHT_MULT or 0.4
+	local duration = math.clamp(
+		flat / math.max(1, C.FISH_SPEED) + (C.FOOD_FIRE_LEAD_SEC or 0.55),
+		C.FOOD_RISE_MIN or 1.35,
+		C.FOOD_RISE_MAX or 1.85
+	) * flightMult
+	local part = Feed.acquireTapFoodPart()
+	part.Color = Color3.fromHSV(fishRng:NextNumber(), 0.9, 1)
+	part.Transparency = 0
+	part.CFrame = CFrame.new(start)
+	visibleShotCount += 1
+	table.insert(activeShots, {
+		part = part,
+		target = nil,
+		fill = 0,
+		coral = nil,
+		alive = true,
+		age = 0,
+		duration = duration,
+		startPos = start,
+		meetPos = meet,
+		swayPhase = fishRng:NextNumber(0, math.pi * 2),
+		visualOnly = true,
+		playerTap = true,
+	})
+	-- Miss SFX is the fail sound in WaveTapFeed (not the hit fire whoosh).
+end
+
 export type TapFeedResult = "hit" | "cooldown" | "miss" | "full" | "blocked"
 
 -- Click/tap help-feed: screen-space pick vs fish root (matches WorldToViewportPoint /
@@ -4003,15 +4133,21 @@ function WaveSim.tryTapFeedAtScreen(screenPos: Vector2): TapFeedResult
 		return "blocked"
 	end
 	local now = os.clock()
-	local cd = C.TAP_FEED_COOLDOWN_SEC or 1
-	if now - lastPlayerTapAt < cd then
+	local reloadStage = L.SkillPowerUpUI.getStage("ReloadSpeed")
+	local cd = L.SkillStages.reloadSpeedCooldownSec(reloadStage)
+	if cd > 0 and now - lastPlayerTapAt < cd then
 		return "cooldown"
 	end
 	local cam = Workspace.CurrentCamera
 	if not cam then
 		return "blocked"
 	end
-	local radius = C.TAP_FEED_RADIUS or 5
+	local baseRadius = C.TAP_FEED_RADIUS or 5
+	local radiusMult = if waveIndex <= 10
+		then (C.TAP_FEED_RADIUS_MULT_W1_10 or 1.2)
+		elseif waveIndex <= 20 then (C.TAP_FEED_RADIUS_MULT_W11_20 or 1.1)
+		else 1
+	local radius = baseRadius * radiusMult
 	local right = cam.CFrame.RightVector
 	local bestHungry: FishAgent? = nil
 	local bestHungryScore = math.huge
@@ -4058,6 +4194,9 @@ function WaveSim.tryTapFeedAtScreen(screenPos: Vector2): TapFeedResult
 	if bestFull then
 		return "full"
 	end
+	-- Miss: lob food at the terrain under the finger (cull-gated when many corals are out).
+	Feed.fireMissTapVisual(tapFeedTerrainFromScreen(cam, screenPos))
+	lastPlayerTapAt = now
 	return "miss"
 end
 
@@ -4753,6 +4892,7 @@ function WaveSim.start(): boolean
 	end
 	-- Real waves replace the pre-start planning train.
 	hasStartedWavesThisSession = true
+	wavesStartCount += 1
 	WaveSim.stopPlanningArrowPreview()
 	pathData = Path.buildPath()
 	pathDataA2 = Path.buildNamedPath(C.FISH_ROUTE_A2_NAME)
@@ -5023,8 +5163,10 @@ end)
 
 task.defer(function()
 	L.PlacedCoralIndex.ensure()
+	placedCoralCount = L.PlacedCoralIndex.countLocal()
 	L.PlacedCoralIndex.onChanged(function()
-		if L.PlacedCoralIndex.countLocal() > 0 then
+		placedCoralCount = L.PlacedCoralIndex.countLocal()
+		if placedCoralCount > 0 then
 			L.WaveArrowPreview.setPlanningLegendVisible(false)
 		end
 	end)

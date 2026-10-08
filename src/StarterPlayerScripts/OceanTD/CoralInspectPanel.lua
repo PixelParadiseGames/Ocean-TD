@@ -48,6 +48,8 @@ local HINT_ATTR = "OceanTD_RollFingerHint"
 local HUE_PLACE_ATTR = "OceanTD_TutorialHuePlaceId"
 local HUE_RESUME_ATTR = "OceanTD_TutorialHueResume"
 local pendingTutorialFreeInvoke = false
+-- While a tutorial size unlock is in flight, don't let the finger reopen the confirm.
+local suppressTutorialSizeConfirm = false
 local hueScrollToken = 0
 local focusColorIndex = 0
 -- Inspect root (assigned in bind). Forward-declared so upgrade→hue can see visibility.
@@ -269,6 +271,7 @@ local function beginTutorialHueFinger(resumeMode: string?)
 end
 
 local function noteTutorialUpgradeSucceeded()
+	suppressTutorialSizeConfirm = false
 	if playerGui:GetAttribute(TUTORIAL_FREE_ATTR) == true then
 		playerGui:SetAttribute(TUTORIAL_FREE_ATTR, false)
 	end
@@ -426,6 +429,7 @@ local confirmGui: ScreenGui? = nil
 local confirmUnlockTarget: number? = nil
 local confirmColorItemId: string? = nil
 local confirmColorIndex: number? = nil
+local confirmLeftHudOrder: number? = nil
 local toastGui: ScreenGui? = nil
 local pulseConn: RBXScriptConnection? = nil
 local hintConn: RBXScriptConnection? = nil
@@ -552,11 +556,32 @@ local function showRangeRing(part: BasePart)
 	CoralRangeRings.show(part, selectedPart)
 end
 
+local function pinDollarHudAboveConfirm()
+	local left = playerGui:FindFirstChild("MobileLeftUI")
+	if not (left and left:IsA("ScreenGui")) then
+		return
+	end
+	if confirmLeftHudOrder == nil then
+		confirmLeftHudOrder = left.DisplayOrder
+	end
+	-- Above OceanTD_CoralSizeConfirm / color confirm dim (DisplayOrder 25000).
+	left.DisplayOrder = math.max(left.DisplayOrder, 25050)
+end
+
+local function unpinDollarHudFromConfirm()
+	local left = playerGui:FindFirstChild("MobileLeftUI")
+	if left and left:IsA("ScreenGui") and confirmLeftHudOrder ~= nil then
+		left.DisplayOrder = confirmLeftHudOrder
+	end
+	confirmLeftHudOrder = nil
+end
+
 local function hideConfirm()
 	RelocateController.setInspectModal(false)
 	confirmUnlockTarget = nil
 	confirmColorItemId = nil
 	confirmColorIndex = nil
+	unpinDollarHudFromConfirm()
 	if confirmStrokeConn then
 		confirmStrokeConn:Disconnect()
 		confirmStrokeConn = nil
@@ -617,6 +642,17 @@ local function handleSizeResult(result: any, unlockNext: boolean): boolean
 			showToast("Collect More $D")
 		elseif code == "Maxed" then
 			showToast("Max size")
+		end
+		-- Unlock failed after dismissing the tutorial confirm — restore the finger.
+		if suppressTutorialSizeConfirm then
+			suppressTutorialSizeConfirm = false
+			if playerGui:GetAttribute(HUE_RESUME_ATTR) == "upgrade"
+				or playerGui:GetAttribute(HINT_ATTR) == false
+				or playerGui:GetAttribute(HINT_ATTR) == nil
+			then
+				playerGui:SetAttribute(HUE_RESUME_ATTR, "upgrade")
+				playerGui:SetAttribute(HINT_ATTR, "upgrade")
+			end
 		end
 	end
 	return false
@@ -1924,6 +1960,11 @@ local function invokeUpgradeNextOneTier()
 	end
 	if #jobs > 0 and #chosen == 0 then
 		showToast("Collect More $D")
+		if suppressTutorialSizeConfirm then
+			suppressTutorialSizeConfirm = false
+			playerGui:SetAttribute(HUE_RESUME_ATTR, "upgrade")
+			playerGui:SetAttribute(HINT_ATTR, "upgrade")
+		end
 		return
 	end
 	UiHaptics.pulseShort()
@@ -2112,6 +2153,7 @@ local function showConfirmUnlock(targetClass: number?)
 	sg.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 	sg.Parent = playerGui
 	confirmGui = sg
+	pinDollarHudAboveConfirm()
 
 	local dim = Instance.new("TextButton")
 	dim.Text = ""
@@ -2124,10 +2166,12 @@ local function showConfirmUnlock(targetClass: number?)
 	dim.Parent = sg
 	dim.Activated:Connect(hideConfirm)
 
+	local showCount = count > 1
+	local panelH = if showCount then 260 else 232
 	local panel = Instance.new("Frame")
 	panel.AnchorPoint = Vector2.new(0.5, 0.5)
 	panel.Position = UDim2.fromScale(0.5, 0.5)
-	panel.Size = UDim2.fromOffset(320, 260)
+	panel.Size = UDim2.fromOffset(320, panelH)
 	panel.BackgroundColor3 = Consts.PANEL_BG
 	panel.BorderSizePixel = 0
 	panel.ZIndex = 2
@@ -2144,6 +2188,12 @@ local function showConfirmUnlock(targetClass: number?)
 	panelStroke.Color = Consts.STROKE_DARK
 	panelStroke.Parent = panel
 
+	local sizeName = CoralSize.labelFor(unlockTo)
+	local titleText = if count == 1
+		then ("Upgrade to " .. sizeName)
+		elseif oneTierEach then "Unlock next size"
+		else ("Unlock " .. sizeName)
+
 	local title = Instance.new("TextLabel")
 	title.BackgroundTransparency = 1
 	title.Size = UDim2.new(1, -24, 0, 44)
@@ -2151,32 +2201,38 @@ local function showConfirmUnlock(targetClass: number?)
 	title.Font = UiTheme.Font
 	title.TextSize = 24
 	title.TextColor3 = Color3.fromRGB(240, 248, 255)
-	title.Text = if oneTierEach then "Unlock next size" else ("Unlock " .. CoralSize.labelFor(unlockTo))
+	title.Text = titleText
 	title.ZIndex = 3
 	title.Parent = panel
 
-	local countLbl = Instance.new("TextLabel")
-	countLbl.BackgroundTransparency = 1
-	countLbl.Size = UDim2.new(1, -24, 0, 28)
-	countLbl.Position = UDim2.fromOffset(12, 58)
-	countLbl.Font = UiTheme.Font
-	countLbl.TextSize = 18
-	countLbl.TextColor3 = Color3.fromRGB(200, 220, 235)
-	countLbl.Text = if count == 1 then "1 coral" else (tostring(count) .. " corals")
-	countLbl.ZIndex = 3
-	countLbl.Parent = panel
+	local costY = 58
+	if showCount then
+		local countLbl = Instance.new("TextLabel")
+		countLbl.BackgroundTransparency = 1
+		countLbl.Size = UDim2.new(1, -24, 0, 28)
+		countLbl.Position = UDim2.fromOffset(12, 58)
+		countLbl.Font = UiTheme.Font
+		countLbl.TextSize = 18
+		countLbl.TextColor3 = Color3.fromRGB(200, 220, 235)
+		countLbl.Text = tostring(count) .. " corals"
+		countLbl.ZIndex = 3
+		countLbl.Parent = panel
+		costY = 88
+	end
 
 	local costLbl = Instance.new("TextLabel")
 	costLbl.BackgroundTransparency = 1
 	costLbl.Size = UDim2.new(1, -24, 0, 28)
-	costLbl.Position = UDim2.fromOffset(12, 88)
+	costLbl.Position = UDim2.fromOffset(12, costY)
 	costLbl.Font = UiTheme.Font
 	costLbl.TextSize = 22
-	costLbl.TextColor3 = Color3.fromRGB(255, 220, 120)
+	costLbl.TextColor3 = Consts.ACTIVE_GREEN
 	costLbl.Text = if freeUpgrade then "FREE" else (tostring(cost) .. " $D")
 	costLbl.ZIndex = 3
 	costLbl.Parent = panel
 
+	local unlockY = if showCount then 124 else 96
+	local cancelY = if showCount then 184 else 156
 	local unlock = Instance.new("TextButton")
 	unlock.Name = "UNLOCK"
 	unlock.Text = "UNLOCK"
@@ -2187,7 +2243,7 @@ local function showConfirmUnlock(targetClass: number?)
 	unlock.BorderSizePixel = 0
 	unlock.Size = UDim2.fromOffset(200, 48)
 	unlock.AnchorPoint = Vector2.new(0.5, 0)
-	unlock.Position = UDim2.new(0.5, 0, 0, 124)
+	unlock.Position = UDim2.new(0.5, 0, 0, unlockY)
 	unlock.ZIndex = 3
 	unlock.Parent = panel
 	local uc = Instance.new("UICorner")
@@ -2221,6 +2277,14 @@ local function showConfirmUnlock(targetClass: number?)
 		if freeUpgrade then
 			pendingTutorialFreeInvoke = true
 		end
+		-- Stop the upgrade finger from reopening this popup every frame mid-cinematic.
+		if playerGui:GetAttribute(HINT_ATTR) == "upgrade" then
+			suppressTutorialSizeConfirm = true
+			if playerGui:GetAttribute(HUE_RESUME_ATTR) == nil then
+				playerGui:SetAttribute(HUE_RESUME_ATTR, "upgrade")
+			end
+			playerGui:SetAttribute(HINT_ATTR, false)
+		end
 		local oneTier = confirmUnlockTarget == -1
 		local n = confirmUnlockTarget
 		hideConfirm()
@@ -2241,7 +2305,7 @@ local function showConfirmUnlock(targetClass: number?)
 	cancel.BorderSizePixel = 0
 	cancel.Size = UDim2.fromOffset(200, 44)
 	cancel.AnchorPoint = Vector2.new(0.5, 0)
-	cancel.Position = UDim2.new(0.5, 0, 0, 184)
+	cancel.Position = UDim2.new(0.5, 0, 0, cancelY)
 	cancel.ZIndex = 3
 	cancel.Parent = panel
 	local cc = Instance.new("UICorner")
@@ -4086,6 +4150,39 @@ function CoralInspectPanel.bind(panel: GuiObject, catalogFrame: GuiObject)
 			nudgeColorFocus(1)
 		end
 	end)
+end
+
+-- Tutorial: open size confirm so RollFingerHint can point at UNLOCK.
+function CoralInspectPanel.openTutorialSizeConfirm(): boolean
+	if suppressTutorialSizeConfirm then
+		return false
+	end
+	if playerGui:GetAttribute(HINT_ATTR) ~= "upgrade" then
+		return false
+	end
+	if not root or not root.Visible then
+		return false
+	end
+	if confirmGui and confirmGui.Parent then
+		return true
+	end
+	showConfirmUnlock()
+	return confirmGui ~= nil and confirmGui.Parent ~= nil
+end
+
+function CoralInspectPanel.getTutorialUnlockButton(): GuiObject?
+	local sg: Instance? = confirmGui
+	if not (sg and sg.Parent) then
+		sg = playerGui:FindFirstChild("OceanTD_CoralSizeConfirm")
+	end
+	if not sg then
+		return nil
+	end
+	local unlock = sg:FindFirstChild("UNLOCK", true)
+	if not (unlock and unlock:IsA("GuiObject") and unlock.Visible and unlock.AbsoluteSize.X >= 2) then
+		return nil
+	end
+	return unlock
 end
 
 function CoralInspectPanel.getTutorialHueSwatch(): GuiObject?

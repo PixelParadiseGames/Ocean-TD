@@ -155,12 +155,18 @@ feedSound.Parent = SoundService
 local arrowSound = Instance.new("Sound")
 arrowSound.Name = "OceanTD_GhostArrow"
 arrowSound.SoundId = C.ARROW_SOUND_ID
-arrowSound.Volume = 0.9
+arrowSound.Volume = C.ARROW_ROUND_START_VOLUME or 0.45
 arrowSound.Parent = SoundService
+
+local waveAdvanceSound = Instance.new("Sound")
+waveAdvanceSound.Name = "OceanTD_GhostWaveAdvance"
+waveAdvanceSound.SoundId = C.WAVE_ADVANCE_SOUND_ID or "rbxassetid://78266353371882"
+waveAdvanceSound.Volume = C.WAVE_ADVANCE_VOLUME or 1
+waveAdvanceSound.Parent = SoundService
 
 task.defer(function()
 	pcall(function()
-		ContentProvider:PreloadAsync({ feedSound, arrowSound })
+		ContentProvider:PreloadAsync({ feedSound, arrowSound, waveAdvanceSound })
 	end)
 end)
 
@@ -879,7 +885,16 @@ local function playArrowStartSound()
 	if lodFar then
 		return
 	end
-	WaveEntityPool.playSound("arrow", arrowSound, 1, 0.9, true)
+	local vol = C.ARROW_ROUND_START_VOLUME or 0.45
+	WaveEntityPool.playSound("arrow", arrowSound, 1, vol, true)
+end
+
+local function playWaveAdvanceSound()
+	if lodFar then
+		return
+	end
+	local vol = C.WAVE_ADVANCE_VOLUME or 1
+	WaveEntityPool.playSound("waveAdvance", waveAdvanceSound, 1, vol, true)
 end
 
 local function startCrabArrowPreview(wave: number)
@@ -974,7 +989,11 @@ local function startWaveArrowPreview(wave: number)
 	end
 	local tmpl = getGreenArrowsTemplate()
 	if #paths > 0 and tmpl then
-		playArrowStartSound()
+		if wave <= 1 then
+			playArrowStartSound()
+		else
+			playWaveAdvanceSound()
+		end
 		local folderFx = ensureFolder()
 		local waveText = "Wave " .. tostring(math.max(1, wave))
 		local arrowI = 0

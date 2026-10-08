@@ -71,6 +71,8 @@ local C = {
 	-- 4b: wake corals near hungry crabs/urchins/sharks using each coral's feed range.
 	GROUND_FEED_ACTIVATE_RANGE = 100, -- legacy pad; wake uses coral.rangeSq
 	-- 8b: keep nest ammo Parts; only this many flying food Parts at once (near camera preferred).
+	-- Cull only when placed corals exceed FOOD_CULL_MIN_CORALS; below that every shot tweens.
+	FOOD_CULL_MIN_CORALS = 100,
 	FOOD_VISIBLE_MAX = 48,
 	FOOD_VISIBLE_DIST = 220, -- studs from camera to start / mid / meet
 	PATH_SAMPLE_STEP = 1.5,
@@ -92,18 +94,28 @@ local C = {
 	HUNGER_EVERY_WAVES = 5, -- +6 food every 5 waves
 	HUNGER_PER_TIER = 6,
 	FOOD_RADIUS = 0.52, -- was 0.65 (−20%)
-	-- Player tap-to-feed: click/tap near a critter → food orb from screen-bottom.
+	-- Player tap-to-feed: click/tap near a critter → food orb from screen-top center.
 	TAP_FEED_RADIUS = 5, -- was 10; tighter click/tap hit radius
+	-- Early waves: larger tap hitbox so feeding is easier.
+	TAP_FEED_RADIUS_MULT_W1_10 = 1.2,
+	TAP_FEED_RADIUS_MULT_W11_20 = 1.1,
+	-- Fallback only; live cooldown comes from SkillStages ReloadSpeed.
 	TAP_FEED_COOLDOWN_SEC = 1,
+	TAP_FEED_FULL_AUTO_MISS_SFX_SEC = 1, -- full-auto: miss/fail SFX at most once per second
 	TAP_FEED_DEBUG = false, -- translucent ball showing tap radius (dev)
-	-- Screen Y (0 top → 1 bottom) for tap-orb spawn; keep above HUD / fish-cam horizon.
-	TAP_FEED_SCREEN_Y = 0.5, -- food orb starts mid-screen (was lower ~0.72)
+	-- Screen Y (0 top → 1 bottom) for tap-orb spawn — top-center so the lob is obvious.
+	TAP_FEED_SCREEN_Y = 0.08,
 	TAP_FEED_START_DEPTH_MIN = 10,
 	TAP_FEED_START_DEPTH_MAX = 20,
 	TAP_FEED_FLIGHT_MULT = 0.5, -- half duration = 2× travel speed vs coral orbs
+	TAP_FEED_SIZE_MULT = 2.6, -- larger than coral orbs so tap food reads clearly
+	-- Miss travel uses same distance→duration curve as hit food; this mult is ≤ hit (faster).
+	TAP_FEED_MISS_FLIGHT_MULT = 0.4, -- hit uses TAP_FEED_FLIGHT_MULT 0.5
+	TAP_FEED_MISS_FADE_SEC = 0.45,
 	TAP_FEED_FIRE_SOUND_ID = "rbxassetid://5852470908",
 	TAP_FEED_FIRE_PITCH_MIN = 0.85,
 	TAP_FEED_FIRE_PITCH_MAX = 1.2,
+	TAP_FEED_FAIL_SOUND_ID = "rbxassetid://85774123067486", -- miss / still reloading
 	AMMO_RADIUS = 0.6, -- was 0.75 (−20%)
 	HUNGER_BAR_PX_W = 28 * 0.8, -- fill strip (was 40 * 0.8)
 	HUNGER_BAR_STRIP_H = HUNGER_BAR_STRIP_H,
@@ -129,6 +141,10 @@ local C = {
 	ARROW_SPEED_MULT = 4, -- GreenArrows travel this × fish speed
 	ARROW_LEAD_SEC = 1, -- fish spawn this long after arrows start
 	ARROW_SOUND_ID = "rbxassetid://1845466760",
+	-- Round start (Start Waves 2nd+) + wave 2+ advance: loud (assets are quiet at 1).
+	ARROW_ROUND_START_VOLUME = 2,
+	WAVE_ADVANCE_SOUND_ID = "rbxassetid://78266353371882",
+	WAVE_ADVANCE_VOLUME = 2,
 	ARROW_PATH_SPACING = 16, -- studs along path between arrow sets in the train
 	ARROW_TRAIN_COUNT = 12, -- green fish train length (emerge from path start)
 	ARROW_LABEL_EVERY = 4, -- "Wave N" on every Nth arrow set

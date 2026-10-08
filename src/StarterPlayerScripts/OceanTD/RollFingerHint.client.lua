@@ -1,7 +1,8 @@
 --!strict
 --[[
 	Join-intro finger tutorial pipeline:
-	roll → await → backpack → equip → plot → upgrade → hue (finger stays on swatch, cycles colors until user taps)
+	roll → await → backpack → equip → plot → upgrade (from bottom-right → UNLOCK)
+	→ hue (finger stays on swatch, cycles colors until user taps)
 	→ closeBackpack → waves
 	(reselectCoral if inspect closes mid-upgrade / mid-hue) → …
 	→ (after first wave-session Finish) if defeat: roll again → skills; if win: skills
@@ -74,7 +75,13 @@ local WAVE_REST_TOWARD_CENTER = 1
 local PLOT_REST_DOWN_PX = 140
 local BELOW_PAD_PX = 130
 local BOTTOM_REST_Y_FRAC = 0.88 -- bottom-center rest for mid-screen targets
-local UPGRADE_AIM_UP_PX = 36 -- tip sits higher on the upgrade button (not below screen)
+-- First coral upgrade: approach from bottom-right → UNLOCK; retreat to bottom-left.
+local UPGRADE_REST_Y_FRAC = 0.94
+local UPGRADE_APPROACH_X_FRAC = 0.94 -- rise from BR
+local UPGRADE_RETREAT_X_FRAC = 0.06 -- leave toward BL
+local UPGRADE_AIM_UP_PX = 36 -- tip sits higher on the unlock button (not below screen)
+-- Above OceanTD_CoralSizeConfirm (25000) so the finger isn't buried under the popup.
+local FINGER_DISPLAY_ORDER = 26000
 local ARC_X_PX = 42
 local ARC_Y_PX = 18
 local TIP_ANCHOR = Vector2.new(0.32, 0.12)
@@ -362,27 +369,20 @@ local function findCamButton(): GuiObject?
 	return nil
 end
 
-local function findUpgradeButton(): GuiObject?
-	local hud = UiViewportTags.pickMainHud(playerGui)
-	if not hud then
-		return nil
+local function findUpgradeUnlockButton(): GuiObject?
+	-- Prefer the size-confirm UNLOCK (tutorial opens that panel when needed).
+	local unlock = CoralInspectPanel.getTutorialUnlockButton()
+	if unlock then
+		return unlock
 	end
-	local up = hud:FindFirstChild("UPGRADE", true)
-	if not (up and up:IsA("GuiObject") and up.Visible) then
-		return nil
-	end
-	-- Parent CoralInspect may be hidden while the button's own Visible stays true.
-	local p: Instance? = up.Parent
-	while p and p ~= hud do
-		if p:IsA("GuiObject") and not p.Visible then
-			return nil
+	local sg = playerGui:FindFirstChild("OceanTD_CoralSizeConfirm")
+	if sg then
+		local btn = sg:FindFirstChild("UNLOCK", true)
+		if btn and btn:IsA("GuiObject") and btn.Visible and btn.AbsoluteSize.X >= 2 then
+			return btn
 		end
-		p = p.Parent
 	end
-	if up.AbsoluteSize.X < 2 then
-		return nil
-	end
-	return up
+	return nil
 end
 
 local function findPlotSizeButton(): GuiObject?
@@ -540,6 +540,18 @@ local function viewportBottomCenter(): Vector2
 	local cam = Workspace.CurrentCamera
 	local vp = if cam then cam.ViewportSize else Vector2.new(1280, 720)
 	return Vector2.new(vp.X * 0.5, vp.Y * BOTTOM_REST_Y_FRAC)
+end
+
+local function viewportBottomRight(): Vector2
+	local cam = Workspace.CurrentCamera
+	local vp = if cam then cam.ViewportSize else Vector2.new(1280, 720)
+	return Vector2.new(vp.X * UPGRADE_APPROACH_X_FRAC, vp.Y * UPGRADE_REST_Y_FRAC)
+end
+
+local function viewportBottomLeft(): Vector2
+	local cam = Workspace.CurrentCamera
+	local vp = if cam then cam.ViewportSize else Vector2.new(1280, 720)
+	return Vector2.new(vp.X * UPGRADE_RETREAT_X_FRAC, vp.Y * UPGRADE_REST_Y_FRAC)
 end
 
 -- First-place plot finger: rise/retreat from the selected backpack coral circle.
@@ -910,6 +922,7 @@ end
 
 local function ensureGui(imageId: string): ImageLabel?
 	if gui and finger and finger.Parent then
+		gui.DisplayOrder = FINGER_DISPLAY_ORDER
 		finger.Image = imageId
 		return finger
 	end
@@ -919,7 +932,7 @@ local function ensureGui(imageId: string): ImageLabel?
 	sg.Name = GUI_NAME
 	sg.ResetOnSpawn = false
 	sg.IgnoreGuiInset = true
-	sg.DisplayOrder = 8500
+	sg.DisplayOrder = FINGER_DISPLAY_ORDER
 	sg.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 	pcall(function()
 		(sg :: any).ClipToDeviceSafeArea = false
@@ -1002,7 +1015,9 @@ local function resolveTarget(mode: HintMode): Vector2?
 	elseif mode == "reselectCoral" then
 		return tutorialHueCoralScreenCenter() or plotScreenCenter()
 	elseif mode == "upgrade" then
-		local a = findUpgradeButton()
+		-- Ensure size confirm is open so UNLOCK exists for the finger.
+		CoralInspectPanel.openTutorialSizeConfirm()
+		local a = findUpgradeUnlockButton()
 		if not a then
 			return nil
 		end
@@ -1054,7 +1069,8 @@ local function restOf(mode: HintMode, btn: Vector2): Vector2
 		return viewportBottomCenter()
 	end
 	if mode == "upgrade" then
-		return btn:Lerp(viewportCenter(), EQUIP_REST_TOWARD_CENTER)
+		-- Retreat / idle park: bottom-left (rise still starts from bottom-right).
+		return viewportBottomLeft()
 	end
 	if mode == "backpack" or mode == "closeBackpack" or mode == "equip"
 		or mode == "closePlotSize" or mode == "waves"
@@ -1155,7 +1171,14 @@ local function startHint(mode: HintMode)
 				end
 				btn = resolveTarget(mode) or btn
 			end
-			fromPos = from or restOf(mode, btn)
+			-- Upgrade: first approach from bottom-right; later cycles continue from retreat (BL).
+			if from ~= nil then
+				fromPos = from
+			elseif mode == "upgrade" then
+				fromPos = viewportBottomRight()
+			else
+				fromPos = restOf(mode, btn)
+			end
 			toPos = btn
 			arcSign = -1
 			setArc(fromPos, toPos, arcSign)

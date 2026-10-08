@@ -3,7 +3,7 @@
 	Soft lava-lamp bubble physics for MobileSkillsA skill ImageButtons.
 	Heartbeat only while open. Does not touch placement / other HUD systems.
 	Bubble size + label placement use per-stage Studio templates (SkillStages);
-	only PlotSize / EarnMore / PlaceMore / RHealth / Skip / WaveSpeed / AutoRoll (LuckBTN) are playable bubbles.
+	Playable bubbles come from SkillStages.all() (incl. ReloadSpeed / RollSpeedBTN).
 
 	Coords: bubble positions use AbsolutePosition space. Hits use native GuiButton
 	InputBegan (Roblox inset-correct) — no manual pointer↔Abs conversion for picking.
@@ -51,6 +51,7 @@ local COMPACT_SIZE_MULT = 1.14 -- slightly larger than raw stage-1 templates
 local COMPACT_ICON_SIZE = UDim2.fromScale(0.40, 0.40)
 local COMPACT_ICON_POS = UDim2.fromScale(0.5, 0.38)
 local AUTO_ROLL_ICON_SCALE = 0.75 -- 25% smaller dice
+local RELOAD_SPEED_ICON_SCALE = 0.90 -- 10% smaller so icon clears label at low stages
 local ICON_SKILL_SCALE_NAME = "_OceanTD_IconSkillScale"
 local COMPACT_LABEL_POS = UDim2.fromScale(0.5, 0.64)
 local COMPACT_LABEL_SIZE = UDim2.fromScale(0.86, 0.32)
@@ -181,15 +182,11 @@ local function readUnlockedStage(skillId: string): number
 end
 
 local function unlockedStagesMap(): { [string]: number }
-	return {
-		PlotSize = readUnlockedStage("PlotSize"),
-		PlaceMore = readUnlockedStage("PlaceMore"),
-		EarnMore = readUnlockedStage("EarnMore"),
-		RHealth = readUnlockedStage("RHealth"),
-		Skip = readUnlockedStage("Skip"),
-		WaveSpeed = readUnlockedStage("WaveSpeed"),
-		AutoRoll = readUnlockedStage("AutoRoll"),
-	}
+	local m: { [string]: number } = {}
+	for _, def in ipairs(SkillStages.all()) do
+		m[def.id] = readUnlockedStage(def.id)
+	end
+	return m
 end
 
 local function clearOrbitLocks()
@@ -608,7 +605,10 @@ end
 
 local function applySkillIconScale(icon: ImageLabel, skillId: string?)
 	local existing = icon:FindFirstChild(ICON_SKILL_SCALE_NAME)
-	local want = if skillId == "AutoRoll" then AUTO_ROLL_ICON_SCALE else 1
+	local want = if skillId == "AutoRoll"
+		then AUTO_ROLL_ICON_SCALE
+		elseif skillId == "ReloadSpeed" then RELOAD_SPEED_ICON_SCALE
+		else 1
 	if want >= 0.999 then
 		if existing then
 			existing:Destroy()

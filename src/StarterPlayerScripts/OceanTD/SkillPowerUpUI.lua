@@ -7,6 +7,7 @@
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local GuiService = game:GetService("GuiService")
+local SoundService = game:GetService("SoundService")
 local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
 local RunService = game:GetService("RunService")
@@ -23,6 +24,7 @@ local POWERUP_OPEN_ATTR = "OceanTD_SkillPowerUpOpen"
 local GREEN = Color3.fromRGB(40, 170, 70)
 local DESC_PULSE_GREEN = Color3.fromRGB(70, 255, 110)
 local DESC_PULSE_WHITE = Color3.new(1, 1, 1)
+local COST_GREEN = Color3.fromRGB(40, 255, 90) -- same as coral upgrade confirm
 local GREY_DARK = Color3.fromRGB(90, 90, 90)
 local GREY_LIGHT = Color3.fromRGB(175, 175, 175)
 local RED = Color3.fromRGB(220, 50, 55)
@@ -30,6 +32,27 @@ local PANEL_BG = Color3.fromRGB(12, 28, 36)
 local POWERUP_Z = 500
 local CLOSE_X_PULSE = TweenInfo.new(0.85, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true)
 local UNLOCK_STROKE_THICKNESS = 2
+local UNLOCK_SOUND_ID = "rbxassetid://134583420216867"
+
+local unlockSound = Instance.new("Sound")
+unlockSound.Name = "OceanTD_SkillUnlock"
+unlockSound.SoundId = UNLOCK_SOUND_ID
+unlockSound.Volume = 1
+unlockSound.Parent = SoundService
+
+local function playUnlockSound()
+	local s = unlockSound:Clone()
+	s.Parent = SoundService
+	s:Play()
+	s.Ended:Connect(function()
+		s:Destroy()
+	end)
+	task.delay(4, function()
+		if s.Parent then
+			s:Destroy()
+		end
+	end)
+end
 
 local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
@@ -42,6 +65,9 @@ local hostScreenGui: ScreenGui? = nil
 local dPad: Instance? = nil
 local template: GuiObject? = nil
 local unlockNameLbl: TextLabel? = nil
+local unlockNameBaseTextSize: number? = nil
+local unlockNameBaseTextScaled: boolean? = nil
+local unlockNameBaseMaxTextSize: number? = nil
 local nextStageLbl: TextLabel? = nil
 local unlockDescLbl: TextLabel? = nil
 local unlockBtn: GuiButton? = nil
@@ -710,6 +736,36 @@ refreshTemplate = function()
 	local unlocked = unlockedStage(activeSkillId)
 	if unlockNameLbl then
 		unlockNameLbl.Text = string.gsub(def.displayName, "\n", " ")
+		-- Cache Studio defaults once so shorter skill titles stay unchanged.
+		if unlockNameBaseTextSize == nil then
+			unlockNameBaseTextSize = unlockNameLbl.TextSize
+			unlockNameBaseTextScaled = unlockNameLbl.TextScaled
+			local constraint = unlockNameLbl:FindFirstChildOfClass("UITextSizeConstraint")
+			if constraint then
+				unlockNameBaseMaxTextSize = constraint.MaxTextSize
+			end
+		end
+		-- "Reload Speed" is long — two sizes smaller so it stays one line above UnlockDesc.
+		if activeSkillId == "ReloadSpeed" then
+			local base = unlockNameBaseMaxTextSize or unlockNameBaseTextSize or unlockNameLbl.TextSize
+			local smaller = math.max(10, base - 4)
+			unlockNameLbl.TextScaled = false
+			unlockNameLbl.TextSize = smaller
+			unlockNameLbl.TextWrapped = false
+			local constraint = unlockNameLbl:FindFirstChildOfClass("UITextSizeConstraint")
+			if constraint then
+				constraint.MaxTextSize = smaller
+			end
+		else
+			unlockNameLbl.TextScaled = if unlockNameBaseTextScaled ~= nil then unlockNameBaseTextScaled else unlockNameLbl.TextScaled
+			if unlockNameBaseTextSize then
+				unlockNameLbl.TextSize = unlockNameBaseTextSize
+			end
+			local constraint = unlockNameLbl:FindFirstChildOfClass("UITextSizeConstraint")
+			if constraint and unlockNameBaseMaxTextSize then
+				constraint.MaxTextSize = unlockNameBaseMaxTextSize
+			end
+		end
 	end
 	local nextS = SkillStages.nextStageFor(activeSkillId, unlocked)
 	if nextStageLbl then
@@ -817,6 +873,28 @@ refreshTemplate = function()
 						end)
 					end
 				end
+			elseif activeSkillId == "ReloadSpeed" then
+				if SkillStages.reloadSpeedIsFullAuto(active) then
+					startUnlockDescPulse("ReloadSpeed", function(c: Color3)
+						return string.format('<font color="%s">Full Auto</font> — hold to shoot', rgbFontTag(c))
+					end)
+				elseif SkillStages.reloadSpeedIsSemiInstant(active) then
+					startUnlockDescPulse("ReloadSpeed", function(c: Color3)
+						return string.format('<font color="%s">Semi Auto</font> — no reload', rgbFontTag(c))
+					end)
+				else
+					local pct = SkillStages.reloadSpeedFasterPercent(1, active)
+					if pct and pct > 0 then
+						startUnlockDescPulse("ReloadSpeed", function(c: Color3)
+							return string.format('<font color="%s">%d%% Faster</font>', rgbFontTag(c), pct)
+						end)
+					else
+						stopUnlockDescPulse()
+						unlockDescLbl.RichText = false
+						unlockDescLbl.Text = "Base reload speed"
+						unlockDescLbl.Visible = true
+					end
+				end
 			else
 				stopUnlockDescPulse()
 				unlockDescLbl.RichText = false
@@ -916,6 +994,28 @@ refreshTemplate = function()
 								inc
 							)
 						end)
+					end
+				end
+			elseif activeSkillId == "ReloadSpeed" then
+				if SkillStages.reloadSpeedIsFullAuto(descStage) then
+					startUnlockDescPulse("ReloadSpeed", function(c: Color3)
+						return string.format('Unlock <font color="%s">Full Auto</font> — hold to shoot', rgbFontTag(c))
+					end)
+				elseif SkillStages.reloadSpeedIsSemiInstant(descStage) then
+					startUnlockDescPulse("ReloadSpeed", function(c: Color3)
+						return string.format('Unlock <font color="%s">Semi Auto</font> — no reload', rgbFontTag(c))
+					end)
+				else
+					local pct = SkillStages.reloadSpeedFasterPercent(descStage - 1, descStage)
+					if pct and pct > 0 then
+						startUnlockDescPulse("ReloadSpeed", function(c: Color3)
+							return string.format('<font color="%s">%d%% Faster</font>', rgbFontTag(c), pct)
+						end)
+					else
+						stopUnlockDescPulse()
+						unlockDescLbl.RichText = false
+						unlockDescLbl.Text = SkillStages.unlockDesc(activeSkillId, descStage)
+						unlockDescLbl.Visible = true
 					end
 				end
 			else
@@ -1082,6 +1182,7 @@ local function doUnlockRemote()
 		return
 	end
 	if result.ok == true then
+		playUnlockSound()
 		if skillId == "PlotSize" then
 			-- Lock before SkillStagesSync arrives (fires before PlotSizeChanged) so the heart
 			-- stays at the old route end until PlotSizeCinematic tweens it.
@@ -1172,10 +1273,12 @@ local function showConfirmUnlock()
 	dim.Parent = sg
 	dim.Activated:Connect(hideConfirm)
 
+	local cost = SkillStages.stageCost(activeSkillId, nextS)
+
 	local panel = Instance.new("Frame")
 	panel.AnchorPoint = Vector2.new(0.5, 0.5)
 	panel.Position = UDim2.fromScale(0.5, 0.5)
-	panel.Size = UDim2.fromOffset(320, 220)
+	panel.Size = UDim2.fromOffset(320, 232)
 	panel.BackgroundColor3 = PANEL_BG
 	panel.BorderSizePixel = 0
 	panel.ZIndex = 2
@@ -1187,14 +1290,26 @@ local function showConfirmUnlock()
 
 	local title = Instance.new("TextLabel")
 	title.BackgroundTransparency = 1
-	title.Size = UDim2.new(1, -24, 0, 56)
-	title.Position = UDim2.fromOffset(12, 20)
+	title.Size = UDim2.new(1, -24, 0, 44)
+	title.Position = UDim2.fromOffset(12, 16)
 	title.Font = Enum.Font.GothamBold
-	title.TextSize = 28
+	title.TextSize = 24
 	title.TextColor3 = Color3.fromRGB(240, 248, 255)
 	title.Text = "Stage " .. tostring(nextS) .. " Unlock"
 	title.ZIndex = 3
 	title.Parent = panel
+
+	local costLbl = Instance.new("TextLabel")
+	costLbl.Name = "Cost"
+	costLbl.BackgroundTransparency = 1
+	costLbl.Size = UDim2.new(1, -24, 0, 28)
+	costLbl.Position = UDim2.fromOffset(12, 58)
+	costLbl.Font = Enum.Font.GothamBold
+	costLbl.TextSize = 22
+	costLbl.TextColor3 = COST_GREEN
+	costLbl.Text = tostring(cost) .. " $D"
+	costLbl.ZIndex = 3
+	costLbl.Parent = panel
 
 	local unlock = Instance.new("TextButton")
 	unlock.Name = "UNLOCK"
