@@ -225,7 +225,7 @@ local function ensurePlanningLegend(): ScreenGui
 	row.Name = "Row"
 	row.AnchorPoint = Vector2.new(0.5, 1)
 	row.Position = UDim2.new(0.5, 0, 1, -36)
-	row.Size = UDim2.fromOffset(0, 36)
+	row.Size = UDim2.fromOffset(0, 32)
 	row.AutomaticSize = Enum.AutomaticSize.X
 	row.BackgroundTransparency = 1
 	row.Parent = sg
@@ -244,9 +244,9 @@ local function ensurePlanningLegend(): ScreenGui
 		lbl.LayoutOrder = order
 		lbl.BackgroundTransparency = 1
 		lbl.AutomaticSize = Enum.AutomaticSize.X
-		lbl.Size = UDim2.fromOffset(0, 36)
+		lbl.Size = UDim2.fromOffset(0, 32)
 		lbl.Font = UiTheme.Font
-		lbl.TextSize = 28
+		lbl.TextSize = 24
 		lbl.Text = text
 		lbl.TextColor3 = color
 		lbl.TextStrokeTransparency = 0.35

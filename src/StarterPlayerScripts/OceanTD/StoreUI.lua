@@ -90,6 +90,9 @@ local storeGui: ScreenGui? = nil
 local cartBtn: GuiObject? = nil
 local leftGui: ScreenGui? = nil
 local leftOrderBase = 0
+local leftInsetsSaved: Enum.ScreenInsets? = nil
+local leftIgnoreInsetSaved: boolean? = nil
+local leftClipSaved: boolean? = nil
 local closeChrome: GuiObject? = nil
 local closeLabel: TextLabel? = nil
 local closeScale: UIScale? = nil
@@ -437,6 +440,53 @@ local function restoreLeftUi()
 		end
 	end
 	table.clear(hiddenLeft)
+end
+
+local function pushLeftHudForStore()
+	local left = leftGui
+	if not left then
+		return
+	end
+	if leftInsetsSaved == nil then
+		local ok, insets = pcall(function()
+			return (left :: any).ScreenInsets
+		end)
+		if ok and typeof(insets) == "EnumItem" then
+			leftInsetsSaved = insets
+		end
+		leftIgnoreInsetSaved = left.IgnoreGuiInset
+		leftClipSaved = left.ClipToDeviceSafeArea
+	end
+	left.DisplayOrder = STORE_LEFT_HUD_ORDER
+	left.IgnoreGuiInset = true
+	left.ClipToDeviceSafeArea = false
+	pcall(function()
+		local anyLeft = left :: any
+		anyLeft.ScreenInsets = Enum.ScreenInsets.None
+	end)
+end
+
+local function popLeftHudFromStore()
+	local left = leftGui
+	if not left then
+		return
+	end
+	left.DisplayOrder = leftOrderBase
+	if leftIgnoreInsetSaved ~= nil then
+		left.IgnoreGuiInset = leftIgnoreInsetSaved
+		leftIgnoreInsetSaved = nil
+	end
+	if leftClipSaved ~= nil then
+		left.ClipToDeviceSafeArea = leftClipSaved
+		leftClipSaved = nil
+	end
+	if leftInsetsSaved ~= nil then
+		local saved = leftInsetsSaved
+		leftInsetsSaved = nil
+		pcall(function()
+			(left :: any).ScreenInsets = saved
+		end)
+	end
 end
 
 local function formatDollarAmount(n: number): string
@@ -890,9 +940,7 @@ function StoreUI.close()
 	cancelGraphicIntros()
 	destroyCloseChrome()
 	restoreLeftUi()
-	if leftGui then
-		leftGui.DisplayOrder = leftOrderBase
-	end
+	popLeftHudFromStore()
 	local sg = storeGui
 	if sg then
 		resetGraphicScales(sg)
@@ -924,15 +972,7 @@ function StoreUI.open()
 	local sg = ensureStoreGui()
 	hardenStoreGui(sg)
 	sg.Enabled = true
-	if leftGui then
-		leftGui.DisplayOrder = STORE_LEFT_HUD_ORDER
-		leftGui.IgnoreGuiInset = true
-		pcall(function()
-			local anyLeft = leftGui :: any
-			anyLeft.ClipToDeviceSafeArea = false
-			anyLeft.ScreenInsets = Enum.ScreenInsets.None
-		end)
-	end
+	pushLeftHudForStore()
 	if cartBtn then
 		cartBtn.Visible = true
 		cartBtn.ZIndex = math.max(cartBtn.ZIndex, 200)
@@ -956,8 +996,8 @@ function StoreUI.open()
 		if not open then
 			return
 		end
-		if leftGui then
-			leftGui.DisplayOrder = STORE_LEFT_HUD_ORDER
+		if open then
+			pushLeftHudForStore()
 		end
 		if cartBtn then
 			cartBtn.Visible = true

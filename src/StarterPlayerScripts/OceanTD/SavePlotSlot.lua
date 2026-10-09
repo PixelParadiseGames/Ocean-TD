@@ -324,6 +324,8 @@ local function startSlot1IdleCycle()
 			and not uiOpen
 			and not busy
 			and not InventoryState.isSavePlotsBusy()
+			and not InventoryState.isClearPlotBusy()
+			and not InventoryState.isPlotOpBusy()
 	end)
 end
 
@@ -839,7 +841,8 @@ end
 local ensureOverwriteUi: () -> ()
 
 local function doSave(slotIndex: number)
-	if busy then
+	if busy or InventoryState.isPlotOpBusy() or InventoryState.isClearPlotBusy() then
+		deps.log("Save blocked — plot op busy")
 		return
 	end
 	busy = true
@@ -912,7 +915,8 @@ local function requestSave(slotIndex: number)
 end
 
 local function doLoad(slotIndex: number)
-	if busy then
+	if busy or InventoryState.isPlotOpBusy() or InventoryState.isClearPlotBusy() then
+		deps.log("Load blocked — plot op busy")
 		return
 	end
 	busy = true

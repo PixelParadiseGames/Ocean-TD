@@ -694,6 +694,10 @@ function ClearPlotSlot.commit()
 	if not clearConfirmActive or InventoryState.isClearPlotBusy() then
 		return
 	end
+	if InventoryState.isSavePlotsBusy() or InventoryState.isPlotOpBusy() then
+		deps.log("Clear plot blocked — plot op busy")
+		return
+	end
 	if PlacementController.isActive() then
 		PlacementController.cancel()
 	end
@@ -776,7 +780,7 @@ function ClearPlotSlot.beginConfirm()
 	if not InventoryState.isOpen() or not slot2 or not slot2.Visible then
 		return
 	end
-	if InventoryState.isSavePlotsBlocking() then
+	if InventoryState.isPlotOpBusy() or InventoryState.isSavePlotsBlocking() then
 		return
 	end
 	if InventoryState.isClearPlotBusy() or ClearPlotVfx.isBusy() then

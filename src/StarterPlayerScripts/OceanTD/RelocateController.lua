@@ -477,18 +477,8 @@ local function aimScreenPos(): Vector2
 end
 
 local function worldToScreen(world: Vector3): Vector2?
-	local cam = Workspace.CurrentCamera
-	if not cam then
-		return nil
-	end
-	-- IgnoreGuiInset ScreenGui layout space (includes top bar).
-	local sp = cam:WorldToScreenPoint(world)
-	-- Behind camera only — still use projected X/Y when slightly off the viewport
-	-- (tall sponge tip can clip the top edge; falling back to the mouse made Del follow the cursor).
-	if sp.Z <= 0 then
-		return nil
-	end
-	return Vector2.new(sp.X, sp.Y)
+	-- Same viewport space as PlaceConfirmChrome.guiPosFromWorld / Billboard AbsolutePosition.
+	return PlaceConfirmChrome.guiPosFromWorld(world)
 end
 
 -- Balls: center (screen then lifts ~52px). Sponges: mesh pivot is mid-body — use the top.
@@ -539,27 +529,35 @@ local function isSelectedBrain(): boolean
 	return part ~= nil and BrainStack.isBrainId(part:GetAttribute("OceanTD_SpeciesId"))
 end
 
-local function layoutWaistChrome(btnPx: number, showCheck: boolean): boolean
+local function layoutWaistChrome(btnPx: number, _showCheck: boolean): boolean
 	if not checkBtn or not cancelBtn or not gui then
 		hideWaistChrome()
 		return false
 	end
 	local showRot = ((isSelectedYawRotate() or (isSelectedBrain() and BrainSnapPreview.isSnapped())) and not recyclePending)
-	local bb, adornee = PlaceConfirmChrome.layoutOnTorso(
+	local adornee = if moveAdorneePart and moveAdorneePart.Parent then moveAdorneePart else part
+	if not adornee or not moveBillboard or not moveIcon then
+		hideWaistChrome()
+		return false
+	end
+	PlaceConfirmChrome.layoutOnMoveBillboard(
+		adornee,
+		C.MOVE_ICON_SIZE,
 		btnPx,
 		playerGui,
-		gui,
 		waistBb,
-		waistAdornee,
 		checkBtn,
 		cancelBtn,
 		rotLeftBtn,
 		rotRightBtn,
-		showRot
+		showRot,
+		moveBillboard,
+		moveIcon
 	)
-	waistBb = bb
-	waistAdornee = adornee
-	return bb ~= nil and adornee ~= nil
+	if waistBb then
+		waistBb.Enabled = false
+	end
+	return true
 end
 
 local function destroyUi()
@@ -681,27 +679,31 @@ local function makeUi()
 	recyclePlus = plus
 
 	local function markDown(claimed: string?, input: InputObject?)
+		-- Sliding over cancel/rot while dragging the coral must not activate them.
+		if (dragging or fingerDown) and not chromeBtnDown then
+			return
+		end
 		local screenPos = PlaceConfirmHitTest.pointerScreenPos(input)
 		local resolved = PlaceConfirmHitTest.resolveTarget(screenPos, checkBtn, cancelBtn, playerGui, rotLeftBtn, rotRightBtn)
 		local target: string? = nil
-		-- Gui buttons are square; only accept ✓/X/rot inside the round disc so nearby drags work.
-		if claimed == "check" or claimed == "cancel" then
-			local btn = if claimed == "check" then checkBtn else cancelBtn
-			if not PlaceConfirmHitTest.isOverDisc(screenPos, btn) then
-				return
-			end
-			target = claimed
-		elseif claimed == "recycle" then
-			target = claimed
-		elseif claimed == "rotLeft" or claimed == "rotRight" then
-			local btn = if claimed == "rotLeft" then rotLeftBtn else rotRightBtn
-			if not PlaceConfirmHitTest.isOverDisc(screenPos, btn) then
-				return
-			end
+		-- Gui MouseButton1Down / InputBegan already hit the button — trust it.
+		-- Billboard AbsolutePosition disc tests often false-reject Confirm after rotate.
+		if claimed == "check" or claimed == "cancel" or claimed == "recycle"
+			or claimed == "rotLeft" or claimed == "rotRight"
+		then
 			target = claimed
 		elseif resolved == "check" or resolved == "cancel" then
+			-- UIS / world pick path: keep round-disc gate so square corners don't steal coral drags.
+			local btn = if resolved == "check" then checkBtn else cancelBtn
+			if not PlaceConfirmHitTest.isOverDisc(screenPos, btn) then
+				return
+			end
 			target = resolved
 		elseif resolved == "rotLeft" or resolved == "rotRight" then
+			local btn = if resolved == "rotLeft" then rotLeftBtn else rotRightBtn
+			if not PlaceConfirmHitTest.isOverDisc(screenPos, btn) then
+				return
+			end
 			target = resolved
 		elseif resolved then
 			target = resolved
@@ -767,7 +769,8 @@ local function makeUi()
 			markDown("recycle", input)
 		end
 	end)
-	-- Same path as Enter → commit. Hit-test InputEnded often maps Confirm → Cancel on billboards.
+	-- Same path as Enter → commit. Don't gate on fingerDown — rotate/drag flags
+	-- can linger a frame and block Confirm after yaw taps.
 	checkBtn.Activated:Connect(function()
 		if not active or busy then
 			return
@@ -775,10 +778,12 @@ local function makeUi()
 		chromeBtnDown = false
 		chromePressTarget = nil
 		chromeClaimSource = nil
+		fingerDown = false
+		dragging = false
 		RelocateController.commit()
 	end)
 	cancelBtn.Activated:Connect(function()
-		if not active or busy then
+		if not active or busy or dragging or fingerDown then
 			return
 		end
 		chromeBtnDown = false
@@ -787,7 +792,7 @@ local function makeUi()
 		RelocateController.cancel()
 	end)
 	recycleBtn.Activated:Connect(function()
-		if not active or busy or recyclePending then
+		if not active or busy or recyclePending or dragging or fingerDown then
 			return
 		end
 		chromeBtnDown = false
@@ -875,6 +880,8 @@ local function tweenMoveIconInspectBlend(target: number)
 end
 
 local function attachMoveIcon(adornee: BasePart)
+	-- Chrome lives on the move Billboard — reparent off before Destroy or upgrade kills the buttons.
+	hideWaistChrome()
 	if moveBillboard then
 		moveBillboard:Destroy()
 		moveBillboard = nil
@@ -1139,17 +1146,20 @@ local function syncChrome()
 	end
 
 	-- Idle close (exit tool): keyboard/mouse instantly; gamepad after 3s.
-	-- After recycle confirm: always show cancel for that action. Move/rotate auto-commit (no ✓).
+	-- After rotate: keep selection; show Confirm to finish (cancel becomes confirm).
+	-- Move still auto-commits on drag release. Recycle confirm as before.
 	-- Inspect header owns recycle confirm (cancel slides beside Recycle → Confirm).
 	local inspectOwnsRecycleConfirm = inspectPanelVisible and recyclePending
 	local idleCloseReady = (not gamepadRelocate) or ((os.clock() - relocateShownAt) >= C.IDLE_CLOSE_DELAY_SEC)
 	local showIdleClose = (not hasMoved) and (not hasRotated) and (not recyclePending) and idleCloseReady
-	local showCancel = hasMoved or (recyclePending and not inspectOwnsRecycleConfirm) or showIdleClose
+	local showRotateConfirm = hasRotated and (not recyclePending) and (not inspectOwnsRecycleConfirm)
+	local showCancel = (hasMoved and not showRotateConfirm)
+		or (recyclePending and not inspectOwnsRecycleConfirm)
+		or showIdleClose
 	cancelBtn.Visible = showCancel
 	local tipLetter = if gamepadRelocate then "B" else "X"
 	local showWord = (math.floor((os.clock() - gamepadChromeT0) / C.HOVER_HINT_PERIOD) % 2) == 1
-	-- Recycle confirm only: move/rotate save immediately on release (undo covers mistakes).
-	checkBtn.Visible = recyclePending and not inspectOwnsRecycleConfirm
+	checkBtn.Visible = (recyclePending and not inspectOwnsRecycleConfirm) or showRotateConfirm
 
 	-- Keep button size fixed — shrinking on rotate made the whole chrome jump.
 	layoutWaistChrome(C.BTN_SIZE, checkBtn.Visible)
@@ -1161,12 +1171,22 @@ local function syncChrome()
 			rotRightBtn.Visible = false
 		end
 	end
+	-- While dragging coral, disable chrome so slide-over doesn't fire cancel/rot.
+	local chromeOn = not dragging and not fingerDown
+	for _, btn in ipairs({ checkBtn, cancelBtn, rotLeftBtn, rotRightBtn, recycleBtn }) do
+		if btn then
+			btn.Active = chromeOn and btn.Visible
+			pcall(function()
+				(btn :: any).Interactable = chromeOn and btn.Visible
+			end)
+		end
+	end
 	cancelBtn.Text = if showWord then (if hasMoved or hasRotated or recyclePending then "CANCEL" else "CLOSE") else tipLetter
 	cancelBtn.TextStrokeColor3 = if showWord then Color3.fromRGB(60, 15, 18) else Color3.new(1, 1, 1)
 	cancelBtn.TextStrokeTransparency = 0
 
 	if checkBtn.Visible then
-		checkBtn.Active = true
+		checkBtn.Active = chromeOn
 		checkBtn.BackgroundTransparency = 0
 		checkBtn.TextColor3 = Color3.new(1, 1, 1)
 		PlaceConfirmChrome.syncConfirmFace(checkBtn, showWord, isUsingGamepad())
@@ -1186,25 +1206,37 @@ local function syncChrome()
 		if showRecycle then
 			recycleBtn.AnchorPoint = Vector2.new(0.5, 1)
 			recycleBtn.Size = UDim2.fromOffset(C.REC_BTN_SIZE, C.REC_BTN_SIZE)
-			-- Park recycle above feet chrome (avatar), not coral tip.
-			local waistScreen = PlaceConfirmChrome.screenPos(waistAdornee)
-			local chromePx = PlaceConfirmChrome.chromeBtnSize(C.BTN_SIZE)
-			local recCx = waistScreen.X
-			local recCy = waistScreen.Y - chromePx - C.REC_GAP_PX
-			-- Idle (not moved): sit near where X will appear. Recycle confirm: above ✓/X pair.
-			local aboveX = recCx + 6 + chromePx * 0.5
-			local abovePair = recCx
-			local idleRecX = aboveX
-			local idleRecY = waistScreen.Y
-			local movedRecX = aboveX + (abovePair - aboveX) * recycleSlideU
-			local movedRecY = recCy
-			local recX = if recyclePending then movedRecX else idleRecX
-			local recY = if recyclePending then movedRecY else idleRecY
-			-- When idle with inspect hidden, tip-aligned recycle is owned by older path —
-			-- keep tip coords for idle non-inspect so existing feel stays; feet only for confirm.
-			if not recyclePending then
-				recX = cx + 6 + chromePx * 0.5
-				recY = cy
+			-- Park recycle above cancel / rot row under the move icon.
+			local chromePx = PlaceConfirmChrome.placeChromeBtnSize(C.BTN_SIZE)
+			local moveGui: Vector2? = nil
+			local movePx = C.MOVE_ICON_SIZE
+			if moveAdorneePart and moveAdorneePart.Parent then
+				moveGui = PlaceConfirmChrome.guiPosFromWorld(moveAdorneePart.Position)
+			end
+			if not moveGui then
+				local center, px = PlaceConfirmChrome.moveIconScreenCenter(moveIcon)
+				if center then
+					moveGui = center
+					movePx = px
+				end
+			end
+			local anchor = if moveGui
+				then PlaceConfirmChrome.toIgnoreInsetPos(moveGui)
+				else PlaceConfirmChrome.toIgnoreInsetPos(Vector2.new(cx, cy))
+			local origin = PlaceConfirmChrome.originBelowMoveIcon(
+				anchor,
+				movePx,
+				chromePx
+			)
+			local abovePairX = origin.X
+			local abovePairY = origin.Y - chromePx * 0.5 - C.REC_GAP_PX
+			local idleRecX = cx + 6 + chromePx * 0.5
+			local idleRecY = cy
+			local recX = if recyclePending then abovePairX else idleRecX
+			local recY = if recyclePending then abovePairY else idleRecY
+			if recyclePending and recycleSlideU < 1 then
+				recX = idleRecX + (abovePairX - idleRecX) * recycleSlideU
+				recY = idleRecY + (abovePairY - idleRecY) * recycleSlideU
 			end
 			recycleBtn.Position = UDim2.fromOffset(recX, recY)
 
@@ -1487,7 +1519,7 @@ local function playIntro(fromScreen: Vector2)
 			local lift = if part then coralChromeScreenLift(part) else 52
 			local cy = screen.Y - lift
 			-- End: recycle where X will sit (right of coral).
-			local recEnd = Vector2.new(cx + 6 + PlaceConfirmChrome.chromeBtnSize(C.BTN_SIZE) * 0.5, cy - C.REC_BTN_SIZE * 0.5)
+			local recEnd = Vector2.new(cx + 6 + PlaceConfirmChrome.placeChromeBtnSize(C.BTN_SIZE) * 0.5, cy - C.REC_BTN_SIZE * 0.5)
 			local rpos = fromScreen:Lerp(recEnd, a)
 			recycleBtn.AnchorPoint = Vector2.new(0.5, 0.5)
 			recycleBtn.Position = UDim2.fromOffset(rpos.X, rpos.Y)
@@ -2765,6 +2797,14 @@ table.insert(inputConns, UserInputService.InputBegan:Connect(function(input, _pr
 		pendingPick = hit
 		pendingPickScreen = screenPos
 		RelocateController.begin(hit)
+		-- Same press can continue into drag (begin() clears fingerDown).
+		-- Past DRAG_PX on InputChanged → move without click-release-click again.
+		if active and part == hit then
+			fingerDown = true
+			pressOrigin = screenPos
+			dragging = false
+			grabFromMoveIcon = false
+		end
 	else
 		pendingPick = nil
 		pendingPickScreen = nil
@@ -2816,7 +2856,8 @@ finalizeMoveOrRotateIfReady = function()
 	if not active or busy or recyclePending then
 		return
 	end
-	if not hasMoved and not hasRotated then
+	-- Move auto-commits on drag/stick release. Rotate stays selected until Confirm.
+	if not hasMoved then
 		return
 	end
 	if validSpot then
@@ -2856,8 +2897,7 @@ table.insert(inputConns, UserInputService.InputEnded:Connect(function(input, _pr
 	if active and wasChrome and chromeTarget then
 		if chromeTarget == "rotLeft" or chromeTarget == "rotRight" then
 			PlaceConfirmChrome.stopRotateHold()
-			-- Rotate is final on release (no ✓).
-			finalizeMoveOrRotateIfReady()
+			-- Keep selected so they can tap rotate again; Confirm finishes.
 			return
 		end
 		PlaceConfirmChrome.stopRotateHold()

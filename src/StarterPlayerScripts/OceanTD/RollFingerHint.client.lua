@@ -8,7 +8,7 @@
 	→ (after first wave-session Finish) if defeat: roll again → skills; if win: skills
 	→ plotSize → plotSizeUpgrade → closePlotSize → closeSkills → cam
 
-	After join intro ends (intro SKIP gone): bottom-left SKIP clears all finger steps + tutorial gates.
+	After join intro ends (Skip Intro gone): bottom-left Skip Training clears all finger steps + tutorial gates.
 ]]
 
 local GuiService = game:GetService("GuiService")
@@ -52,6 +52,14 @@ local SKILLS_OPEN_ATTR = "OceanTD_SkillsBubblesOpen"
 local POWERUP_OPEN_ATTR = "OceanTD_SkillPowerUpOpen"
 local REPORT_OPEN_ATTR = "OceanTD_ReefReportOpen"
 local HIDE_UI_ACTIVE_ATTR = "OceanTD_HideUiActive"
+-- PlotSizeCinematic sets these while ForceClose tears down skills for the grow/dial shot.
+local PLOT_SIZE_CINE_BUSY_ATTR = "OceanTD_PlotSizeCinematicBusy"
+local PLOT_SIZE_CINE_SUPPRESS_ATTR = "OceanTD_PlotSizeCineSuppressTutorial"
+
+local function plotSizeCineBlocksTutorialAdvance(): boolean
+	return playerGui:GetAttribute(PLOT_SIZE_CINE_BUSY_ATTR) == true
+		or playerGui:GetAttribute(PLOT_SIZE_CINE_SUPPRESS_ATTR) == true
+end
 
 local FINGER_PX = 110
 local RISE_SEC = 0.7
@@ -161,7 +169,7 @@ local JOIN_INTRO_BUSY_ATTR = "OceanTD_JoinIntroBusy"
 local SKIP_TUTORIAL_GUI = "OceanTD_FingerTutorialSkip"
 local SKIP_GREEN = Color3.fromRGB(55, 200, 90)
 local SKIP_STROKE_BRIGHT = Color3.fromRGB(90, 255, 110)
-local SKIP_BTN_SIZE = Vector2.new(70, 26) -- half of prior 140×52
+local SKIP_BTN_SIZE = Vector2.new(132, 28)
 
 local function playPlantFirstCoralSoundOnce()
 	if plantFirstCoralSoundPlayed or fingerTutorialSkipped then
@@ -850,13 +858,13 @@ local function ensureSkipTutorialBtn()
 	sg.Parent = playerGui
 
 	local btn = Instance.new("TextButton")
-	btn.Name = "Skip"
+	btn.Name = "SkipTraining"
 	btn.AnchorPoint = Vector2.new(0, 1)
 	btn.Position = UDim2.new(0, 28, 1, -28)
 	btn.Size = UDim2.fromOffset(SKIP_BTN_SIZE.X, SKIP_BTN_SIZE.Y)
 	btn.BackgroundColor3 = SKIP_GREEN
 	btn.Font = UiTheme.Font
-	btn.Text = "SKIP"
+	btn.Text = "Skip Training"
 	btn.TextColor3 = Color3.new(1, 1, 1)
 	btn.TextScaled = true
 	btn.AutoButtonColor = true
@@ -1277,15 +1285,21 @@ local function startHint(mode: HintMode)
 					return
 				end
 			elseif mode == "closePlotSize" and playerGui:GetAttribute(POWERUP_OPEN_ATTR) ~= true then
-				-- Power-up already closed (or never open) — advance to skills close.
-				if playerGui:GetAttribute(SKILLS_OPEN_ATTR) == true then
+				-- Grow/dial cinematic ForceClose is not a real close — stay on CloseBTN.
+				if plotSizeCineBlocksTutorialAdvance() then
+					-- wait
+				elseif playerGui:GetAttribute(SKILLS_OPEN_ATTR) == true then
+					-- Power-up already closed (or never open) — advance to skills close.
 					playerGui:SetAttribute(HINT_ATTR, "closeSkills")
 					return
 				end
 			elseif mode == "closeSkills" and playerGui:GetAttribute(SKILLS_OPEN_ATTR) ~= true then
-				-- Skills fully closed after plot-size tutorial → point at camera cycle.
-				playerGui:SetAttribute(HINT_ATTR, "cam")
-				return
+				-- Same: cinematic teardown must not skip straight to cam narrator.
+				if not plotSizeCineBlocksTutorialAdvance() then
+					-- Skills fully closed after plot-size tutorial → point at camera cycle.
+					playerGui:SetAttribute(HINT_ATTR, "cam")
+					return
+				end
 			elseif mode == "cam" then
 				-- Cleared when the player changes cam mode (see CamCycleMode listener).
 			end
@@ -1505,6 +1519,10 @@ playerGui:GetAttributeChangedSignal(SKILLS_OPEN_ATTR):Connect(function()
 	if open and v == "skills" then
 		playerGui:SetAttribute(HINT_ATTR, "plotSize")
 	elseif not open then
+		-- Plot size grow/dial shot force-closes skills; ignore until chrome is restored.
+		if plotSizeCineBlocksTutorialAdvance() then
+			return
+		end
 		if v == "closeSkills" then
 			-- After plot-size upgrade + closing skills, teach the cam cycle button.
 			if playerGui:GetAttribute("OceanTD_TutorialGateCam") == true then

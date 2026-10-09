@@ -97,7 +97,7 @@ local C = {
 	-- Player tap-to-feed: click/tap near a critter → food orb from screen-top center.
 	TAP_FEED_RADIUS = 5, -- was 10; tighter click/tap hit radius
 	-- Early waves: larger tap hitbox so feeding is easier.
-	TAP_FEED_RADIUS_MULT_W1_10 = 1.2,
+	TAP_FEED_RADIUS_MULT_W1_10 = 1.32, -- was 1.2; +10% again for waves 1–10
 	TAP_FEED_RADIUS_MULT_W11_20 = 1.1,
 	-- Fallback only; live cooldown comes from SkillStages ReloadSpeed.
 	TAP_FEED_COOLDOWN_SEC = 1,

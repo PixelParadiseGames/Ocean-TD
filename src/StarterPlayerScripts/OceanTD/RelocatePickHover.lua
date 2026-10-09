@@ -11,6 +11,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local oceanRoot = ReplicatedStorage:WaitForChild("OceanTD")
 local CoralVisual = require(oceanRoot:WaitForChild("Shared"):WaitForChild("CoralVisual"))
+local CoralSize = require(oceanRoot:WaitForChild("Shared"):WaitForChild("CoralSize"))
 local UiCircles = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiCircles"))
 local UiTheme = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiTheme"))
 
@@ -24,6 +25,9 @@ local RelocatePickHover = {}
 
 local C = RelocateConsts
 local player = Players.LocalPlayer
+
+-- Build-mode debug: show raycast part bounds + screen-radius pick disc (PICK_SCREEN_PX).
+local DEBUG_PICK_HITBOXES = true
 
 export type Host = {
 	getPrimary: () -> BasePart?,
@@ -43,10 +47,6 @@ local hoverHintBadge: Frame? = nil
 local hoverHintMove: Frame? = nil
 local hoverHintT0 = 0
 local hoverConn: RBXScriptConnection? = nil
-
-function RelocatePickHover.mount(h: Host)
-	host = h
-end
 
 local function isUsingGamepad(): boolean
 	local t = UserInputService:GetLastInputType()
@@ -113,6 +113,191 @@ local function getPlotFolder(): Folder?
 		return folder
 	end
 	return nil
+end
+
+-- --- Build-mode pick hitbox debug (green disc = screen pick radius at plant point) ---
+type PickDebugEntry = {
+	bb: BillboardGui,
+	part: BasePart,
+}
+local pickDebugEntries: { [string]: PickDebugEntry } = {}
+local pickDebugConn: RBXScriptConnection? = nil
+local pickDebugFolder: Folder? = nil
+-- Eye (HideUI) in build mode toggles this; does not affect real pick hit tests.
+local pickDebugUserHidden = false
+
+-- Screen-pick probe at the plant point (terrain contact), not mesh tip / mid-body.
+local function pickProbeWorld(coral: BasePart): Vector3
+	local anchor = CoralVisual.readGridAnchor(coral)
+	if anchor then
+		return anchor
+	end
+	return coral.Position
+end
+
+-- Small −30%, medium −20%, large full base radius.
+local function pickScreenRadiusFor(coral: BasePart): number
+	local base = if isUsingGamepad() then math.max(C.PICK_SCREEN_PX, 36) else C.PICK_SCREEN_PX
+	local _, class = CoralSize.readFromPart(coral)
+	if class <= CoralSize.SMALL then
+		return base * 0.7
+	elseif class == CoralSize.MEDIUM then
+		return base * 0.8
+	end
+	return base
+end
+
+local function pickDebugKey(coral: BasePart): string
+	local pid = coral:GetAttribute("OceanTD_PlaceId")
+	if typeof(pid) == "string" and pid ~= "" then
+		return pid
+	end
+	return coral:GetFullName()
+end
+
+local function clearPickDebugHitboxes()
+	for _, entry in pairs(pickDebugEntries) do
+		entry.bb:Destroy()
+	end
+	table.clear(pickDebugEntries)
+	if pickDebugFolder then
+		pickDebugFolder:Destroy()
+		pickDebugFolder = nil
+	end
+end
+
+function RelocatePickHover.setPickDebugVisible(on: boolean)
+	pickDebugUserHidden = on ~= true
+end
+
+function RelocatePickHover.isPickDebugVisible(): boolean
+	return not pickDebugUserHidden
+end
+
+-- Returns whether circles are visible after the toggle.
+function RelocatePickHover.togglePickDebugVisible(): boolean
+	pickDebugUserHidden = not pickDebugUserHidden
+	return not pickDebugUserHidden
+end
+
+local function syncPickDebugHitboxes()
+	if not DEBUG_PICK_HITBOXES then
+		clearPickDebugHitboxes()
+		return
+	end
+	local h = host
+	if not h or not InventoryState.isOpen() or pickDebugUserHidden then
+		clearPickDebugHitboxes()
+		return
+	end
+	local folder = getPlotFolder()
+	local pg = h.playerGui
+	if not folder then
+		clearPickDebugHitboxes()
+		return
+	end
+	if not pickDebugFolder or pickDebugFolder.Parent ~= pg then
+		if pickDebugFolder then
+			pickDebugFolder:Destroy()
+		end
+		local f = Instance.new("Folder")
+		f.Name = "OceanTD_PickHitDebug"
+		f.Parent = pg
+		pickDebugFolder = f
+	end
+	-- Drop legacy SelectionBox outlines from older debug builds.
+	for _, ch in ipairs(pickDebugFolder:GetChildren()) do
+		if ch:IsA("SelectionBox") then
+			ch:Destroy()
+		end
+	end
+
+	local seen: { [string]: boolean } = {}
+	local primary = h.getPrimary()
+	local discGreen = Color3.fromRGB(80, 255, 120)
+	local discCyan = Color3.fromRGB(80, 200, 255)
+	local fillTrans = 0.86
+	local strokeTrans = 0.625
+
+	for _, inst in ipairs(folder:GetChildren()) do
+		local coral = isPlacedCoralPart(inst)
+		if not coral then
+			continue
+		end
+		local key = pickDebugKey(coral)
+		seen[key] = true
+		local radius = pickScreenRadiusFor(coral)
+		local diam = math.max(math.floor(radius * 2 + 0.5), 8)
+		local entry = pickDebugEntries[key]
+		if not entry or entry.part ~= coral or not entry.bb.Parent then
+			if entry then
+				entry.bb:Destroy()
+			end
+			local bb = Instance.new("BillboardGui")
+			bb.Name = "ScreenPick"
+			bb.AlwaysOnTop = true
+			bb.Active = false
+			bb.LightInfluence = 0
+			bb.Size = UDim2.fromOffset(diam, diam)
+			bb.MaxDistance = 2000
+			bb.Adornee = coral
+			bb.Parent = pickDebugFolder
+
+			local circle = Instance.new("Frame")
+			circle.Name = "Disc"
+			circle.BackgroundColor3 = discGreen
+			circle.BackgroundTransparency = fillTrans
+			circle.BorderSizePixel = 0
+			circle.Size = UDim2.fromScale(1, 1)
+			circle.Parent = bb
+			local corner = Instance.new("UICorner")
+			corner.CornerRadius = UDim.new(1, 0)
+			corner.Parent = circle
+			local stroke = Instance.new("UIStroke")
+			stroke.Thickness = 2
+			stroke.Color = discGreen
+			stroke.Transparency = strokeTrans
+			stroke.Parent = circle
+
+			entry = { bb = bb, part = coral }
+			pickDebugEntries[key] = entry
+		end
+
+		entry.bb.Adornee = coral
+		entry.bb.Size = UDim2.fromOffset(diam, diam)
+		local probe = pickProbeWorld(coral)
+		entry.bb.StudsOffsetWorldSpace = probe - coral.Position
+		local tint = if coral == primary then discCyan else discGreen
+		local disc = entry.bb:FindFirstChild("Disc")
+		if disc and disc:IsA("Frame") then
+			disc.BackgroundColor3 = tint
+			disc.BackgroundTransparency = fillTrans
+			local stroke = disc:FindFirstChildOfClass("UIStroke")
+			if stroke then
+				stroke.Color = tint
+				stroke.Transparency = strokeTrans
+			end
+			for _, ch in ipairs(disc:GetChildren()) do
+				if ch:IsA("TextLabel") then
+					ch:Destroy()
+				end
+			end
+		end
+	end
+
+	for key, entry in pairs(pickDebugEntries) do
+		if not seen[key] then
+			entry.bb:Destroy()
+			pickDebugEntries[key] = nil
+		end
+	end
+end
+
+function RelocatePickHover.mount(h: Host)
+	host = h
+	if DEBUG_PICK_HITBOXES and not pickDebugConn then
+		pickDebugConn = RunService.RenderStepped:Connect(syncPickDebugHitboxes)
+	end
 end
 
 function RelocatePickHover.findByPlaceId(placeIdWant: string): BasePart?
@@ -229,21 +414,18 @@ function RelocatePickHover.pick(screenPos: Vector2): BasePart?
 		return losHit.Distance >= dist - 0.35
 	end
 
-	local radius = if isUsingGamepad() then math.max(C.PICK_SCREEN_PX, 72) else C.PICK_SCREEN_PX
 	local c1: BasePart? = nil
 	local c2: BasePart? = nil
 	local c3: BasePart? = nil
-	local d1, d2, d3 = radius + 1, radius + 1, radius + 1
+	local d1, d2, d3 = math.huge, math.huge, math.huge
 	for _, inst in ipairs(folder:GetChildren()) do
 		local coral = isPlacedCoralPart(inst)
 		if coral and coral ~= primary then
-			-- Mesh corals: center sits mid-body; tip tracks where you actually click.
-			local probe = coral.Position
-			if CoralVisual.isMeshSpecies(coral:GetAttribute("OceanTD_SpeciesId")) then
-				probe = coral.Position + Vector3.new(0, coral.Size.Y * 0.5, 0)
-			end
+			-- Mesh corals: plant point at terrain (not tip / mid-body).
+			local probe = pickProbeWorld(coral)
 			local sp = worldToViewport(cam, probe)
 			if sp then
+				local radius = pickScreenRadiusFor(coral)
 				local d = (sp - screenPos).Magnitude
 				if d <= radius then
 					if d < d1 then
@@ -291,9 +473,9 @@ function RelocatePickHover.pointerHitsSelected(screenPos: Vector2): boolean
 	if result then
 		return true
 	end
-	local sp = worldToViewport(cam, primary.Position)
+	local sp = worldToViewport(cam, pickProbeWorld(primary))
 	if sp then
-		local radius = if isUsingGamepad() then math.max(C.PICK_SCREEN_PX, 72) else C.PICK_SCREEN_PX
+		local radius = pickScreenRadiusFor(primary)
 		if (sp - screenPos).Magnitude <= radius then
 			return true
 		end

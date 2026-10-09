@@ -19,6 +19,7 @@ local ItemCatalog = require(oceanShared:WaitForChild("ItemCatalog"))
 local SkillStages = require(oceanShared:WaitForChild("SkillStages"))
 local PlotOutlineColors = require(oceanShared:WaitForChild("PlotOutlineColors"))
 local BrainStack = require(oceanShared:WaitForChild("BrainStack"))
+local HueSeeds = require(oceanShared:WaitForChild("HueSeeds"))
 
 local PlotService = require(script.Parent:WaitForChild("PlotService"))
 local GridService = require(script.Parent:WaitForChild("GridService"))
@@ -40,6 +41,7 @@ type LayoutObject = {
 	sizeTier: number?,
 	sizeClass: number?,
 	colorIndex: number?,
+	seedHue: number?,
 	colorR: number?,
 	colorG: number?,
 	colorB: number?,
@@ -51,6 +53,10 @@ type LayoutObject = {
 	webColorR: number?,
 	webColorG: number?,
 	webColorB: number?,
+	placeId: string?,
+	parentPlaceId: string?,
+	fedTotal: number?,
+	wavesTotal: number?,
 }
 
 export type PlaceOpts = {
@@ -151,6 +157,15 @@ end
 
 -- Pull color attrs from a live visual when the grid cell has no saved paint yet.
 local function enrichLayoutObjFromVisual(obj: any, visual: BasePart)
+	-- Always keep placement-seed hue on the layout (save/load credits/debits this).
+	if typeof(obj.seedHue) ~= "number" then
+		local seedAttr = visual:GetAttribute("OceanTD_SeedHue")
+		if typeof(seedAttr) == "number" then
+			obj.seedHue = PlotOutlineColors.clampCoralIndex(seedAttr)
+		elseif typeof(obj.colorIndex) == "number" then
+			obj.seedHue = PlotOutlineColors.clampCoralIndex(obj.colorIndex)
+		end
+	end
 	local hasCellPaint = typeof(obj.colorIndex) == "number"
 		or (typeof(obj.colorR) == "number" and typeof(obj.colorG) == "number" and typeof(obj.colorB) == "number")
 	if hasCellPaint then
@@ -214,24 +229,26 @@ local function syncDefaultVisualPaintToCell(plotId: string, gx: number, gy: numb
 	end
 end
 
+-- Credit the placement seed stack — never the paint color (paint is cosmetic).
 local function resolveRecycleHue(visual: BasePart?, cell: any?): number
 	if visual then
-		local colorAttr = visual:GetAttribute("OceanTD_ColorIndex")
-		if typeof(colorAttr) == "number" then
-			return PlotOutlineColors.clampCoralIndex(colorAttr)
-		end
 		local seedAttr = visual:GetAttribute("OceanTD_SeedHue")
 		if typeof(seedAttr) == "number" then
 			return PlotOutlineColors.clampCoralIndex(seedAttr)
 		end
 	end
-	if cell then
-		if typeof(cell.colorIndex) == "number" then
-			return PlotOutlineColors.clampCoralIndex(cell.colorIndex)
+	if cell and typeof(cell.seedHue) == "number" then
+		return PlotOutlineColors.clampCoralIndex(cell.seedHue)
+	end
+	-- Legacy: painted corals placed before seedHue was persisted spent that paint hue.
+	if visual then
+		local colorAttr = visual:GetAttribute("OceanTD_ColorIndex")
+		if typeof(colorAttr) == "number" then
+			return PlotOutlineColors.clampCoralIndex(colorAttr)
 		end
-		if typeof(cell.seedHue) == "number" then
-			return PlotOutlineColors.clampCoralIndex(cell.seedHue)
-		end
+	end
+	if cell and typeof(cell.colorIndex) == "number" then
+		return PlotOutlineColors.clampCoralIndex(cell.colorIndex)
 	end
 	return PlotOutlineColors.DEFAULT_INDEX
 end
@@ -718,6 +735,7 @@ function PlacementService.placeFromSave(
 	sizeTier: number?,
 	sizeClass: number?,
 	colorIndex: number?,
+	seedHue: number?,
 	colorR: number?,
 	colorG: number?,
 	colorB: number?,
@@ -759,9 +777,14 @@ function PlacementService.placeFromSave(
 
 	local debitHueForSave: number? = nil
 	if shouldConsume then
-		debitHueForSave = if typeof(colorIndex) == "number"
-			then PlotOutlineColors.clampCoralIndex(colorIndex)
-			else PlotOutlineColors.DEFAULT_INDEX
+		-- Same stack recycle/clear credit (resolveRecycleHue prefers seedHue).
+		if typeof(seedHue) == "number" then
+			debitHueForSave = PlotOutlineColors.clampCoralIndex(seedHue)
+		elseif typeof(colorIndex) == "number" then
+			debitHueForSave = PlotOutlineColors.clampCoralIndex(colorIndex)
+		else
+			debitHueForSave = PlotOutlineColors.DEFAULT_INDEX
+		end
 		local debited = select(1, PersistenceService.tryDebitHueSeed(player, itemId, debitHueForSave, 1))
 		if not debited then
 			return { ok = false, errorCode = "NoSeeds" }
@@ -1625,6 +1648,7 @@ export type RecycleResult = {
 }
 
 -- Remove a placed coral and credit one seed back to the player's inventory.
+-- Caller (Bootstrap) must hold plotOp "recycling". Credits seedHue, not paint.
 function PlacementService.recycle(player: Player, placeId: string, worldPos: Vector3): RecycleResult
 	if typeof(placeId) ~= "string" then
 		return { ok = false, errorCode = "BadRequest" }
@@ -1632,7 +1656,7 @@ function PlacementService.recycle(player: Player, placeId: string, worldPos: Vec
 	if typeof(worldPos) ~= "Vector3" then
 		return { ok = false, errorCode = "BadPosition" }
 	end
-	if not PlayerSession.canSave(player) then
+	if not PlayerSession.canMutatePlot(player) then
 		return { ok = false, errorCode = "NotReady" }
 	end
 	local plotId = PlotService.getOwnerPlotId(player)
@@ -1682,6 +1706,8 @@ function PlacementService.recycle(player: Player, placeId: string, worldPos: Vec
 	end
 
 	log("Recycled", creditedId, "for", player.Name, "seeds=", seedCount)
+	-- Persist seed credit immediately (paid hues must not wait on autosave).
+	PersistenceService.save(player, PlacementService.snapshotLayout(plotId))
 	return {
 		ok = true,
 		itemId = creditedId,
@@ -1835,6 +1861,10 @@ function PlacementService.clearPlot(player: Player, allowEmpty: boolean?, record
 	end
 
 	log("Cleared plot", plotId, "for", player.Name, "count=", #entries)
+	-- User clear (bulk recycle): persist credits now. Load/applyLayout persists after re-place.
+	if PlayerSession.getPlotOp(player) == "clearing" then
+		PersistenceService.save(player, PlacementService.snapshotLayout(plotId))
+	end
 	return {
 		ok = true,
 		count = #entries,
@@ -1848,6 +1878,39 @@ export type ApplyLayoutResult = {
 	errorCode: string?,
 	placed: number?,
 }
+
+local function layoutDebitHue(obj: LayoutObject): number
+	if typeof(obj.seedHue) == "number" then
+		return PlotOutlineColors.clampCoralIndex(obj.seedHue)
+	end
+	if typeof(obj.colorIndex) == "number" then
+		return PlotOutlineColors.clampCoralIndex(obj.colorIndex)
+	end
+	return PlotOutlineColors.DEFAULT_INDEX
+end
+
+-- Simulate credit-live + debit-target on a copy. Abort load if any coral would fail NoSeeds.
+local function canAffordLayoutSwap(player: Player, plotId: string, layout: { LayoutObject }): boolean
+	local payload = PersistenceService.getInventoryPayload(player)
+	local inv = HueSeeds.sanitize(payload, false)
+	GridService.forEachCell(plotId, function(cell)
+		if cell.ownerUserId ~= player.UserId then
+			return
+		end
+		local hue = resolveRecycleHue(nil, cell)
+		HueSeeds.credit(inv, cell.id, hue, 1)
+	end)
+	for _, obj in ipairs(layout) do
+		if typeof(obj) ~= "table" or typeof(obj.id) ~= "string" then
+			continue
+		end
+		local ok = select(1, HueSeeds.tryDebit(inv, obj.id, layoutDebitHue(obj), 1))
+		if not ok then
+			return false
+		end
+	end
+	return true
+end
 
 -- Wipe live plot (credit seeds, no undo) then place layout objects (debit seeds).
 function PlacementService.applyLayout(player: Player, layout: { LayoutObject }): ApplyLayoutResult
@@ -1863,6 +1926,12 @@ function PlacementService.applyLayout(player: Player, layout: { LayoutObject }):
 		return { ok = false, errorCode = "BadPlot" }
 	end
 
+	-- Never burn paid hues: refuse the whole swap if post-credit inventory can't place target.
+	if not canAffordLayoutSwap(player, plotId, layout) then
+		warnPlace("applyLayout blocked — not enough hue seeds after credit for", player.Name)
+		return { ok = false, errorCode = "NeedSeeds" }
+	end
+
 	local cleared = PlacementService.clearPlot(player, true, false)
 	if not cleared.ok then
 		return { ok = false, errorCode = cleared.errorCode or "ClearFail" }
@@ -1875,6 +1944,7 @@ function PlacementService.applyLayout(player: Player, layout: { LayoutObject }):
 			continue
 		end
 		local visualLocal = LayoutRestore.resolveVisualLocal(obj, slot.cframe)
+		local seedHue = if typeof(obj.seedHue) == "number" then obj.seedHue else obj.colorIndex
 		-- fromSave: world-anchored VisualPos — never re-raycast; ignore stale grid keys.
 		local result = PlacementService.placeFromSave(
 			player,
@@ -1888,6 +1958,7 @@ function PlacementService.applyLayout(player: Player, layout: { LayoutObject }):
 			obj.sizeTier,
 			obj.sizeClass,
 			obj.colorIndex,
+			seedHue,
 			obj.colorR,
 			obj.colorG,
 			obj.colorB,
@@ -1917,6 +1988,48 @@ function PlacementService.applyLayout(player: Player, layout: { LayoutObject }):
 
 	log("Applied layout for", player.Name, "placed=", placed, "/", #layout)
 	return { ok = true, placed = placed }
+end
+
+-- Backfill missing seedHue on live grid from paint / attribute (stops future wrong recycle credits).
+function PlacementService.backfillLiveSeedHues(player: Player): number
+	local plotId = PlotService.getOwnerPlotId(player)
+	if not plotId then
+		return 0
+	end
+	local fixed = 0
+	GridService.forEachCell(plotId, function(cell)
+		if cell.ownerUserId ~= player.UserId then
+			return
+		end
+		if typeof(cell.seedHue) == "number" then
+			return
+		end
+		local hue: number? = nil
+		if typeof(cell.colorIndex) == "number" then
+			hue = PlotOutlineColors.clampCoralIndex(cell.colorIndex)
+		else
+			local visual = findVisualByPlaceId(plotId, cell.placeId or "")
+			if visual then
+				local seedAttr = visual:GetAttribute("OceanTD_SeedHue")
+				local colorAttr = visual:GetAttribute("OceanTD_ColorIndex")
+				if typeof(seedAttr) == "number" then
+					hue = PlotOutlineColors.clampCoralIndex(seedAttr)
+				elseif typeof(colorAttr) == "number" then
+					hue = PlotOutlineColors.clampCoralIndex(colorAttr)
+				end
+			end
+		end
+		if not hue then
+			hue = PlotOutlineColors.DEFAULT_INDEX
+		end
+		cell.seedHue = hue
+		local visual = findVisualByPlaceId(plotId, cell.placeId or "")
+		if visual then
+			visual:SetAttribute("OceanTD_SeedHue", hue)
+		end
+		fixed += 1
+	end)
+	return fixed
 end
 
 export type UndoResult = {

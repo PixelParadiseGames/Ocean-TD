@@ -5,8 +5,10 @@
 ]]
 
 local Players = game:GetService("Players")
+local GuiService = game:GetService("GuiService")
 local UserInputService = game:GetService("UserInputService")
 local RunService = game:GetService("RunService")
+local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local InventoryState = require(script.Parent:WaitForChild("InventoryState"))
@@ -66,6 +68,8 @@ export type Env = {
 	setPendingArmSlotScreen: (Vector2?) -> (),
 	getAimPinnedToHand: () -> boolean,
 	setAimPinnedToHand: (boolean) -> (),
+	getAimPinnedToCenter: (() -> boolean)?,
+	setAimPinnedToCenter: ((boolean) -> ())?,
 	getAimPinOrigin: () -> Vector2?,
 	setAimPinOrigin: (Vector2?) -> (),
 	getAimFingerDown: () -> boolean,
@@ -87,6 +91,33 @@ export type Env = {
 	setPendingGhostScaleIn: (boolean) -> (),
 }
 
+local function screenCenterPos(cam: Camera?): Vector2
+	local c = cam or Workspace.CurrentCamera
+	if not c then
+		return Vector2.new(400, 300)
+	end
+	-- Viewport center — same space as PlaceConfirmChrome.guiPosFromWorld / AbsolutePosition.
+	local vp = c.ViewportSize
+	return Vector2.new(vp.X * 0.5, vp.Y * 0.5)
+end
+
+-- ScreenPointToRay / resolveParkPos want GetMouseLocation space (AbsolutePosition + GuiInset).
+local function guiPosToRayPos(guiPos: Vector2): Vector2
+	local inset = GuiService:GetGuiInset()
+	return Vector2.new(guiPos.X + inset.X, guiPos.Y + inset.Y)
+end
+
+local function moveIconLayoutPos(env: Env): (Vector2, number)
+	local ghost = env.getGhost()
+	if ghost and ghost.Parent then
+		local screen = PlaceConfirmChrome.guiPosFromWorld(ghost.Position)
+		if screen and PlaceConfirmChrome.isPlausibleGuiPos(screen) then
+			return screen, MOVE_ICON_SIZE
+		end
+	end
+	return screenCenterPos(Workspace.CurrentCamera), MOVE_ICON_SIZE
+end
+
 local function layoutChrome(env: Env, checkBtn: TextButton?, cancelBtn: TextButton?)
 	local rotL = if env.getRotLeftBtn then env.getRotLeftBtn() else nil
 	local rotR = if env.getRotRightBtn then env.getRotRightBtn() else nil
@@ -97,20 +128,19 @@ local function layoutChrome(env: Env, checkBtn: TextButton?, cancelBtn: TextButt
 	if rotR then
 		rotR.Visible = showRot
 	end
-	local bb, adornee = PlaceConfirmChrome.layoutOnTorso(
+	local movePos, movePx = moveIconLayoutPos(env)
+	PlaceConfirmChrome.layoutBelowMoveIcon(
+		movePos,
+		movePx,
 		BTN_SIZE,
-		env.playerGui,
 		env.getConfirmGui(),
 		env.getChromeBillboard(),
-		env.getChromeAdorneePart(),
 		checkBtn,
 		cancelBtn,
 		rotL,
 		rotR,
 		showRot
 	)
-	env.setChromeBillboard(bb)
-	env.setChromeAdorneePart(adornee)
 end
 
 function PlaceArmDisarmAnim.isDisarmAnimating(): boolean
@@ -461,32 +491,44 @@ function PlaceArmDisarmAnim.playArmIntroFromSlot(
 	itemId: string,
 	seedColor: Color3,
 	onDone: () -> (),
-	keepChromePinned: boolean?
+	_keepChromePinned: boolean?
 )
+	-- Single-click arm: fly ghost backpack → screen center; move+chrome stay on the ghost Billboard.
 	PlaceArmDisarmAnim.stopArmIntro()
 	armIntroAnimating = true
-	env.setAimPinnedToHand(true)
+	env.setAimPinnedToHand(false)
+	if env.setAimPinnedToCenter then
+		env.setAimPinnedToCenter(true)
+	end
 	env.setPendingGhostScaleIn(false)
-	env.detachMoveHintToScreen()
 
-	local slotScreen = env.getPendingArmSlotScreen()
+	local cam = env.camera or Workspace.CurrentCamera
+	local centerGui = screenCenterPos(cam)
+	local centerRay = guiPosToRayPos(centerGui)
+
+	local slotGui = env.getPendingArmSlotScreen()
 	env.setPendingArmSlotScreen(nil)
-	if not slotScreen then
-		slotScreen = InventoryState.getItemSlotScreenCenter(itemId)
+	if not slotGui then
+		slotGui = InventoryState.getItemSlotScreenCenter(itemId)
 	end
-	if not slotScreen then
-		local cam = env.camera
-		local vp = if cam then cam.ViewportSize else Vector2.new(800, 600)
-		slotScreen = Vector2.new(vp.X * 0.85, vp.Y * 0.5)
+	if not slotGui then
+		slotGui = centerGui
 	end
+	local slotRay = guiPosToRayPos(slotGui)
+
+	local endWorld = env.resolveParkPos(centerRay)
+	if not endWorld and cam then
+		local ray = cam:ScreenPointToRay(centerRay.X, centerRay.Y)
+		endWorld = ray.Origin + ray.Direction * 28
+	end
+	endWorld = endWorld or Vector3.zero
 
 	local startWorld: Vector3
-	local cam = env.camera
 	if cam then
-		local ray = cam:ViewportPointToRay(slotScreen.X, slotScreen.Y)
-		startWorld = ray.Origin + ray.Direction * 7
+		local ray = cam:ScreenPointToRay(slotRay.X, slotRay.Y)
+		startWorld = ray.Origin + ray.Direction * 10
 	else
-		startWorld = HandOrb.getHoldWorldPos() or Vector3.zero
+		startWorld = endWorld
 	end
 
 	HandOrb.clear()
@@ -505,11 +547,8 @@ function PlaceArmDisarmAnim.playArmIntroFromSlot(
 	env.makeConfirmUi()
 	env.setMoveHintVisible(true)
 
-	local chromePos = PlaceConfirmChrome.screenPos(env.getChromeAdorneePart())
 	local checkBtn = env.getCheckBtn()
 	local cancelBtn = env.getCancelBtn()
-	local moveHintImage = env.getMoveHintImage()
-	-- SeaFan: show yaw controls as soon as chrome exists (not only after fly-in ends).
 	do
 		local showRot = CoralVisual.hasYawRotateChrome(itemId)
 		local rotL = if env.getRotLeftBtn then env.getRotLeftBtn() else nil
@@ -531,8 +570,7 @@ function PlaceArmDisarmAnim.playArmIntroFromSlot(
 	if checkBtn then
 		checkBtn.Visible = false
 	end
-	-- Always lay out once so rot circles sit beside Close immediately (not only when pinned).
-	layoutChrome(env, checkBtn, cancelBtn)
+	env.syncConfirmButtons()
 
 	local t0 = os.clock()
 	armIntroConn = RunService.RenderStepped:Connect(function()
@@ -541,24 +579,10 @@ function PlaceArmDisarmAnim.playArmIntroFromSlot(
 			PlaceArmDisarmAnim.stopArmIntro()
 			return
 		end
-		local handWorld = HandOrb.getHoldWorldPos()
-		local player = Players.LocalPlayer
-		if not handWorld and player.Character then
-			local hand = player.Character:FindFirstChild("RightHand") or player.Character:FindFirstChild("Right Arm")
-			if hand and hand:IsA("BasePart") then
-				handWorld = hand.Position
-			end
-		end
-		handWorld = handWorld or startWorld
 
-		local handScreen: Vector2 = slotScreen
-		if cam then
-			local sp, _ = cam:WorldToViewportPoint(handWorld)
-			if sp.Z > 0 then
-				handScreen = Vector2.new(sp.X, sp.Y)
-			end
-		end
-		chromePos = PlaceConfirmChrome.screenPos(env.getChromeAdorneePart())
+		-- Keep end parked on plot under screen center (plot can resolve a frame late).
+		local liveEnd = env.resolveParkPos(centerRay) or endWorld
+		endWorld = liveEnd
 
 		local u = math.clamp((os.clock() - t0) / ARM_INTRO_SEC, 0, 1)
 		local a = 1 - (1 - u) * (1 - u)
@@ -568,89 +592,46 @@ function PlaceArmDisarmAnim.playArmIntroFromSlot(
 		if ghostPart.Parent then
 			ghostPart.Size = fullSize * scale
 			ghostPart.Transparency = 0.4
-			ghostPart.CFrame = CFrame.new(startWorld:Lerp(handWorld, a))
+			ghostPart.CFrame = CFrame.new(startWorld:Lerp(endWorld, a))
 			if ghostBaseColor then
 				ghostPart.Color = ghostBaseColor
 			end
 		end
 
-		local travel = slotScreen:Lerp(handScreen, a)
-		if moveHintImage and moveHintImage.Parent then
-			moveHintImage.Visible = true
-			moveHintImage.AnchorPoint = Vector2.new(0.5, 0.5)
-			moveHintImage.Position = UDim2.fromOffset(travel.X, travel.Y)
-			local m = MOVE_ICON_SIZE * scale
-			moveHintImage.Size = UDim2.fromOffset(m, m)
-			moveHintImage.ImageTransparency = 0
+		if cancelBtn and cancelBtn.Parent then
+			cancelBtn.Visible = true
 		end
-
-		if keepChromePinned then
-			if cancelBtn and cancelBtn.Parent then
-				cancelBtn.Visible = true
-			end
-			if checkBtn and checkBtn.Parent then
-				checkBtn.Visible = false
-			end
-			do
-				layoutChrome(env, checkBtn, cancelBtn)
-			end
-		else
-			local btnTravel = slotScreen:Lerp(chromePos, a)
-			local fullBtn = PlaceConfirmChrome.chromeBtnSize(BTN_SIZE)
-			local bsize = fullBtn * math.max(scale, 0.35)
-			local rotL = if env.getRotLeftBtn then env.getRotLeftBtn() else nil
-			local rotR = if env.getRotRightBtn then env.getRotRightBtn() else nil
-			local showRot = CoralVisual.hasYawRotateChrome(env.getArmedItemId())
-			if rotL then
-				rotL.Visible = showRot
-			end
-			if rotR then
-				rotR.Visible = showRot
-			end
-			PlaceConfirmChrome.layoutAt(
-				btnTravel,
-				bsize,
-				env.getConfirmGui(),
-				env.getChromeBillboard(),
-				checkBtn,
-				cancelBtn,
-				rotL,
-				rotR,
-				showRot
-			)
-			if cancelBtn and cancelBtn.Parent then
-				cancelBtn.Visible = true
-			end
-			if checkBtn and checkBtn.Parent then
-				checkBtn.Visible = false
-			end
+		if checkBtn and checkBtn.Parent then
+			checkBtn.Visible = false
 		end
+		-- Move icon + cancel/rot ride the ghost Billboard (same layout as post-drag).
+		env.syncConfirmButtons()
 
 		if u >= 1 then
 			PlaceArmDisarmAnim.stopArmIntro()
 			if ghostPart.Parent then
 				ghostPart.Size = fullSize
-				ghostPart.CFrame = CFrame.new(handWorld)
+				ghostPart.CFrame = CFrame.new(endWorld)
 			end
-			if moveHintImage then
-				moveHintImage.Size = UDim2.fromOffset(MOVE_ICON_SIZE, MOVE_ICON_SIZE)
-			end
+			env.setPlaceAnchor(endWorld)
 			if checkBtn then
 				checkBtn.Visible = false
 			end
 			if cancelBtn then
 				cancelBtn.Visible = true
 			end
-			do
-				layoutChrome(env, checkBtn, cancelBtn)
-			end
 			local color = ghostBaseColor or seedColor
 			HandOrb.arm(color)
-			env.setAimPinnedToHand(true)
+			env.setAimPinnedToHand(false)
+			if env.setAimPinnedToCenter then
+				env.setAimPinnedToCenter(true)
+			end
 			env.setAimPinOrigin(UserInputService:GetMouseLocation())
 			if env.getPlacePointerHeld() and not InventoryState.isPointerOverBackpack(env.getAimPinOrigin() or Vector2.zero) then
 				env.setAimFingerDown(true)
-				env.releaseHandPin()
+				if env.setAimPinnedToCenter then
+					env.setAimPinnedToCenter(false)
+				end
 			end
 			env.startMoveHintAttract()
 			env.syncConfirmButtons()

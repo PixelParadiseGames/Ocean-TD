@@ -191,6 +191,19 @@ function SkillStages.stageCost(_skillId: string, _stage: number): number
 	return 1
 end
 
+-- Total $D spent to reach the unlocked stages in `unlockedMap` (stage 1 is free).
+function SkillStages.spentSandDollarsForMap(unlockedMap: { [string]: number }): number
+	local total = 0
+	local src = if typeof(unlockedMap) == "table" then unlockedMap else {}
+	for _, def in ipairs(DEFS) do
+		local stage = SkillStages.clampStageFor(def.id, src[def.id] or SkillStages.MIN_STAGE)
+		for s = SkillStages.MIN_STAGE + 1, stage do
+			total += math.max(0, math.floor(SkillStages.stageCost(def.id, s)))
+		end
+	end
+	return total
+end
+
 function SkillStages.nextStage(current: number): number?
 	local c = SkillStages.clampStage(current)
 	if c >= SkillStages.MAX_STAGE then

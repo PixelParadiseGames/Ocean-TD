@@ -57,8 +57,20 @@ local playerGui = player:WaitForChild("PlayerGui")
 local busy = false
 local token = 0
 
+-- While set, RollFingerHint must not treat ForceClose as "player closed skills"
+-- (that wrongly jumps closePlotSize → closeSkills → cam + narrator mid-shot).
+local SUPPRESS_TUTORIAL_ATTR = "OceanTD_PlotSizeCineSuppressTutorial"
+
 local function forceCloseSkills()
 	playerGui:SetAttribute("OceanTD_ForceCloseSkills", os.clock())
+end
+
+local function setTutorialSuppress(on: boolean)
+	if on then
+		playerGui:SetAttribute(SUPPRESS_TUTORIAL_ATTR, true)
+	else
+		playerGui:SetAttribute(SUPPRESS_TUTORIAL_ATTR, nil)
+	end
 end
 
 local function forceCloseFreeCam()
@@ -78,20 +90,26 @@ end
 local function reopenPlotSizeSkills()
 	playerGui:SetAttribute("OceanTD_ForceOpenSkillId", "PlotSize")
 	playerGui:SetAttribute("OceanTD_ForceOpenSkills", os.clock())
-	if playerGui:GetAttribute("OceanTD_PendingClosePlotSizeHint") == true then
+	local restoreCloseHint = playerGui:GetAttribute("OceanTD_PendingClosePlotSizeHint") == true
+	if restoreCloseHint then
 		playerGui:SetAttribute("OceanTD_PendingClosePlotSizeHint", nil)
-		-- Wait for power-up chrome so the close finger has a real target.
-		task.spawn(function()
-			local deadline = os.clock() + 2
-			while os.clock() < deadline do
-				if playerGui:GetAttribute("OceanTD_SkillPowerUpOpen") == true then
-					break
-				end
-				task.wait(0.05)
-			end
-			playerGui:SetAttribute("OceanTD_RollFingerHint", "closePlotSize")
-		end)
 	end
+	-- Wait for chrome before clearing suppress — otherwise closeSkills→cam can race.
+	task.spawn(function()
+		local deadline = os.clock() + 2
+		while os.clock() < deadline do
+			if playerGui:GetAttribute("OceanTD_SkillPowerUpOpen") == true
+				or playerGui:GetAttribute("OceanTD_SkillsBubblesOpen") == true
+			then
+				break
+			end
+			task.wait(0.05)
+		end
+		if restoreCloseHint then
+			playerGui:SetAttribute("OceanTD_RollFingerHint", "closePlotSize")
+		end
+		setTutorialSuppress(false)
+	end)
 end
 
 local function getPlotSizesFolder(): Instance?
@@ -309,6 +327,8 @@ function PlotSizeCinematic.play(
 	-- Always drop avatar-cam override so the wide plot shot can play.
 	releaseSkillsAvatarCam()
 	if not keepSkillsOpen then
+		-- Suppress before ForceClose so closeSkills→cam cannot race the teardown.
+		setTutorialSuppress(true)
 		forceCloseSkills()
 		forceCloseFreeCam()
 		task.wait(0.05)
@@ -400,13 +420,18 @@ function PlotSizeCinematic.play(
 		playerGui:SetAttribute("OceanTD_PlotSizeCinematicBusy", false)
 		if shouldReopenPlotSize then
 			-- Return to skills + Plot Size power-up after the wide shot.
+			-- Suppress clears inside reopenPlotSizeSkills (after chrome is back).
 			task.defer(reopenPlotSizeSkills)
 		elseif not keepSkillsOpen then
 			playerGui:SetAttribute("OceanTD_SkillsUiRestore", os.clock())
-		elseif okCommit then
-			pcall(function()
-				require(script.Parent:WaitForChild("SkillsBubbleSim")).refreshStageLayouts()
-			end)
+			setTutorialSuppress(false)
+		else
+			setTutorialSuppress(false)
+			if okCommit then
+				pcall(function()
+					require(script.Parent:WaitForChild("SkillsBubbleSim")).refreshStageLayouts()
+				end)
+			end
 		end
 	end
 

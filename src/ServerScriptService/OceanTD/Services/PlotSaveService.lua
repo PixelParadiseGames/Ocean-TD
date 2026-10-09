@@ -42,6 +42,7 @@ local function cloneLayout(layout: { LayoutObject }): { LayoutObject }
 			sizeTier = obj.sizeTier,
 			sizeClass = obj.sizeClass,
 			colorIndex = obj.colorIndex,
+			seedHue = obj.seedHue,
 			colorR = obj.colorR,
 			colorG = obj.colorG,
 			colorB = obj.colorB,
@@ -119,15 +120,25 @@ local function persistNow(player: Player, reason: string): boolean
 	if not plotId then
 		return false
 	end
-	PlayerSession.setSaving(player, true)
+	-- Nested under an existing plotOp (save/load) — only toggle the saving flag.
+	local nested = PlayerSession.getPlotOp(player) ~= "idle"
+	if not nested then
+		PlayerSession.setSaving(player, true)
+	end
 	local layout = PlacementService.snapshotLayout(plotId)
 	local ok = PersistenceService.save(player, layout)
-	PlayerSession.setSaving(player, false)
+	if not nested then
+		PlayerSession.setSaving(player, false)
+	end
 	log("Persist", reason, "ok=", ok, player.Name)
 	return ok
 end
 
 function PlotSaveService.getClientState(player: Player): any
+	-- Allow readout while idle; Busy during ops so UI doesn't fight mid-swap.
+	if PlayerSession.getPlotOp(player) ~= "idle" then
+		return { ok = false, errorCode = "Busy" }
+	end
 	if not PlayerSession.canSave(player) then
 		return { ok = false, errorCode = "NotReady" }
 	end
@@ -160,15 +171,17 @@ end
 
 -- Write live plot into slotIndex. Does not change active index unless writing the active slot.
 function PlotSaveService.saveSlot(player: Player, slotIndex: number): any
-	if not PlayerSession.canSave(player) then
-		return { ok = false, errorCode = "NotReady" }
+	if not PlayerSession.tryBeginPlotOp(player, "saving") then
+		return { ok = false, errorCode = "Busy" }
 	end
 	local idx = clampSlot(slotIndex)
 	if not idx then
+		PlayerSession.endPlotOp(player)
 		return { ok = false, errorCode = "BadSlot" }
 	end
 	local plotId = PlotService.getOwnerPlotId(player)
 	if not plotId then
+		PlayerSession.endPlotOp(player)
 		return { ok = false, errorCode = "NoPlot" }
 	end
 
@@ -181,17 +194,18 @@ function PlotSaveService.saveSlot(player: Player, slotIndex: number): any
 	PersistenceService.writeSlotLayout(player, idx, layout, true)
 
 	-- Keep active slot / profile.layout in sync when saving the live slot.
+	local ok = true
 	if idx == PersistenceService.getActiveSlotIndex(player) then
-		persistNow(player, "manual-save-active")
+		ok = persistNow(player, "manual-save-active")
 	else
 		-- Persist other slots without changing live layout snapshot ownership.
-		PlayerSession.setSaving(player, true)
 		local activeLayout = PlacementService.snapshotLayout(plotId)
-		local ok = PersistenceService.save(player, activeLayout)
-		PlayerSession.setSaving(player, false)
-		if not ok then
-			return { ok = false, errorCode = "SaveFail" }
-		end
+		ok = PersistenceService.save(player, activeLayout)
+		log("Persist", "manual-save-other", "ok=", ok, player.Name)
+	end
+	PlayerSession.endPlotOp(player)
+	if not ok then
+		return { ok = false, errorCode = "SaveFail" }
 	end
 
 	log("Saved slot", idx, "for", player.Name, "objects=", #layout)
@@ -200,28 +214,30 @@ end
 
 -- LOAD saved slot or NEW empty slot: switch active, credit live corals, apply layout, wipe undo.
 function PlotSaveService.loadSlot(player: Player, slotIndex: number): any
-	if not PlayerSession.canMutatePlot(player) then
-		return { ok = false, errorCode = "NotReady" }
+	if not PlayerSession.tryBeginPlotOp(player, "loading") then
+		return { ok = false, errorCode = "Busy" }
 	end
 	local idx = clampSlot(slotIndex)
 	if not idx then
+		PlayerSession.endPlotOp(player)
 		return { ok = false, errorCode = "BadSlot" }
 	end
 	local saves = PersistenceService.getPlotSaves(player)
 	if not saves then
+		PlayerSession.endPlotOp(player)
 		return { ok = false, errorCode = "NoProfile" }
 	end
 	local target = saves.slots[idx]
 	if not target then
+		PlayerSession.endPlotOp(player)
 		return { ok = false, errorCode = "BadSlot" }
 	end
 
 	local plotId = PlotService.getOwnerPlotId(player)
 	if not plotId then
+		PlayerSession.endPlotOp(player)
 		return { ok = false, errorCode = "NoPlot" }
 	end
-
-	PlayerSession.setPlotLoading(player, true)
 
 	-- Capture destination layout FIRST — never clobber a saved slot with live before apply.
 	local layoutToApply: { LayoutObject }
@@ -234,10 +250,9 @@ function PlotSaveService.loadSlot(player: Player, slotIndex: number): any
 	end
 
 	local currentActive = saves.activeIndex
-	local leavingSnapshot: { LayoutObject }? = nil
 	-- Only auto-save the slot we're leaving. Reloading the same slot must keep its saved meta.
 	if currentActive ~= idx then
-		leavingSnapshot = PlacementService.snapshotLayout(plotId)
+		local leavingSnapshot = PlacementService.snapshotLayout(plotId)
 		PersistenceService.writeSlotLayout(player, currentActive, leavingSnapshot, true)
 	end
 	if not target.saved then
@@ -246,7 +261,7 @@ function PlotSaveService.loadSlot(player: Player, slotIndex: number): any
 
 	local applied = PlacementService.applyLayout(player, layoutToApply)
 	if not applied.ok then
-		PlayerSession.setPlotLoading(player, false)
+		PlayerSession.endPlotOp(player)
 		return { ok = false, errorCode = applied.errorCode or "LoadFail" }
 	end
 
@@ -266,10 +281,8 @@ function PlotSaveService.loadSlot(player: Player, slotIndex: number): any
 
 	UndoService.clear(player)
 	PlacementService.clearPendingColorSave(player)
-	PlayerSession.setSaving(player, true)
 	local ok = PersistenceService.save(player, persistLayout)
-	PlayerSession.setSaving(player, false)
-	PlayerSession.setPlotLoading(player, false)
+	PlayerSession.endPlotOp(player)
 	log("Persist load-slot-" .. tostring(idx), "ok=", ok, player.Name)
 
 	log("Loaded slot", idx, "for", player.Name, "placed=", applied.placed, "wasSaved=", target.saved)

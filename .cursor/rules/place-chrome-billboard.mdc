@@ -1,0 +1,39 @@
+---
+description: Working method for place/relocate cancel-rot-confirm under the move icon (do not regress).
+globs:
+  - "**/PlaceConfirmChrome.lua"
+  - "**/PlacementController.lua"
+  - "**/RelocateController.lua"
+  - "**/PlaceArmDisarmAnim.lua"
+  - "**/PlaceConfirmHitTest.lua"
+alwaysApply: false
+---
+
+# Place / relocate chrome under move icon
+
+This layout took many failed attempts. **Do not “simplify” back to ScreenGui projection.**
+
+## Working method (canonical)
+
+1. **Move icon** lives on a `BillboardGui` adorneed to the ghost / relocate move adornee.
+2. **Cancel / rotate / confirm** are children of that **same** Billboard — local pixel offsets under the disc via `PlaceConfirmChrome.layoutOnMoveBillboard(..., moveBillboard, moveIcon)`.
+3. Move disc stays at Billboard center `(0.5, 0)`; chrome row uses `useScale` positions with `topY = moveIconSize/2 + gap + btn/2`.
+4. Expand that Billboard’s `Size` so the button row fits; `ClipsDescendants = false`. Keep move `ImageLabel` at fixed `MOVE_ICON_SIZE` offset (not `UDim2.fromScale(1,1)` of the tall BB).
+5. Arm intro: fly the **ghost** only; call `syncConfirmButtons()` each frame so move+chrome ride the Billboard. **Never** park chrome with `layoutBelowMoveIcon` / `layoutAt` on the IgnoreGuiInset ScreenGui for the steady/parked state.
+
+## What failed (do not revive)
+
+- Mixing `AbsolutePosition` of Billboard children with ScreenGui `Position` (Billboard AP X is unreliable).
+- `WorldToViewportPoint` / `GuiInset` / `IgnoreGuiInset` conversion for button `Position` (left, high, or far down-left).
+- Separate chrome Billboard + `StudsOffsetWorldSpace` pixel→world offset (wrong until first drag).
+- Avatar feet / `layoutOnTorso` for place chrome.
+- Arm intro ending with ScreenGui `layoutChrome` then hoping a later sync fixes park — first select stayed wrong until drag.
+
+## Drag / input
+
+- While dragging the coral, set chrome `Active = false` (`setPlaceChromeHungry`) so slide-over does not fire cancel/rot.
+- Prefer `PlaceConfirmHitTest` / `GetGuiObjectsAtPosition` over trusting Billboard `AbsolutePosition` for hits.
+
+## Entry point
+
+`PlaceConfirmChrome.layoutOnMoveBillboard` — place via `PlacementController.syncConfirmButtons`; relocate via `layoutWaistChrome`.

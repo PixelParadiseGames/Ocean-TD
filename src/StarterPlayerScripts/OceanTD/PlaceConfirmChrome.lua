@@ -1,10 +1,15 @@
 --!strict
 --[[
-	Feet-locked ✓/X (+ optional SeaFan rotate) layout helpers for PlacementController.
-	Extracted so PlacementController stays under Luau's 200-local limit.
+	Place chrome helpers for PlacementController / RelocateController.
+
+	WORKING LAYOUT (do not regress — see .cursor/rules/place-chrome-billboard.mdc):
+	Cancel / rot / confirm are children of the SAME BillboardGui as the move icon,
+	with local pixel offsets under the disc (layoutOnMoveBillboard). Never ScreenGui
+	AbsolutePosition / GuiInset projection for the parked chrome. Never avatar feet.
 ]]
 
 local Players = game:GetService("Players")
+local GuiService = game:GetService("GuiService")
 local TweenService = game:GetService("TweenService")
 local SoundService = game:GetService("SoundService")
 local Workspace = game:GetService("Workspace")
@@ -26,6 +31,8 @@ local FEET_LIFT = 0.45
 local BASE_BTN_PX = 52
 -- Confirm is 20% larger than Close / rot.
 local CONFIRM_BTN_SCALE = 1.2
+-- Placement / relocate chrome under the move icon (slightly under original feet size).
+local PLACE_BELOW_MOVE_SCALE = 0.9
 -- ≤720p class (mobile): 30% smaller. 720p+: 20% larger.
 local MOBILE_BTN_SCALE = 0.7
 local DESKTOP_BTN_SCALE = 1.2
@@ -43,6 +50,56 @@ end
 
 function PlaceConfirmChrome.confirmBtnSize(basePx: number?): number
 	return math.max(math.floor(PlaceConfirmChrome.chromeBtnSize(basePx) * CONFIRM_BTN_SCALE + 0.5), 28)
+end
+
+-- Placement close / rotate size (viewport scale × 0.64 under move icon).
+function PlaceConfirmChrome.placeChromeBtnSize(basePx: number?): number
+	return math.max(math.floor(PlaceConfirmChrome.chromeBtnSize(basePx) * PLACE_BELOW_MOVE_SCALE + 0.5), 22)
+end
+
+function PlaceConfirmChrome.placeConfirmBtnSize(basePx: number?): number
+	return math.max(math.floor(PlaceConfirmChrome.placeChromeBtnSize(basePx) * CONFIRM_BTN_SCALE + 0.5), 22)
+end
+
+-- Screen origin for placeChrome so the top row sits just under the move icon.
+function PlaceConfirmChrome.originBelowMoveIcon(movePos: Vector2, moveIconSize: number, btnSize: number): Vector2
+	-- Generous gap so cancel/rot don't overlap the move disc.
+	local gap = math.max(math.floor(btnSize * 0.45 + 0.5), 14)
+	return Vector2.new(movePos.X, movePos.Y + moveIconSize * 0.5 + gap + btnSize * 0.5)
+end
+
+function PlaceConfirmChrome.layoutBelowMoveIcon(
+	movePos: Vector2,
+	moveIconSize: number,
+	baseBtnPx: number,
+	confirmGui: ScreenGui?,
+	chromeBillboard: BillboardGui?,
+	checkBtn: TextButton?,
+	cancelBtn: TextButton?,
+	rotLeftBtn: GuiObject?,
+	rotRightBtn: GuiObject?,
+	showRot: boolean?
+)
+	-- ScreenGui path (arm-intro fly). Prefer layoutOnMoveBillboard once the move icon is on a world Billboard.
+	if not PlaceConfirmChrome.isPlausibleGuiPos(movePos) then
+		return
+	end
+	local s = PlaceConfirmChrome.placeChromeBtnSize(baseBtnPx)
+	local origin = PlaceConfirmChrome.originBelowMoveIcon(movePos, moveIconSize, s)
+	if not PlaceConfirmChrome.isPlausibleGuiPos(origin) then
+		return
+	end
+	PlaceConfirmChrome.layoutAt(
+		origin,
+		s,
+		confirmGui,
+		chromeBillboard,
+		checkBtn,
+		cancelBtn,
+		rotLeftBtn,
+		rotRightBtn,
+		showRot
+	)
 end
 
 -- Fixed px for the word "CONFIRM" inside the circle (TextScaled wraps it on mobile).
@@ -187,8 +244,12 @@ function PlaceConfirmChrome.ensureAdornee(existing: BasePart?): BasePart?
 	return part
 end
 
--- IgnoreGuiInset + ScreenInsets.None → Position matches WorldToViewportPoint (viewport origin).
--- Do NOT use WorldToScreenPoint / TopbarInset here — that overshoots right on phones.
+--[[
+	guiPos = AbsolutePosition / WorldToViewportPoint (inset-exclusive).
+	Place/relocate chrome ScreenGuis use IgnoreGuiInset=true → Position needs GuiInset
+	(same as GetMouseLocation / SeedWheelReveal.leftHudScreenCenter).
+	Billboard AbsolutePosition X is often wrong — prefer guiPosFromWorld(adornee).
+]]
 local function projectToGuiPos(cam: Camera, world: Vector3): Vector2?
 	local sp, _onScreen = cam:WorldToViewportPoint(world)
 	if sp.Z <= 0 then
@@ -197,29 +258,64 @@ local function projectToGuiPos(cam: Camera, world: Vector3): Vector2?
 	return Vector2.new(sp.X, sp.Y)
 end
 
+-- AbsolutePosition / viewport → Position on IgnoreGuiInset ScreenGui.
+function PlaceConfirmChrome.toIgnoreInsetPos(guiPos: Vector2): Vector2
+	local inset = GuiService:GetGuiInset()
+	return Vector2.new(guiPos.X + inset.X, guiPos.Y + inset.Y)
+end
+
+function PlaceConfirmChrome.isPlausibleGuiPos(pos: Vector2): boolean
+	if pos.X < 12 and pos.Y < 12 then
+		return false
+	end
+	local cam = Workspace.CurrentCamera
+	local vp = if cam then cam.ViewportSize else Vector2.new(1920, 1080)
+	local inset = GuiService:GetGuiInset()
+	-- Accept either inset-exclusive or inset-inclusive coords.
+	return pos.X < vp.X + inset.X + 120 and pos.Y < vp.Y + inset.Y + 120
+end
+
+function PlaceConfirmChrome.guiPosFromWorld(world: Vector3): Vector2?
+	local cam = Workspace.CurrentCamera
+	if not cam then
+		return nil
+	end
+	return projectToGuiPos(cam, world)
+end
+
+-- Live AbsolutePosition center (inset-exclusive). Prefer guiPosFromWorld for Billboard icons.
+function PlaceConfirmChrome.absoluteCenterToGuiPos(gui: GuiObject?): (Vector2?, number)
+	if not gui or not gui.Parent or not gui.Visible then
+		return nil, 0
+	end
+	local as = gui.AbsoluteSize
+	if as.X < 2 or as.Y < 2 then
+		return nil, 0
+	end
+	local ap = gui.AbsolutePosition
+	-- (0,0) AbsolutePosition glitch for a frame — refuse.
+	if ap.X < 2 and ap.Y < 2 then
+		return nil, 0
+	end
+	local center = Vector2.new(ap.X + as.X * 0.5, ap.Y + as.Y * 0.5)
+	if not PlaceConfirmChrome.isPlausibleGuiPos(center) then
+		return nil, 0
+	end
+	return center, as.X
+end
+
+function PlaceConfirmChrome.moveIconScreenCenter(move: GuiObject?): (Vector2?, number)
+	return PlaceConfirmChrome.absoluteCenterToGuiPos(move)
+end
+
+-- Project adornee / world only — never avatar feet (place/relocate chrome must not snap to ankles).
 function PlaceConfirmChrome.screenPos(adornee: BasePart?): Vector2
 	local cam = Workspace.CurrentCamera
 	local vp = if cam then cam.ViewportSize else Vector2.new(800, 600)
-	local fallback = Vector2.new(vp.X * 0.5, vp.Y - BTN_FALLBACK_BOTTOM_PAD)
+	local fallback = Vector2.new(vp.X * 0.5, vp.Y * 0.55)
 	if not cam then
 		return fallback
 	end
-
-	local char = player.Character
-	local root = char and char:FindFirstChild("HumanoidRootPart")
-	if root and root:IsA("BasePart") and char then
-		-- X from HRP (body center). Y from feet. Mixing them avoids perspective skew.
-		local feetWorld = feetWorldCFrame(char, root).Position
-		local rootPos = projectToGuiPos(cam, root.Position)
-		local feetPos = projectToGuiPos(cam, Vector3.new(root.Position.X, feetWorld.Y, root.Position.Z))
-		if rootPos and feetPos then
-			return Vector2.new(rootPos.X, feetPos.Y)
-		end
-		if rootPos then
-			return rootPos
-		end
-	end
-
 	local world: Vector3? = if adornee then adornee.Position else nil
 	if not world then
 		return fallback
@@ -350,10 +446,11 @@ local function placeChrome(
 	rotLeftBtn: GuiObject?,
 	cancelBtn: GuiObject?,
 	rotRightBtn: GuiObject?,
-	useScale: boolean -- BillboardGui uses scale-centered coords
+	useScale: boolean, -- BillboardGui uses scale-centered coords
+	topYOverride: number?
 )
 	--[[
-		Close + rot stay fixed on the top row. Confirm parks below Close; only Visible toggles.
+		Close + rot on the top row (placement: under move icon). Confirm parks below Close.
 		Confirm is larger than Close — space centers so discs don't overlap.
 	]]
 	local checkS = math.max(math.floor(s * CONFIRM_BTN_SCALE + 0.5), s)
@@ -382,8 +479,8 @@ local function placeChrome(
 	end
 
 	local rowGap = math.max(math.floor(s * 0.35 + 0.5), 10)
-	local topY = 0
-	local confirmY = checkS * 0.5 + s * 0.5 + rowGap
+	local topY = if typeof(topYOverride) == "number" then topYOverride else 0
+	local confirmY = topY + checkS * 0.5 + s * 0.5 + rowGap
 
 	if showRot and cancelBtn and rotLeftBtn and rotRightBtn then
 		setPos(rotLeftBtn, -(s + gap), topY, s)
@@ -433,45 +530,97 @@ function PlaceConfirmChrome.layoutAt(
 	parentToGui(cancelBtn)
 	parentToGui(rotLeftBtn)
 	parentToGui(rotRightBtn)
-	placeChrome(chrome, s, gap, showCheck, doRot, checkBtn, rotLeftBtn, cancelBtn, rotRightBtn, false)
+	placeChrome(chrome, s, gap, showCheck, doRot, checkBtn, rotLeftBtn, cancelBtn, rotRightBtn, false, nil)
 end
 
-function PlaceConfirmChrome.layoutOnTorso(
-	btnSize: number,
-	playerGui: PlayerGui,
-	confirmGui: ScreenGui?,
+--[[
+	Cancel/rot/confirm share the move BillboardGui (local pixel offsets under the icon).
+	No ScreenGui / GuiInset / StudsOffsetWorldSpace — same host as the move disc.
+	`chromeBillboard` if passed is disabled (legacy separate BB).
+]]
+function PlaceConfirmChrome.layoutOnMoveBillboard(
+	adornee: BasePart,
+	moveIconSize: number,
+	baseBtnPx: number,
+	_parent: Instance,
 	chromeBillboard: BillboardGui?,
-	chromeAdornee: BasePart?,
 	checkBtn: TextButton?,
 	cancelBtn: TextButton?,
 	rotLeftBtn: GuiObject?,
 	rotRightBtn: GuiObject?,
-	showRot: boolean?
-): (BillboardGui?, BasePart?)
-	local s = PlaceConfirmChrome.chromeBtnSize(btnSize)
-	local doRot = showRot == true and rotLeftBtn ~= nil and rotRightBtn ~= nil
-	local adornee = PlaceConfirmChrome.ensureAdornee(chromeAdornee)
-
-	-- Always ScreenGui: Billboard AbsolutePosition / hit tests are unreliable (clicks land
-	-- below the visible disc). Screen-space buttons behave like normal GuiButtons.
+	showRot: boolean?,
+	moveBillboard: BillboardGui?,
+	moveIcon: GuiObject?
+): BillboardGui?
 	if chromeBillboard then
 		chromeBillboard.Enabled = false
 	end
-	if not adornee or not confirmGui then
-		return chromeBillboard, adornee
+	local bb = moveBillboard
+	if not (bb and bb.Parent) then
+		return chromeBillboard
 	end
-	PlaceConfirmChrome.layoutAt(
-		PlaceConfirmChrome.screenPos(adornee),
-		s,
-		confirmGui,
-		chromeBillboard,
-		checkBtn,
-		cancelBtn,
-		rotLeftBtn,
-		rotRightBtn,
-		doRot
-	)
-	return chromeBillboard, adornee
+	local s = PlaceConfirmChrome.placeChromeBtnSize(baseBtnPx)
+	local gap = 6
+	local gapUnder = math.max(math.floor(s * 0.45 + 0.5), 14)
+	local showCheck = checkBtn ~= nil and checkBtn.Visible
+	local doRot = showRot == true and rotLeftBtn ~= nil and rotRightBtn ~= nil
+	local checkS = math.max(math.floor(s * CONFIRM_BTN_SCALE + 0.5), s)
+	local rowGap = math.max(math.floor(s * 0.35 + 0.5), 10)
+	local belowH = gapUnder + s + (if showCheck then rowGap + checkS else 0)
+	-- Keep move disc centered on adornee; extend BB downward for chrome.
+	local heightPx = math.max(math.floor(moveIconSize + belowH * 2 + 0.5), moveIconSize)
+	local widthPx = math.max(moveIconSize, math.floor((s + gap) * 2 + s + 24))
+
+	bb.Adornee = adornee
+	bb.StudsOffset = Vector3.zero
+	bb.StudsOffsetWorldSpace = Vector3.zero
+	bb.Size = UDim2.fromOffset(widthPx, heightPx)
+	bb.Active = true
+	bb.Enabled = true
+	bb.ClipsDescendants = false
+
+	if moveIcon then
+		moveIcon.AnchorPoint = Vector2.new(0.5, 0.5)
+		moveIcon.Position = UDim2.new(0.5, 0, 0.5, 0)
+		moveIcon.Size = UDim2.fromOffset(moveIconSize, moveIconSize)
+		moveIcon.Visible = true
+		if moveIcon.Parent ~= bb then
+			moveIcon.Parent = bb
+		end
+	end
+
+	local function parentToBb(btn: GuiObject?)
+		if btn and btn.Parent ~= bb then
+			btn.Parent = bb
+		end
+	end
+	parentToBb(checkBtn)
+	parentToBb(cancelBtn)
+	parentToBb(rotLeftBtn)
+	parentToBb(rotRightBtn)
+
+	local topY = moveIconSize * 0.5 + gapUnder + s * 0.5
+	placeChrome(Vector2.zero, s, gap, showCheck, doRot, checkBtn, rotLeftBtn, cancelBtn, rotRightBtn, true, topY)
+	return chromeBillboard
+end
+
+-- Deprecated: feet-locked chrome. Kept as a no-op so old callers cannot yank buttons to the avatar.
+function PlaceConfirmChrome.layoutOnTorso(
+	_btnSize: number,
+	_playerGui: PlayerGui,
+	_confirmGui: ScreenGui?,
+	chromeBillboard: BillboardGui?,
+	chromeAdornee: BasePart?,
+	_checkBtn: TextButton?,
+	_cancelBtn: TextButton?,
+	_rotLeftBtn: GuiObject?,
+	_rotRightBtn: GuiObject?,
+	_showRot: boolean?
+): (BillboardGui?, BasePart?)
+	if chromeBillboard then
+		chromeBillboard.Enabled = false
+	end
+	return chromeBillboard, chromeAdornee
 end
 
 PlaceConfirmChrome.ROT_LEFT_ICON = ROT_LEFT_ICON

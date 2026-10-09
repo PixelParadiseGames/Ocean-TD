@@ -219,8 +219,8 @@ local function onCharacterAdded(player: Player, _character: Model)
 end
 
 local function savePlayer(player: Player, reason: string)
-	if PlayerSession.isPlotLoading(player) then
-		print("[PERSIST] Skip save (" .. reason .. ") — plot slot load in progress for", player.Name)
+	if PlayerSession.isPlotLoading(player) or PlayerSession.getPlotOp(player) ~= "idle" then
+		print("[PERSIST] Skip save (" .. reason .. ") — plot op in progress for", player.Name)
 		return
 	end
 	if not PlayerSession.canSave(player) then
@@ -434,17 +434,32 @@ requestRecycle.OnServerInvoke = function(player: Player, placeId: any, worldPos:
 	if typeof(placeId) ~= "string" or typeof(worldPos) ~= "Vector3" then
 		return { ok = false, errorCode = "BadRequest" }
 	end
-	return PlacementService.recycle(player, placeId, worldPos)
+	-- Single recycle: exclusive plot op (blocks clear/save/load mid-flight).
+	if not PlayerSession.tryBeginPlotOp(player, "recycling") then
+		return { ok = false, errorCode = "Busy" }
+	end
+	local result = PlacementService.recycle(player, placeId, worldPos)
+	PlayerSession.endPlotOp(player)
+	return result
 end
 
 local requestUndo = Remotes.getFunction("RequestUndo")
 requestUndo.OnServerInvoke = function(player: Player)
+	if not PlayerSession.canSave(player) then
+		return { ok = false, errorCode = "Busy" }
+	end
 	return PlacementService.undoLast(player)
 end
 
 local requestClearPlot = Remotes.getFunction("RequestClearPlot")
 requestClearPlot.OnServerInvoke = function(player: Player)
-	return PlacementService.clearPlot(player)
+	-- Bulk recycle (clear plot): same seedHue credit path as single recycle, under exclusive lock.
+	if not PlayerSession.tryBeginPlotOp(player, "clearing") then
+		return { ok = false, errorCode = "Busy" }
+	end
+	local result = PlacementService.clearPlot(player)
+	PlayerSession.endPlotOp(player)
+	return result
 end
 
 local requestGetPlotSaves = Remotes.getFunction("RequestGetPlotSaves")
@@ -666,7 +681,10 @@ end)
 local requestResetSkillStages = Remotes.getFunction("RequestResetSkillStages")
 requestResetSkillStages.OnServerInvoke = function(player: Player)
 	local stages = PersistenceService.resetSkillStages(player)
-	Remotes.get("SkillStagesSync"):FireClient(player, stages)
+	Remotes.get("SkillStagesSync"):FireClient(player, {
+		unlocked = stages.unlocked,
+		active = stages.active,
+	})
 	local payload = PlotService.applyOwnerPlotSizeStage(player, 1)
 	if payload then
 		Remotes.get("PlotAssigned"):FireClient(player, payload)
@@ -681,7 +699,12 @@ requestResetSkillStages.OnServerInvoke = function(player: Player)
 		})
 		WaveWatchService.broadcastRoster(nil)
 	end
-	return { ok = true, skillStages = stages }
+	return {
+		ok = true,
+		skillStages = { unlocked = stages.unlocked, active = stages.active },
+		refunded = stages.refunded,
+		sandDollars = stages.sandDollars,
+	}
 end
 
 local requestCoralSize = Remotes.getFunction("RequestCoralSize")
@@ -789,4 +812,81 @@ requestGetJoinIntro.OnServerInvoke = function(player: Player)
 		hasSeenJoinIntro = PersistenceService.hasSeenJoinIntro(player),
 		introSourceCFrame = if plot4 then plot4.ringCFrame else CFrame.identity,
 	}
+end
+
+-- Studio / place creator only: /repairhues audit|backfill|redistribute|wipe
+local function isHueRepairPrivileged(player: Player): boolean
+	if game:GetService("RunService"):IsStudio() then
+		return true
+	end
+	if player.UserId == game.CreatorId then
+		return true
+	end
+	return false
+end
+
+local function printHueAudit(player: Player, result: any)
+	print("[REPAIRHUES]", player.Name, "mode=", result.mode, "ok=", result.ok, "err=", result.errorCode)
+	if typeof(result.fixedSeedHue) == "number" then
+		print("[REPAIRHUES] backfilled live seedHue cells=", result.fixedSeedHue)
+	end
+	local rows = result.rows
+	if typeof(rows) ~= "table" then
+		return
+	end
+	for _, row in ipairs(rows) do
+		local parts = {}
+		for hue = 1, 14 do
+			local n = row.hues[hue]
+			if typeof(n) == "number" and n > 0 then
+				table.insert(parts, string.format("%d=%d", hue, n))
+			end
+		end
+		print(
+			string.format(
+				"[REPAIRHUES] %s total=%d hueSum=%d [%s]",
+				row.itemId,
+				row.total,
+				row.hueSum,
+				table.concat(parts, " ")
+			)
+		)
+	end
+end
+
+Players.PlayerAdded:Connect(function(player)
+	player.Chatted:Connect(function(msg)
+		if not isHueRepairPrivileged(player) then
+			return
+		end
+		local lower = string.lower(string.gsub(msg, "^%s+", ""))
+		local mode = string.match(lower, "^/repairhues%s+(%S+)")
+		if not mode then
+			if lower == "/repairhues" then
+				mode = "audit"
+			else
+				return
+			end
+		end
+		local result = PersistenceService.repairHueInventory(player, mode)
+		printHueAudit(player, result)
+	end)
+end)
+for _, player in ipairs(Players:GetPlayers()) do
+	player.Chatted:Connect(function(msg)
+		if not isHueRepairPrivileged(player) then
+			return
+		end
+		local lower = string.lower(string.gsub(msg, "^%s+", ""))
+		local mode = string.match(lower, "^/repairhues%s+(%S+)")
+		if not mode then
+			if lower == "/repairhues" then
+				mode = "audit"
+			else
+				return
+			end
+		end
+		local result = PersistenceService.repairHueInventory(player, mode)
+		printHueAudit(player, result)
+	end)
 end

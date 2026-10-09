@@ -216,12 +216,13 @@ function InventoryState.getBackpackButtonScreenCenter(): Vector2?
 end
 
 -- Slot2 clear-plot confirm gates place / relocate.
--- VFX "busy" only prevents another clear — it must not block placing (can stick if VFX cancels).
+-- plotOpBusy: client-side mutex for clear / save / load (mirrors server plotOp).
 local clearPlotConfirming = false
 local clearPlotBusy = false
 local savePlotsOpen = false
 local savePlotsBusy = false
 local settingsOpen = false
+local plotOpBusy = false
 
 function InventoryState.setClearPlotConfirming(value: boolean)
 	clearPlotConfirming = value == true
@@ -233,6 +234,7 @@ end
 
 function InventoryState.setClearPlotBusy(value: boolean)
 	clearPlotBusy = value == true
+	plotOpBusy = clearPlotBusy or savePlotsBusy
 end
 
 function InventoryState.isClearPlotBusy(): boolean
@@ -240,7 +242,8 @@ function InventoryState.isClearPlotBusy(): boolean
 end
 
 function InventoryState.isClearPlotBlocking(): boolean
-	return clearPlotConfirming
+	-- Confirm UI + in-flight clear VFX both block other plot ops.
+	return clearPlotConfirming or clearPlotBusy
 end
 
 function InventoryState.setSavePlotsOpen(value: boolean)
@@ -253,6 +256,7 @@ end
 
 function InventoryState.setSavePlotsBusy(value: boolean)
 	savePlotsBusy = value == true
+	plotOpBusy = clearPlotBusy or savePlotsBusy
 end
 
 function InventoryState.isSavePlotsBusy(): boolean
@@ -260,7 +264,11 @@ function InventoryState.isSavePlotsBusy(): boolean
 end
 
 function InventoryState.isSavePlotsBlocking(): boolean
-	return savePlotsOpen or savePlotsBusy
+	return savePlotsOpen or savePlotsBusy or clearPlotBusy
+end
+
+function InventoryState.isPlotOpBusy(): boolean
+	return plotOpBusy or clearPlotBusy or savePlotsBusy
 end
 
 function InventoryState.setSettingsOpen(value: boolean)

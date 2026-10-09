@@ -23,10 +23,11 @@ local Constants = {
 	-- PreviewBox_1 .. PreviewBox_5 are the other five plots (NOT PreviewBox_2..6)
 	PREVIEW_BOX_PREFIX = "PreviewBox_",
 
-	DATASTORE_NAME = "OceanTD_Player_v1",
+	-- v2: fresh profiles after seedHue / plot-op economy repair (pre-launch wipe).
+	DATASTORE_NAME = "OceanTD_Player_v2",
 	-- OrderedDataStore: key = userId string, value = Reef Report score (int).
-	REEF_SCORE_ORDERED_STORE = "OceanTD_ReefScore_v1",
-	PROFILE_VERSION = 9,
+	REEF_SCORE_ORDERED_STORE = "OceanTD_ReefScore_v2",
+	PROFILE_VERSION = 10,
 
 	AUTOSAVE_INTERVAL_SEC = 60,
 

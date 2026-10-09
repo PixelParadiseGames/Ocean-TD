@@ -2026,7 +2026,7 @@ local function attachTapFeedDebug(agent: FishAgent)
 	local root = agent.root
 	local baseR = C.TAP_FEED_RADIUS or 10
 	local mult = if waveIndex <= 10
-		then (C.TAP_FEED_RADIUS_MULT_W1_10 or 1.2)
+		then (C.TAP_FEED_RADIUS_MULT_W1_10 or 1.32)
 		elseif waveIndex <= 20 then (C.TAP_FEED_RADIUS_MULT_W11_20 or 1.1)
 		else 1
 	local diam = math.max(2, baseR * mult * 2)
@@ -4144,7 +4144,7 @@ function WaveSim.tryTapFeedAtScreen(screenPos: Vector2): TapFeedResult
 	end
 	local baseRadius = C.TAP_FEED_RADIUS or 5
 	local radiusMult = if waveIndex <= 10
-		then (C.TAP_FEED_RADIUS_MULT_W1_10 or 1.2)
+		then (C.TAP_FEED_RADIUS_MULT_W1_10 or 1.32)
 		elseif waveIndex <= 20 then (C.TAP_FEED_RADIUS_MULT_W11_20 or 1.1)
 		else 1
 	local radius = baseRadius * radiusMult

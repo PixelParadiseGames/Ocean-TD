@@ -924,7 +924,9 @@ local function moveSpeedForWish(): number
 	end
 	-- Joystick pan while placing: half normal speed for finer aim.
 	-- Plot Cam + center feed reticle: same slow pan (aim by moving the camera).
+	-- Backpack open: half pan speed when dragging the plot view.
 	if PlacementController.isActive()
+		or InventoryState.isOpen()
 		or (mode == "plotcam" and playerGui:GetAttribute("OceanTD_FishFeedAimCenter") == true)
 	then
 		speed *= 0.5
@@ -1630,6 +1632,10 @@ UserInputService.InputBegan:Connect(function(input, _gameProcessed)
 			return
 		end
 		local pos = Vector2.new(input.Position.X, input.Position.Y)
+		-- Scrolling backpack coral list must not steal the finger as a plot pan stick.
+		if InventoryState.isPointerOverBackpack(pos) then
+			return
+		end
 		if isFishCamLook() then
 			local cam = getCamera()
 			local viewW = if cam then cam.ViewportSize.X else 0

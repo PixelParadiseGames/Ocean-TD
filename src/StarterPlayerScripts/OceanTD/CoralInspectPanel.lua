@@ -47,6 +47,7 @@ local TUTORIAL_FREE_ATTR = "OceanTD_TutorialFreeUpgrade"
 local HINT_ATTR = "OceanTD_RollFingerHint"
 local HUE_PLACE_ATTR = "OceanTD_TutorialHuePlaceId"
 local HUE_RESUME_ATTR = "OceanTD_TutorialHueResume"
+local HUE_INDEX_ATTR = "OceanTD_TutorialHueIndex"
 local pendingTutorialFreeInvoke = false
 -- While a tutorial size unlock is in flight, don't let the finger reopen the confirm.
 local suppressTutorialSizeConfirm = false
@@ -54,6 +55,10 @@ local hueScrollToken = 0
 local focusColorIndex = 0
 -- Inspect root (assigned in bind). Forward-declared so upgrade→hue can see visibility.
 local root: Frame? = nil
+-- Color row (assigned in bind). Must be forward-declared — beginTutorialHueFinger
+-- runs above the bind locals and would otherwise index nil globals.
+local colorScroll: ScrollingFrame? = nil
+local colorSwatchBtns: { [number]: GuiButton } = {}
 -- True while beginTutorialHueFinger has HINT cleared for swatch scroll — must not
 -- be treated as "inspect closed mid-hue" (that wrongly forces reselectCoral).
 local hueFingerArming = false
@@ -69,7 +74,45 @@ local function resolveTutorialHueIndex(): number?
 	if typeof(awarded) == "number" then
 		return PlotOutlineColors.clampCoralIndex(awarded)
 	end
+	local saved = playerGui:GetAttribute(HUE_INDEX_ATTR)
+	if typeof(saved) == "number" then
+		return PlotOutlineColors.clampCoralIndex(saved)
+	end
+	local part = RelocateController.getSelectedPart()
+	if part then
+		local seed = part:GetAttribute("OceanTD_SeedHue")
+		if typeof(seed) == "number" then
+			return PlotOutlineColors.clampCoralIndex(seed)
+		end
+		local painted = part:GetAttribute("OceanTD_ColorIndex")
+		if typeof(painted) == "number" and painted > 0 then
+			return PlotOutlineColors.clampCoralIndex(painted)
+		end
+	end
 	return nil
+end
+
+local function rememberTutorialHueIndex(idx: number?)
+	if typeof(idx) ~= "number" then
+		return
+	end
+	local clamped = PlotOutlineColors.clampCoralIndex(idx)
+	playerGui:SetAttribute(HUE_INDEX_ATTR, clamped)
+	SeedWheelRevealApi.lastAwardedColorIndex = clamped
+end
+
+-- Force inspect chrome on after size cine without calling setVisible (defined later).
+local function ensureInspectVisibleForHue()
+	if not RelocateController.isActive() then
+		return
+	end
+	if root and not root.Visible then
+		root.Visible = true
+	end
+	if catalog then
+		catalog.Visible = false
+	end
+	RelocateController.setInspectPanelVisible(true)
 end
 
 local huePlaceTrackConn: RBXScriptConnection? = nil
@@ -81,6 +124,7 @@ local function clearTutorialHueTracking()
 	end
 	playerGui:SetAttribute(HUE_PLACE_ATTR, nil)
 	playerGui:SetAttribute(HUE_RESUME_ATTR, nil)
+	playerGui:SetAttribute(HUE_INDEX_ATTR, nil)
 end
 
 local function rememberTutorialHueCoral()
@@ -147,26 +191,24 @@ local isSwatchVisibleInScroll: ((ScrollingFrame, GuiObject, number) -> boolean)?
 local function beginTutorialHueFinger(resumeMode: string?)
 	-- Finger demo + one user hue press → closeBackpack (hueReroll step removed).
 	local mode = "hue"
-	-- Arm before any yield so inspect flicker can't force reselectCoral mid-scroll.
+	-- Cancel any in-flight scroll from a prior arm attempt, then re-arm.
+	hueScrollToken += 1
 	hueFingerArming = true
 	rememberTutorialHueCoral()
 	playerGui:SetAttribute(HUE_RESUME_ATTR, mode)
-	playerGui:SetAttribute(HINT_ATTR, false)
+	-- Keep finger stopped until the swatch is ready (HINT false → no RollFingerHint loop).
+	if playerGui:GetAttribute(HINT_ATTR) ~= mode then
+		playerGui:SetAttribute(HINT_ATTR, false)
+	end
 
 	local hue = resolveTutorialHueIndex()
-	if typeof(hue) ~= "number" then
-		local part = RelocateController.getSelectedPart()
-		local seed = if part then part:GetAttribute("OceanTD_SeedHue") else nil
-		if typeof(seed) == "number" then
-			hue = PlotOutlineColors.clampCoralIndex(seed)
-		end
-	end
 	if typeof(hue) ~= "number" then
 		hueFingerArming = false
 		clearTutorialHueTracking()
 		playerGui:SetAttribute(HINT_ATTR, "closeBackpack")
 		return
 	end
+	rememberTutorialHueIndex(hue)
 	local lastInput = UserInputService:GetLastInputType()
 	local onGamepad = lastInput == Enum.UserInputType.Gamepad1
 		or lastInput == Enum.UserInputType.Gamepad2
@@ -183,11 +225,17 @@ local function beginTutorialHueFinger(resumeMode: string?)
 	else
 		focusColorIndex = hue
 	end
+	ensureInspectVisibleForHue()
 	if refreshColorSwatches then
 		refreshColorSwatches()
 	end
 
+	local finished = false
 	local function finishArming()
+		if finished then
+			return
+		end
+		finished = true
 		-- animateScrollToSwatch only calls this after the swatch is in the scroll viewport.
 		hueFingerArming = false
 		-- Re-assert D-Pad start (scroll must not leave selection on the finger hue).
@@ -199,8 +247,9 @@ local function beginTutorialHueFinger(resumeMode: string?)
 			HuePad.syncOverlays()
 			HuePad.armDpadPrompt()
 		end
+		-- Always show the hue finger after size upgrade — don't leave HINT stuck on false.
 		local cur = playerGui:GetAttribute(HINT_ATTR)
-		if cur == false or cur == nil then
+		if cur == false or cur == nil or cur == "upgrade" or cur == "reselectCoral" then
 			playerGui:SetAttribute(HINT_ATTR, mode)
 		end
 	end
@@ -208,11 +257,12 @@ local function beginTutorialHueFinger(resumeMode: string?)
 	local targetHue = hue
 	task.spawn(function()
 		-- Wait for inspect + color row after size cinematic (AbsoluteSize is often 0 mid-swap).
-		local deadline = os.clock() + 3.5
+		local deadline = os.clock() + 5
 		while os.clock() < deadline do
-			if not hueFingerArming then
+			if finished then
 				return
 			end
+			ensureInspectVisibleForHue()
 			local sc = colorScroll
 			local sw = colorSwatchBtns[targetHue]
 			if root and root.Visible and sc and sw and sc.AbsoluteSize.X >= 8 and sw.AbsoluteSize.X >= 2 then
@@ -220,7 +270,7 @@ local function beginTutorialHueFinger(resumeMode: string?)
 			end
 			task.wait()
 		end
-		if not hueFingerArming then
+		if finished then
 			return
 		end
 
@@ -255,6 +305,7 @@ local function beginTutorialHueFinger(resumeMode: string?)
 					conn:Disconnect()
 					proxy:Destroy()
 					if my ~= hueScrollToken or not colorScroll then
+						onDone()
 						return
 					end
 					colorScroll.CanvasPosition = Vector2.new(0, 0)
@@ -263,6 +314,7 @@ local function beginTutorialHueFinger(resumeMode: string?)
 					sc.CanvasPosition = Vector2.new(0, 0)
 				end
 				if my ~= hueScrollToken then
+					onDone()
 					return
 				end
 				-- Keep D-Pad focus one left so the player must nudge onto the finger hue.
@@ -273,7 +325,7 @@ local function beginTutorialHueFinger(resumeMode: string?)
 		end
 
 		runScroll(function()
-			if not hueFingerArming then
+			if finished then
 				return
 			end
 			local sc = colorScroll
@@ -284,11 +336,15 @@ local function beginTutorialHueFinger(resumeMode: string?)
 				local retryFn = animateScrollToSwatch
 				if retryFn then
 					retryFn(targetHue, finishArming, onGamepad)
+					-- Belt-and-suspenders: if retry is cancelled mid-flight, still arm.
+					task.delay(1.2, finishArming)
 					return
 				end
 			end
 			finishArming()
 		end)
+		-- Scroll path can bail on token cancel without onDone — never leave HINT=false.
+		task.delay(2.5, finishArming)
 	end)
 end
 
@@ -299,6 +355,10 @@ local function noteTutorialUpgradeSucceeded()
 	end
 	local hint = playerGui:GetAttribute(HINT_ATTR)
 	local resume = playerGui:GetAttribute(HUE_RESUME_ATTR)
+	-- Already on hue / arming — don't restart and cancel an in-flight scroll.
+	if hueFingerArming or hint == "hue" or hint == "hueReroll" then
+		return
+	end
 	-- Still on upgrade, or reselect/false after a cinematic flicker — advance to hue.
 	local fromUpgrade = hint == "upgrade"
 		or (hint == "reselectCoral" and resume == "upgrade")
@@ -306,12 +366,15 @@ local function noteTutorialUpgradeSucceeded()
 	if not fromUpgrade then
 		return
 	end
-	playerGui:SetAttribute(HUE_RESUME_ATTR, nil)
+	-- Keep resume="upgrade" until beginTutorialHueFinger takes over — clearing it early
+	-- lets inspect flicker treat HINT=false as mid-hue and force reselectCoral instead.
+	playerGui:SetAttribute(HUE_RESUME_ATTR, "upgrade")
 	-- Let inspect / color row lay out after size cine before scrolling the swatch.
 	task.defer(function()
 		-- Mesh swap can leave PlaceId / panel visibility settling for a few frames.
-		for _ = 1, 24 do
+		for _ = 1, 40 do
 			rememberTutorialHueCoral()
+			ensureInspectVisibleForHue()
 			if RelocateController.getSelectedPart() and root and root.Visible then
 				beginTutorialHueFinger("hue")
 				return
@@ -325,6 +388,7 @@ local function noteTutorialUpgradeSucceeded()
 		-- Still selected after upgrade — go to hue even if panel visibility lagged;
 		-- never ask to "select" a coral that is already selected.
 		if RelocateController.getSelectedPart() then
+			ensureInspectVisibleForHue()
 			beginTutorialHueFinger("hue")
 			return
 		end
@@ -396,8 +460,14 @@ local function onInspectVisibilityForTutorial(visible: boolean)
 		return
 	end
 
+	-- Only treat HINT=false as mid-hue when resume is already "hue"/"hueReroll".
+	-- After size unlock HINT is false with resume="upgrade" — must not steal that handoff.
 	local midHue = hint == "hue" or hint == "hueReroll"
-		or (hasTrackedPlace and (hint == false or hint == nil) and resumeAttr ~= "upgrade")
+		or (
+			hasTrackedPlace
+			and (hint == false or hint == nil)
+			and (resumeAttr == "hue" or resumeAttr == "hueReroll")
+		)
 	if midHue then
 		local resume = if hint == "hue" or hint == "hueReroll"
 			then hint
@@ -429,8 +499,7 @@ local iconLbl: ImageLabel? = nil
 local headerSeedAmount: TextLabel? = nil
 local nameLbl: TextLabel? = nil
 local upgradeBtn: TextButton? = nil
-local colorScroll: ScrollingFrame? = nil
-local colorSwatchBtns: { [number]: GuiButton } = {}
+-- colorScroll / colorSwatchBtns forward-declared near top (hue finger).
 local colorSwatchStrokes: { [number]: UIStroke } = {}
 local colorSwatchLocks: { [number]: ImageLabel } = {}
 local colorSwatchCounts: { [number]: TextLabel } = {}
@@ -2020,6 +2089,9 @@ local function invokeSize(targetClass: number, unlockNext: boolean)
 		if CoralVisual.isMeshSpecies(speciesId) then
 			task.spawn(function()
 				runSpongeSizeCinematic(part, placeId, targetClass, unlockNext)
+				if unlockNext then
+					noteTutorialUpgradeSucceeded()
+				end
 			end)
 			return
 		end
@@ -2028,6 +2100,9 @@ local function invokeSize(targetClass: number, unlockNext: boolean)
 		end)
 		if ok and handleSizeResult(result, unlockNext) then
 			applyServerSize(result, unlockNext)
+			if unlockNext then
+				noteTutorialUpgradeSucceeded()
+			end
 		else
 			revertSizeColors()
 		end
@@ -2133,6 +2208,8 @@ local function refreshColorSeedLabels()
 		local btn = colorSwatchBtns[idx]
 		local countLbl = colorSwatchCounts[idx]
 		local isActive = activeColorIndex ~= nil and idx == activeColorIndex
+		-- Label = owned inventory seeds (matches backpack total). Dim when no paint slots left.
+		local owned = if typeof(itemId) == "string" then InventoryState.getHueSeedCount(itemId, idx) else 0
 		local available = if typeof(itemId) == "string" then getHueAvailableSlots(itemId, idx) else 0
 		if lock then
 			lock.Visible = false
@@ -2143,7 +2220,7 @@ local function refreshColorSeedLabels()
 				countLbl.Visible = false
 			else
 				countLbl.Visible = true
-				countLbl.Text = tostring(available)
+				countLbl.Text = tostring(owned)
 				countLbl.TextColor3 = seedCountLabelColor(idx)
 			end
 		end
@@ -4226,24 +4303,26 @@ end
 
 function CoralInspectPanel.getTutorialHueSwatch(): GuiObject?
 	if not root or not root.Visible then
-		return nil
+		ensureInspectVisibleForHue()
+		if not root or not root.Visible then
+			return nil
+		end
 	end
 	-- Always the hue the player needs to pick (not the D-pad highlight).
 	local hue = resolveTutorialHueIndex()
-	if typeof(hue) ~= "number" then
-		local part = RelocateController.getSelectedPart()
-		local seed = if part then part:GetAttribute("OceanTD_SeedHue") else nil
-		if typeof(seed) == "number" then
-			hue = PlotOutlineColors.clampCoralIndex(seed)
-		end
-	end
 	if typeof(hue) ~= "number" then
 		return nil
 	end
 	local btn = colorSwatchBtns[hue]
 	-- Accept even if briefly clipped during paint refresh — RollFingerHint clamps aim.
-	if not (btn and btn.AbsoluteSize.X >= 2) then
+	if not btn then
 		return nil
+	end
+	if btn.AbsoluteSize.X < 2 then
+		-- Layout may still be settling after size cine; Offset size is authored when Absolute is 0.
+		if btn.Size.X.Offset < 2 then
+			return nil
+		end
 	end
 	return btn
 end

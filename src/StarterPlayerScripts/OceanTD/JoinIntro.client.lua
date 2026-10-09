@@ -32,7 +32,7 @@ local SKIP_ACTION = "OceanTD_JoinIntroSkip"
 local WHITE = Color3.new(1, 1, 1)
 local SKIP_GREEN = Color3.fromRGB(55, 200, 90)
 local SKIP_STROKE_BRIGHT = Color3.fromRGB(90, 255, 110)
-local SKIP_BTN_SIZE = Vector2.new(70, 26) -- half of prior 140×52
+local SKIP_BTN_SIZE = Vector2.new(118, 28)
 local LOAD_BAR_BG = Color3.fromRGB(28, 36, 48)
 local LOAD_BAR_FILL = Color3.fromRGB(70, 200, 255)
 local LOAD_WAVE_EMOJI = "🌊"
@@ -871,13 +871,13 @@ local function makeUi(): (ScreenGui, TextButton)
 	sg.Parent = playerGui
 
 	local btn = Instance.new("TextButton")
-	btn.Name = "Skip"
-	btn.AnchorPoint = Vector2.new(1, 1)
-	btn.Position = UDim2.new(1, -28, 1, -28)
+	btn.Name = "SkipIntro"
+	btn.AnchorPoint = Vector2.new(0, 1)
+	btn.Position = UDim2.new(0, 28, 1, -28)
 	btn.Size = UDim2.fromOffset(SKIP_BTN_SIZE.X, SKIP_BTN_SIZE.Y)
 	btn.BackgroundColor3 = SKIP_GREEN
 	btn.Font = UiTheme.Font
-	btn.Text = "SKIP"
+	btn.Text = "Skip Intro"
 	btn.TextColor3 = Color3.new(1, 1, 1)
 	btn.TextScaled = true
 	btn.AutoButtonColor = true

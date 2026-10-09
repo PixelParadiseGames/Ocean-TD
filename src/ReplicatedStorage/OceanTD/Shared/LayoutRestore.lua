@@ -35,6 +35,7 @@ function LayoutRestore.reframeLayout(layout: { LayoutObject }, oldCf: CFrame, ne
 			sizeTier = obj.sizeTier,
 			sizeClass = obj.sizeClass,
 			colorIndex = obj.colorIndex,
+			seedHue = obj.seedHue,
 			colorR = obj.colorR,
 			colorG = obj.colorG,
 			colorB = obj.colorB,
@@ -48,6 +49,8 @@ function LayoutRestore.reframeLayout(layout: { LayoutObject }, oldCf: CFrame, ne
 			webColorB = obj.webColorB,
 			placeId = obj.placeId,
 			parentPlaceId = obj.parentPlaceId,
+			fedTotal = obj.fedTotal,
+			wavesTotal = obj.wavesTotal,
 		})
 	end
 	return out

@@ -1,7 +1,10 @@
 --!strict
 -- Session gate: autosave / leave-save only after layoutLoaded.
+-- plotOp mutex: clear / save / load / recycle cannot overlap.
 
 local PlayerSession = {}
+
+export type PlotOp = "idle" | "clearing" | "saving" | "loading" | "recycling"
 
 export type Session = {
 	userId: number,
@@ -9,6 +12,7 @@ export type Session = {
 	plotId: string?,
 	saving: boolean,
 	plotLoading: boolean,
+	plotOp: PlotOp,
 	tutorialFreeCoralSize: boolean,
 }
 
@@ -25,6 +29,7 @@ function PlayerSession.begin(player: Player): Session
 		plotId = nil,
 		saving = false,
 		plotLoading = false,
+		plotOp = "idle",
 		tutorialFreeCoralSize = false,
 	}
 	sessions[player] = session
@@ -57,15 +62,63 @@ function PlayerSession.markReady(player: Player, plotId: string)
 	session.plotId = plotId
 end
 
-function PlayerSession.canSave(player: Player): boolean
+function PlayerSession.getPlotOp(player: Player): PlotOp
 	local session = sessions[player]
-	return session ~= nil and session.layoutLoaded == true and session.saving ~= true and session.plotLoading ~= true
+	if not session then
+		return "idle"
+	end
+	return session.plotOp
 end
 
--- Server plot mutations (slot load apply) while plotLoading blocks client saves.
+-- Acquire exclusive plot op. Only succeeds from idle (+ layout ready).
+function PlayerSession.tryBeginPlotOp(player: Player, op: PlotOp): boolean
+	if op == "idle" then
+		return false
+	end
+	local session = sessions[player]
+	if not session or session.layoutLoaded ~= true then
+		return false
+	end
+	if session.plotOp ~= "idle" or session.saving == true or session.plotLoading == true then
+		return false
+	end
+	session.plotOp = op
+	if op == "saving" then
+		session.saving = true
+	elseif op == "loading" then
+		session.plotLoading = true
+	end
+	return true
+end
+
+function PlayerSession.endPlotOp(player: Player)
+	local session = sessions[player]
+	if not session then
+		return
+	end
+	session.plotOp = "idle"
+	session.saving = false
+	session.plotLoading = false
+end
+
+-- Autosave / place / move: only when no plot op is in flight.
+function PlayerSession.canSave(player: Player): boolean
+	local session = sessions[player]
+	return session ~= nil
+		and session.layoutLoaded == true
+		and session.plotOp == "idle"
+		and session.saving ~= true
+		and session.plotLoading ~= true
+end
+
+-- Mutations while holding clear/load/recycle lock (or idle for legacy callers).
 function PlayerSession.canMutatePlot(player: Player): boolean
 	local session = sessions[player]
-	return session ~= nil and session.layoutLoaded == true and session.saving ~= true
+	if not session or session.layoutLoaded ~= true then
+		return false
+	end
+	local op = session.plotOp
+	return op == "idle" or op == "loading" or op == "clearing" or op == "recycling"
 end
 
 function PlayerSession.setPlotLoading(player: Player, loading: boolean)
@@ -77,7 +130,7 @@ end
 
 function PlayerSession.isPlotLoading(player: Player): boolean
 	local session = sessions[player]
-	return session ~= nil and session.plotLoading == true
+	return session ~= nil and (session.plotLoading == true or session.plotOp == "loading")
 end
 
 function PlayerSession.setSaving(player: Player, saving: boolean)

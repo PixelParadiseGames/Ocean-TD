@@ -57,10 +57,30 @@ task.defer(function()
 	end)
 end)
 
+local function wipeLocalFx()
+	local cam = Workspace.CurrentCamera
+	local folder = cam and cam:FindFirstChild("OceanTD_LocalFX")
+	if folder then
+		folder:ClearAllChildren()
+	end
+	local workspaceFolder = Workspace:FindFirstChild("OceanTD_LocalFX")
+	if workspaceFolder and workspaceFolder ~= folder then
+		workspaceFolder:ClearAllChildren()
+	end
+	local pg = player:FindFirstChild("PlayerGui")
+	if pg then
+		local fly = pg:FindFirstChild("OceanTD_ClearFly")
+		if fly then
+			fly:Destroy()
+		end
+	end
+end
+
 local function completeOnce()
 	local cb = activeOnDone
 	activeOnDone = nil
 	busy = false
+	wipeLocalFx()
 	if cb then
 		task.defer(function()
 			pcall(cb)
@@ -189,6 +209,7 @@ end
 
 function ClearPlotVfx.cancel()
 	token += 1
+	-- Invalidate in-flight tweens, then wipe any neon leftovers (stuck green coral).
 	completeOnce()
 end
 

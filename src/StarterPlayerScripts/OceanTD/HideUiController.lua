@@ -25,6 +25,7 @@ local UiTheme = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiTheme")
 
 local HideUiState = require(script.Parent:WaitForChild("HideUiState"))
 local InventoryState = require(script.Parent:WaitForChild("InventoryState"))
+local RelocatePickHover = require(script.Parent:WaitForChild("RelocatePickHover"))
 local WaveSim = require(script.Parent:WaitForChild("WaveSim"))
 
 local HideUiController = {}
@@ -33,13 +34,16 @@ local STUDIO_ANCHOR_NAME = "HideUI"
 local CONFIRM_GUI_NAME = "OceanTD_HideUiConfirm"
 local EYE_GLYPH_NAME = "_OceanTD_HideUiEye"
 local BG_DISK_NAME = "_OceanTD_HideUiBg"
+local PICK_STROKE_NAME = "_OceanTD_HideUiPickStroke"
 local LEGACY_LOCK_NAME = "_OceanTD_HideUiLock"
 local RUNTIME_CHILD_NAMES = {
 	_OceanTD_HideUiHit = true,
 	[LEGACY_LOCK_NAME] = true,
 	[EYE_GLYPH_NAME] = true,
 	[BG_DISK_NAME] = true,
+	[PICK_STROKE_NAME] = true,
 }
+local PICK_STROKE_THICK = 3
 local EYE_SIZE_SCALE = 0.504 -- 30% smaller than 0.72
 local GREEN_HOLD_SEC = 2
 local BG_FADE_SEC = 4
@@ -194,6 +198,40 @@ local function ensureBgDisk(host: GuiObject): Frame
 	return disk
 end
 
+local function ensurePickStroke(disk: Frame): UIStroke
+	local existing = disk:FindFirstChild(PICK_STROKE_NAME)
+	if existing and existing:IsA("UIStroke") then
+		return existing
+	end
+	if existing then
+		existing:Destroy()
+	end
+	local stroke = Instance.new("UIStroke")
+	stroke.Name = PICK_STROKE_NAME
+	stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+	stroke.LineJoinMode = Enum.LineJoinMode.Round
+	stroke.Thickness = PICK_STROKE_THICK
+	stroke.Enabled = false
+	stroke.Parent = disk
+	return stroke
+end
+
+-- Build mode: green ring = pick circles on; red = circles hidden. Off outside build.
+local function refreshPickDebugStroke()
+	local disk = bgDisk
+	if not disk then
+		return
+	end
+	local stroke = ensurePickStroke(disk)
+	if not HideUiState.isUnlocked() or not InventoryState.isOpen() then
+		stroke.Enabled = false
+		return
+	end
+	stroke.Enabled = true
+	stroke.Thickness = PICK_STROKE_THICK
+	stroke.Color = if RelocatePickHover.isPickDebugVisible() then GREEN else RED
+end
+
 local function snapshotHostLockImage(host: GuiObject)
 	if lockedHostImage ~= nil then
 		return
@@ -310,6 +348,7 @@ local function applyLockedVisual()
 	if eyeGlyph then
 		eyeGlyph.Visible = false
 	end
+	refreshPickDebugStroke()
 end
 
 local function applyUnlockedIdleVisual()
@@ -331,6 +370,7 @@ local function applyUnlockedIdleVisual()
 	if eyeGlyph then
 		eyeGlyph.Visible = true
 	end
+	refreshPickDebugStroke()
 end
 
 local function refreshButtonVisual()
@@ -772,9 +812,22 @@ local function resyncSubsystemsAfterShow()
 				local dPad = left:FindFirstChild("dPad")
 				if dPad then
 					for _, ch in ipairs(dPad:GetChildren()) do
-						if ch:IsA("GuiObject") and ch.Name ~= "dPadIcon" and not LeftHudLayout.isSandDollarChrome(ch) then
+						if
+							ch:IsA("GuiObject")
+							and ch.Name ~= "dPadIcon"
+							and ch.Name ~= "HideUI"
+							and ch.Name ~= "CartIcon"
+							and ch.Name ~= "Cart"
+							and ch.Name ~= "CartBTN"
+							and ch.Name ~= "CartBtn"
+							and not LeftHudLayout.isSandDollarChrome(ch)
+						then
 							ch.Visible = false
 						end
+					end
+					local eye = dPad:FindFirstChild("HideUI")
+					if eye and eye:IsA("GuiObject") then
+						eye.Visible = true
 					end
 				end
 				for _, ch in ipairs(left:GetChildren()) do
@@ -805,6 +858,7 @@ local function resyncSubsystemsAfterShow()
 						ch.Visible = false
 					end
 				end
+				LeftHudLayout.revealSandDollarChrome(left)
 			end
 		end
 	end)
@@ -1099,6 +1153,18 @@ local function onHideUiPressed()
 		showConfirmUnlock()
 		return
 	end
+	-- Build mode: eye only toggles coral pick debug circles — leave backpack / HUD alone.
+	if InventoryState.isOpen() then
+		local circlesVisible = RelocatePickHover.togglePickDebugVisible()
+		refreshPickDebugStroke()
+		local nextHidden = not circlesVisible
+		if nextHidden then
+			flashButtonBg(RED, GREEN_HOLD_SEC, BG_FADE_SEC)
+		else
+			flashButtonBg(GREEN, 0, BG_FADE_SEC)
+		end
+		return
+	end
 	local nextHidden = not HideUiState.isActive()
 	if nextHidden then
 		flashButtonBg(RED, GREEN_HOLD_SEC, BG_FADE_SEC)
@@ -1143,6 +1209,7 @@ local function wireStudioHideUiButton(leftOpt: Instance?)
 		legacyLock:Destroy()
 	end
 	bgDisk = ensureBgDisk(anchor)
+	ensurePickStroke(bgDisk)
 	eyeGlyph = ensureEyeGlyph(anchor)
 	if eyeGlyph then
 		eyeGlyph.Size = UDim2.fromScale(EYE_SIZE_SCALE, EYE_SIZE_SCALE)
@@ -1169,6 +1236,10 @@ function HideUiController.init()
 			lastUnlocked = unlockedNow
 			refreshButtonVisual()
 		end
+		refreshPickDebugStroke()
+	end)
+	InventoryState.onOpenChanged(function()
+		refreshPickDebugStroke()
 	end)
 	playerGui.ChildAdded:Connect(function(ch)
 		if not HideUiState.isActive() or animBusy then

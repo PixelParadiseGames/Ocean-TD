@@ -7,12 +7,14 @@
 	distFront (near arena) → distBack (tall back edge); DistOff fine-tunes.
 ]]
 
+local ContextActionService = game:GetService("ContextActionService")
 local UserInputService = game:GetService("UserInputService")
 local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Constants = require(ReplicatedStorage:WaitForChild("OceanTD"):WaitForChild("Shared"):WaitForChild("Constants"))
 local ClientPlot = require(script.Parent:WaitForChild("ClientPlot"))
+local InventoryState = require(script.Parent:WaitForChild("InventoryState"))
 
 local PlotCam2 = {}
 
@@ -35,7 +37,7 @@ local DEFAULT_YAW_BIAS_DEG = 0
 local DEFAULT_FOCUS_HEIGHT = 30
 local DEFAULT_DIST_FRONT = 28
 local DEFAULT_DIST_BACK = 200
-local DEFAULT_DIST_OFFSET = -35 -- max zoom-in (DistOff floor)
+local DEFAULT_DIST_OFFSET = -110 -- max zoom-in (DistOff floor); was -70
 -- Session start / pre-BUILD: pulled back; first BUILD eases to DEFAULT_DIST_OFFSET.
 local START_DIST_OFFSET = 55
 local DEFAULT_PAN_OUT = 200
@@ -43,19 +45,20 @@ local DEFAULT_PAN_IN = 20
 local DEFAULT_PAN_SIDE = 90
 local PITCH_MIN = 15
 local PITCH_MAX = 80
-local DIST_OFFSET_MIN = -35
+local DIST_OFFSET_MIN = -110 -- closer plot zoom
 local DIST_OFFSET_MAX = 160
-local DIST_MIN = 15
+local DIST_MIN = 5 -- floor for effective camera distance
 local DIST_MAX = 360
 local PAN_AT_REF_DIST = 70
 local PAN_EXTRA_MIN = 0
 local PAN_EXTRA_MAX = 400
-local WHEEL_ZOOM_STEP = 6
+local WHEEL_ZOOM_STEP = 5
+local WHEEL_ACTION = "OceanTD_PlotCam2Wheel"
+local WHEEL_PRIORITY = Enum.ContextActionPriority.High.Value + 20
 local DIST_TWEEN_RATE = 3.5 -- ease toward pan-based baseline (lower = softer)
 
 local active = false
 local focus = Vector3.zero
-local wheelAccum = 0
 local wheelConn: RBXScriptConnection? = nil
 local liveDist = DEFAULT_DIST_FRONT -- smoothed effective distance
 -- Until the player opens BUILD once this session, keep the pulled-back start zoom.
@@ -264,26 +267,65 @@ local function cameraCFrame(plotCf: CFrame): CFrame
 	return CFrame.lookAt(camPos, focus)
 end
 
+local function syncDistOffsetAchievable(plotCf: CFrame, plotSize: Vector3)
+	-- Kill DistOff dead-zone: when baseline+offset is clamped by DIST_MIN/MAX,
+	-- further +/- clicks must move the camera on the first notch.
+	local base = baselineDist(plotCf, plotSize)
+	local minOff = math.max(DIST_OFFSET_MIN, DIST_MIN - base)
+	local maxOff = math.min(DIST_OFFSET_MAX, DIST_MAX - base)
+	if minOff > maxOff then
+		minOff, maxOff = maxOff, minOff
+	end
+	tune.distOffset = math.clamp(tune.distOffset, minOff, maxOff)
+end
+
+local function snapLiveDist()
+	local plotCf, plotSize = getPlot()
+	if plotCf and plotSize then
+		syncDistOffsetAchievable(plotCf, plotSize)
+		liveDist = targetDist(plotCf, plotSize)
+	end
+end
+
+-- Same as DistOff +/- quick buttons: scroll up zooms in (-DistOff), down zooms out.
+local function applyWheelZoom(wheelZ: number): boolean
+	if not active or wheelZ == 0 or wheelZ ~= wheelZ then
+		return false
+	end
+	if InventoryState.isOpen() then
+		local mouse = UserInputService:GetMouseLocation()
+		if InventoryState.isPointerOverBackpack(mouse) then
+			return false
+		end
+	end
+	-- Multi-notch wheels: |Z| can be >1. Scroll up (+Z) -> zoom in -> lower DistOff.
+	local delta = -wheelZ * WHEEL_ZOOM_STEP
+	return PlotCam2.nudge("distOffset", delta)
+end
+
 local function bindWheel()
+	ContextActionService:UnbindAction(WHEEL_ACTION)
 	if wheelConn then
 		return
 	end
-	wheelConn = UserInputService.InputChanged:Connect(function(input, gameProcessed)
-		if gameProcessed or not active then
+	wheelConn = UserInputService.InputChanged:Connect(function(input, _gameProcessed)
+		if not active or input.UserInputType ~= Enum.UserInputType.MouseWheel then
 			return
 		end
-		if input.UserInputType == Enum.UserInputType.MouseWheel then
-			wheelAccum -= input.Position.Z * WHEEL_ZOOM_STEP
+		local z = input.Position.Z
+		if (z == 0 or z ~= z) and typeof(input.Delta) == "Vector3" then
+			z = input.Delta.Z
 		end
+		applyWheelZoom(z)
 	end)
 end
 
 local function unbindWheel()
+	ContextActionService:UnbindAction(WHEEL_ACTION)
 	if wheelConn then
 		wheelConn:Disconnect()
 		wheelConn = nil
 	end
-	wheelAccum = 0
 end
 
 local function persistTune()
@@ -394,6 +436,7 @@ function PlotCam2.nudge(key: string, delta: number): boolean
 	elseif key == "dist" or key == "distOffset" then
 		before = tune.distOffset
 		tune.distOffset = math.clamp(tune.distOffset + delta, DIST_OFFSET_MIN, DIST_OFFSET_MAX)
+		snapLiveDist()
 		after = tune.distOffset
 	elseif key == "distFront" then
 		before = tune.distFront
@@ -464,6 +507,7 @@ function PlotCam2.begin(resumeCf: CFrame?): boolean
 		end
 	end
 
+	syncDistOffsetAchievable(plotCf, plotSize)
 	liveDist = targetDist(plotCf, plotSize)
 	active = true
 	bindWheel()
@@ -505,12 +549,14 @@ function PlotCam2.tick(dt: number, input: TickInput): CFrame?
 		focus = clampFocus(plotCf.Position, plotCf, plotSize)
 	end
 
+	syncDistOffsetAchievable(plotCf, plotSize)
+
 	local wish = input.wish
+	-- E/Q keyboard zoom (wheel applies DistOff immediately via nudge).
 	local zoom = -wish.Y * input.panSpeed * dt * 0.85
-	zoom += wheelAccum
-	wheelAccum = 0
 	if math.abs(zoom) > 1e-4 then
 		tune.distOffset = math.clamp(tune.distOffset + zoom, DIST_OFFSET_MIN, DIST_OFFSET_MAX)
+		syncDistOffsetAchievable(plotCf, plotSize)
 		persistTune()
 	end
 

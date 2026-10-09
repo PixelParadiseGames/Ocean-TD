@@ -26,6 +26,7 @@ Do not broad-scan the repo unless the index is missing — then fix the index.
 
 ## UI
 - Default generated text font: `Enum.Font.FredokaOne` via `Shared/UiTheme.lua`. Use that when unsure.
+- Place/relocate cancel·rot under move icon: same Billboard as the move disc — see `.cursor/rules/place-chrome-billboard.mdc` (do not regress to ScreenGui/GuiInset projection).
 
 ## Organization
 - One system = one owner script + named helpers.

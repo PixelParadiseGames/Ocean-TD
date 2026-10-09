@@ -229,6 +229,13 @@ local function sanitizeLayout(raw: any): { LayoutObject }
 			if colorIndex then
 				entry.colorIndex = math.clamp(math.floor(colorIndex), 1, 14)
 			end
+			local seedHue = tonumber(obj.seedHue)
+			if seedHue then
+				entry.seedHue = math.clamp(math.floor(seedHue), 1, 14)
+			elseif entry.colorIndex then
+				-- Legacy layouts: painted corals spent that hue at place time.
+				entry.seedHue = entry.colorIndex
+			end
 			local colorR = tonumber(obj.colorR)
 			local colorG = tonumber(obj.colorG)
 			local colorB = tonumber(obj.colorB)
@@ -300,6 +307,7 @@ local function cloneLayout(layout: { LayoutObject }): { LayoutObject }
 			sizeTier = obj.sizeTier,
 			sizeClass = obj.sizeClass,
 			colorIndex = obj.colorIndex,
+			seedHue = obj.seedHue,
 			colorR = obj.colorR,
 			colorG = obj.colorG,
 			colorB = obj.colorB,
@@ -983,16 +991,37 @@ function PersistenceService.grantHueSeed(player: Player, itemId: string, colorIn
 	return true
 end
 
--- TEMP / debug: reset every skill to stage 1.
-function PersistenceService.resetSkillStages(player: Player): { unlocked: { [string]: number }, active: { [string]: number } }
+-- Refund all $D spent on skill unlocks, then reset every skill to stage 1.
+function PersistenceService.resetSkillStages(player: Player): {
+	unlocked: { [string]: number },
+	active: { [string]: number },
+	refunded: number,
+	sandDollars: number,
+}
 	local profile = profiles[player]
 	if not profile then
 		local d = SkillStages.defaultMap()
-		return { unlocked = d, active = SkillStages.defaultMap() }
+		return { unlocked = d, active = SkillStages.defaultMap(), refunded = 0, sandDollars = 0 }
 	end
+	profile.skillStages = SkillStages.sanitizeMap(profile.skillStages)
+	local refund = SkillStages.spentSandDollarsForMap(profile.skillStages)
 	profile.skillStages = SkillStages.defaultMap()
 	profile.skillActiveStages = SkillStages.defaultMap()
-	return PersistenceService.getSkillStagesPayload(player)
+	if refund > 0 then
+		PersistenceService.creditSandDollars(player, refund)
+	else
+		PersistenceService.syncSandDollarsAttribute(player)
+	end
+	task.spawn(function()
+		PersistenceService.save(player)
+	end)
+	local payload = PersistenceService.getSkillStagesPayload(player)
+	return {
+		unlocked = payload.unlocked,
+		active = payload.active,
+		refunded = refund,
+		sandDollars = PersistenceService.getSandDollars(player),
+	}
 end
 
 -- Atomic Robux $D grant. Idempotent on PurchaseId. Safe if the player is offline
@@ -1504,6 +1533,135 @@ function PersistenceService.getInventoryPayload(player: Player): { [string]: { [
 		return {}
 	end
 	return HueSeeds.toClientPayload(ensureInventory(profile))
+end
+
+export type HueAuditRow = {
+	itemId: string,
+	total: number,
+	hueSum: number,
+	hues: { [number]: number },
+}
+
+-- Studio / creator: inspect whether backpack totals match per-hue buckets.
+function PersistenceService.auditHueInventory(player: Player): { HueAuditRow }
+	local profile = profiles[player]
+	local rows: { HueAuditRow } = {}
+	if not profile then
+		return rows
+	end
+	local inv = ensureInventory(profile)
+	for itemId, bucket in pairs(inv) do
+		if typeof(itemId) ~= "string" or typeof(bucket) ~= "table" then
+			continue
+		end
+		local hues: { [number]: number } = {}
+		local hueSum = 0
+		for k, v in pairs(bucket) do
+			local idx = tonumber(k)
+			local n = math.max(0, math.floor(tonumber(v) or 0))
+			if typeof(idx) == "number" and n > 0 then
+				local hue = PlotOutlineColors.clampCoralIndex(idx)
+				hues[hue] = (hues[hue] or 0) + n
+				hueSum += n
+			end
+		end
+		local total = HueSeeds.getSpeciesTotal(inv, itemId)
+		table.insert(rows, {
+			itemId = itemId,
+			total = total,
+			hueSum = hueSum,
+			hues = hues,
+		})
+	end
+	table.sort(rows, function(a, b)
+		return a.total > b.total
+	end)
+	return rows
+end
+
+--[[
+	Studio / creator repair modes:
+	- "audit" — no writes; returns audit rows
+	- "backfillSeedHue" — fix live placed seedHue only (via PlacementService)
+	- "redistributeEven" — keep each species total; split evenly across hues 1–14
+	- "wipe" — clear all hue seeds (nuclear; use only on test accounts)
+]]
+function PersistenceService.repairHueInventory(
+	player: Player,
+	mode: string
+): { ok: boolean, errorCode: string?, mode: string?, rows: { HueAuditRow }?, fixedSeedHue: number? }
+	local profile = profiles[player]
+	if not profile then
+		return { ok = false, errorCode = "NoProfile" }
+	end
+	local m = string.lower(tostring(mode or "audit"))
+	if m == "audit" then
+		return { ok = true, mode = m, rows = PersistenceService.auditHueInventory(player) }
+	end
+	if m == "backfillseedhue" or m == "backfill" then
+		local PlacementService = require(script.Parent:WaitForChild("PlacementService"))
+		local fixed = PlacementService.backfillLiveSeedHues(player)
+		-- Also backfill seedHue on every saved plot slot from colorIndex.
+		local saves = profile.plotSaves
+		if saves and typeof(saves.slots) == "table" then
+			for _, slot in ipairs(saves.slots) do
+				if typeof(slot) == "table" and typeof(slot.layout) == "table" then
+					for _, obj in ipairs(slot.layout) do
+						if typeof(obj) == "table" and typeof(obj.seedHue) ~= "number" then
+							if typeof(obj.colorIndex) == "number" then
+								obj.seedHue = PlotOutlineColors.clampCoralIndex(obj.colorIndex)
+							end
+						end
+					end
+				end
+			end
+		end
+		for _, obj in ipairs(profile.layout) do
+			if typeof(obj) == "table" and typeof(obj.seedHue) ~= "number" then
+				if typeof(obj.colorIndex) == "number" then
+					obj.seedHue = PlotOutlineColors.clampCoralIndex(obj.colorIndex)
+				end
+			end
+		end
+		return {
+			ok = true,
+			mode = m,
+			fixedSeedHue = fixed,
+			rows = PersistenceService.auditHueInventory(player),
+		}
+	end
+	if m == "wipe" then
+		profile.inventory = {}
+		PersistenceService.syncInventoryToClient(player)
+		return { ok = true, mode = m, rows = PersistenceService.auditHueInventory(player) }
+	end
+	if m == "redistributeeven" or m == "redistribute" then
+		local inv = ensureInventory(profile)
+		local nextInv: HueSeeds.HueInventory = {}
+		for itemId, _bucket in pairs(inv) do
+			if typeof(itemId) ~= "string" or not HueSeeds.isHueItem(itemId) then
+				continue
+			end
+			local total = HueSeeds.getSpeciesTotal(inv, itemId)
+			if total <= 0 then
+				continue
+			end
+			local hueMax = PlotOutlineColors.CORAL_MAX_INDEX
+			local base = math.floor(total / hueMax)
+			local rem = total - base * hueMax
+			local bucket = HueSeeds.ensureBucket(nextInv, itemId)
+			for hue = 1, hueMax do
+				local n = base + (if hue <= rem then 1 else 0)
+				if n > 0 then
+					bucket[tostring(hue)] = n
+				end
+			end
+		end
+		profile.inventory = nextInv
+		PersistenceService.syncInventoryToClient(player)
+		return { ok = true, mode = m, rows = PersistenceService.auditHueInventory(player) }
+	end
+	return { ok = false, errorCode = "BadMode", mode = m }
 end
 
 local inventorySyncQueued: { [Player]: boolean } = {}

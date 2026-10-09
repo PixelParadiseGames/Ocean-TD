@@ -205,6 +205,7 @@ local function finishBusy()
 	end
 	if typeof(awardedColorIndex) == "number" then
 		SeedWheelRevealApi.lastAwardedColorIndex = math.clamp(math.floor(awardedColorIndex), 1, 14)
+		playerGui:SetAttribute("OceanTD_TutorialHueIndex", SeedWheelRevealApi.lastAwardedColorIndex)
 	end
 	SeedWheelRevealApi.fireCycleFinished()
 end
@@ -1111,6 +1112,7 @@ playReveal = function(
 	-- Tutorial can target this hue as soon as the award starts.
 	SeedWheelRevealApi.lastAwardedItemId = itemId
 	SeedWheelRevealApi.lastAwardedColorIndex = math.clamp(math.floor(colorIndex), 1, 14)
+	playerGui:SetAttribute("OceanTD_TutorialHueIndex", SeedWheelRevealApi.lastAwardedColorIndex)
 	disconnectAll()
 	abortRequested = false
 	preloadWheelIcons()

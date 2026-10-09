@@ -23,13 +23,17 @@ local SLIDE_PX = 88
 local SLIDE_IN = TweenInfo.new(0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 local SLIDE_OUT = TweenInfo.new(0.22, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
 local UNDO_SOUND_ID = "rbxassetid://17612245730"
+local UNDO_FAIL_SOUND_ID = "rbxassetid://5852470908"
 local UNDO_STREAK_WINDOW = 3
 local UNDO_PITCH_MIN = 0.9
 local UNDO_PITCH_MAX = 1.55
 local UNDO_PITCH_STEP = 0.07
+local UNDO_FAIL_PITCH_MIN = 0.5
+local UNDO_FAIL_PITCH_MAX = 0.82
 local UNDO_FLASH_HOLD = 1
 local UNDO_FLASH_FADE = 0.35
 local UNDO_GLOW = Color3.fromRGB(255, 140, 40)
+local UNDO_FAIL_GLOW = Color3.fromRGB(220, 45, 45)
 local ORANGE = Color3.fromRGB(230, 120, 40)
 
 export type Deps = {
@@ -68,9 +72,14 @@ undoSoundTemplate.Name = "OceanTD_UndoSound"
 undoSoundTemplate.SoundId = UNDO_SOUND_ID
 undoSoundTemplate.Volume = 0.9
 undoSoundTemplate.Parent = SoundService
+local undoFailSoundTemplate = Instance.new("Sound")
+undoFailSoundTemplate.Name = "OceanTD_UndoFailSound"
+undoFailSoundTemplate.SoundId = UNDO_FAIL_SOUND_ID
+undoFailSoundTemplate.Volume = 0.95
+undoFailSoundTemplate.Parent = SoundService
 task.defer(function()
 	pcall(function()
-		ContentProvider:PreloadAsync({ undoSoundTemplate })
+		ContentProvider:PreloadAsync({ undoSoundTemplate, undoFailSoundTemplate })
 	end)
 end)
 
@@ -150,19 +159,8 @@ local function slot3HiddenPos(home: UDim2): UDim2
 	return home + UDim2.fromOffset(SLIDE_PX, 0)
 end
 
-local function playUndoSound()
-	local now = os.clock()
-	if now - undoLastPressAt <= UNDO_STREAK_WINDOW then
-		undoPitchStreak += 1
-	else
-		undoPitchStreak = 0
-	end
-	undoLastPressAt = now
-
-	local base = UNDO_PITCH_MIN + math.random() * (1.15 - UNDO_PITCH_MIN)
-	local pitch = math.clamp(base + undoPitchStreak * UNDO_PITCH_STEP, UNDO_PITCH_MIN, UNDO_PITCH_MAX)
-
-	local sound = undoSoundTemplate:Clone()
+local function playClonedSound(template: Sound, pitch: number)
+	local sound = template:Clone()
 	sound.PlaybackSpeed = pitch
 	sound.Parent = SoundService
 	sound:Play()
@@ -176,7 +174,28 @@ local function playUndoSound()
 	end)
 end
 
-local function playSlot3UndoPressFeedback()
+local function playUndoSound()
+	local now = os.clock()
+	if now - undoLastPressAt <= UNDO_STREAK_WINDOW then
+		undoPitchStreak += 1
+	else
+		undoPitchStreak = 0
+	end
+	undoLastPressAt = now
+
+	local base = UNDO_PITCH_MIN + math.random() * (1.15 - UNDO_PITCH_MIN)
+	local pitch = math.clamp(base + undoPitchStreak * UNDO_PITCH_STEP, UNDO_PITCH_MIN, UNDO_PITCH_MAX)
+	playClonedSound(undoSoundTemplate, pitch)
+end
+
+local function playUndoFailSound()
+	undoPitchStreak = 0
+	undoLastPressAt = os.clock()
+	local pitch = UNDO_FAIL_PITCH_MIN + math.random() * (UNDO_FAIL_PITCH_MAX - UNDO_FAIL_PITCH_MIN)
+	playClonedSound(undoFailSoundTemplate, pitch)
+end
+
+local function playSlot3PressFlash(glow: Color3)
 	if not slot3Circle then
 		return
 	end
@@ -187,7 +206,7 @@ local function playSlot3UndoPressFeedback()
 	if slot3Circle:IsA("ImageLabel") or slot3Circle:IsA("ImageButton") then
 		(slot3Circle :: any).Image = ""
 	end
-	slot3Circle.BackgroundColor3 = UNDO_GLOW
+	slot3Circle.BackgroundColor3 = glow
 	slot3Circle.BackgroundTransparency = 0
 	if slot3UndoLabel then
 		slot3UndoLabel.TextColor3 = Color3.new(1, 1, 1)
@@ -202,14 +221,24 @@ local function playSlot3UndoPressFeedback()
 			BackgroundColor3 = Color3.new(0, 0, 0),
 		})
 		fade:Play()
-		fade.Completed:Wait()
-		if token ~= slot3PressToken then
-			return
-		end
-		if InventoryState.isOpen() and slot3 and slot3.Visible then
-			startSlot3IdleCycle()
-		end
+		fade.Completed:Connect(function()
+			if token ~= slot3PressToken then
+				return
+			end
+			if InventoryState.isOpen() and slot3 and slot3.Visible then
+				startSlot3IdleCycle()
+			end
+		end)
 	end)
+end
+
+local function playSlot3UndoPressFeedback()
+	playSlot3PressFlash(UNDO_GLOW)
+end
+
+local function playSlot3UndoFailFeedback()
+	playUndoFailSound()
+	playSlot3PressFlash(UNDO_FAIL_GLOW)
 end
 
 function UndoSlot.refreshHelpBadge()
@@ -228,12 +257,15 @@ function UndoSlot.requestUndo()
 	if InventoryState.isSavePlotsBlocking() or InventoryState.isClearPlotBlocking() then
 		return
 	end
-	playUndoSound()
-	playSlot3UndoPressFeedback()
 	if undoBusy then
 		return
 	end
 	undoBusy = true
+	-- Instant orange + sound; server round-trip must not delay the press feel.
+	playUndoSound()
+	playSlot3UndoPressFeedback()
+
+	-- Local selection undo (no yield).
 	if RelocateController.tryRestoreSelectionUndo() then
 		undoBusy = false
 		deps.log("Undo", "selection")
@@ -242,16 +274,23 @@ function UndoSlot.requestUndo()
 	if RelocateController.isActive() then
 		RelocateController.cancel(true)
 	end
-	local ok, result = pcall(function()
-		return Remotes.getFunction("RequestUndo"):InvokeServer()
-	end)
-	undoBusy = false
-	if ok and typeof(result) == "table" and result.ok then
-		deps.log("Undo", result.kind)
-	else
+
+	task.spawn(function()
+		local ok, result = pcall(function()
+			return Remotes.getFunction("RequestUndo"):InvokeServer()
+		end)
+		undoBusy = false
+		if ok and typeof(result) == "table" and result.ok then
+			deps.log("Undo", result.kind)
+			return
+		end
 		local code = if ok and typeof(result) == "table" then result.errorCode else "Fail"
 		deps.log("Undo rejected", code)
-	end
+		if code == "NothingToUndo" then
+			-- Override optimistic orange with red + fail sound.
+			playSlot3UndoFailFeedback()
+		end
+	end)
 end
 
 function UndoSlot.playReveal()
@@ -471,8 +510,14 @@ function UndoSlot.mount(d: Deps)
 	if slot3Button then
 		if slot3Button:GetAttribute("_OceanTD_ActBound") ~= true then
 			slot3Button:SetAttribute("_OceanTD_ActBound", true)
-			slot3Button.Activated:Connect(function()
+			-- MouseButton1Down / touch InputBegan: feedback on press, not after Activated delay.
+			slot3Button.MouseButton1Down:Connect(function()
 				UndoSlot.requestUndo()
+			end)
+			slot3Button.InputBegan:Connect(function(input)
+				if input.UserInputType == Enum.UserInputType.Touch then
+					UndoSlot.requestUndo()
+				end
 			end)
 		end
 	end

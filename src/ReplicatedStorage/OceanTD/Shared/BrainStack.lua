@@ -24,7 +24,7 @@ BrainStack.ENGAGE_PAD = 1.25
 -- Total XZ wander from stack root.
 BrainStack.MAX_ROOT_DRIFT = 10
 -- Orbit step when rotating a snapped child around its parent.
-BrainStack.ORBIT_ROT_STEP = math.rad(10)
+BrainStack.ORBIT_ROT_STEP = math.rad(15) -- was 10°; match relocate yaw step
 BrainStack.MIN_REROLL_ANGLE = math.rad(55)
 -- Max children by parent size class (S/M/L).
 BrainStack.MAX_CHILDREN_BY_CLASS = {

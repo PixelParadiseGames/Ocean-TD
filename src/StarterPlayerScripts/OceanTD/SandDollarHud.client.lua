@@ -91,6 +91,12 @@ local function applyText(amount: number)
 end
 
 local function hideInnerDLabel(countHost: GuiObject)
+	-- Only suppress nested "$D" duplicates when a separate glyph already sits beside the count.
+	local left = playerGui:FindFirstChild("MobileLeftUI")
+	local external = if left then LeftHudLayout.findDLabel(left) else nil
+	if not external or external:IsDescendantOf(countHost) then
+		return
+	end
 	for _, d in ipairs(countHost:GetDescendants()) do
 		if (d:IsA("TextLabel") or d:IsA("TextButton")) and d.Name == LABEL_NAME then
 			d.Visible = false

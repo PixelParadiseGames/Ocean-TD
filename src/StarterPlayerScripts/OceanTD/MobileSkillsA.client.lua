@@ -355,6 +355,8 @@ local function hideLeftUiExceptSkillsClose()
 			rememberHide(ch)
 		end
 	end
+	-- $D glyph left of the count must stay up while skills / power-up are open.
+	LeftHudLayout.revealSandDollarChrome(left)
 end
 
 local function hideQuickbarSlotsOnHud(hud: Instance)

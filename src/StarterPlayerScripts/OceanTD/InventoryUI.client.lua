@@ -97,9 +97,10 @@ local function setLeftUiHiddenForBackpack(hide: boolean)
 		if dPad then
 			for _, ch in ipairs(dPad:GetChildren()) do
 				-- FreeCam syncs dPadIcon from InventoryState.isOpen().
-				-- Keep cart visible in build mode (info “i” → reef report).
+				-- Keep cart + HideUI eye visible in build mode.
 				if ch:IsA("GuiObject")
 					and ch.Name ~= "dPadIcon"
+					and ch.Name ~= "HideUI"
 					and ch.Name ~= "CartIcon"
 					and ch.Name ~= "Cart"
 					and ch.Name ~= "CartBTN"
@@ -109,11 +110,10 @@ local function setLeftUiHiddenForBackpack(hide: boolean)
 					rememberHideLeftForBackpack(ch)
 				end
 			end
-			for _, name in ipairs({ "CartIcon", "Cart", "CartBTN", "CartBtn" }) do
-				local cart = dPad:FindFirstChild(name)
-				if cart and cart:IsA("GuiObject") then
-					cart.Visible = true
-					break
+			for _, name in ipairs({ "CartIcon", "Cart", "CartBTN", "CartBtn", "HideUI" }) do
+				local keep = dPad:FindFirstChild(name)
+				if keep and keep:IsA("GuiObject") then
+					keep.Visible = true
 				end
 			end
 		end

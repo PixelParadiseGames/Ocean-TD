@@ -321,14 +321,24 @@ local function rgbFontTag(c: Color3): string
 	)
 end
 
-local function syncSideSubFromDesc()
+local function syncSideSubFromDesc(pulseColor: Color3?)
 	if not sideSubLbl then
 		return
 	end
 	local raw = if unlockDescLbl then unlockDescLbl.Text else ""
 	local plain = string.gsub(raw, "<[^>]+>", "")
-	sideSubLbl.Text = plain
-	sideSubLbl.Visible = plain ~= ""
+	if plain == "" then
+		sideSubLbl.Text = ""
+		sideSubLbl.Visible = false
+		return
+	end
+	local c = pulseColor or DESC_PULSE_GREEN
+	local safe = string.gsub(plain, "&", "&amp;")
+	safe = string.gsub(safe, "<", "&lt;")
+	sideSubLbl.RichText = true
+	sideSubLbl.Text = string.format('<font color="%s">%s</font>', rgbFontTag(c), safe)
+	sideSubLbl.TextColor3 = c
+	sideSubLbl.Visible = true
 end
 
 local function startUnlockDescPulse(skillId: string, buildRichText: (Color3) -> string)
@@ -341,7 +351,7 @@ local function startUnlockDescPulse(skillId: string, buildRichText: (Color3) -> 
 	unlockDescLbl.Visible = false
 	-- Apply immediately so dial-down doesn't wait a frame (or stick on old copy).
 	unlockDescLbl.Text = buildRichText(DESC_PULSE_GREEN)
-	syncSideSubFromDesc()
+	syncSideSubFromDesc(DESC_PULSE_GREEN)
 	local token = unlockDescPulseToken
 	unlockDescPulseConn = RunService.Heartbeat:Connect(function()
 		if token ~= unlockDescPulseToken or not unlockDescLbl then
@@ -354,7 +364,8 @@ local function startUnlockDescPulse(skillId: string, buildRichText: (Color3) -> 
 		local c = DESC_PULSE_GREEN:Lerp(DESC_PULSE_WHITE, u)
 		unlockDescLbl.Text = buildRichText(c)
 		unlockDescLbl.Visible = false
-		syncSideSubFromDesc()
+		-- Whole right-side subtitle pulses bright green → white.
+		syncSideSubFromDesc(c)
 	end)
 end
 
@@ -1580,7 +1591,8 @@ local function ensureSideTextGui(): ScreenGui
 	sub.Font = UI_FONT
 	sub.TextSize = SIDE_SUB_TEXT_SIZE
 	sub.TextScaled = false
-	sub.TextColor3 = Color3.fromRGB(180, 200, 220)
+	sub.TextColor3 = DESC_PULSE_GREEN
+	sub.RichText = true
 	sub.TextXAlignment = Enum.TextXAlignment.Center
 	sub.TextYAlignment = Enum.TextYAlignment.Top
 	sub.TextWrapped = true
@@ -1625,9 +1637,13 @@ local function layoutTitleBesideSkillBubble()
 		sideTitleLbl.Visible = titleText ~= ""
 	end
 	if sideSubLbl then
-		sideSubLbl.Text = subText
 		sideSubLbl.TextSize = SIDE_SUB_TEXT_SIZE
-		sideSubLbl.Visible = subText ~= ""
+		if unlockDescPulseConn then
+			-- Pulse owns colored rich text; just keep visibility in sync.
+			sideSubLbl.Visible = subText ~= ""
+		else
+			syncSideSubFromDesc(DESC_PULSE_GREEN)
+		end
 	end
 
 	-- Keep Studio labels hidden inside the circle — side layer owns the copy.
@@ -1682,7 +1698,7 @@ local function ensureUnlockCostLabel(parent: Instance): TextLabel
 	lbl.Name = "_OceanTD_UnlockCost"
 	lbl.BackgroundTransparency = 1
 	lbl.Font = UI_FONT
-	lbl.TextSize = 22 -- +2 vs prior 20
+	lbl.TextSize = 34
 	lbl.TextScaled = false
 	lbl.TextColor3 = COST_GREEN
 	lbl.TextXAlignment = Enum.TextXAlignment.Center
@@ -1720,7 +1736,7 @@ local function layoutUnlockCostBelow(nextS: number?)
 	local cost = SkillStages.stageCost(activeSkillId :: string, nextS)
 	local lbl = ensureUnlockCostLabel(parent)
 	lbl.Text = tostring(cost) .. " $D"
-	lbl.TextSize = 22
+	lbl.TextSize = 34
 	lbl.Visible = true
 	lbl.TextColor3 = COST_GREEN
 	lbl.AnchorPoint = Vector2.new(0.5, 0)
@@ -1733,7 +1749,7 @@ local function layoutUnlockCostBelow(nextS: number?)
 		local centerAbs = unlockBtn.AbsolutePosition + Vector2.new(uw * 0.5, uh + 4)
 		local localPos = absToParentOffset(p, centerAbs)
 		lbl.Position = UDim2.fromOffset(math.floor(localPos.X), math.floor(localPos.Y))
-		lbl.Size = UDim2.fromOffset(math.max(120, math.floor(uw)), 28)
+		lbl.Size = UDim2.fromOffset(math.max(120, math.floor(uw)), 40)
 	else
 		local ux, uy, us = unlockBtn.Position, unlockBtn.Position, unlockBtn.Size
 		local ap = unlockBtn.AnchorPoint
@@ -1743,7 +1759,7 @@ local function layoutUnlockCostBelow(nextS: number?)
 			uy.Y.Scale + us.Y.Scale * (1 - ap.Y),
 			uy.Y.Offset + us.Y.Offset * (1 - ap.Y) + 4
 		)
-		lbl.Size = UDim2.new(us.X.Scale, us.X.Offset, 0, 28)
+		lbl.Size = UDim2.new(us.X.Scale, us.X.Offset, 0, 40)
 	end
 end
 
@@ -2478,7 +2494,7 @@ local RHealthUI = (function()
 				costLbl.Name = "_OceanTD_UnlockCost"
 				costLbl.BackgroundTransparency = 1
 				costLbl.Font = UI_FONT
-				costLbl.TextSize = 18 -- +2 vs prior 16
+				costLbl.TextSize = 20 -- +2 vs prior 18
 				costLbl.TextScaled = false
 				costLbl.TextColor3 = COST_GREEN
 				costLbl.TextXAlignment = Enum.TextXAlignment.Center
@@ -2487,11 +2503,11 @@ local RHealthUI = (function()
 			end
 			local cl = costLbl :: TextLabel
 			cl.Text = tostring(cost) .. " $D"
-			cl.TextSize = 18
+			cl.TextSize = 20
 			cl.Visible = true
 			cl.AnchorPoint = Vector2.new(0.5, 0)
 			cl.Position = UDim2.new(0.5, 0, 0, 30)
-			cl.Size = UDim2.new(1.5, 0, 0, 20)
+			cl.Size = UDim2.new(1.5, 0, 0, 22)
 		else
 			unlock.Visible = false
 			unlock.Active = false
@@ -2828,6 +2844,19 @@ refreshTemplate = function()
 				unlockDescLbl.RichText = false
 				unlockDescLbl.Text = SkillStages.unlockDesc(activeSkillId, descStage)
 				unlockDescLbl.Visible = true
+			end
+		end
+		-- Plain-text paths: still pulse the right-side subtitle green → white.
+		if unlockDescPulseConn == nil and activeSkillId then
+			local plain = string.gsub(unlockDescLbl.Text, "<[^>]+>", "")
+			if plain ~= "" then
+				local sid = activeSkillId
+				local body = plain
+				startUnlockDescPulse(sid, function(c: Color3)
+					local safe = string.gsub(body, "&", "&amp;")
+					safe = string.gsub(safe, "<", "&lt;")
+					return string.format('<font color="%s">%s</font>', rgbFontTag(c), safe)
+				end)
 			end
 		end
 	end
