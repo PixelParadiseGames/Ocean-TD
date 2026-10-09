@@ -895,6 +895,7 @@ local function applyHudHiddenInstant(hidden: boolean)
 		finalizeHudHidden()
 	else
 		WaveSim.setHideUiSuppressesCritterUi(false)
+		local wavesRunning = WaveSim.isRunning() == true
 		for _, sgEntry in ipairs(hiddenScreenGuis) do
 			if sgEntry.gui.Parent then
 				sgEntry.gui.Enabled = sgEntry.wasEnabled
@@ -902,7 +903,14 @@ local function applyHudHiddenInstant(hidden: boolean)
 		end
 		for _, entry in ipairs(animEntries) do
 			if isAliveGui(entry.gui) then
-				entry.gui.Visible = entry.wasVisible
+				-- Stash may still say "was visible" from mid-wave Hide UI — don't
+				-- bring Wave/Watch chrome back after the run finished.
+				local name = entry.gui.Name
+				if (name == "OceanTD_WaveHud" or name == "OceanTD_WatchHud") and not wavesRunning then
+					entry.gui.Visible = false
+				else
+					entry.gui.Visible = entry.wasVisible
+				end
 			end
 		end
 		table.clear(animEntries)

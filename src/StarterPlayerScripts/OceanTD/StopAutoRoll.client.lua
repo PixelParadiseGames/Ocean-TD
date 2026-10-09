@@ -1121,13 +1121,27 @@ local function stopAutoRoll()
 end
 
 -- One coral + hue. Does not enable auto-roll, so the server will not queue another seed.
-local function rollOnce()
+local function rollOnce(fromPressSound: boolean?)
 	if busyAnim or presenting or SeedWheelAutoRollState.isEnabled() then
 		return
 	end
 	local isBusy = SeedWheelRevealApi.isBusy
 	if isBusy and isBusy() then
+		-- Brief reveal settle race: retry once so a tap isn't lost after the press snap.
+		task.delay(0.12, function()
+			if busyAnim or presenting or SeedWheelAutoRollState.isEnabled() then
+				return
+			end
+			local still = SeedWheelRevealApi.isBusy
+			if still and still() then
+				return
+			end
+			rollOnce(fromPressSound)
+		end)
 		return
+	end
+	if fromPressSound then
+		playRollPressSound()
 	end
 	presenting = true
 	busyAnim = true
@@ -1183,7 +1197,7 @@ local function beginRollPress()
 	end
 	clearRollFingerHint()
 	flashPressGreen()
-	playRollPressSound()
+	-- Snap plays when the roll/auto action actually starts (avoid snap-with-no-wheel).
 	UiHaptics.pulseDouble()
 	startHoldFountain()
 	pressGen += 1
@@ -1199,6 +1213,7 @@ local function beginRollPress()
 		-- Hold completed — stop spray before toggling auto-roll.
 		stopHoldFountain()
 		UiHaptics.pulseLong()
+		playRollPressSound()
 		if wasAuto then
 			stopAutoRoll()
 		else
@@ -1216,9 +1231,10 @@ local function endRollPress()
 	pressGen += 1
 	stopHoldFountain()
 	if SeedWheelAutoRollState.isEnabled() then
+		playRollPressSound()
 		stopAutoRoll()
 	else
-		rollOnce()
+		rollOnce(true)
 	end
 end
 

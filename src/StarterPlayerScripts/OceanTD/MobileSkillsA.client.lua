@@ -319,10 +319,19 @@ local function rememberHide(gui: GuiObject)
 end
 
 local function restoreHiddenHud()
+	local wavesRunning = false
+	pcall(function()
+		wavesRunning = require(script.Parent:WaitForChild("WaveSim")).isRunning() == true
+	end)
 	for _, entry in ipairs(hiddenHudGuis) do
 		local gui = entry.gui
 		if gui.Parent then
-			gui.Visible = entry.wasVisible
+			-- Don't resurrect a stale Wave/Watch HUD after the run already ended.
+			if WAVE_HUD_NAMES[gui.Name] and not wavesRunning then
+				gui.Visible = false
+			else
+				gui.Visible = entry.wasVisible
+			end
 		end
 	end
 	table.clear(hiddenHudGuis)

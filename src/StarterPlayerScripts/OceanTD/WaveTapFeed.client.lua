@@ -1020,6 +1020,7 @@ end)
 
 UserInputService.LastInputTypeChanged:Connect(refreshAimMode)
 playerGui:GetAttributeChangedSignal("OceanTD_CamCycleMode"):Connect(refreshAimMode)
+playerGui:GetAttributeChangedSignal("OceanTD_ReloadFullAutoTrial"):Connect(refreshFullAutoLoop)
 InventoryState.onOpenChanged(refreshAimMode)
 WaveSim.onHud(function()
 	refreshAimMode()

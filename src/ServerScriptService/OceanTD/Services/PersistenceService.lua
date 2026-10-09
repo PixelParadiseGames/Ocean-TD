@@ -494,7 +494,8 @@ local function sanitizeProfile(raw: any): PlayerProfile
 	profile.skillStages = SkillStages.sanitizeMap(raw.skillStages)
 	profile.skillActiveStages = SkillStages.sanitizeActiveMap(raw.skillActiveStages, profile.skillStages)
 	profile.coralColorUnlocks = {}
-	profile.hideUiUnlocked = raw.hideUiUnlocked == true
+	-- Hide UI is free / unlocked for everyone (legacy locked profiles migrate on load).
+	profile.hideUiUnlocked = true
 	profile.hasSeenJoinIntro = raw.hasSeenJoinIntro == true
 	profile.version = math.max(profile.version, Constants.PROFILE_VERSION)
 	return profile
@@ -889,9 +890,13 @@ end
 function PersistenceService.isHideUiUnlocked(player: Player): boolean
 	local profile = profiles[player]
 	if not profile then
-		return false
+		return true
 	end
-	return profile.hideUiUnlocked == true
+	-- Always unlocked (kept as a profile field for save compat).
+	if profile.hideUiUnlocked ~= true then
+		profile.hideUiUnlocked = true
+	end
+	return true
 end
 
 function PersistenceService.syncHideUiToClient(player: Player)

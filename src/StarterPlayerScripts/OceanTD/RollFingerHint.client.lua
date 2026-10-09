@@ -244,7 +244,8 @@ local function playFingerSkillsSoundOnce()
 		return
 	end
 	fingerSkillsSoundPlayed = true
-	TutorialVo.play(FINGER_SKILLS_SOUND_ID, "OceanTD_FingerSkills", { volume = 4 })
+	-- Don't cut "out of reef health" (or any active narrator) — queue until idle.
+	TutorialVo.playWhenIdle(FINGER_SKILLS_SOUND_ID, "OceanTD_FingerSkills", { volume = 4 })
 end
 
 local function onCamButtonClickedForTryWaves()

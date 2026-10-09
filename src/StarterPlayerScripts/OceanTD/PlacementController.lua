@@ -2189,7 +2189,9 @@ end)
 -- Closing backpack ends placement so the player can move again.
 InventoryState.onOpenChanged(function(isOpen)
 	if not isOpen then
-		if PlaceArmDisarmAnim.isDisarmAnimating() then
+		-- Never leave a frozen ghost / locked cam if disarm was mid-flight when build closed.
+		if PlaceArmDisarmAnim.isDisarmAnimating() or PlaceArmDisarmAnim.isArmIntroAnimating() then
+			PlacementController.forceExit()
 			return
 		end
 		if mode ~= MODE_OFF then

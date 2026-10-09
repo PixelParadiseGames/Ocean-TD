@@ -18,8 +18,13 @@ FreeCamConfig.TOUCH_STICK_RADIUS = 90
 FreeCamConfig.SINK_ACTION = "OceanTD_FreeCamSink"
 FreeCamConfig.DPAD_ACTION = "OceanTD_FreeCamDPad"
 FreeCamConfig.MARGIN = 0.75
-FreeCamConfig.FISH_DAMP_RATE = 0.95
-FreeCamConfig.FISH_CAM_RATE = 1.7
+-- Focus / body follow. Small errors track tightly; large waypoint jerks ease in.
+FreeCamConfig.FISH_DAMP_RATE = 1.35 -- snappy when already on the fish
+FreeCamConfig.FISH_DAMP_RATE_SOFT = 0.4 -- when focus error is large (corner / lateral whip)
+FreeCamConfig.FISH_DAMP_SOFT_STUDS = 3.25 -- start blending toward soft rate above this error
+FreeCamConfig.FISH_CAM_RATE = 1.25
+FreeCamConfig.FISH_LOOK_RATE = 0.7 -- look-at lags focus so corner jerks don't whip yaw/pitch
+FreeCamConfig.FISH_FOCUS_MAX_SPEED = 24 -- studs/sec cap (above fish ~18 so chase isn't starved)
 FreeCamConfig.FISH_SWITCH_SEC = 3.5
 FreeCamConfig.FISH_CHASE_DIST = 31.2
 FreeCamConfig.FISH_CHASE_HEIGHT = 12

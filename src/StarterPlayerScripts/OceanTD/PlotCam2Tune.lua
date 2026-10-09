@@ -12,9 +12,13 @@ local RunService = game:GetService("RunService")
 local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
 
-local UiTheme = require(game:GetService("ReplicatedStorage"):WaitForChild("OceanTD"):WaitForChild("Shared"):WaitForChild("UiTheme"))
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local UiTheme = require(ReplicatedStorage:WaitForChild("OceanTD"):WaitForChild("Shared"):WaitForChild("UiTheme"))
+local Constants = require(ReplicatedStorage:WaitForChild("OceanTD"):WaitForChild("Shared"):WaitForChild("Constants"))
 local FreeCamConfig = require(script.Parent:WaitForChild("FreeCamConfig"))
 local PlotCam2 = require(script.Parent:WaitForChild("PlotCam2"))
+local HideUiState = require(script.Parent:WaitForChild("HideUiState"))
+local InventoryState = require(script.Parent:WaitForChild("InventoryState"))
 
 local PlotCam2Tune = {}
 
@@ -450,9 +454,17 @@ end
 
 local function hudBlocksQuick(): boolean
 	-- Fullscreen overlays own the left HUD — don't keep PlotCam yaw/zoom pads up.
-	return playerGui:GetAttribute("OceanTD_StoreOpen") == true
+	if playerGui:GetAttribute("OceanTD_StoreOpen") == true
 		or playerGui:GetAttribute("OceanTD_SkillsBubblesOpen") == true
 		or playerGui:GetAttribute("OceanTD_ReefReportOpen") == true
+	then
+		return true
+	end
+	-- Hide UI (outside build): tuck yaw/zoom with the rest of the HUD.
+	if HideUiState.isActive() and not InventoryState.isOpen() then
+		return true
+	end
+	return false
 end
 
 local function syncQuickVisibility()
@@ -480,6 +492,11 @@ end)
 playerGui:GetAttributeChangedSignal("OceanTD_StoreOpen"):Connect(syncQuickVisibility)
 playerGui:GetAttributeChangedSignal("OceanTD_SkillsBubblesOpen"):Connect(syncQuickVisibility)
 playerGui:GetAttributeChangedSignal("OceanTD_ReefReportOpen"):Connect(syncQuickVisibility)
+playerGui:GetAttributeChangedSignal(Constants.HIDE_UI_ACTIVE_ATTR):Connect(syncQuickVisibility)
+HideUiState.onChanged(syncQuickVisibility)
+InventoryState.onOpenChanged(function()
+	syncQuickVisibility()
+end)
 
 function PlotCam2Tune.isVisible(): boolean
 	return visible

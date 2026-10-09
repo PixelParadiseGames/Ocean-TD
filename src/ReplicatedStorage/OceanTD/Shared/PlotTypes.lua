@@ -147,7 +147,7 @@ function PlotTypes.defaultProfile(): PlayerProfile
 		skillStages = SkillStages.defaultMap(),
 		skillActiveStages = SkillStages.defaultMap(),
 		coralColorUnlocks = {},
-		hideUiUnlocked = false,
+		hideUiUnlocked = true, -- free for all players from the start
 		hasSeenJoinIntro = false,
 	}
 end

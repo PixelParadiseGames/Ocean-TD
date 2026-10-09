@@ -561,6 +561,142 @@ local function unlockedStage(skillId: string): number
 	return SkillStages.clampStageFor(skillId, unlockedMap[skillId])
 end
 
+-- Session-only Reload Speed stage-8 demo (IIFE keeps helpers out of main-chunk locals).
+local ReloadTrialUI = (function()
+	local SEC = 120
+	local ATTR = "OceanTD_ReloadFullAutoTrial"
+	local LABEL = "Try Full Auto"
+	local st = {
+		endsAt = nil :: number?,
+		btn = nil :: TextButton?,
+		lbl = nil :: TextLabel?,
+		conn = nil :: RBXScriptConnection?,
+		token = 0,
+	}
+	local api = {}
+
+	local function active(): boolean
+		local ends = st.endsAt
+		return ends ~= nil and os.clock() < ends
+	end
+
+	local function remaining(): number
+		local ends = st.endsAt
+		if not ends then
+			return 0
+		end
+		return math.max(0, ends - os.clock())
+	end
+
+	local function formatCountdown(sec: number): string
+		local s = math.max(0, math.ceil(sec))
+		return string.format("%d:%02d", math.floor(s / 60), s % 60)
+	end
+
+	local function publish()
+		playerGui:SetAttribute(ATTR, if active() then (st.endsAt :: number) else 0)
+	end
+
+	local function stopTimer()
+		st.token += 1
+		if st.conn then
+			st.conn:Disconnect()
+			st.conn = nil
+		end
+	end
+
+	local syncButton: () -> ()
+
+	local function endTrial()
+		stopTimer()
+		st.endsAt = nil
+		publish()
+		syncButton()
+	end
+
+	syncButton = function()
+		local btn = st.btn
+		local lbl = st.lbl
+		if not btn or not lbl then
+			return
+		end
+		local show = popupOpen
+			and activeSkillId == "ReloadSpeed"
+			and unlockedStage("ReloadSpeed") < SkillStages.RELOAD_SPEED_FULL_AUTO_STAGE
+		btn.Visible = show
+		if not show then
+			return
+		end
+		if active() then
+			lbl.Text = formatCountdown(remaining())
+			btn.AutoButtonColor = false
+		else
+			lbl.Text = LABEL
+			btn.AutoButtonColor = true
+		end
+	end
+
+	function api.active(): boolean
+		return active()
+	end
+
+	function api.publish()
+		publish()
+	end
+
+	function api.syncButton()
+		syncButton()
+	end
+
+	function api.clearRefs()
+		st.btn = nil
+		st.lbl = nil
+	end
+
+	function api.setButton(btn: TextButton, lbl: TextLabel)
+		st.btn = btn
+		st.lbl = lbl
+	end
+
+	function api.hasButton(): boolean
+		return st.btn ~= nil and st.btn.Parent ~= nil
+	end
+
+	function api.label(): string
+		return LABEL
+	end
+
+	function api.begin()
+		if active() then
+			return
+		end
+		if unlockedStage("ReloadSpeed") >= SkillStages.RELOAD_SPEED_FULL_AUTO_STAGE then
+			return
+		end
+		st.endsAt = os.clock() + SEC
+		publish()
+		stopTimer()
+		st.token += 1
+		local token = st.token
+		st.conn = RunService.Heartbeat:Connect(function()
+			if token ~= st.token then
+				return
+			end
+			if not active() then
+				endTrial()
+				return
+			end
+			local lbl = st.lbl
+			if lbl and lbl.Parent then
+				lbl.Text = formatCountdown(remaining())
+			end
+		end)
+		syncButton()
+	end
+
+	return api
+end)()
+
 local function isGreenish(c: Color3): boolean
 	return c.G > c.R + 0.04 and c.G > c.B + 0.04 and c.G > 0.2
 end
@@ -1514,11 +1650,12 @@ local function destroySideTextGui()
 	sideIconLbl = nil
 	sideTitleLbl = nil
 	sideSubLbl = nil
+	ReloadTrialUI.clearRefs()
 end
 
 local function ensureSideTextGui(): ScreenGui
-	-- Rebuild if an older layout (no icon column) is still around.
-	if sideTextGui and sideTextGui.Parent and sideIconLbl and sideIconLbl.Parent then
+	-- Rebuild if an older layout (no icon column / try button) is still around.
+	if sideTextGui and sideTextGui.Parent and sideIconLbl and sideIconLbl.Parent and ReloadTrialUI.hasButton() then
 		return sideTextGui
 	end
 	destroySideTextGui()
@@ -1599,10 +1736,62 @@ local function ensureSideTextGui(): ScreenGui
 	sub.ZIndex = 10
 	sub.Parent = col
 
+	-- Store-style green CTA under the Reload Speed subheading.
+	local tryBtn = Instance.new("TextButton")
+	tryBtn.Name = "TryFullAuto"
+	tryBtn.AutoButtonColor = true
+	tryBtn.BackgroundColor3 = Color3.new(1, 1, 1)
+	tryBtn.BorderSizePixel = 0
+	tryBtn.Size = UDim2.fromOffset(188, 48)
+	tryBtn.Text = ""
+	tryBtn.LayoutOrder = 4
+	tryBtn.ZIndex = 12
+	tryBtn.Visible = false
+	tryBtn.Selectable = false
+	tryBtn.Parent = col
+	local tryCorner = Instance.new("UICorner")
+	tryCorner.CornerRadius = UDim.new(0, 12)
+	tryCorner.Parent = tryBtn
+	local tryGrad = Instance.new("UIGradient")
+	tryGrad.Color = ColorSequence.new({
+		ColorSequenceKeypoint.new(0, GREEN_DARK),
+		ColorSequenceKeypoint.new(1, GREEN_BRIGHT),
+	})
+	tryGrad.Rotation = 90
+	tryGrad.Parent = tryBtn
+	local tryStroke = Instance.new("UIStroke")
+	tryStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+	tryStroke.Thickness = 2.5
+	tryStroke.Color = GREEN_BRIGHT
+	tryStroke.Parent = tryBtn
+	local tryLbl = Instance.new("TextLabel")
+	tryLbl.Name = "Label"
+	tryLbl.BackgroundTransparency = 1
+	tryLbl.Size = UDim2.fromScale(1, 1)
+	tryLbl.Font = UI_FONT
+	tryLbl.Text = ReloadTrialUI.label()
+	tryLbl.TextSize = 20
+	tryLbl.TextColor3 = WHITE
+	tryLbl.TextXAlignment = Enum.TextXAlignment.Center
+	tryLbl.TextYAlignment = Enum.TextYAlignment.Center
+	tryLbl.ZIndex = 13
+	tryLbl.Active = false
+	tryLbl.Parent = tryBtn
+	tryBtn.Activated:Connect(function()
+		if not powerUpClickGuard() then
+			return
+		end
+		if activeSkillId ~= "ReloadSpeed" or not popupOpen then
+			return
+		end
+		ReloadTrialUI.begin()
+	end)
+
 	sideTextGui = sg
 	sideIconLbl = icon
 	sideTitleLbl = title
 	sideSubLbl = sub
+	ReloadTrialUI.setButton(tryBtn, tryLbl)
 	return sg
 end
 
@@ -1645,6 +1834,7 @@ local function layoutTitleBesideSkillBubble()
 			syncSideSubFromDesc(DESC_PULSE_GREEN)
 		end
 	end
+	ReloadTrialUI.syncButton()
 
 	-- Keep Studio labels hidden inside the circle — side layer owns the copy.
 	if unlockNameLbl then
@@ -3227,6 +3417,10 @@ local function showConfirmUnlock()
 end
 
 function SkillPowerUpUI.getStage(skillId: string): number
+	-- Temporary Reload Speed demo: full-auto stage without changing saved unlocks.
+	if skillId == "ReloadSpeed" and ReloadTrialUI.active() then
+		return SkillStages.RELOAD_SPEED_FULL_AUTO_STAGE
+	end
 	return currentStage(skillId)
 end
 
@@ -3541,6 +3735,7 @@ function SkillPowerUpUI.bind(mobileSkillsRoot: Instance)
 		end
 	end
 	bound = true
+	ReloadTrialUI.publish()
 
 	task.spawn(function()
 		local ok, payload = pcall(function()

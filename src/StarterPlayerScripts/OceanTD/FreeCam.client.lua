@@ -108,6 +108,7 @@ local fishSt = {
 	targetId = nil :: number?,
 	focusPos = Vector3.zero,
 	dampPos = Vector3.zero,
+	lookPos = Vector3.zero, -- lagging look-at (softer than focus / body)
 	switchFrom = Vector3.zero,
 	switchTo = Vector3.zero,
 	switchT0 = 0,
@@ -821,14 +822,33 @@ local function resetFishOrbitClock()
 	fishSt.orbitElev = 0
 end
 
+local function seedFishFocus(pos: Vector3)
+	fishSt.focusPos = pos
+	fishSt.dampPos = pos
+	fishSt.lookPos = pos
+end
+
 local function resetFishFollowState(seed: Vector3?)
 	fishSt.targetId = nil
 	fishSt.switching = false
-	fishSt.focusPos = seed or camPos
-	fishSt.dampPos = fishSt.focusPos
+	seedFishFocus(seed or camPos)
 	fishSt.switchFrom = fishSt.focusPos
 	fishSt.switchTo = fishSt.focusPos
 	resetFishOrbitClock()
+end
+
+-- Exponential damp toward goal, but never faster than maxSpeed (kills waypoint whips).
+local function dampToward(current: Vector3, goal: Vector3, rate: number, dt: number, maxSpeed: number?): Vector3
+	local a = 1 - math.exp(-rate * math.max(dt, 0))
+	local next = current:Lerp(goal, a)
+	if maxSpeed and maxSpeed > 0 and dt > 0 then
+		local delta = next - current
+		local maxStep = maxSpeed * dt
+		if delta.Magnitude > maxStep then
+			return current + delta.Unit * maxStep
+		end
+	end
+	return next
 end
 
 local function fishDistanceMult(elapsed: number): number
@@ -1218,9 +1238,14 @@ local function tickFishFollow(dt: number)
 		end
 	end
 
-	-- Damp the live fish pose so path jerks don't snap the camera.
-	local dampA = 1 - math.exp(-FC.FISH_DAMP_RATE * math.max(dt, 0))
-	fishSt.dampPos = fishSt.dampPos:Lerp(goal, dampA)
+	-- Soft-follow: tight when close, ease + speed-cap when a waypoint whips the fish sideways.
+	local focusErr = (goal - fishSt.dampPos).Magnitude
+	local dampRate = FC.FISH_DAMP_RATE
+	if focusErr > FC.FISH_DAMP_SOFT_STUDS then
+		local softT = math.clamp((focusErr - FC.FISH_DAMP_SOFT_STUDS) / 10, 0, 1)
+		dampRate = FC.FISH_DAMP_RATE + (FC.FISH_DAMP_RATE_SOFT - FC.FISH_DAMP_RATE) * softT
+	end
+	fishSt.dampPos = dampToward(fishSt.dampPos, goal, dampRate, dt, FC.FISH_FOCUS_MAX_SPEED)
 
 	if fishSt.switching then
 		local u = math.clamp((os.clock() - fishSt.switchT0) / FC.FISH_SWITCH_SEC, 0, 1)
@@ -1235,12 +1260,14 @@ local function tickFishFollow(dt: number)
 		fishSt.focusPos = fishSt.dampPos
 	end
 
-	-- Slow orbit + extra camera-body damper so look stays stable.
-	local desired = fishSt.focusPos + fishChaseOffset(dt)
-	local aCam = 1 - math.exp(-FC.FISH_CAM_RATE * math.max(dt, 0))
-	camPos = camPos:Lerp(desired, aCam)
+	-- Look-at lags focus so yaw/pitch don't whip while dampPos catches a corner.
+	fishSt.lookPos = dampToward(fishSt.lookPos, fishSt.focusPos, FC.FISH_LOOK_RATE, dt, FC.FISH_FOCUS_MAX_SPEED)
+
+	-- Orbit around the lagged look point; body damper keeps framing stable.
+	local desired = fishSt.lookPos + fishChaseOffset(dt)
+	camPos = dampToward(camPos, desired, FC.FISH_CAM_RATE, dt, nil)
 	cam.CameraType = Enum.CameraType.Scriptable
-	cam.CFrame = lookAtFocus(fishSt.focusPos)
+	cam.CFrame = lookAtFocus(fishSt.lookPos)
 	syncLookFromCFrame(cam.CFrame)
 end
 
@@ -1446,12 +1473,10 @@ setMode = function(nextMode: CamMode)
 			local fish = WaveSim.getFurthestUnfedFish()
 			local spawnFocus = resolveFishSpawnFocus()
 			if fish then
-				fishSt.focusPos = fish.position
-				fishSt.dampPos = fish.position
+				seedFishFocus(fish.position)
 				fishSt.targetId = fish.id
 			elseif spawnFocus then
-				fishSt.focusPos = spawnFocus
-				fishSt.dampPos = spawnFocus
+				seedFishFocus(spawnFocus)
 				fishSt.targetId = nil
 			else
 				resetFishFollowState(camPos)
@@ -1467,16 +1492,14 @@ setMode = function(nextMode: CamMode)
 				cam.CameraType = Enum.CameraType.Scriptable
 				local fish = WaveSim.getFurthestUnfedFish()
 				if fish then
-					fishSt.focusPos = fish.position
-					fishSt.dampPos = fish.position
+					seedFishFocus(fish.position)
 					fishSt.targetId = fish.id
 				elseif spawnFocus then
-					fishSt.focusPos = spawnFocus
-					fishSt.dampPos = spawnFocus
+					seedFishFocus(spawnFocus)
 					fishSt.targetId = nil
 				end
 				camPos = fishSt.focusPos + fishChaseOffset(0)
-				cam.CFrame = lookAtFocus(fishSt.focusPos)
+				cam.CFrame = lookAtFocus(fishSt.lookPos)
 				syncLookFromCFrame(cam.CFrame)
 			end
 		end
@@ -2140,12 +2163,10 @@ local function bindMobileLeftUi(left: Instance)
 					local fish = WaveSim.getFurthestUnfedFish()
 					local spawnFocus = resolveFishSpawnFocus()
 					if fish then
-						fishSt.focusPos = fish.position
-						fishSt.dampPos = fish.position
+						seedFishFocus(fish.position)
 						fishSt.targetId = fish.id
 					elseif spawnFocus then
-						fishSt.focusPos = spawnFocus
-						fishSt.dampPos = spawnFocus
+						seedFishFocus(spawnFocus)
 						fishSt.targetId = nil
 					end
 					fishSt.switching = false

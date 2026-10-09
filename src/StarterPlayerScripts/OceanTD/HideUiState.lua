@@ -13,7 +13,8 @@ local playerGui = player:WaitForChild("PlayerGui")
 
 local HideUiState = {}
 
-local unlocked = false
+-- Free for all from the start (server also always syncs unlocked=true).
+local unlocked = true
 local active = false
 local changed: BindableEvent = Instance.new("BindableEvent")
 

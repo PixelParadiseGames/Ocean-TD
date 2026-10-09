@@ -1719,6 +1719,13 @@ local function setHudVisible(on: boolean)
 		restoreBarChrome()
 		if hudWaveFill then
 			hudWaveFill.BackgroundColor3 = BAR_FILL
+			hudWaveFill.Size = UDim2.fromScale(0, 1)
+		end
+		if hudWaveLabel then
+			hudWaveLabel.Text = "🍴 Wave"
+		end
+		if hudTime then
+			hudTime.Text = "⏱️00:00:00"
 		end
 		if hudBarHeartScale then
 			hudBarHeartScale.Scale = 1
@@ -2509,9 +2516,8 @@ function WaveSlot.mount(d: Deps)
 			syncTempW100Button(false)
 		else
 			syncSlot5TutorialGate()
-			if WaveSim.isRunning() then
-				setHudVisible(true)
-			end
+			-- Always sync: skills stash can restore a stale Wave HUD after Finish.
+			setHudVisible(WaveSim.isRunning())
 			WaveSlotSummary.resumeAfterSkills()
 		end
 	end)

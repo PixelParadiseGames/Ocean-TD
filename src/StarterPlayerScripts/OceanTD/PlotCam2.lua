@@ -37,8 +37,8 @@ local DEFAULT_YAW_BIAS_DEG = 0
 local DEFAULT_FOCUS_HEIGHT = 30
 local DEFAULT_DIST_FRONT = 28
 local DEFAULT_DIST_BACK = 200
-local DEFAULT_DIST_OFFSET = -110 -- max zoom-in (DistOff floor); was -70
--- Session start / pre-BUILD: pulled back; first BUILD eases to DEFAULT_DIST_OFFSET.
+local DEFAULT_DIST_OFFSET = -110 -- max zoom-in (DistOff floor); manual +/- / wheel can reach this
+-- Session start: pulled back. Opening BUILD keeps this zoom (no auto slam to max).
 local START_DIST_OFFSET = 55
 local DEFAULT_PAN_OUT = 200
 local DEFAULT_PAN_IN = 20
@@ -475,13 +475,16 @@ function PlotCam2.resetTune()
 	persistTune()
 end
 
--- First BUILD open this session: ease DistOff to max zoom-in.
+-- First BUILD open this session: ease DistOff 60% of the way from start → max zoom-in
+-- (not all the way; DistOff +/- / wheel still reach DIST_OFFSET_MIN).
 function PlotCam2.notifyBuildOpened()
 	if not awaitingBuildZoom then
 		return
 	end
 	awaitingBuildZoom = false
-	tune.distOffset = DEFAULT_DIST_OFFSET
+	local from = START_DIST_OFFSET
+	local to = DEFAULT_DIST_OFFSET
+	tune.distOffset = math.clamp(from + (to - from) * 0.60, DIST_OFFSET_MIN, DIST_OFFSET_MAX)
 	persistTune()
 	-- liveDist keeps easing via DIST_TWEEN_RATE in tick().
 end

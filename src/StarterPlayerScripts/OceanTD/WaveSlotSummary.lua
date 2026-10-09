@@ -423,6 +423,12 @@ function WaveSlotSummary.hide()
 	end
 	-- Finish / dismiss: restore follow cam, do not re-enter FishCam.
 	releaseDefeatCam(false)
+	local h = host
+	if h then
+		-- Belt-and-suspenders: skills/HideUI stash can resurrect the wave chrome.
+		h.setHudVisible(false)
+		h.applyIcon(false)
+	end
 	-- Join-intro: post-summary finger (roll-then-skills on defeat, or skills on win).
 	local pg = Players.LocalPlayer:FindFirstChild("PlayerGui")
 	if pg and pg:IsA("PlayerGui") then

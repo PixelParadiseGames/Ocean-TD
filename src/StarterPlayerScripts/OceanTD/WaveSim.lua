@@ -58,7 +58,7 @@ export type HudSnapshot = {
 	elapsedSec: number,
 	running: boolean,
 	feedProgress: number, -- 0..1 hunger filled this wave
-	feedComplete: boolean, -- all wave fish fully fed; early finish available
+	feedComplete: boolean, -- no hungry agents left on field; NEXT WAVE / early finish available
 	hungerDanger: boolean, -- any hungry fish bar flashing red near route end
 	hungryMissToken: number, -- bumps when a hungry fish reaches the end (broken heart)
 	fishFull: number, -- fully-fed fish this wave (alive + finished happy)
@@ -663,12 +663,11 @@ local function getFeedProgress(): (number, boolean)
 	end
 	local progress = math.clamp(filled / total, 0, 1)
 	local spawningDone = (not waveSpawning) and spawnQueue <= 0 and crabSpawnQueue <= 0 and urchinSpawnQueue <= 0
-	-- Fish + crabs + urchins must be fully fed before NEXT WAVE.
 	local unitsSpawned = waveFishSpawned + WaveCrab.spawnedCount() + WaveUrchin.spawnedCount()
-	local complete = spawningDone
-		and unitsSpawned > 0
-		and (not anyHungryAlive)
-		and waveFishFullyFed >= unitsSpawned
+	-- NEXT WAVE when nothing hungry remains on the field (sharks ignored).
+	-- Hungry finishers already cost reef health — don't wait for a full urchin/crab
+	-- to walk the rest of a long path, and don't require 100% feed bar.
+	local complete = spawningDone and unitsSpawned > 0 and (not anyHungryAlive)
 	return progress, complete
 end
 
