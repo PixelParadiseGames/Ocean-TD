@@ -46,6 +46,7 @@ local UNLOCK_SETTLE_INFO = TweenInfo.new(UNLOCK_SETTLE_SEC, Enum.EasingStyle.Qua
 -- Extra bubble + label size on 720p+ (on top of HUD scale baked into bubble Size).
 local HUD_BUBBLE_TEXT_BOOST = 1.5
 local HUD_BUBBLE_SIZE_MULT = 1.42 -- slightly larger bubbles overall
+local SELECTED_BUBBLE_SCALE = 1.2 -- focused / opened power-up bubble
 -- Early stages: always show skill icon above text (no flash cycle).
 local COMPACT_SIZE_MULT = 1.14 -- slightly larger than raw stage-1 templates
 local COMPACT_ICON_SIZE = UDim2.fromScale(0.40, 0.40)
@@ -1134,20 +1135,36 @@ end
 
 local function findBackgroundGradient(panel: Instance): BgFade?
 	local named: Instance? = nil
+	local sg: ScreenGui? = if panel:IsA("ScreenGui") then panel else panel:FindFirstAncestorOfClass("ScreenGui")
+	local function consider(inst: Instance?)
+		if named or not inst then
+			return
+		end
+		local lower = string.lower(inst.Name)
+		if lower == "backgroundgradient" or lower == "background" then
+			named = inst
+		end
+	end
 	for _, d in ipairs(panel:GetDescendants()) do
-		if string.lower(d.Name) == "backgroundgradient" then
-			named = d
+		consider(d)
+		if named then
 			break
+		end
+	end
+	-- May have been reparented to the ScreenGui root for full-height cover.
+	if not named and sg then
+		for _, ch in ipairs(sg:GetChildren()) do
+			consider(ch)
+			if named then
+				break
+			end
 		end
 	end
 	if not named then
 		-- Common Studio layout: Frame "Background" + UIGradient child.
-		local bg = panel:FindFirstChild("Background", true)
+		local bg = panel:FindFirstChild("Background", true) or (sg and sg:FindFirstChild("Background"))
 		if bg then
-			local g = bg:FindFirstChildWhichIsA("UIGradient")
-			if g then
-				named = bg
-			end
+			named = bg
 		end
 	end
 	if not named then
@@ -1980,7 +1997,8 @@ function SkillsBubbleSim.isRunning(): boolean
 	return running
 end
 
-function SkillsBubbleSim.setSuppressed(value: boolean)
+-- When opening a power-up, pass skillId to keep that bubble visible at +20% size.
+function SkillsBubbleSim.setSuppressed(value: boolean, keepSkillId: string?)
 	suppressed = value == true
 	if suppressed then
 		-- Cancel in-flight drags without firing bubble activate (was stealing Close/UNLOCK clicks).
@@ -1992,20 +2010,46 @@ function SkillsBubbleSim.setSuppressed(value: boolean)
 		SkillsBubbleSim.clearGamepadFocus()
 		clearDebugHitBoxes()
 	end
+
+	local keepName: string? = nil
+	if suppressed and typeof(keepSkillId) == "string" then
+		local def = SkillStages.get(keepSkillId)
+		if def then
+			keepName = def.buttonName
+		end
+	end
+
 	for _, b in ipairs(bubbles) do
 		if b.btn.Parent then
+			local keep = keepName ~= nil and b.btn.Name == keepName
 			b.btn.Active = not suppressed
+			if suppressed then
+				b.btn.Visible = keep
+				b.btn.Active = false
+				if keep and b.scale and b.scale.Parent then
+					b.scale.Scale = b.settledScale * SELECTED_BUBBLE_SCALE
+				end
+			else
+				b.btn.Visible = true
+				if b.scale and b.scale.Parent then
+					b.scale.Scale = b.settledScale
+				end
+			end
 		end
 	end
 	if layer and layer.Parent then
-		layer.Visible = not suppressed
+		-- Keep layer on when a selected bubble should stay visible under the power-up.
+		layer.Visible = not suppressed or keepName ~= nil
 	end
 	if bgFade and bgFade.gui and bgFade.gui.Parent then
-		if suppressed then
-			bgFade.gui.Visible = false
-		else
-			bgFade.gui.Visible = true
+		-- Keep the full-height blue veil up while a power-up is open.
+		bgFade.gui.Visible = true
+		if not suppressed then
+			applyBgFade(bgFade, 1)
 		end
+	end
+	if suppressed then
+		syncOrbitLocks()
 	end
 end
 
@@ -2053,6 +2097,15 @@ local function applyGamepadFocusVisual()
 	if not b.btn.Parent then
 		return
 	end
+	-- Restore other bubbles to settled size; grow the focused one +20%.
+	for _, other in ipairs(bubbles) do
+		if other.scale and other.scale.Parent and not suppressed then
+			other.scale.Scale = other.settledScale
+		end
+	end
+	if b.scale and b.scale.Parent and not suppressed then
+		b.scale.Scale = b.settledScale * SELECTED_BUBBLE_SCALE
+	end
 	local stroke = Instance.new("UIStroke")
 	stroke.Name = "_OceanTD_GamepadFocus"
 	stroke.Thickness = 4
@@ -2064,6 +2117,12 @@ local function applyGamepadFocusVisual()
 end
 
 function SkillsBubbleSim.clearGamepadFocus()
+	if gamepadFocus >= 1 and gamepadFocus <= #bubbles and not suppressed then
+		local b = bubbles[gamepadFocus]
+		if b and b.scale and b.scale.Parent then
+			b.scale.Scale = b.settledScale
+		end
+	end
 	gamepadFocus = 0
 	clearGamepadFocusVisual()
 end

@@ -55,15 +55,61 @@ local SKILLS_OPEN_ATTR = "OceanTD_SkillsBubblesOpen"
 local SKILLS_DISMISS_KEY_ATTR = "OceanTD_SkillsDismissKey"
 local skillsScaleConn: RBXScriptConnection? = nil
 
+local function stretchSkillsBackground(panel: Instance)
+	-- Blue veil should cover the full screen; parent HUD UIScale would leave it short.
+	local sg: ScreenGui? = if panel:IsA("ScreenGui") then panel else panel:FindFirstAncestorOfClass("ScreenGui")
+	if not sg then
+		return
+	end
+	local bg: GuiObject? = nil
+	for _, d in ipairs(panel:GetDescendants()) do
+		local lower = string.lower(d.Name)
+		if (lower == "backgroundgradient" or lower == "background") and d:IsA("GuiObject") then
+			bg = d
+			break
+		end
+	end
+	if not bg then
+		for _, ch in ipairs(sg:GetChildren()) do
+			local lower = string.lower(ch.Name)
+			if (lower == "backgroundgradient" or lower == "background") and ch:IsA("GuiObject") then
+				bg = ch
+				break
+			end
+		end
+	end
+	if not bg then
+		return
+	end
+	local scale = bg:FindFirstChild("_OceanTD_PopupScale")
+	if scale then
+		scale:Destroy()
+	end
+	-- Lift off scaled parents (e.g. dPad) so Size scale=1 fills the ScreenGui.
+	if bg.Parent ~= sg then
+		bg.Parent = sg
+	end
+	bg.AnchorPoint = Vector2.new(0.5, 0.5)
+	bg.Position = UDim2.fromScale(0.5, 0.5)
+	bg.Size = UDim2.fromScale(1, 1)
+	bg.ZIndex = math.min(bg.ZIndex, 1)
+end
+
 local function applySkillsViewportScale(panel: Instance)
 	local sg: ScreenGui? = if panel:IsA("ScreenGui") then panel else panel:FindFirstAncestorOfClass("ScreenGui")
 	if not sg then
 		return
 	end
+	stretchSkillsBackground(panel)
 	for _, ch in sg:GetChildren() do
-		if ch:IsA("GuiObject") and ch.Name ~= "_OceanTD_BubbleLayer" then
-			UiPopupScale.attachHud(ch)
+		if not ch:IsA("GuiObject") then
+			continue
 		end
+		local lower = string.lower(ch.Name)
+		if ch.Name == "_OceanTD_BubbleLayer" or lower == "background" or lower == "backgroundgradient" then
+			continue
+		end
+		UiPopupScale.attachHud(ch)
 	end
 end
 
