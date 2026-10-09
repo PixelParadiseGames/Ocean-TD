@@ -1505,6 +1505,14 @@ local function refreshGamepadCloseLabel()
 	end)
 end
 
+local function scrollWindowHeight(): number
+	local windowY = scroll.AbsoluteWindowSize.Y
+	if windowY < 1 then
+		windowY = scroll.AbsoluteSize.Y
+	end
+	return windowY
+end
+
 local function scrollFocusIntoView(btn: GuiObject)
 	local btnTop = btn.AbsolutePosition.Y
 	local btnBottom = btnTop + btn.AbsoluteSize.Y
@@ -1516,6 +1524,84 @@ local function scrollFocusIntoView(btn: GuiObject)
 	elseif btnBottom > scrollBottom then
 		scroll.CanvasPosition = Vector2.new(canvas.X, canvas.Y + (btnBottom - scrollBottom) + 8)
 	end
+end
+
+local function isBtnVisibleInItemScroll(btn: GuiObject, pad: number): boolean
+	if btn.AbsoluteSize.Y < 2 or scroll.AbsoluteSize.Y < 8 then
+		return false
+	end
+	local top = btn.AbsolutePosition.Y
+	local bottom = top + btn.AbsoluteSize.Y
+	local viewT = scroll.AbsolutePosition.Y + pad
+	local viewB = scroll.AbsolutePosition.Y + scroll.AbsoluteSize.Y - pad
+	return top >= viewT - 2 and bottom <= viewB + 2
+end
+
+-- Canvas Y that parks `btn` in the upper-middle of the backpack list.
+local function canvasYForItemBtn(btn: GuiObject): number?
+	local windowY = scrollWindowHeight()
+	if windowY < 8 or btn.AbsoluteSize.Y < 2 or scroll.AbsoluteSize.Y < 8 then
+		return nil
+	end
+	local btnCanvasY = scroll.CanvasPosition.Y + (btn.AbsolutePosition.Y - scroll.AbsolutePosition.Y)
+	local target = btnCanvasY - windowY * 0.28
+	local maxY = math.max(0, scroll.AbsoluteCanvasSize.Y - windowY)
+	return math.clamp(target, 0, maxY)
+end
+
+local revealScrollToken = 0
+local REVEAL_SCROLL_SEC = 0.45
+
+local function tutorialWantsItemReveal(): boolean
+	local hint = playerGui:GetAttribute("OceanTD_RollFingerHint")
+	return hint == "equip" or hint == "plot"
+end
+
+local function animateItemScrollToY(targetY: number, token: number, duration: number)
+	local startY = scroll.CanvasPosition.Y
+	if duration <= 0 or math.abs(startY - targetY) < 1 then
+		scroll.CanvasPosition = Vector2.new(scroll.CanvasPosition.X, targetY)
+		return
+	end
+	local proxy = Instance.new("NumberValue")
+	proxy.Value = startY
+	local conn = proxy:GetPropertyChangedSignal("Value"):Connect(function()
+		if token ~= revealScrollToken then
+			return
+		end
+		scroll.CanvasPosition = Vector2.new(scroll.CanvasPosition.X, proxy.Value)
+	end)
+	local tw = TweenService:Create(
+		proxy,
+		TweenInfo.new(duration, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+		{ Value = targetY }
+	)
+	tw:Play()
+	tw.Completed:Wait()
+	conn:Disconnect()
+	proxy:Destroy()
+	if token == revealScrollToken then
+		scroll.CanvasPosition = Vector2.new(scroll.CanvasPosition.X, targetY)
+	end
+end
+
+local function findItemButtonForReveal(itemId: string): ImageButton?
+	local pulsed: ImageButton? = nil
+	local first: ImageButton? = nil
+	for _, btn in ipairs(itemButtons) do
+		if btn:GetAttribute("OceanTD_ItemId") == itemId then
+			if not first then
+				first = btn
+			end
+			local icon = btn:FindFirstChild("Circle")
+			local stroke = icon and icon:FindFirstChild("_SelectPulse")
+			if stroke and stroke:IsA("UIStroke") and stroke.Enabled then
+				pulsed = btn
+				break
+			end
+		end
+	end
+	return pulsed or first
 end
 
 local function setGamepadFocus(index: number)
@@ -1586,12 +1672,22 @@ local function enableGamepadSelect(withOpenIntro: boolean?)
 	for _, btn in ipairs(itemButtons) do
 		btn.Selectable = false
 	end
-	if withOpenIntro then
+	-- Tutorial equip/plot finger needs a specific coral — skip the bottom→top intro scroll.
+	if withOpenIntro and not tutorialWantsItemReveal() then
 		startGamepadOpenIntro()
 	else
 		stopGamepadOpenIntro()
 		gamepadDpadPromptUntil = 0
-		setGamepadFocus(1)
+		if tutorialWantsItemReveal() then
+			local id = InventoryState.getSelectedId() or SeedWheelRevealApi.lastAwardedItemId
+			if typeof(id) == "string" and id ~= "" then
+				InventoryState.revealItemInBackpack(id)
+			else
+				setGamepadFocus(1)
+			end
+		else
+			setGamepadFocus(1)
+		end
 	end
 	refreshGamepadCloseLabel()
 	log("Gamepad select on — D-pad list, stick moves player", if withOpenIntro then "intro" else "focus1")
@@ -2044,15 +2140,87 @@ InventoryState.setItemSlotScreenPosProvider(function(itemId: string): Vector2?
 end)
 
 InventoryState.setRevealItemInBackpackProvider(function(itemId: string)
-	if not InventoryState.isOpen() then
+	if typeof(itemId) ~= "string" or itemId == "" then
 		return
 	end
-	for _, btn in ipairs(itemButtons) do
-		if btn:GetAttribute("OceanTD_ItemId") == itemId then
+	revealScrollToken += 1
+	local my = revealScrollToken
+	task.spawn(function()
+		-- Open tween leaves AbsoluteSize/Positions wrong — wait until docked.
+		local deadline = os.clock() + 3.5
+		while os.clock() < deadline do
+			if my ~= revealScrollToken then
+				return
+			end
+			if InventoryState.isOpen() and not animating and host.Visible and uiScale.Scale > 0.95 then
+				break
+			end
+			task.wait()
+		end
+		if my ~= revealScrollToken or not InventoryState.isOpen() then
+			return
+		end
+
+		-- Gamepad open-intro scrolls to the top and fights the tutorial coral target.
+		if tutorialWantsItemReveal() then
+			stopGamepadOpenIntro()
+		end
+
+		local btn: ImageButton? = nil
+		deadline = os.clock() + 2.5
+		while os.clock() < deadline do
+			if my ~= revealScrollToken then
+				return
+			end
+			local found = findItemButtonForReveal(itemId)
+			if found and found.AbsoluteSize.Y >= 4 and scroll.AbsoluteSize.Y >= 8 then
+				btn = found
+				break
+			end
+			task.wait()
+		end
+		if not btn or my ~= revealScrollToken then
+			return
+		end
+
+		for _ = 1, 4 do
+			task.wait()
+			if my ~= revealScrollToken then
+				return
+			end
+		end
+
+		local targetY = canvasYForItemBtn(btn)
+		if typeof(targetY) ~= "number" then
 			scrollFocusIntoView(btn)
 			return
 		end
-	end
+		animateItemScrollToY(targetY, my, REVEAL_SCROLL_SEC)
+		if my ~= revealScrollToken then
+			return
+		end
+
+		-- Layout can settle after AutomaticCanvasSize — snap until the cell is on-screen.
+		for _ = 1, 6 do
+			task.wait()
+			if my ~= revealScrollToken then
+				return
+			end
+			local live = findItemButtonForReveal(itemId)
+			if not live then
+				return
+			end
+			if isBtnVisibleInItemScroll(live, 6) then
+				return
+			end
+			local y = canvasYForItemBtn(live)
+			if typeof(y) == "number" then
+				scroll.CanvasPosition = Vector2.new(scroll.CanvasPosition.X, y)
+			else
+				scrollFocusIntoView(live)
+			end
+		end
+	end)
 end)
 
 InventoryState.setScrollCenterProvider(function(): Vector2?
@@ -2231,6 +2399,13 @@ local function playOpen()
 
 	applyDockedLayout()
 	animating = false
+	-- Finger reveal often raced the open tween; re-scroll once layout is final.
+	if tutorialWantsItemReveal() then
+		local id = InventoryState.getSelectedId() or SeedWheelRevealApi.lastAwardedItemId
+		if typeof(id) == "string" and id ~= "" then
+			InventoryState.revealItemInBackpack(id)
+		end
+	end
 end
 
 local function playClose()

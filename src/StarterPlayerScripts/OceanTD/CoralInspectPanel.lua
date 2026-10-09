@@ -142,12 +142,17 @@ end
 -- Forward-declared; assigned after colorScroll exists.
 local animateScrollToSwatch: ((number, (() -> ())?, boolean?) -> ())?
 local refreshColorSwatches: (() -> ())?
+local isSwatchVisibleInScroll: ((ScrollingFrame, GuiObject, number) -> boolean)?
 
 local function beginTutorialHueFinger(resumeMode: string?)
 	-- Finger demo + one user hue press → closeBackpack (hueReroll step removed).
 	local mode = "hue"
+	-- Arm before any yield so inspect flicker can't force reselectCoral mid-scroll.
+	hueFingerArming = true
 	rememberTutorialHueCoral()
 	playerGui:SetAttribute(HUE_RESUME_ATTR, mode)
+	playerGui:SetAttribute(HINT_ATTR, false)
+
 	local hue = resolveTutorialHueIndex()
 	if typeof(hue) ~= "number" then
 		local part = RelocateController.getSelectedPart()
@@ -168,8 +173,9 @@ local function beginTutorialHueFinger(resumeMode: string?)
 		or lastInput == Enum.UserInputType.Gamepad3
 		or lastInput == Enum.UserInputType.Gamepad4
 	-- Joystick: start focus one swatch left of the finger target so D-Pad is required to match it.
+	local startFocus = hue
 	if onGamepad then
-		local startFocus = hue - 1
+		startFocus = hue - 1
 		if startFocus < Consts.DEFAULT_PALETTE_SWATCH then
 			startFocus = PlotOutlineColors.CORAL_MAX_INDEX
 		end
@@ -180,12 +186,7 @@ local function beginTutorialHueFinger(resumeMode: string?)
 	if refreshColorSwatches then
 		refreshColorSwatches()
 	end
-	-- Hide finger during scroll, but mark arming so a visibility flicker can't
-	-- reinterpret HINT=false as "closed mid-hue → reselect coral".
-	hueFingerArming = true
-	playerGui:SetAttribute(HINT_ATTR, false)
-	local scrollFn = animateScrollToSwatch
-	local startFocus = focusColorIndex
+
 	local function finishArming()
 		-- animateScrollToSwatch only calls this after the swatch is in the scroll viewport.
 		hueFingerArming = false
@@ -203,71 +204,92 @@ local function beginTutorialHueFinger(resumeMode: string?)
 			playerGui:SetAttribute(HINT_ATTR, mode)
 		end
 	end
-	if scrollFn then
-		if onGamepad then
-			-- Scroll to the start of the row first, then to the finger's coral hue.
-			hueScrollToken += 1
-			local my = hueScrollToken
-			task.spawn(function()
+
+	local targetHue = hue
+	task.spawn(function()
+		-- Wait for inspect + color row after size cinematic (AbsoluteSize is often 0 mid-swap).
+		local deadline = os.clock() + 3.5
+		while os.clock() < deadline do
+			if not hueFingerArming then
+				return
+			end
+			local sc = colorScroll
+			local sw = colorSwatchBtns[targetHue]
+			if root and root.Visible and sc and sw and sc.AbsoluteSize.X >= 8 and sw.AbsoluteSize.X >= 2 then
+				break
+			end
+			task.wait()
+		end
+		if not hueFingerArming then
+			return
+		end
+
+		local scrollFn = animateScrollToSwatch
+		if not scrollFn then
+			finishArming()
+			return
+		end
+
+		local function runScroll(onDone: () -> ())
+			if onGamepad then
+				hueScrollToken += 1
+				local my = hueScrollToken
 				local sc = colorScroll
-				if sc then
-					local deadline = os.clock() + 2.0
-					while os.clock() < deadline do
-						if my ~= hueScrollToken then
-							return
-						end
-						if sc.AbsoluteSize.X >= 8 then
-							break
-						end
-						task.wait()
-					end
-					if my ~= hueScrollToken or not colorScroll then
-						return
-					end
-					sc = colorScroll
+				if sc and sc.CanvasPosition.X > 0.5 then
 					local startX = sc.CanvasPosition.X
-					if startX > 0.5 then
-						local proxy = Instance.new("NumberValue")
-						proxy.Value = startX
-						local conn = proxy:GetPropertyChangedSignal("Value"):Connect(function()
-							if my ~= hueScrollToken or not colorScroll then
-								return
-							end
-							colorScroll.CanvasPosition = Vector2.new(proxy.Value, 0)
-						end)
-						local tw = TweenService:Create(
-							proxy,
-							TweenInfo.new(0.45, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
-							{ Value = 0 }
-						)
-						tw:Play()
-						tw.Completed:Wait()
-						conn:Disconnect()
-						proxy:Destroy()
+					local proxy = Instance.new("NumberValue")
+					proxy.Value = startX
+					local conn = proxy:GetPropertyChangedSignal("Value"):Connect(function()
 						if my ~= hueScrollToken or not colorScroll then
 							return
 						end
-						colorScroll.CanvasPosition = Vector2.new(0, 0)
-						task.wait(0.12)
-					else
-						sc.CanvasPosition = Vector2.new(0, 0)
-					end
-					if my ~= hueScrollToken then
+						colorScroll.CanvasPosition = Vector2.new(proxy.Value, 0)
+					end)
+					local tw = TweenService:Create(
+						proxy,
+						TweenInfo.new(0.45, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+						{ Value = 0 }
+					)
+					tw:Play()
+					tw.Completed:Wait()
+					conn:Disconnect()
+					proxy:Destroy()
+					if my ~= hueScrollToken or not colorScroll then
 						return
 					end
+					colorScroll.CanvasPosition = Vector2.new(0, 0)
+					task.wait(0.12)
+				elseif sc then
+					sc.CanvasPosition = Vector2.new(0, 0)
 				end
 				if my ~= hueScrollToken then
 					return
 				end
-				-- Scroll finger hue into view, but keep D-Pad focus one left so the player must nudge onto it.
-				scrollFn(hue, finishArming, true)
-			end)
-		else
-			scrollFn(hue, finishArming)
+				-- Keep D-Pad focus one left so the player must nudge onto the finger hue.
+				scrollFn(targetHue, onDone, true)
+			else
+				scrollFn(targetHue, onDone)
+			end
 		end
-	else
-		finishArming()
-	end
+
+		runScroll(function()
+			if not hueFingerArming then
+				return
+			end
+			local sc = colorScroll
+			local sw = colorSwatchBtns[targetHue]
+			local visibleFn = isSwatchVisibleInScroll
+			if sc and sw and visibleFn and not visibleFn(sc, sw, 4) then
+				-- One hard retry if layout settled late (common after upgrade mesh swap).
+				local retryFn = animateScrollToSwatch
+				if retryFn then
+					retryFn(targetHue, finishArming, onGamepad)
+					return
+				end
+			end
+			finishArming()
+		end)
+	end)
 end
 
 local function noteTutorialUpgradeSucceeded()
@@ -2650,7 +2672,7 @@ local function estimateSwatchCanvasCenterX(idx: number): (number, number)
 	return centerX, totalW
 end
 
-local function isSwatchVisibleInScroll(sc: ScrollingFrame, sw: GuiObject, pad: number): boolean
+isSwatchVisibleInScroll = function(sc: ScrollingFrame, sw: GuiObject, pad: number): boolean
 	if sw.AbsoluteSize.X < 2 or sc.AbsoluteSize.X < 8 then
 		return false
 	end
@@ -2665,14 +2687,6 @@ end
 animateScrollToSwatch = function(idx: number, onDone: (() -> ())?, keepFocus: boolean?)
 	hueScrollToken += 1
 	local my = hueScrollToken
-	local scroll = colorScroll
-	local btn = colorSwatchBtns[idx]
-	if not scroll or not btn then
-		if onDone then
-			onDone()
-		end
-		return
-	end
 	-- keepFocus: scroll the finger target into view without moving D-Pad selection onto it.
 	if not keepFocus then
 		focusColorIndex = idx
@@ -2686,7 +2700,7 @@ animateScrollToSwatch = function(idx: number, onDone: (() -> ())?, keepFocus: bo
 			return
 		end
 		-- Wait until the color row has real layout (upgrade cinematic / cam switch can leave AbsoluteSize 0).
-		local deadline = os.clock() + 2.5
+		local deadline = os.clock() + 3.5
 		while os.clock() < deadline do
 			if my ~= hueScrollToken then
 				return
@@ -2701,9 +2715,15 @@ animateScrollToSwatch = function(idx: number, onDone: (() -> ())?, keepFocus: bo
 		if my ~= hueScrollToken then
 			return
 		end
+		if not colorScroll or not colorSwatchBtns[idx] then
+			if onDone then
+				onDone()
+			end
+			return
+		end
 
 		-- Extra frames so AutomaticCanvasSize / UIListLayout catch up after upgrade restyle.
-		for _ = 1, 5 do
+		for _ = 1, 6 do
 			task.wait()
 			if my ~= hueScrollToken then
 				return
@@ -2775,15 +2795,16 @@ animateScrollToSwatch = function(idx: number, onDone: (() -> ())?, keepFocus: bo
 			return
 		end
 
+		local visibleFn = isSwatchVisibleInScroll
 		-- Snap / retry until the awarded swatch is actually inside the scroll viewport.
-		for attempt = 1, 8 do
+		for attempt = 1, 10 do
 			task.wait()
 			if my ~= hueScrollToken then
 				return
 			end
 			local sc = colorScroll
 			local sw = colorSwatchBtns[idx]
-			if sc and sw and isSwatchVisibleInScroll(sc, sw, 4) then
+			if sc and sw and visibleFn and visibleFn(sc, sw, 4) then
 				break
 			end
 			ensureTargetAndScroll(true, attempt > 1)
@@ -2793,23 +2814,41 @@ animateScrollToSwatch = function(idx: number, onDone: (() -> ())?, keepFocus: bo
 			end
 		end
 
-		if colorScroll and colorScroll.AutomaticCanvasSize == Enum.AutomaticSize.None then
-			colorScroll.AutomaticCanvasSize = Enum.AutomaticSize.X
+		-- Keep a manual canvas floor so restoring AutomaticCanvasSize can't collapse scroll range.
+		local scKeep = colorScroll
+		local _, totalWKeep = estimateSwatchCanvasCenterX(idx)
+		local needKeep = 0
+		if scKeep then
+			needKeep = math.max(totalWKeep, scKeep.AbsoluteSize.X + 8)
+			scKeep.AutomaticCanvasSize = Enum.AutomaticSize.None
+			scKeep.CanvasSize = UDim2.fromOffset(math.ceil(math.max(needKeep, scKeep.AbsoluteCanvasSize.X)), 0)
 		end
 		task.wait()
 		if my ~= hueScrollToken then
 			return
 		end
-		-- Final snap after AutomaticCanvasSize restores.
+		-- Final snap, then allow AutomaticCanvasSize again.
 		local sc = colorScroll
 		local sw = colorSwatchBtns[idx]
-		if sc and sw and not isSwatchVisibleInScroll(sc, sw, 4) then
+		if sc and sw and visibleFn and not visibleFn(sc, sw, 4) then
 			ensureTargetAndScroll(true, true)
 			task.wait()
 			if not keepFocus and colorScroll and colorSwatchBtns[idx] then
 				focusColorIndex = idx
 				scrollFocusIntoView()
 			end
+		end
+		if colorScroll then
+			colorScroll.AutomaticCanvasSize = Enum.AutomaticSize.X
+		end
+		task.wait()
+		if my ~= hueScrollToken then
+			return
+		end
+		sc = colorScroll
+		sw = colorSwatchBtns[idx]
+		if sc and sw and visibleFn and not visibleFn(sc, sw, 4) then
+			ensureTargetAndScroll(true, true)
 		end
 		if onDone then
 			onDone()

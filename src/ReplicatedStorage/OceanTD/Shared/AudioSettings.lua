@@ -1,7 +1,8 @@
 --!strict
 --[[
-	Client audio mixers: SoundGroups for SFX + BGM, volume prefs on the local player.
-	New sounds parented under SoundService auto-route to OceanTD_SFX unless marked BGM.
+	Client audio mixers: SoundGroups for SFX + BGM + Narrator (tutorial VO),
+	volume prefs on the local player.
+	New sounds parented under SoundService auto-route to OceanTD_SFX unless marked BGM/VO.
 ]]
 
 local Players = game:GetService("Players")
@@ -11,10 +12,12 @@ local AudioSettings = {}
 
 local ATTR_SFX = "OceanTD_SfxVolume"
 local ATTR_BGM = "OceanTD_BgmVolume"
+local ATTR_NARRATOR = "OceanTD_NarratorVolume"
 local ATTR_SHUFFLE = "OceanTD_BgmShuffle"
 
 local sfxGroup: SoundGroup? = nil
 local bgmGroup: SoundGroup? = nil
+local narratorGroup: SoundGroup? = nil
 local initialized = false
 
 -- Soft-duck SFX under tutorial VO (feed hits, taps, etc.) without changing the saved slider.
@@ -48,11 +51,22 @@ local function isBgmSound(sound: Sound): boolean
 end
 
 local function isVoSound(sound: Sound): boolean
-	return sound:GetAttribute("OceanTD_VoTrack") == true
+	if sound:GetAttribute("OceanTD_VoTrack") == true then
+		return true
+	end
+	local g = narratorGroup
+	return g ~= nil and sound.SoundGroup == g
 end
 
 local function routeSound(sound: Sound)
-	if isBgmSound(sound) or isVoSound(sound) then
+	if isBgmSound(sound) then
+		return
+	end
+	if isVoSound(sound) then
+		local g = narratorGroup
+		if g then
+			sound.SoundGroup = g
+		end
 		return
 	end
 	local g = sfxGroup
@@ -61,34 +75,30 @@ local function routeSound(sound: Sound)
 	end
 end
 
+local function ensureGroup(name: string): SoundGroup
+	local existing = SoundService:FindFirstChild(name)
+	if existing and existing:IsA("SoundGroup") then
+		return existing
+	end
+	local g = Instance.new("SoundGroup")
+	g.Name = name
+	g.Parent = SoundService
+	return g
+end
+
 function AudioSettings.init()
 	if initialized then
 		return
 	end
 	initialized = true
 
-	local existingSfx = SoundService:FindFirstChild("OceanTD_SFX")
-	if existingSfx and existingSfx:IsA("SoundGroup") then
-		sfxGroup = existingSfx
-	else
-		local g = Instance.new("SoundGroup")
-		g.Name = "OceanTD_SFX"
-		g.Parent = SoundService
-		sfxGroup = g
-	end
-
-	local existingBgm = SoundService:FindFirstChild("OceanTD_BGM")
-	if existingBgm and existingBgm:IsA("SoundGroup") then
-		bgmGroup = existingBgm
-	else
-		local g = Instance.new("SoundGroup")
-		g.Name = "OceanTD_BGM"
-		g.Parent = SoundService
-		bgmGroup = g
-	end
+	sfxGroup = ensureGroup("OceanTD_SFX")
+	bgmGroup = ensureGroup("OceanTD_BGM")
+	narratorGroup = ensureGroup("OceanTD_Narrator")
 
 	sfxGroup.Volume = readAttr(ATTR_SFX, 1)
 	bgmGroup.Volume = readAttr(ATTR_BGM, 0.7)
+	narratorGroup.Volume = readAttr(ATTR_NARRATOR, 1)
 
 	for _, d in ipairs(SoundService:GetDescendants()) do
 		if d:IsA("Sound") then
@@ -110,6 +120,10 @@ function AudioSettings.getBgmGroup(): SoundGroup?
 	return bgmGroup
 end
 
+function AudioSettings.getNarratorGroup(): SoundGroup?
+	return narratorGroup
+end
+
 function AudioSettings.getSfxVolume(): number
 	-- Prefer saved preference so the UI slider doesn't jump while VO is ducking SFX.
 	if sfxDuckActive then
@@ -120,6 +134,10 @@ end
 
 function AudioSettings.getBgmVolume(): number
 	return if bgmGroup then bgmGroup.Volume else readAttr(ATTR_BGM, 0.7)
+end
+
+function AudioSettings.getNarratorVolume(): number
+	return if narratorGroup then narratorGroup.Volume else readAttr(ATTR_NARRATOR, 1)
 end
 
 function AudioSettings.getBgmShuffle(): boolean
@@ -220,6 +238,17 @@ function AudioSettings.setBgmVolume(v: number)
 	end
 end
 
+function AudioSettings.setNarratorVolume(v: number)
+	local n = clamp01(v)
+	if narratorGroup then
+		narratorGroup.Volume = n
+	end
+	local player = Players.LocalPlayer
+	if player then
+		player:SetAttribute(ATTR_NARRATOR, n)
+	end
+end
+
 function AudioSettings.setBgmShuffle(on: boolean)
 	local player = Players.LocalPlayer
 	if player then
@@ -235,10 +264,16 @@ function AudioSettings.markBgmSound(sound: Sound)
 	end
 end
 
--- Tutorial / explainer VO: skip SFX SoundGroup so the SFX slider doesn't bury dialogue.
+-- Tutorial / explainer VO: Narrator SoundGroup (separate slider from SFX).
 function AudioSettings.markVoSound(sound: Sound)
 	sound:SetAttribute("OceanTD_VoTrack", true)
-	sound.SoundGroup = nil
+	AudioSettings.init()
+	local g = narratorGroup
+	if g then
+		sound.SoundGroup = g
+	else
+		sound.SoundGroup = nil
+	end
 end
 
 return AudioSettings

@@ -256,10 +256,15 @@ local function playColorBurstSound()
 end
 
 local function applySeedWheelDisplayOrder(gui: ScreenGui)
-	-- Under reef report while open; under skills bubbles while skills open; else under left HUD.
+	-- Under reef report / store / skills while those are open; else under left HUD.
 	local report = playerGui:FindFirstChild("OceanTD_ReefReport")
 	if playerGui:GetAttribute("OceanTD_ReefReportOpen") == true and report and report:IsA("ScreenGui") then
 		gui.DisplayOrder = math.max(0, report.DisplayOrder - 1)
+		return
+	end
+	local store = playerGui:FindFirstChild("OceanTD_Store")
+	if playerGui:GetAttribute("OceanTD_StoreOpen") == true and store and store:IsA("ScreenGui") then
+		gui.DisplayOrder = math.max(0, store.DisplayOrder - 1)
 		return
 	end
 	local skills = playerGui:FindFirstChild("MobileSkillsA")
@@ -1341,6 +1346,13 @@ playerGui:GetAttributeChangedSignal("OceanTD_SkillsBubblesOpen"):Connect(functio
 end)
 
 playerGui:GetAttributeChangedSignal("OceanTD_ReefReportOpen"):Connect(function()
+	local overlay = playerGui:FindFirstChild("OceanTD_SeedWheel")
+	if overlay and overlay:IsA("ScreenGui") then
+		applySeedWheelDisplayOrder(overlay)
+	end
+end)
+
+playerGui:GetAttributeChangedSignal("OceanTD_StoreOpen"):Connect(function()
 	local overlay = playerGui:FindFirstChild("OceanTD_SeedWheel")
 	if overlay and overlay:IsA("ScreenGui") then
 		applySeedWheelDisplayOrder(overlay)

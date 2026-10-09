@@ -126,6 +126,7 @@ local function uiHidesRoll(): boolean
 	return playerGui:GetAttribute(SKILLS_OPEN_ATTR) == true
 		or playerGui:GetAttribute(POWERUP_OPEN_ATTR) == true
 		or playerGui:GetAttribute(REPORT_OPEN_ATTR) == true
+		or playerGui:GetAttribute(STORE_OPEN_ATTR) == true
 		or playerGui:GetAttribute(HIDE_UI_ACTIVE_ATTR) == true
 		or InventoryState.isOpen()
 end
@@ -1324,6 +1325,7 @@ end
 playerGui:GetAttributeChangedSignal(SKILLS_OPEN_ATTR):Connect(onOverlayUiAttrChanged)
 playerGui:GetAttributeChangedSignal(POWERUP_OPEN_ATTR):Connect(onOverlayUiAttrChanged)
 playerGui:GetAttributeChangedSignal(REPORT_OPEN_ATTR):Connect(onOverlayUiAttrChanged)
+playerGui:GetAttributeChangedSignal(STORE_OPEN_ATTR):Connect(onOverlayUiAttrChanged)
 playerGui:GetAttributeChangedSignal(HIDE_UI_ACTIVE_ATTR):Connect(onOverlayUiAttrChanged)
 InventoryState.onOpenChanged(function()
 	refreshRollButtonVisibility()

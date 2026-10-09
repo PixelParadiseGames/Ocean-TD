@@ -448,16 +448,23 @@ local function setQuickVisible(on: boolean)
 	end
 end
 
+local function hudBlocksQuick(): boolean
+	-- Fullscreen overlays own the left HUD — don't keep PlotCam yaw/zoom pads up.
+	return playerGui:GetAttribute("OceanTD_StoreOpen") == true
+		or playerGui:GetAttribute("OceanTD_SkillsBubblesOpen") == true
+		or playerGui:GetAttribute("OceanTD_ReefReportOpen") == true
+end
+
 local function syncQuickVisibility()
 	-- Yaw / DistOff quick pad under Plot Cam — keep these even when the full tuner panel is off.
-	setQuickVisible(visible and carouselCollapsedReady())
+	setQuickVisible(visible and carouselCollapsedReady() and not hudBlocksQuick())
 end
 
 function PlotCam2Tune.setVisible(on: boolean)
 	visible = on == true
 	if SHOW_DEBUG_PANEL then
 		local sg = ensureGui()
-		sg.Enabled = visible
+		sg.Enabled = visible and not hudBlocksQuick()
 		if visible then
 			refreshReadout()
 		end
@@ -470,6 +477,9 @@ end
 playerGui:GetAttributeChangedSignal(FreeCamConfig.ATTR_CAROUSEL_COLLAPSED):Connect(function()
 	syncQuickVisibility()
 end)
+playerGui:GetAttributeChangedSignal("OceanTD_StoreOpen"):Connect(syncQuickVisibility)
+playerGui:GetAttributeChangedSignal("OceanTD_SkillsBubblesOpen"):Connect(syncQuickVisibility)
+playerGui:GetAttributeChangedSignal("OceanTD_ReefReportOpen"):Connect(syncQuickVisibility)
 
 function PlotCam2Tune.isVisible(): boolean
 	return visible

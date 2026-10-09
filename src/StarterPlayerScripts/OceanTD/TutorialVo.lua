@@ -1,7 +1,7 @@
 --!strict
 --[[
-	One-shot tutorial voice-over clips: full volume + soft-duck BGM/SFX until Ended/Stop.
-	VO bypasses the SFX SoundGroup (settings slider) so dialogue isn't buried under music.
+	One-shot tutorial voice-over clips: Narrator SoundGroup + soft-duck BGM/SFX until Ended/Stop.
+	VO uses OceanTD_Narrator (Settings → Narrator), not the SFX slider.
 	playWhenIdle queues behind the current clip (e.g. wave explainer after "how many waves").
 ]]
 

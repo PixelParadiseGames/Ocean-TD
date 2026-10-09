@@ -38,12 +38,19 @@ local BRIGHT_GREEN_RING = Color3.fromRGB(40, 255, 90)
 local WHITE = Color3.new(1, 1, 1)
 local PANEL_BG = Color3.fromRGB(12, 28, 36)
 local RHEALTH_LAYOUT_VER = 6
-local RHEALTH_STAGE_TEXT_SIZE = 22 -- +3 vs prior ~19 scaled
-local RHEALTH_STAT_TEXT_SIZE = 15 -- Max N (+2 from prior 13)
+local RHEALTH_STAGE_TEXT_SIZE = 22
+local RHEALTH_STAT_TEXT_SIZE = 15 -- +2 from prior 13
 local RHEALTH_CLOSE_SCALE = 0.7 -- 30% smaller than default CloseBTN
 local POWERUP_Z = 500
 local ACTIVE_STAGE_SCALE = 1.2
 local CLOSE_X_PULSE = TweenInfo.new(0.85, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true)
+-- 25% slower than the first pass (was 0.45 / 0.1 / 0.08).
+local STAGE_INTRO_SEC = 0.5625
+local STAGE_INTRO_STAGGER_SEC = 0.125 -- stage 1 → 2 → …
+local STAGE_ICON_STAGGER_SEC = 0.125 -- N → check/lock after all scaled (25% slower than 0.1)
+local STAGE_INTRO_INFO = TweenInfo.new(STAGE_INTRO_SEC, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
+local INTRO_GREY = Color3.fromRGB(55, 55, 58)
+local INTRO_STROKE_WHITE = Color3.new(1, 1, 1)
 local UNLOCK_STROKE_THICKNESS = 2
 local UNLOCK_SOUND_ID = "rbxassetid://134583420216867"
 
@@ -53,6 +60,12 @@ unlockSound.SoundId = UNLOCK_SOUND_ID
 unlockSound.Volume = 1
 unlockSound.Parent = SoundService
 
+local stageIntroSfx = {
+	pop = "rbxassetid://5852470908", -- grey circle scale-in
+	check = "rbxassetid://138571475125488", -- N → check
+	lock = "rbxassetid://9126267639", -- N → lock
+}
+
 local function playUnlockSound()
 	local s = unlockSound:Clone()
 	s.Parent = SoundService
@@ -61,6 +74,35 @@ local function playUnlockSound()
 		s:Destroy()
 	end)
 	task.delay(4, function()
+		if s.Parent then
+			s:Destroy()
+		end
+	end)
+end
+
+-- stepIndex is 1-based within that SFX series (rising for pop/check, falling for lock).
+local function playStageIntroSfx(kind: "pop" | "check" | "lock", stepIndex: number)
+	local id = stageIntroSfx[kind]
+	if not id then
+		return
+	end
+	local pitch: number
+	if kind == "lock" then
+		pitch = math.clamp(1.22 - (stepIndex - 1) * 0.055, 0.72, 1.28)
+	else
+		pitch = math.clamp(0.88 + (stepIndex - 1) * 0.055, 0.82, 1.35)
+	end
+	local s = Instance.new("Sound")
+	s.Name = "OceanTD_StageIntro_" .. kind
+	s.SoundId = id
+	s.Volume = 0.75
+	s.PlaybackSpeed = pitch
+	s.Parent = SoundService
+	s:Play()
+	s.Ended:Once(function()
+		s:Destroy()
+	end)
+	task.delay(3, function()
 		if s.Parent then
 			s:Destroy()
 		end
@@ -91,6 +133,25 @@ local lockOverlays: { GuiObject } = {}
 local refreshTemplate: () -> ()
 local activeSkillId: string? = nil
 local popupOpen = false
+type TitleLayoutBackup = {
+	parent: Instance?,
+	pos: UDim2,
+	size: UDim2,
+	anchor: Vector2,
+	textX: Enum.TextXAlignment,
+	textY: Enum.TextYAlignment,
+}
+local unlockNameLayoutBackup: TitleLayoutBackup? = nil
+local unlockDescLayoutBackup: TitleLayoutBackup? = nil
+local nextStageLayoutBackup: TitleLayoutBackup? = nil
+-- Dedicated full-screen layer so title/subtitle never live inside the stage circle.
+local SIDE_TEXT_GUI_NAME = "_OceanTD_PowerUpSideText"
+local SIDE_TITLE_TEXT_SIZE = 35 -- +1 from prior 34
+local SIDE_SUB_TEXT_SIZE = 21 -- +1 from prior 20
+local sideTextGui: ScreenGui? = nil
+local sideIconLbl: ImageLabel? = nil
+local sideTitleLbl: TextLabel? = nil
+local sideSubLbl: TextLabel? = nil
 local confirmGui: ScreenGui? = nil
 local toastGui: ScreenGui? = nil
 local bound = false
@@ -110,19 +171,18 @@ local unlockBtnPulseToken = 0
 local nextUnlockPulseConn: RBXScriptConnection? = nil
 local nextUnlockPulseToken = 0
 local lastPowerUpClickAt = 0
+local stageIntroToken = 0
+local stageIntroTweens: { Tween } = {}
+local playStageIntroOnNextRefresh = false
+local stageIntroActive = false
 
--- Reef Health: horizontal 8-stage layout (replaces Studio ring chrome for this skill only).
+-- Reef Health layout mode:
+--   "RING" = shared Studio ring (same as other skills) — default
+--   "LINE" = full-bleed horizontal backup kept in RHealthUI below
+local RHEALTH_LAYOUT_MODE: "RING" | "LINE" = "RING"
 local RHEALTH_SUBHEAD = "Raise the reef's maximum health"
 local rHealthLayout: Frame? = nil
 local rHealthUnlockBtn: TextButton? = nil
-local closeLayoutSaved: {
-	parent: Instance?,
-	pos: UDim2,
-	size: UDim2,
-	anchor: Vector2,
-	absX: number,
-	absY: number,
-}? = nil
 type RHealthCol = {
 	root: Frame,
 	bubble: TextButton,
@@ -132,14 +192,25 @@ type RHealthCol = {
 	unlockSlot: Frame,
 }
 local rHealthCols: { RHealthCol } = {}
+local rHealthCloseBackup: {
+	parent: Instance?,
+	position: UDim2,
+	anchorPoint: Vector2,
+	size: UDim2,
+}? = nil
+local rHealthCloseScale: UIScale? = nil
 
 local unlockRf = Remotes.getFunction("RequestUnlockSkillStage")
 local getStagesRf = Remotes.getFunction("RequestGetSkillStages")
 local setActiveRf = Remotes.getFunction("RequestSetSkillActiveStage")
 local syncRemote = Remotes.get("SkillStagesSync")
 
+local function useRHealthLineLayout(): boolean
+	return activeSkillId == "RHealth" and RHEALTH_LAYOUT_MODE == "LINE"
+end
+
 local function navUnlockBtn(): GuiButton?
-	if activeSkillId == "RHealth" and rHealthUnlockBtn and rHealthUnlockBtn.Visible then
+	if useRHealthLineLayout() and rHealthUnlockBtn and rHealthUnlockBtn.Visible then
 		return rHealthUnlockBtn
 	end
 	if unlockBtn and unlockBtn.Visible then
@@ -250,15 +321,27 @@ local function rgbFontTag(c: Color3): string
 	)
 end
 
+local function syncSideSubFromDesc()
+	if not sideSubLbl then
+		return
+	end
+	local raw = if unlockDescLbl then unlockDescLbl.Text else ""
+	local plain = string.gsub(raw, "<[^>]+>", "")
+	sideSubLbl.Text = plain
+	sideSubLbl.Visible = plain ~= ""
+end
+
 local function startUnlockDescPulse(skillId: string, buildRichText: (Color3) -> string)
 	stopUnlockDescPulse()
 	if not unlockDescLbl then
 		return
 	end
 	unlockDescLbl.RichText = true
-	unlockDescLbl.Visible = true
+	-- Studio label stays hidden; side ScreenGui shows the copy.
+	unlockDescLbl.Visible = false
 	-- Apply immediately so dial-down doesn't wait a frame (or stick on old copy).
 	unlockDescLbl.Text = buildRichText(DESC_PULSE_GREEN)
+	syncSideSubFromDesc()
 	local token = unlockDescPulseToken
 	unlockDescPulseConn = RunService.Heartbeat:Connect(function()
 		if token ~= unlockDescPulseToken or not unlockDescLbl then
@@ -270,6 +353,8 @@ local function startUnlockDescPulse(skillId: string, buildRichText: (Color3) -> 
 		local u = (math.sin(os.clock() * math.pi * 1.35) + 1) * 0.5
 		local c = DESC_PULSE_GREEN:Lerp(DESC_PULSE_WHITE, u)
 		unlockDescLbl.Text = buildRichText(c)
+		unlockDescLbl.Visible = false
+		syncSideSubFromDesc()
 	end)
 end
 
@@ -532,6 +617,230 @@ local function ensureStageScale(sb: GuiObject): UIScale
 	return scale
 end
 
+local function cancelStageIntro()
+	stageIntroToken += 1
+	stageIntroActive = false
+	for _, tw in ipairs(stageIntroTweens) do
+		pcall(function()
+			tw:Cancel()
+		end)
+	end
+	table.clear(stageIntroTweens)
+end
+
+-- Hide check / lock glyph art while showing stage N (children only — keep circle root).
+local function setStageChildImagesHidden(root: GuiObject, hidden: boolean)
+	for _, d in ipairs(root:GetDescendants()) do
+		if d.Name == "_OceanTD_IntroStageNum" or d.Name == "_OceanTD_IntroStroke" then
+			continue
+		end
+		if d:IsA("ImageLabel") or d:IsA("ImageButton") then
+			(d :: any).ImageTransparency = if hidden then 1 else 0
+			d.Visible = not hidden
+		elseif d:IsA("TextLabel") or d:IsA("TextButton") then
+			local text = (d :: TextLabel).Text
+			if text == "✓" or string.find(text, "✓", 1, true) or string.lower(d.Name) == "check" then
+				(d :: TextLabel).TextTransparency = if hidden then 1 else 0
+				d.Visible = not hidden
+			end
+		end
+	end
+end
+
+local function clearIntroStageNum(host: GuiObject)
+	local num = host:FindFirstChild("_OceanTD_IntroStageNum")
+	if num then
+		num:Destroy()
+	end
+end
+
+local function clearIntroStroke(host: GuiObject)
+	local stroke = host:FindFirstChild("_OceanTD_IntroStroke")
+	if stroke then
+		stroke:Destroy()
+	end
+end
+
+local function ensureIntroStroke(host: GuiObject)
+	local stroke = host:FindFirstChild("_OceanTD_IntroStroke")
+	if not (stroke and stroke:IsA("UIStroke")) then
+		if stroke then
+			stroke:Destroy()
+		end
+		stroke = Instance.new("UIStroke")
+		stroke.Name = "_OceanTD_IntroStroke"
+		stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+		stroke.LineJoinMode = Enum.LineJoinMode.Round
+		stroke.Parent = host
+	end
+	;(stroke :: UIStroke).Thickness = 3.5
+	;(stroke :: UIStroke).Color = INTRO_STROKE_WHITE
+	;(stroke :: UIStroke).Transparency = 0
+	;(stroke :: UIStroke).Enabled = true
+end
+
+local function suppressNonIntroStrokes(root: GuiObject)
+	-- Studio active stages keep a green UIStroke — force them off so only white intro ring shows.
+	local function suppress(stroke: UIStroke)
+		if stroke.Name == "_OceanTD_IntroStroke" then
+			return
+		end
+		if stroke:GetAttribute("_OceanTD_IntroStrokeWas") == nil then
+			stroke:SetAttribute("_OceanTD_IntroStrokeWas", stroke.Enabled)
+			stroke:SetAttribute("_OceanTD_IntroStrokeColor", stroke.Color)
+		end
+		stroke.Enabled = false
+	end
+	for _, ch in ipairs(root:GetChildren()) do
+		if ch:IsA("UIStroke") then
+			suppress(ch)
+		end
+	end
+	for _, d in ipairs(root:GetDescendants()) do
+		if d:IsA("UIStroke") then
+			suppress(d)
+		end
+	end
+end
+
+local function restoreSuppressedStrokes(root: GuiObject)
+	local function restore(stroke: UIStroke)
+		local was = stroke:GetAttribute("_OceanTD_IntroStrokeWas")
+		if typeof(was) == "boolean" then
+			stroke.Enabled = was
+			stroke:SetAttribute("_OceanTD_IntroStrokeWas", nil)
+		end
+		local col = stroke:GetAttribute("_OceanTD_IntroStrokeColor")
+		if typeof(col) == "Color3" then
+			stroke.Color = col
+			stroke:SetAttribute("_OceanTD_IntroStrokeColor", nil)
+		end
+	end
+	for _, ch in ipairs(root:GetChildren()) do
+		if ch:IsA("UIStroke") then
+			restore(ch)
+		end
+	end
+	for _, d in ipairs(root:GetDescendants()) do
+		if d:IsA("UIStroke") then
+			restore(d)
+		end
+	end
+end
+
+local function paintStageIntroNeutral(root: GuiObject)
+	-- Dark grey circle + white ring; hide baked check art until icon reveal.
+	if root:IsA("ImageLabel") or root:IsA("ImageButton") then
+		if root:GetAttribute("_OceanTD_IntroImgT") == nil then
+			root:SetAttribute("_OceanTD_IntroImgT", (root :: any).ImageTransparency)
+		end
+		-- Hide circle image (often includes a check glyph) for the N-only intro.
+		(root :: any).ImageTransparency = 1
+	end
+	if root:GetAttribute("_OceanTD_IntroBgT") == nil then
+		root:SetAttribute("_OceanTD_IntroBgT", root.BackgroundTransparency)
+	end
+	root.BackgroundTransparency = 0
+	root.BackgroundColor3 = INTRO_GREY
+	-- Ensure round clip if Studio relied on the image for the circle shape.
+	if not root:FindFirstChildOfClass("UICorner") then
+		local corner = Instance.new("UICorner")
+		corner.Name = "_OceanTD_IntroCorner"
+		corner.CornerRadius = UDim.new(1, 0)
+		corner.Parent = root
+	end
+	for _, d in ipairs(root:GetDescendants()) do
+		if d.Name == "_OceanTD_IntroStageNum" or d.Name == "_OceanTD_IntroStroke" then
+			continue
+		end
+		if d:IsA("ImageLabel") or d:IsA("ImageButton") then
+			(d :: any).ImageTransparency = 1
+			d.Visible = false
+		elseif d:IsA("GuiObject") and d.BackgroundTransparency < 0.99 then
+			d.BackgroundColor3 = INTRO_GREY
+		end
+	end
+	suppressNonIntroStrokes(root)
+	ensureIntroStroke(root)
+end
+
+local function restoreIntroRootVisual(root: GuiObject)
+	local imgT = root:GetAttribute("_OceanTD_IntroImgT")
+	if typeof(imgT) == "number" and (root:IsA("ImageLabel") or root:IsA("ImageButton")) then
+		(root :: any).ImageTransparency = imgT
+		root:SetAttribute("_OceanTD_IntroImgT", nil)
+	end
+	local bgT = root:GetAttribute("_OceanTD_IntroBgT")
+	if typeof(bgT) == "number" then
+		root.BackgroundTransparency = bgT
+		root:SetAttribute("_OceanTD_IntroBgT", nil)
+	end
+	local introCorner = root:FindFirstChild("_OceanTD_IntroCorner")
+	if introCorner then
+		introCorner:Destroy()
+	end
+	restoreSuppressedStrokes(root)
+end
+
+local function showIntroStageNum(host: GuiObject, stageNum: number)
+	clearIntroStageNum(host)
+	local num = Instance.new("TextLabel")
+	num.Name = "_OceanTD_IntroStageNum"
+	num.BackgroundTransparency = 1
+	num.AnchorPoint = Vector2.new(0.5, 0.5)
+	num.Position = UDim2.fromScale(0.5, 0.5)
+	num.Size = UDim2.fromScale(0.72, 0.72)
+	num.Font = UI_FONT
+	num.TextScaled = true
+	num.TextColor3 = WHITE
+	num.TextStrokeTransparency = 1
+	num.Text = tostring(stageNum)
+	num.ZIndex = host.ZIndex + 20
+	num.Active = false
+	num.Visible = true
+	num.Parent = host
+	return num
+end
+
+-- UIScale grows from AnchorPoint — keep the circle visually centered while scaling.
+local function ensureCenterPivot(gui: GuiObject)
+	if gui.AnchorPoint.X == 0.5 and gui.AnchorPoint.Y == 0.5 then
+		return
+	end
+	local parent = gui.Parent
+	if not (parent and parent:IsA("GuiObject")) then
+		gui.AnchorPoint = Vector2.new(0.5, 0.5)
+		return
+	end
+	local p = parent :: GuiObject
+	local ps = p.AbsoluteSize
+	if ps.X < 1 or ps.Y < 1 then
+		gui.AnchorPoint = Vector2.new(0.5, 0.5)
+		return
+	end
+	local absCenter = gui.AbsolutePosition + gui.AbsoluteSize * 0.5
+	local rel = absCenter - p.AbsolutePosition
+	gui.AnchorPoint = Vector2.new(0.5, 0.5)
+	gui.Position = UDim2.fromScale(rel.X / ps.X, rel.Y / ps.Y)
+end
+
+local function paintStageLockedFill(root: GuiObject)
+	local function force(gui: GuiObject)
+		if gui.BackgroundTransparency < 0.99 then
+			gui.BackgroundColor3 = BRIGHT_RED
+		end
+		if gui:IsA("ImageLabel") or gui:IsA("ImageButton") then
+			(gui :: any).ImageColor3 = BRIGHT_RED
+		end
+	end
+	force(root)
+	for _, d in ipairs(root:GetDescendants()) do
+		if d:IsA("GuiObject") then
+			force(d)
+		end
+	end
+end
+
 local function stopNextUnlockPulse()
 	nextUnlockPulseToken += 1
 	if nextUnlockPulseConn then
@@ -757,6 +1066,13 @@ local function clearLockOverlays()
 		if num then
 			num:Destroy()
 		end
+		clearIntroStageNum(sb)
+		clearIntroStroke(sb)
+		setStageChildImagesHidden(sb, false)
+	end
+	for _, col in ipairs(rHealthCols) do
+		clearIntroStageNum(col.bubble)
+		clearIntroStroke(col.bubble)
 	end
 end
 
@@ -969,14 +1285,15 @@ local function setStudioRingChromeVisible(visible: boolean)
 			sb.Visible = false
 		end
 	end
+	-- Studio UnlockName / UnlockDesc stay hidden while open — side ScreenGui owns that copy.
 	if unlockNameLbl then
-		unlockNameLbl.Visible = visible
+		unlockNameLbl.Visible = false
+	end
+	if unlockDescLbl then
+		unlockDescLbl.Visible = false
 	end
 	if nextStageLbl then
 		nextStageLbl.Visible = visible
-	end
-	if unlockDescLbl then
-		unlockDescLbl.Visible = visible
 	end
 	if unlockBtn then
 		unlockBtn.Visible = visible
@@ -984,486 +1301,690 @@ local function setStudioRingChromeVisible(visible: boolean)
 	end
 end
 
-local function restoreCloseLayoutFromRHealth()
-	if not closeBtn or not closeLayoutSaved then
-		return
+local function applyStudioStageResting(
+	stageIndex: number,
+	sb: GuiObject,
+	active: number,
+	unlocked: number,
+	nextUnlock: number?
+)
+	clearIntroStageNum(sb)
+	clearIntroStroke(sb)
+	restoreIntroRootVisual(sb)
+	setStageChildImagesHidden(sb, false)
+	local leftoverNum = sb:FindFirstChild("_OceanTD_StageNum")
+	if leftoverNum then
+		leftoverNum:Destroy()
 	end
-	if closeLayoutSaved.parent then
-		closeBtn.Parent = closeLayoutSaved.parent
+	local leftoverLock = sb:FindFirstChild("_OceanTD_StageLock")
+	if leftoverLock then
+		leftoverLock:Destroy()
 	end
-	closeBtn.AnchorPoint = closeLayoutSaved.anchor
-	closeBtn.Position = closeLayoutSaved.pos
-	closeBtn.Size = closeLayoutSaved.size
-	closeLayoutSaved = nil
-end
-
-local function applyRHealthCloseLayout()
-	if not closeBtn or not hostScreenGui then
-		return
+	local leftoverStroke = sb:FindFirstChild("_OceanTD_NextUnlockStroke")
+	if leftoverStroke then
+		leftoverStroke:Destroy()
 	end
-	if not closeLayoutSaved then
-		-- Capture pixel size while still under the Studio parent (before reparent).
-		closeLayoutSaved = {
-			parent = closeBtn.Parent,
-			pos = closeBtn.Position,
-			size = closeBtn.Size,
-			anchor = closeBtn.AnchorPoint,
-			absX = math.max(1, closeBtn.AbsoluteSize.X),
-			absY = math.max(1, closeBtn.AbsoluteSize.Y),
-		}
-	end
-	-- Top-right of the full screen, 30% smaller (offset size so ScreenGui scale doesn't inflate it).
-	local w = math.max(24, closeLayoutSaved.absX * RHEALTH_CLOSE_SCALE)
-	local h = math.max(24, closeLayoutSaved.absY * RHEALTH_CLOSE_SCALE)
-	closeBtn.Parent = hostScreenGui
-	closeBtn.AnchorPoint = Vector2.new(1, 0)
-	closeBtn.Position = UDim2.new(1, -12, 0, 12)
-	closeBtn.Size = UDim2.fromOffset(w, h)
-	closeBtn.Visible = true
-	raiseInteractive(closeBtn, POWERUP_Z + 700)
-	if closeHitBtn then
-		closeHitBtn.Active = true
-		closeHitBtn.Visible = true
-		closeHitBtn.ZIndex = POWERUP_Z + 710
-	end
-	ensureCloseXVisible()
-end
-
-local function hideRHealthLayout()
-	if rHealthLayout then
-		rHealthLayout.Visible = false
-	end
-	if rHealthUnlockBtn then
-		rHealthUnlockBtn.Visible = false
-		rHealthUnlockBtn.Active = false
-	end
-	restoreCloseLayoutFromRHealth()
-end
-
-local function setRHealthBubbleGradient(bubble: GuiObject, dark: Color3, bright: Color3)
-	bubble.BackgroundColor3 = WHITE
-	local grad = bubble:FindFirstChild("_OceanTD_FillGrad")
-	if not (grad and grad:IsA("UIGradient")) then
-		if grad then
-			grad:Destroy()
-		end
-		grad = Instance.new("UIGradient")
-		grad.Name = "_OceanTD_FillGrad"
-		grad.Rotation = 90
-		grad.Parent = bubble
-	end
-	;(grad :: UIGradient).Enabled = true
-	;(grad :: UIGradient).Color = ColorSequence.new({
-		ColorSequenceKeypoint.new(0, dark),
-		ColorSequenceKeypoint.new(1, bright),
-	})
-end
-
-local function clearRHealthBubbleGradient(bubble: GuiObject)
-	local grad = bubble:FindFirstChild("_OceanTD_FillGrad")
-	if grad and grad:IsA("UIGradient") then
-		grad.Enabled = false
-	end
-end
-
-local function setRHealthCircleStroke(bubble: GuiObject, color: Color3?, thickness: number?)
-	local existing = bubble:FindFirstChild("_OceanTD_CircleStroke")
-	if not color then
-		if existing then
-			existing:Destroy()
-		end
-		return
-	end
-	local stroke: UIStroke
-	if existing and existing:IsA("UIStroke") then
-		stroke = existing
+	local stageScale = ensureStageScale(sb)
+	if nextUnlock and stageIndex == nextUnlock then
+		placeNextUnlockOn(sb, stageIndex)
+		stageScale.Scale = 1
+	elseif stageIndex > unlocked then
+		placeLockOn(sb)
+		stageScale.Scale = 1
+	elseif stageIndex == active then
+		paintStageCheckmarks(sb, "active")
+		stageScale.Scale = ACTIVE_STAGE_SCALE
 	else
-		if existing then
-			existing:Destroy()
+		paintStageCheckmarks(sb, "idle")
+		stageScale.Scale = 1
+	end
+end
+
+local function prepareStudioStageIntro(
+	stageIndex: number,
+	sb: GuiObject,
+	active: number,
+	_unlocked: number,
+	_nextUnlock: number?
+): number
+	-- Dark grey + white N/stroke while scaling; green/red applied on icon reveal.
+	clearIntroStageNum(sb)
+	local leftoverLock = sb:FindFirstChild("_OceanTD_StageLock")
+	if leftoverLock then
+		leftoverLock:Destroy()
+	end
+	local leftoverStroke = sb:FindFirstChild("_OceanTD_NextUnlockStroke")
+	if leftoverStroke then
+		leftoverStroke:Destroy()
+	end
+	local restScale = if stageIndex == active then ACTIVE_STAGE_SCALE else 1
+	paintStageIntroNeutral(sb)
+	setStageChildImagesHidden(sb, true)
+	showIntroStageNum(sb, stageIndex)
+	local scale = ensureStageScale(sb)
+	scale.Scale = 0
+	return restScale
+end
+
+local function playStudioStageIntro(active: number, unlocked: number, nextUnlock: number?, maxS: number)
+	cancelStageIntro()
+	local my = stageIntroToken
+	stageIntroActive = true
+	clearLockOverlays()
+
+	type IntroStage = { index: number, sb: GuiObject, restScale: number }
+	local stages: { IntroStage } = {}
+	for i = 1, SkillStages.MAX_STAGE do
+		local sb = stageButtons[i]
+		if not sb then
+			continue
 		end
-		stroke = Instance.new("UIStroke")
-		stroke.Name = "_OceanTD_CircleStroke"
-		stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
-		stroke.LineJoinMode = Enum.LineJoinMode.Round
-		stroke.Parent = bubble
-	end
-	stroke.Thickness = thickness or 3.5
-	stroke.Color = color
-	stroke.Transparency = 0
-	stroke.Enabled = true
-end
-
-local function ensureRHealthNextUnlockRing(bubble: GuiObject)
-	-- Dedicated ring on the circle (not the lock glyph) so red↔white always shows.
-	local old = bubble:FindFirstChild("_OceanTD_NextUnlockStroke")
-	if old then
-		old:Destroy()
-	end
-	setRHealthCircleStroke(bubble, nil)
-	local stroke = Instance.new("UIStroke")
-	stroke.Name = "_OceanTD_NextUnlockStroke"
-	stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
-	stroke.LineJoinMode = Enum.LineJoinMode.Round
-	stroke.Thickness = 4.5
-	stroke.Color = BRIGHT_RED
-	stroke.Transparency = 0
-	stroke.Enabled = true
-	stroke.Parent = bubble
-	startNextUnlockPulse(stroke, BRIGHT_RED, WHITE)
-end
-
-local function paintRHealthCheckStroke(check: TextLabel, color: Color3)
-	local stroke = check:FindFirstChild("_OceanTD_CheckStroke")
-	if not (stroke and stroke:IsA("UIStroke")) then
-		if stroke then
-			stroke:Destroy()
+		if i > maxS then
+			sb.Visible = false
+			continue
 		end
-		stroke = Instance.new("UIStroke")
-		stroke.Name = "_OceanTD_CheckStroke"
-		stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Contextual
-		stroke.LineJoinMode = Enum.LineJoinMode.Round
-		stroke.Thickness = 2.5
-		stroke.Parent = check
+		sb.Visible = true
+		ensureCenterPivot(sb)
+		local restScale = prepareStudioStageIntro(i, sb, active, unlocked, nextUnlock)
+		table.insert(stages, { index = i, sb = sb, restScale = restScale })
 	end
-	;(stroke :: UIStroke).Color = color
-	;(stroke :: UIStroke).Transparency = 0
-	;(stroke :: UIStroke).Enabled = true
+	if #stages == 0 then
+		stageIntroActive = false
+		return
+	end
+
+	local function revealIconsFromOne()
+		local checkStep = 0
+		local lockStep = 0
+		for j, entry in ipairs(stages) do
+			task.delay((j - 1) * STAGE_ICON_STAGGER_SEC, function()
+				if my ~= stageIntroToken or not popupOpen or activeSkillId == nil then
+					return
+				end
+				-- Drop prior lock overlays for this button only, then apply resting icon.
+				local oldLock = entry.sb:FindFirstChild("_OceanTD_StageLock")
+				if oldLock then
+					-- Also remove from lockOverlays tracking table.
+					for k = #lockOverlays, 1, -1 do
+						if lockOverlays[k] == oldLock then
+							table.remove(lockOverlays, k)
+						end
+					end
+					oldLock:Destroy()
+				end
+				if entry.index <= unlocked then
+					checkStep += 1
+					playStageIntroSfx("check", checkStep)
+				else
+					lockStep += 1
+					playStageIntroSfx("lock", lockStep)
+				end
+				applyStudioStageResting(entry.index, entry.sb, active, unlocked, nextUnlock)
+				if closeBtn and popupOpen then
+					raiseInteractive(closeBtn, POWERUP_Z + 700)
+					ensureCloseXVisible()
+				end
+				if unlockBtn and unlockBtn.Visible and unlockBtn.Active then
+					raiseInteractive(unlockBtn, POWERUP_Z + 650)
+				end
+				if j == #stages and my == stageIntroToken then
+					stageIntroActive = false
+				end
+			end)
+		end
+	end
+
+	for j, entry in ipairs(stages) do
+		local delaySec = (j - 1) * STAGE_INTRO_STAGGER_SEC
+		task.delay(delaySec, function()
+			if my ~= stageIntroToken or not popupOpen then
+				return
+			end
+			playStageIntroSfx("pop", j)
+			local scale = ensureStageScale(entry.sb)
+			scale.Scale = 0
+			local tw = TweenService:Create(scale, STAGE_INTRO_INFO, { Scale = entry.restScale })
+			table.insert(stageIntroTweens, tw)
+			tw:Play()
+			if j == #stages then
+				local conn: RBXScriptConnection? = nil
+				conn = tw.Completed:Connect(function(playbackState)
+					if conn then
+						conn:Disconnect()
+						conn = nil
+					end
+					if playbackState ~= Enum.PlaybackState.Completed then
+						return
+					end
+					if my ~= stageIntroToken or not popupOpen then
+						return
+					end
+					revealIconsFromOne()
+				end)
+			end
+		end)
+	end
 end
 
-local function paintRHealthBubble(col: RHealthCol, mode: "active" | "idle")
-	local bubble = col.bubble
-	local check = col.check
-	-- Same size for active + idle — no +20% scale on Reef Health.
-	ensureStageScale(bubble).Scale = 1
-	local nextStroke = bubble:FindFirstChild("_OceanTD_NextUnlockStroke")
-	if nextStroke then
-		nextStroke:Destroy()
+local function backupTextLayout(lbl: TextLabel): TitleLayoutBackup
+	return {
+		parent = lbl.Parent,
+		pos = lbl.Position,
+		size = lbl.Size,
+		anchor = lbl.AnchorPoint,
+		textX = lbl.TextXAlignment,
+		textY = lbl.TextYAlignment,
+	}
+end
+
+local function restoreTextLayout(lbl: TextLabel?, backup: TitleLayoutBackup?)
+	if not lbl or not backup then
+		return
 	end
-	if mode == "active" then
-		setRHealthBubbleGradient(bubble, GREEN_DARK, GREEN_BRIGHT)
-		setRHealthCircleStroke(bubble, BRIGHT_GREEN_RING, 3.5)
-		check.TextColor3 = WHITE
-		check.Text = "✓"
-		check.Visible = true
-		paintRHealthCheckStroke(check, Color3.fromRGB(20, 60, 30))
-	else
-		setRHealthBubbleGradient(bubble, GREY_DARKER, GREY_DARK)
-		setRHealthCircleStroke(bubble, nil)
-		check.TextColor3 = GREY_LIGHT
-		check.Text = "✓"
-		check.Visible = true
-		paintRHealthCheckStroke(check, Color3.fromRGB(40, 40, 40))
+	if backup.parent and backup.parent.Parent then
+		lbl.Parent = backup.parent
+	end
+	lbl.Position = backup.pos
+	lbl.Size = backup.size
+	lbl.AnchorPoint = backup.anchor
+	lbl.TextXAlignment = backup.textX
+	lbl.TextYAlignment = backup.textY
+end
+
+local function absToParentOffset(parent: GuiObject, absPos: Vector2): Vector2
+	return absPos - parent.AbsolutePosition
+end
+
+local function destroySideTextGui()
+	if sideTextGui then
+		sideTextGui:Destroy()
+		sideTextGui = nil
+	end
+	sideIconLbl = nil
+	sideTitleLbl = nil
+	sideSubLbl = nil
+end
+
+local function ensureSideTextGui(): ScreenGui
+	-- Rebuild if an older layout (no icon column) is still around.
+	if sideTextGui and sideTextGui.Parent and sideIconLbl and sideIconLbl.Parent then
+		return sideTextGui
+	end
+	destroySideTextGui()
+	local sg = Instance.new("ScreenGui")
+	sg.Name = SIDE_TEXT_GUI_NAME
+	sg.ResetOnSpawn = false
+	sg.IgnoreGuiInset = true
+	sg.DisplayOrder = POWERUP_Z + 50
+	sg.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+	sg.Enabled = false
+	pcall(function()
+		local anySg = sg :: any
+		anySg.ClipToDeviceSafeArea = false
+		anySg.ScreenInsets = Enum.ScreenInsets.None
+	end)
+	sg.Parent = playerGui
+
+	-- Right ~30% column; content centered in that band.
+	local col = Instance.new("Frame")
+	col.Name = "SideColumn"
+	col.BackgroundTransparency = 1
+	col.BorderSizePixel = 0
+	col.AnchorPoint = Vector2.new(1, 0.5)
+	col.Position = UDim2.fromScale(1, 0.42)
+	col.Size = UDim2.fromScale(0.30, 0.55)
+	col.ZIndex = 5
+	col.Parent = sg
+
+	local list = Instance.new("UIListLayout")
+	list.FillDirection = Enum.FillDirection.Vertical
+	list.HorizontalAlignment = Enum.HorizontalAlignment.Center
+	list.VerticalAlignment = Enum.VerticalAlignment.Center
+	list.Padding = UDim.new(0, 10)
+	list.SortOrder = Enum.SortOrder.LayoutOrder
+	list.Parent = col
+
+	local icon = Instance.new("ImageLabel")
+	icon.Name = "SideIcon"
+	icon.BackgroundTransparency = 1
+	icon.BorderSizePixel = 0
+	icon.Size = UDim2.fromOffset(96, 96)
+	icon.LayoutOrder = 1
+	icon.ScaleType = Enum.ScaleType.Fit
+	icon.ZIndex = 10
+	icon.Parent = col
+	local iconAspect = Instance.new("UIAspectRatioConstraint")
+	iconAspect.AspectRatio = 1
+	iconAspect.Parent = icon
+
+	local title = Instance.new("TextLabel")
+	title.Name = "SideTitle"
+	title.BackgroundTransparency = 1
+	title.Size = UDim2.new(1, -24, 0, 44)
+	title.LayoutOrder = 2
+	title.Font = UI_FONT
+	title.TextSize = SIDE_TITLE_TEXT_SIZE
+	title.TextScaled = false
+	title.TextColor3 = WHITE
+	title.TextXAlignment = Enum.TextXAlignment.Center
+	title.TextYAlignment = Enum.TextYAlignment.Center
+	title.TextWrapped = true
+	title.ZIndex = 10
+	title.Parent = col
+
+	local sub = Instance.new("TextLabel")
+	sub.Name = "SideSub"
+	sub.BackgroundTransparency = 1
+	sub.Size = UDim2.new(1, -24, 0, 64)
+	sub.LayoutOrder = 3
+	sub.Font = UI_FONT
+	sub.TextSize = SIDE_SUB_TEXT_SIZE
+	sub.TextScaled = false
+	sub.TextColor3 = Color3.fromRGB(180, 200, 220)
+	sub.TextXAlignment = Enum.TextXAlignment.Center
+	sub.TextYAlignment = Enum.TextYAlignment.Top
+	sub.TextWrapped = true
+	sub.ZIndex = 10
+	sub.Parent = col
+
+	sideTextGui = sg
+	sideIconLbl = icon
+	sideTitleLbl = title
+	sideSubLbl = sub
+	return sg
+end
+
+-- Title + subtitle on a separate ScreenGui — far right, never inside the stage circle.
+local function layoutTitleBesideSkillBubble()
+	local titleText = if unlockNameLbl then unlockNameLbl.Text else ""
+	local subText = ""
+	if unlockDescLbl then
+		-- Prefer plain text; strip simple rich-text tags for the side panel.
+		subText = unlockDescLbl.Text
+		subText = string.gsub(subText, "<[^>]+>", "")
+	end
+	if titleText == "" and subText == "" then
+		return
+	end
+
+	local sg = ensureSideTextGui()
+	sg.Enabled = popupOpen
+	if sideIconLbl then
+		local iconId = if activeSkillId then SkillStages.iconImageFor(activeSkillId) else nil
+		if iconId and iconId ~= "" then
+			sideIconLbl.Image = iconId
+			sideIconLbl.Visible = true
+		else
+			sideIconLbl.Image = ""
+			sideIconLbl.Visible = false
+		end
+	end
+	if sideTitleLbl then
+		sideTitleLbl.Text = titleText
+		sideTitleLbl.TextSize = SIDE_TITLE_TEXT_SIZE
+		sideTitleLbl.Visible = titleText ~= ""
+	end
+	if sideSubLbl then
+		sideSubLbl.Text = subText
+		sideSubLbl.TextSize = SIDE_SUB_TEXT_SIZE
+		sideSubLbl.Visible = subText ~= ""
+	end
+
+	-- Keep Studio labels hidden inside the circle — side layer owns the copy.
+	if unlockNameLbl then
+		unlockNameLbl.Visible = false
+	end
+	if unlockDescLbl then
+		unlockDescLbl.Visible = false
 	end
 end
 
-local function ensureRHealthLayout()
-	local parent: Instance? = hostScreenGui or template
+local function restoreTitleLayouts()
+	destroySideTextGui()
+	if unlockNameLbl then
+		unlockNameLbl.Visible = true
+	end
+	if unlockDescLbl then
+		unlockDescLbl.Visible = true
+	end
+	restoreTextLayout(nextStageLbl, nextStageLayoutBackup)
+	nextStageLayoutBackup = nil
+	unlockNameLayoutBackup = nil
+	unlockDescLayoutBackup = nil
+end
+
+local function setUnlockButtonLabel(text: string)
+	if not unlockBtn then
+		return
+	end
+	local textChild = unlockBtn:FindFirstChildWhichIsA("TextLabel", true)
+	if unlockBtn:IsA("TextButton") then
+		local tb = unlockBtn :: TextButton
+		if tb.Text ~= "" or not textChild then
+			tb.Text = text
+		elseif textChild then
+			textChild.Text = text
+		end
+	elseif textChild then
+		textChild.Text = text
+	end
+end
+
+local function ensureUnlockCostLabel(parent: Instance): TextLabel
+	local existing = parent:FindFirstChild("_OceanTD_UnlockCost")
+	if existing and existing:IsA("TextLabel") then
+		return existing
+	end
+	if existing then
+		existing:Destroy()
+	end
+	local lbl = Instance.new("TextLabel")
+	lbl.Name = "_OceanTD_UnlockCost"
+	lbl.BackgroundTransparency = 1
+	lbl.Font = UI_FONT
+	lbl.TextSize = 22 -- +2 vs prior 20
+	lbl.TextScaled = false
+	lbl.TextColor3 = COST_GREEN
+	lbl.TextXAlignment = Enum.TextXAlignment.Center
+	lbl.TextYAlignment = Enum.TextYAlignment.Top
+	lbl.ZIndex = POWERUP_Z + 80
+	lbl.Parent = parent
+	return lbl
+end
+
+local function hideUnlockCostLabel()
+	if unlockBtn and unlockBtn.Parent then
+		local lbl = unlockBtn.Parent:FindFirstChild("_OceanTD_UnlockCost")
+		if lbl and lbl:IsA("GuiObject") then
+			lbl.Visible = false
+		end
+	end
+	if template then
+		local lbl = template:FindFirstChild("_OceanTD_UnlockCost", true)
+		if lbl and lbl:IsA("GuiObject") then
+			lbl.Visible = false
+		end
+	end
+end
+
+-- Cost under UNLOCK (button itself is "UNLOCK" only).
+local function layoutUnlockCostBelow(nextS: number?)
+	if not (unlockBtn and unlockBtn.Parent and unlockBtn.Visible and nextS) then
+		hideUnlockCostLabel()
+		return
+	end
+	local parent = unlockBtn.Parent
 	if not parent then
 		return
 	end
-	-- Rebuild if still under the old PowerUpTemplate panel or layout version outdated.
-	local needsRebuild = not rHealthLayout
-		or rHealthLayout.Parent ~= parent
-		or rHealthLayout:GetAttribute("LayoutVer") ~= RHEALTH_LAYOUT_VER
-		or #rHealthCols < SkillStages.MAX_STAGE
-	if not needsRebuild then
+	local cost = SkillStages.stageCost(activeSkillId :: string, nextS)
+	local lbl = ensureUnlockCostLabel(parent)
+	lbl.Text = tostring(cost) .. " $D"
+	lbl.TextSize = 22
+	lbl.Visible = true
+	lbl.TextColor3 = COST_GREEN
+	lbl.AnchorPoint = Vector2.new(0.5, 0)
+	lbl.TextXAlignment = Enum.TextXAlignment.Center
+
+	local uw = unlockBtn.AbsoluteSize.X
+	local uh = unlockBtn.AbsoluteSize.Y
+	if uw >= 8 and uh >= 8 and parent:IsA("GuiObject") then
+		local p = parent :: GuiObject
+		local centerAbs = unlockBtn.AbsolutePosition + Vector2.new(uw * 0.5, uh + 4)
+		local localPos = absToParentOffset(p, centerAbs)
+		lbl.Position = UDim2.fromOffset(math.floor(localPos.X), math.floor(localPos.Y))
+		lbl.Size = UDim2.fromOffset(math.max(120, math.floor(uw)), 28)
+	else
+		local ux, uy, us = unlockBtn.Position, unlockBtn.Position, unlockBtn.Size
+		local ap = unlockBtn.AnchorPoint
+		lbl.Position = UDim2.new(
+			ux.X.Scale + us.X.Scale * (0.5 - ap.X),
+			ux.X.Offset + us.X.Offset * (0.5 - ap.X),
+			uy.Y.Scale + us.Y.Scale * (1 - ap.Y),
+			uy.Y.Offset + us.Y.Offset * (1 - ap.Y) + 4
+		)
+		lbl.Size = UDim2.new(us.X.Scale, us.X.Offset, 0, 28)
+	end
+end
+
+-- "STAGE N" centered above UNLOCK (next purchasable stage).
+local function layoutStageLabelAboveUnlock(nextS: number?)
+	if not nextStageLbl then
 		return
 	end
-	table.clear(rHealthCols)
-	if rHealthLayout then
-		rHealthLayout:Destroy()
-		rHealthLayout = nil
+	if not nextStageLayoutBackup then
+		nextStageLayoutBackup = backupTextLayout(nextStageLbl)
 	end
-	local legacy = template and template:FindFirstChild("_OceanTD_RHealthLayout")
-	if legacy then
-		legacy:Destroy()
+	if nextS then
+		nextStageLbl.Text = "STAGE " .. tostring(nextS)
+		nextStageLbl.Visible = true
+	else
+		nextStageLbl.Text = "MAX STAGE"
+		nextStageLbl.Visible = true
 	end
-	local legacySg = hostScreenGui and hostScreenGui:FindFirstChild("_OceanTD_RHealthLayout")
-	if legacySg and legacySg ~= rHealthLayout then
-		legacySg:Destroy()
+	nextStageLbl.TextXAlignment = Enum.TextXAlignment.Center
+	nextStageLbl.TextYAlignment = Enum.TextYAlignment.Center
+	nextStageLbl.ZIndex = POWERUP_Z + 80
+
+	if not (unlockBtn and unlockBtn.Parent and unlockBtn.Visible) then
+		return
+	end
+	-- Prefer same parent as UNLOCK so centering shares the same layout space.
+	local unlockParent = unlockBtn.Parent
+	if not (unlockParent and unlockParent:IsA("GuiObject")) then
+		return
+	end
+	if nextStageLbl.Parent ~= unlockParent then
+		nextStageLbl.Parent = unlockParent
+	end
+	nextStageLbl.AnchorPoint = Vector2.new(0.5, 1)
+	nextStageLbl.TextXAlignment = Enum.TextXAlignment.Center
+
+	local uw = unlockBtn.AbsoluteSize.X
+	if uw >= 8 then
+		local parent = unlockParent :: GuiObject
+		local centerAbs = unlockBtn.AbsolutePosition + Vector2.new(uw * 0.5, 0)
+		local topAbs = Vector2.new(centerAbs.X, unlockBtn.AbsolutePosition.Y - 6)
+		local localPos = absToParentOffset(parent, topAbs)
+		nextStageLbl.Position = UDim2.fromOffset(math.floor(localPos.X), math.floor(localPos.Y))
+		nextStageLbl.Size = UDim2.fromOffset(math.max(120, math.floor(uw)), 28)
+	else
+		-- AbsoluteSize not ready — mirror unlock UDim and account for unlock AnchorPoint.
+		local ux, uy, us = unlockBtn.Position, unlockBtn.Position, unlockBtn.Size
+		local ap = unlockBtn.AnchorPoint
+		nextStageLbl.Position = UDim2.new(
+			ux.X.Scale + us.X.Scale * (0.5 - ap.X),
+			ux.X.Offset + us.X.Offset * (0.5 - ap.X),
+			uy.Y.Scale,
+			uy.Y.Offset - 6
+		)
+		nextStageLbl.Size = UDim2.new(us.X.Scale, us.X.Offset, 0, 28)
+	end
+end
+
+-- LINE layout backup for Reef Health (full-bleed horizontal stages).
+-- Unused while RHEALTH_LAYOUT_MODE == "RING". Set mode to "LINE" to restore.
+-- Scoped in an IIFE so locals don't consume main-chunk registers.
+local RHealthUI = (function()
+	local function restoreRHealthCloseLayout()
+		if not closeBtn or not rHealthCloseBackup then
+			if rHealthCloseScale then
+				rHealthCloseScale.Scale = 1
+			end
+			return
+		end
+		local b = rHealthCloseBackup
+		if b.parent and b.parent.Parent then
+			closeBtn.Parent = b.parent
+		end
+		closeBtn.AnchorPoint = b.anchorPoint
+		closeBtn.Position = b.position
+		closeBtn.Size = b.size
+		if rHealthCloseScale then
+			rHealthCloseScale.Scale = 1
+		end
+		rHealthCloseBackup = nil
 	end
 
-	local host = Instance.new("Frame")
-	host.Name = "_OceanTD_RHealthLayout"
-	host.BackgroundTransparency = 1
-	host.BorderSizePixel = 0
-	host.Size = UDim2.fromScale(1, 1)
-	host.Position = UDim2.fromScale(0, 0)
-	host.ZIndex = POWERUP_Z + 20
-	host.Visible = false
-	host:SetAttribute("LayoutVer", RHEALTH_LAYOUT_VER)
-	host.Parent = parent
-	rHealthLayout = host
-
-	-- Full-screen blue → dark blue gradient at 90% opaque.
-	local bg = Instance.new("Frame")
-	bg.Name = "FullBleedBg"
-	bg.BorderSizePixel = 0
-	bg.Size = UDim2.fromScale(1, 1)
-	bg.Position = UDim2.fromScale(0, 0)
-	bg.BackgroundColor3 = WHITE
-	bg.BackgroundTransparency = 0.1
-	bg.ZIndex = host.ZIndex
-	bg.Active = false
-	bg.Parent = host
-	local grad = Instance.new("UIGradient")
-	grad.Rotation = 90
-	grad.Color = ColorSequence.new({
-		ColorSequenceKeypoint.new(0, Color3.fromRGB(45, 130, 210)),
-		ColorSequenceKeypoint.new(0.5, Color3.fromRGB(22, 70, 140)),
-		ColorSequenceKeypoint.new(1, Color3.fromRGB(8, 28, 72)),
-	})
-	grad.Parent = bg
-
-	local content = Instance.new("Frame")
-	content.Name = "Content"
-	content.BackgroundTransparency = 1
-	content.Size = UDim2.fromScale(1, 1)
-	content.ZIndex = host.ZIndex + 1
-	content.Parent = host
-
-	local title = Instance.new("TextLabel")
-	title.Name = "Title"
-	title.BackgroundTransparency = 1
-	title.AnchorPoint = Vector2.new(0.5, 0)
-	title.Position = UDim2.new(0.5, 0, 0.06, 0)
-	title.Size = UDim2.new(0.9, 0, 0.08, 0)
-	title.Font = UI_FONT
-	title.Text = "Reef Health"
-	title.TextColor3 = WHITE
-	title.TextScaled = true
-	title.ZIndex = content.ZIndex + 1
-	title.Parent = content
-
-	local sub = Instance.new("TextLabel")
-	sub.Name = "Subhead"
-	sub.BackgroundTransparency = 1
-	sub.AnchorPoint = Vector2.new(0.5, 0)
-	sub.Position = UDim2.new(0.5, 0, 0.14, 0)
-	sub.Size = UDim2.new(0.92, 0, 0.06, 0)
-	sub.Font = UI_FONT
-	sub.Text = RHEALTH_SUBHEAD
-	sub.TextColor3 = Color3.fromRGB(180, 200, 220)
-	sub.TextScaled = true
-	sub.ZIndex = content.ZIndex + 1
-	sub.Parent = content
-
-	local row = Instance.new("Frame")
-	row.Name = "StageRow"
-	row.BackgroundTransparency = 1
-	row.AnchorPoint = Vector2.new(0.5, 0)
-	row.Position = UDim2.new(0.5, 0, 0.24, 0)
-	-- Edge-to-edge: 8 columns fill the full screen width.
-	row.Size = UDim2.new(1, 0, 0.64, 0)
-	row.ZIndex = content.ZIndex + 1
-	row.Parent = content
-	local rowLayout = Instance.new("UIListLayout")
-	rowLayout.FillDirection = Enum.FillDirection.Horizontal
-	rowLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
-	rowLayout.VerticalAlignment = Enum.VerticalAlignment.Top
-	rowLayout.Padding = UDim.new(0, 0)
-	rowLayout.SortOrder = Enum.SortOrder.LayoutOrder
-	rowLayout.Parent = row
-
-	local colW = 1 / SkillStages.MAX_STAGE
-	for i = 1, SkillStages.MAX_STAGE do
-		local col = Instance.new("Frame")
-		col.Name = "Col" .. tostring(i)
-		col.BackgroundTransparency = 1
-		col.Size = UDim2.new(colW, 0, 1, 0)
-		col.LayoutOrder = i
-		col.ZIndex = row.ZIndex + 1
-		col.Parent = row
-		local colLayout = Instance.new("UIListLayout")
-		colLayout.FillDirection = Enum.FillDirection.Vertical
-		colLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
-		colLayout.VerticalAlignment = Enum.VerticalAlignment.Top
-		colLayout.Padding = UDim.new(0, 2)
-		colLayout.SortOrder = Enum.SortOrder.LayoutOrder
-		colLayout.Parent = col
-		local colPad = Instance.new("UIPadding")
-		colPad.PaddingLeft = UDim.new(0.06, 0)
-		colPad.PaddingRight = UDim.new(0.06, 0)
-		colPad.Parent = col
-
-		local bubble = Instance.new("TextButton")
-		bubble.Name = "Bubble"
-		bubble.Text = ""
-		bubble.AutoButtonColor = false
-		bubble.BackgroundColor3 = GREEN
-		bubble.BorderSizePixel = 0
-		bubble.Size = UDim2.new(1, 0, 0.34, 0)
-		bubble.LayoutOrder = 1
-		bubble.ZIndex = col.ZIndex + 2
-		bubble.Selectable = false
-		bubble.Parent = col
-		local aspect = Instance.new("UIAspectRatioConstraint")
-		aspect.AspectRatio = 1
-		aspect.DominantAxis = Enum.DominantAxis.Width
-		aspect.Parent = bubble
-		local sizeCon = Instance.new("UISizeConstraint")
-		sizeCon.MinSize = Vector2.new(48, 48)
-		sizeCon.Parent = bubble
-		local corner = Instance.new("UICorner")
-		corner.CornerRadius = UDim.new(1, 0)
-		corner.Parent = bubble
-
-		local check = Instance.new("TextLabel")
-		check.Name = "Check"
-		check.BackgroundTransparency = 1
-		check.Size = UDim2.fromScale(1, 1)
-		check.Font = UI_FONT
-		check.Text = "✓"
-		check.TextColor3 = WHITE
-		check.TextScaled = true
-		check.ZIndex = bubble.ZIndex + 1
-		check.Active = false
-		check.Parent = bubble
-		local checkPad = Instance.new("UIPadding")
-		checkPad.PaddingTop = UDim.new(0.12, 0)
-		checkPad.PaddingBottom = UDim.new(0.12, 0)
-		checkPad.PaddingLeft = UDim.new(0.12, 0)
-		checkPad.PaddingRight = UDim.new(0.12, 0)
-		checkPad.Parent = check
-		paintRHealthCheckStroke(check, Color3.fromRGB(20, 60, 30))
-
-		local stageLbl = Instance.new("TextLabel")
-		stageLbl.Name = "StageNum"
-		stageLbl.BackgroundTransparency = 1
-		stageLbl.Size = UDim2.new(1, 0, 0, RHEALTH_STAGE_TEXT_SIZE + 2)
-		stageLbl.Font = UI_FONT
-		stageLbl.Text = tostring(i)
-		stageLbl.TextColor3 = WHITE
-		stageLbl.TextScaled = false
-		stageLbl.TextSize = RHEALTH_STAGE_TEXT_SIZE
-		stageLbl.LayoutOrder = 2
-		stageLbl.ZIndex = col.ZIndex + 1
-		stageLbl.Parent = col
-
-		local statLbl = Instance.new("TextLabel")
-		statLbl.Name = "Stat"
-		statLbl.BackgroundTransparency = 1
-		-- Tight to stage number; height fits Max N / +N lines only.
-		statLbl.Size = UDim2.new(1, 0, 0, RHEALTH_STAT_TEXT_SIZE * 2 + 4)
-		statLbl.Font = UI_FONT
-		statLbl.Text = "Max 10"
-		statLbl.TextColor3 = Color3.fromRGB(190, 210, 230)
-		statLbl.TextScaled = false
-		statLbl.TextSize = RHEALTH_STAT_TEXT_SIZE
-		statLbl.TextWrapped = true
-		statLbl.LayoutOrder = 3
-		statLbl.ZIndex = col.ZIndex + 1
-		statLbl.Parent = col
-
-		local unlockSlot = Instance.new("Frame")
-		unlockSlot.Name = "UnlockSlot"
-		unlockSlot.BackgroundTransparency = 1
-		unlockSlot.Size = UDim2.new(1, 0, 0, 36)
-		unlockSlot.LayoutOrder = 4
-		unlockSlot.ZIndex = col.ZIndex + 1
-		unlockSlot.Parent = col
-
-		local stageIndex = i
-		bubble.Activated:Connect(function()
-			if not popupOpen or activeSkillId ~= "RHealth" or not powerUpClickGuard() then
-				return
+	local function applyRHealthCloseLayout()
+		if not closeBtn or not rHealthLayout then
+			return
+		end
+		if not rHealthCloseBackup then
+			rHealthCloseBackup = {
+				parent = closeBtn.Parent,
+				position = closeBtn.Position,
+				anchorPoint = closeBtn.AnchorPoint,
+				size = closeBtn.Size,
+			}
+		end
+		closeBtn.Parent = rHealthLayout
+		closeBtn.AnchorPoint = Vector2.new(1, 0)
+		closeBtn.Position = UDim2.new(1, -18, 0, 18)
+		closeBtn.Visible = true
+		local scale = closeBtn:FindFirstChild("_OceanTD_RHealthCloseScale")
+		if not (scale and scale:IsA("UIScale")) then
+			if scale then
+				scale:Destroy()
 			end
-			if confirmGui then
-				return
-			end
-			local unlocked = unlockedStage("RHealth")
-			if stageIndex > unlocked then
-				SkillPowerUpUI.requestUnlockNext()
-				return
-			end
-			if stageIndex == currentStage("RHealth") then
-				return
-			end
-			requestSetActiveStage("RHealth", stageIndex)
-		end)
+			scale = Instance.new("UIScale")
+			scale.Name = "_OceanTD_RHealthCloseScale"
+			scale.Parent = closeBtn
+		end
+		;(scale :: UIScale).Scale = RHEALTH_CLOSE_SCALE
+		rHealthCloseScale = scale :: UIScale
+	end
 
-		table.insert(rHealthCols, {
-			root = col,
-			bubble = bubble,
-			check = check,
-			stageLbl = stageLbl,
-			statLbl = statLbl,
-			unlockSlot = unlockSlot,
+	local function hideRHealthLayout()
+		if rHealthLayout then
+			rHealthLayout.Visible = false
+		end
+		if rHealthUnlockBtn then
+			rHealthUnlockBtn.Visible = false
+			rHealthUnlockBtn.Active = false
+		end
+		restoreRHealthCloseLayout()
+	end
+
+	local function setRHealthBubbleGradient(bubble: GuiObject, dark: Color3, bright: Color3)
+		bubble.BackgroundColor3 = WHITE
+		local grad = bubble:FindFirstChild("_OceanTD_FillGrad")
+		if not (grad and grad:IsA("UIGradient")) then
+			if grad then
+				grad:Destroy()
+			end
+			grad = Instance.new("UIGradient")
+			grad.Name = "_OceanTD_FillGrad"
+			grad.Rotation = 90
+			grad.Parent = bubble
+		end
+		;(grad :: UIGradient).Enabled = true
+		;(grad :: UIGradient).Color = ColorSequence.new({
+			ColorSequenceKeypoint.new(0, dark),
+			ColorSequenceKeypoint.new(1, bright),
 		})
 	end
 
-	local unlock = Instance.new("TextButton")
-	unlock.Name = "RHealthUNLOCK"
-	unlock.Text = "UNLOCK"
-	unlock.Font = UI_FONT
-	unlock.TextSize = 16
-	unlock.TextScaled = true
-	unlock.TextColor3 = WHITE
-	unlock.BackgroundColor3 = GREEN
-	unlock.BorderSizePixel = 0
-	unlock.Size = UDim2.fromScale(1.5, 1)
-	unlock.Visible = false
-	unlock.Active = false
-	unlock.Selectable = false
-	unlock.ZIndex = POWERUP_Z + 650
-	unlock.Parent = host
-	local uc = Instance.new("UICorner")
-	uc.CornerRadius = UDim.new(0, 8)
-	uc.Parent = unlock
-	applyUnlockStroke(unlock)
-	bindButtonPress(unlock, "_OceanTD_RHealthUnlockBound", onUnlockPressed)
-	rHealthUnlockBtn = unlock
-end
-
-local function refreshRHealthLayout()
-	ensureRHealthLayout()
-	if not rHealthLayout or not rHealthUnlockBtn then
-		return
-	end
-	-- Hide Studio power-up panel + floating skill bubble behind this full-screen layout.
-	if template then
-		template.Visible = false
-	end
-	setStudioRingChromeVisible(false)
-	rHealthLayout.Visible = true
-	raiseTreeAboveBubbles(rHealthLayout)
-	local bg = rHealthLayout:FindFirstChild("FullBleedBg")
-	if bg and bg:IsA("GuiObject") then
-		-- Keep gradient behind the stage columns / title.
-		bg.ZIndex = rHealthLayout.ZIndex
-	end
-	local content = rHealthLayout:FindFirstChild("Content")
-	if content and content:IsA("GuiObject") then
-		content.ZIndex = rHealthLayout.ZIndex + 1
-		for _, d in ipairs(content:GetDescendants()) do
-			if d:IsA("GuiObject") then
-				d.ZIndex = math.max(d.ZIndex, content.ZIndex + 1)
-			end
+	local function clearRHealthBubbleGradient(bubble: GuiObject)
+		local grad = bubble:FindFirstChild("_OceanTD_FillGrad")
+		if grad and grad:IsA("UIGradient") then
+			grad.Enabled = false
 		end
 	end
 
-	local active = currentStage("RHealth")
-	local unlocked = unlockedStage("RHealth")
-	local nextS = SkillStages.nextStageFor("RHealth", unlocked)
-	clearLockOverlays()
-
-	for i, col in ipairs(rHealthCols) do
-		local hp = SkillStages.reefHealthAtStage(i)
-		col.stageLbl.Text = tostring(i)
-		if i <= unlocked then
-			col.statLbl.Text = "Max " .. tostring(hp)
-			col.statLbl.TextColor3 = if i == active then DESC_PULSE_GREEN else Color3.fromRGB(190, 210, 230)
+	local function setRHealthCircleStroke(bubble: GuiObject, color: Color3?, thickness: number?)
+		local existing = bubble:FindFirstChild("_OceanTD_CircleStroke")
+		if not color then
+			if existing then
+				existing:Destroy()
+			end
+			return
+		end
+		local stroke: UIStroke
+		if existing and existing:IsA("UIStroke") then
+			stroke = existing
 		else
-			local inc = SkillStages.reefHealthIncrementAtStage(i)
-			if inc > 0 then
-				col.statLbl.Text = "Max " .. tostring(hp) .. "\n+" .. tostring(inc)
-			else
-				col.statLbl.Text = "Max " .. tostring(hp)
+			if existing then
+				existing:Destroy()
 			end
-			col.statLbl.TextColor3 = Color3.fromRGB(150, 160, 175)
+			stroke = Instance.new("UIStroke")
+			stroke.Name = "_OceanTD_CircleStroke"
+			stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+			stroke.LineJoinMode = Enum.LineJoinMode.Round
+			stroke.Parent = bubble
 		end
+		stroke.Thickness = thickness or 3.5
+		stroke.Color = color
+		stroke.Transparency = 0
+		stroke.Enabled = true
+	end
 
-		-- Clear prior lock/num chrome on custom bubbles.
+	local function ensureRHealthNextUnlockRing(bubble: GuiObject)
+		-- Dedicated ring on the circle (not the lock glyph) so red↔white always shows.
+		local old = bubble:FindFirstChild("_OceanTD_NextUnlockStroke")
+		if old then
+			old:Destroy()
+		end
+		setRHealthCircleStroke(bubble, nil)
+		local stroke = Instance.new("UIStroke")
+		stroke.Name = "_OceanTD_NextUnlockStroke"
+		stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+		stroke.LineJoinMode = Enum.LineJoinMode.Round
+		stroke.Thickness = 4.5
+		stroke.Color = BRIGHT_RED
+		stroke.Transparency = 0
+		stroke.Enabled = true
+		stroke.Parent = bubble
+		startNextUnlockPulse(stroke, BRIGHT_RED, WHITE)
+	end
+
+	local function paintRHealthCheckStroke(check: TextLabel, color: Color3)
+		local stroke = check:FindFirstChild("_OceanTD_CheckStroke")
+		if not (stroke and stroke:IsA("UIStroke")) then
+			if stroke then
+				stroke:Destroy()
+			end
+			stroke = Instance.new("UIStroke")
+			stroke.Name = "_OceanTD_CheckStroke"
+			stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Contextual
+			stroke.LineJoinMode = Enum.LineJoinMode.Round
+			stroke.Thickness = 2.5
+			stroke.Parent = check
+		end
+		;(stroke :: UIStroke).Color = color
+		;(stroke :: UIStroke).Transparency = 0
+		;(stroke :: UIStroke).Enabled = true
+	end
+
+	local function paintRHealthBubble(col: RHealthCol, mode: "active" | "idle")
+		local bubble = col.bubble
+		local check = col.check
+		-- Same size for active + idle — no +20% scale on Reef Health.
+		ensureStageScale(bubble).Scale = 1
+		local nextStroke = bubble:FindFirstChild("_OceanTD_NextUnlockStroke")
+		if nextStroke then
+			nextStroke:Destroy()
+		end
+		if mode == "active" then
+			setRHealthBubbleGradient(bubble, GREEN_DARK, GREEN_BRIGHT)
+			setRHealthCircleStroke(bubble, BRIGHT_GREEN_RING, 3.5)
+			check.TextColor3 = WHITE
+			check.Text = "✓"
+			check.Visible = true
+			paintRHealthCheckStroke(check, Color3.fromRGB(20, 60, 30))
+		else
+			setRHealthBubbleGradient(bubble, GREY_DARKER, GREY_DARK)
+			setRHealthCircleStroke(bubble, nil)
+			check.TextColor3 = GREY_LIGHT
+			check.Text = "✓"
+			check.Visible = true
+			paintRHealthCheckStroke(check, Color3.fromRGB(40, 40, 40))
+		end
+	end
+
+	local function applyRHealthStageResting(col: RHealthCol, stageIndex: number, active: number, unlocked: number, nextS: number?)
+		clearIntroStageNum(col.bubble)
+		clearIntroStroke(col.bubble)
 		local leftoverNum = col.bubble:FindFirstChild("_OceanTD_StageNum")
 		if leftoverNum then
 			leftoverNum:Destroy()
@@ -1476,65 +1997,526 @@ local function refreshRHealthLayout()
 		if leftoverStroke then
 			leftoverStroke:Destroy()
 		end
-
 		col.check.Visible = true
 		col.root.ClipsDescendants = false
 		col.bubble.ClipsDescendants = false
-		if nextS and i == nextS then
+		if nextS and stageIndex == nextS then
 			col.check.Visible = false
 			clearRHealthBubbleGradient(col.bubble)
 			col.bubble.BackgroundColor3 = BRIGHT_RED
 			ensureStageScale(col.bubble).Scale = 1
-			-- Lock only (no number flash); ring applied separately on the circle.
-			placeNextUnlockOn(col.bubble, i, {
+			placeNextUnlockOn(col.bubble, stageIndex, {
 				lockOnly = true,
 				noRing = true,
 			})
 			ensureRHealthNextUnlockRing(col.bubble)
-		elseif i > unlocked then
+		elseif stageIndex > unlocked then
 			col.check.Visible = false
 			clearRHealthBubbleGradient(col.bubble)
 			col.bubble.BackgroundColor3 = BRIGHT_RED
 			setRHealthCircleStroke(col.bubble, nil)
-			local ns = col.bubble:FindFirstChild("_OceanTD_NextUnlockStroke")
-			if ns then
-				ns:Destroy()
-			end
 			ensureStageScale(col.bubble).Scale = 1
 			placeLockOn(col.bubble)
-		elseif i == active then
+		elseif stageIndex == active then
 			paintRHealthBubble(col, "active")
 		else
 			paintRHealthBubble(col, "idle")
 		end
 	end
 
-	-- Park UNLOCK under the next locked stage column (50% wider than the column).
-	local unlock = rHealthUnlockBtn
-	if nextS and rHealthCols[nextS] then
-		local slot = rHealthCols[nextS].unlockSlot
-		unlock.Parent = slot
-		unlock.AnchorPoint = Vector2.new(0.5, 0)
-		unlock.Position = UDim2.fromScale(0.5, 0)
-		unlock.Size = UDim2.fromScale(1.5, 1)
-		local cost = SkillStages.stageCost("RHealth", nextS)
-		unlock.Text = "UNLOCK\n" .. tostring(cost) .. " $D"
-		unlock.Visible = true
-		unlock.Active = true
-		raiseInteractive(unlock, POWERUP_Z + 650)
-		startUnlockBtnPulse()
-	else
-		unlock.Visible = false
-		unlock.Active = false
-		unlock.Parent = rHealthLayout
-		stopUnlockBtnPulse()
+	local function prepareRHealthStageIntro(col: RHealthCol, stageIndex: number, _active: number, _unlocked: number, _nextS: number?)
+		clearIntroStageNum(col.bubble)
+		clearIntroStroke(col.bubble)
+		local leftoverLock = col.bubble:FindFirstChild("_OceanTD_StageLock")
+		if leftoverLock then
+			leftoverLock:Destroy()
+		end
+		local leftoverStroke = col.bubble:FindFirstChild("_OceanTD_NextUnlockStroke")
+		if leftoverStroke then
+			leftoverStroke:Destroy()
+		end
+		col.check.Visible = false
+		col.bubble.AnchorPoint = Vector2.new(0.5, 0.5)
+		col.bubble.Position = UDim2.fromScale(0.5, 0.5)
+		col.bubble.Size = UDim2.fromScale(1, 1)
+		clearRHealthBubbleGradient(col.bubble)
+		setRHealthCircleStroke(col.bubble, nil)
+		col.bubble.BackgroundColor3 = INTRO_GREY
+		ensureIntroStroke(col.bubble)
+		showIntroStageNum(col.bubble, stageIndex)
+		ensureStageScale(col.bubble).Scale = 0
 	end
 
-	if popupOpen then
-		applyRHealthCloseLayout()
-		beginGamepadNav()
+	local function playRHealthStageIntro(active: number, unlocked: number, nextS: number?)
+		cancelStageIntro()
+		local my = stageIntroToken
+		stageIntroActive = true
+		clearLockOverlays()
+
+		type IntroCol = { index: number, col: RHealthCol }
+		local stages: { IntroCol } = {}
+		for i, col in ipairs(rHealthCols) do
+			prepareRHealthStageIntro(col, i, active, unlocked, nextS)
+			table.insert(stages, { index = i, col = col })
+		end
+		if #stages == 0 then
+			stageIntroActive = false
+			return
+		end
+
+		local function revealIconsFromOne()
+			local checkStep = 0
+			local lockStep = 0
+			for j, entry in ipairs(stages) do
+				task.delay((j - 1) * STAGE_ICON_STAGGER_SEC, function()
+					if my ~= stageIntroToken or not popupOpen or activeSkillId ~= "RHealth" then
+						return
+					end
+					if entry.index <= unlocked then
+						checkStep += 1
+						playStageIntroSfx("check", checkStep)
+					else
+						lockStep += 1
+						playStageIntroSfx("lock", lockStep)
+					end
+					applyRHealthStageResting(entry.col, entry.index, active, unlocked, nextS)
+					if closeBtn and popupOpen then
+						raiseInteractive(closeBtn, POWERUP_Z + 700)
+						ensureCloseXVisible()
+					end
+					if j == #stages and my == stageIntroToken then
+						stageIntroActive = false
+					end
+				end)
+			end
+		end
+
+		for j, entry in ipairs(stages) do
+			task.delay((j - 1) * STAGE_INTRO_STAGGER_SEC, function()
+				if my ~= stageIntroToken or not popupOpen then
+					return
+				end
+				playStageIntroSfx("pop", j)
+				local scale = ensureStageScale(entry.col.bubble)
+				scale.Scale = 0
+				local tw = TweenService:Create(scale, STAGE_INTRO_INFO, { Scale = 1 })
+				table.insert(stageIntroTweens, tw)
+				tw:Play()
+				if j == #stages then
+					local conn: RBXScriptConnection? = nil
+					conn = tw.Completed:Connect(function(playbackState)
+						if conn then
+							conn:Disconnect()
+							conn = nil
+						end
+						if playbackState ~= Enum.PlaybackState.Completed then
+							return
+						end
+						if my ~= stageIntroToken or not popupOpen then
+							return
+						end
+						revealIconsFromOne()
+					end)
+				end
+			end)
+		end
 	end
-end
+
+	local function ensureRHealthLayout()
+		local parent: Instance? = hostScreenGui or template
+		if not parent then
+			return
+		end
+		-- Rebuild if still under the old PowerUpTemplate panel or layout version outdated.
+		local needsRebuild = not rHealthLayout
+			or rHealthLayout.Parent ~= parent
+			or rHealthLayout:GetAttribute("LayoutVer") ~= RHEALTH_LAYOUT_VER
+			or #rHealthCols < SkillStages.MAX_STAGE
+		if not needsRebuild then
+			return
+		end
+		table.clear(rHealthCols)
+		if rHealthLayout then
+			rHealthLayout:Destroy()
+			rHealthLayout = nil
+		end
+		local legacy = template and template:FindFirstChild("_OceanTD_RHealthLayout")
+		if legacy then
+			legacy:Destroy()
+		end
+		local legacySg = hostScreenGui and hostScreenGui:FindFirstChild("_OceanTD_RHealthLayout")
+		if legacySg and legacySg ~= rHealthLayout then
+			legacySg:Destroy()
+		end
+
+		local host = Instance.new("Frame")
+		host.Name = "_OceanTD_RHealthLayout"
+		host.BackgroundTransparency = 1
+		host.BorderSizePixel = 0
+		host.Size = UDim2.fromScale(1, 1)
+		host.Position = UDim2.fromScale(0, 0)
+		host.ZIndex = POWERUP_Z + 20
+		host.Visible = false
+		host:SetAttribute("LayoutVer", RHEALTH_LAYOUT_VER)
+		host.Parent = parent
+		rHealthLayout = host
+
+		-- Full-screen blue → dark blue gradient at 90% opaque.
+		local bg = Instance.new("Frame")
+		bg.Name = "FullBleedBg"
+		bg.BorderSizePixel = 0
+		bg.Size = UDim2.fromScale(1, 1)
+		bg.Position = UDim2.fromScale(0, 0)
+		bg.BackgroundColor3 = WHITE
+		bg.BackgroundTransparency = 0.1
+		bg.ZIndex = host.ZIndex
+		bg.Active = false
+		bg.Parent = host
+		local grad = Instance.new("UIGradient")
+		grad.Rotation = 90
+		grad.Color = ColorSequence.new({
+			ColorSequenceKeypoint.new(0, Color3.fromRGB(45, 130, 210)),
+			ColorSequenceKeypoint.new(0.5, Color3.fromRGB(22, 70, 140)),
+			ColorSequenceKeypoint.new(1, Color3.fromRGB(8, 28, 72)),
+		})
+		grad.Parent = bg
+
+		local content = Instance.new("Frame")
+		content.Name = "Content"
+		content.BackgroundTransparency = 1
+		content.Size = UDim2.fromScale(1, 1)
+		content.ZIndex = host.ZIndex + 1
+		content.Parent = host
+
+		local title = Instance.new("TextLabel")
+		title.Name = "Title"
+		title.BackgroundTransparency = 1
+		title.AnchorPoint = Vector2.new(0.5, 0)
+		title.Position = UDim2.new(0.5, 0, 0.06, 0)
+		title.Size = UDim2.new(0.9, 0, 0.08, 0)
+		title.Font = UI_FONT
+		title.Text = "Reef Health"
+		title.TextColor3 = WHITE
+		title.TextScaled = true
+		title.ZIndex = content.ZIndex + 1
+		title.Parent = content
+
+		local sub = Instance.new("TextLabel")
+		sub.Name = "Subhead"
+		sub.BackgroundTransparency = 1
+		sub.AnchorPoint = Vector2.new(0.5, 0)
+		sub.Position = UDim2.new(0.5, 0, 0.14, 0)
+		sub.Size = UDim2.new(0.92, 0, 0.06, 0)
+		sub.Font = UI_FONT
+		sub.Text = RHEALTH_SUBHEAD
+		sub.TextColor3 = Color3.fromRGB(180, 200, 220)
+		sub.TextScaled = true
+		sub.ZIndex = content.ZIndex + 1
+		sub.Parent = content
+
+		local row = Instance.new("Frame")
+		row.Name = "StageRow"
+		row.BackgroundTransparency = 1
+		row.AnchorPoint = Vector2.new(0.5, 0)
+		row.Position = UDim2.new(0.5, 0, 0.24, 0)
+		-- Edge-to-edge: 8 columns fill the full screen width.
+		row.Size = UDim2.new(1, 0, 0.64, 0)
+		row.ZIndex = content.ZIndex + 1
+		row.Parent = content
+		local rowLayout = Instance.new("UIListLayout")
+		rowLayout.FillDirection = Enum.FillDirection.Horizontal
+		rowLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+		rowLayout.VerticalAlignment = Enum.VerticalAlignment.Top
+		rowLayout.Padding = UDim.new(0, 0)
+		rowLayout.SortOrder = Enum.SortOrder.LayoutOrder
+		rowLayout.Parent = row
+
+		local colW = 1 / SkillStages.MAX_STAGE
+		for i = 1, SkillStages.MAX_STAGE do
+			local col = Instance.new("Frame")
+			col.Name = "Col" .. tostring(i)
+			col.BackgroundTransparency = 1
+			col.Size = UDim2.new(colW, 0, 1, 0)
+			col.LayoutOrder = i
+			col.ZIndex = row.ZIndex + 1
+			col.Parent = row
+			local colLayout = Instance.new("UIListLayout")
+			colLayout.FillDirection = Enum.FillDirection.Vertical
+			colLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+			colLayout.VerticalAlignment = Enum.VerticalAlignment.Top
+			colLayout.Padding = UDim.new(0, 2)
+			colLayout.SortOrder = Enum.SortOrder.LayoutOrder
+			colLayout.Parent = col
+			local colPad = Instance.new("UIPadding")
+			colPad.PaddingLeft = UDim.new(0.06, 0)
+			colPad.PaddingRight = UDim.new(0.06, 0)
+			colPad.Parent = col
+
+			-- Square slot sized by width so UIListLayout doesn't reserve a tall empty band.
+			local bubbleSlot = Instance.new("Frame")
+			bubbleSlot.Name = "BubbleSlot"
+			bubbleSlot.BackgroundTransparency = 1
+			bubbleSlot.BorderSizePixel = 0
+			bubbleSlot.Size = UDim2.new(1, 0, 0, 0)
+			bubbleSlot.LayoutOrder = 1
+			bubbleSlot.ZIndex = col.ZIndex + 1
+			bubbleSlot.ClipsDescendants = false
+			bubbleSlot.Parent = col
+			local slotAspect = Instance.new("UIAspectRatioConstraint")
+			slotAspect.AspectRatio = 1
+			slotAspect.DominantAxis = Enum.DominantAxis.Width
+			slotAspect.Parent = bubbleSlot
+
+			local bubble = Instance.new("TextButton")
+			bubble.Name = "Bubble"
+			bubble.Text = ""
+			bubble.AutoButtonColor = false
+			bubble.BackgroundColor3 = GREEN
+			bubble.BorderSizePixel = 0
+			bubble.Size = UDim2.fromScale(1, 1)
+			bubble.ZIndex = bubbleSlot.ZIndex + 1
+			bubble.Selectable = false
+			bubble.ClipsDescendants = false
+			bubble.Parent = bubbleSlot
+			local sizeCon = Instance.new("UISizeConstraint")
+			sizeCon.MinSize = Vector2.new(48, 48)
+			sizeCon.Parent = bubble
+			local corner = Instance.new("UICorner")
+			corner.CornerRadius = UDim.new(1, 0)
+			corner.Parent = bubble
+
+			local check = Instance.new("TextLabel")
+			check.Name = "Check"
+			check.BackgroundTransparency = 1
+			check.Size = UDim2.fromScale(1, 1)
+			check.Font = UI_FONT
+			check.Text = "✓"
+			check.TextColor3 = WHITE
+			check.TextScaled = true
+			check.ZIndex = bubble.ZIndex + 1
+			check.Active = false
+			check.Parent = bubble
+			local checkPad = Instance.new("UIPadding")
+			checkPad.PaddingTop = UDim.new(0.12, 0)
+			checkPad.PaddingBottom = UDim.new(0.12, 0)
+			checkPad.PaddingLeft = UDim.new(0.12, 0)
+			checkPad.PaddingRight = UDim.new(0.12, 0)
+			checkPad.Parent = check
+			paintRHealthCheckStroke(check, Color3.fromRGB(20, 60, 30))
+
+			local stageLbl = Instance.new("TextLabel")
+			stageLbl.Name = "StageNum"
+			stageLbl.BackgroundTransparency = 1
+			stageLbl.Size = UDim2.new(1, 0, 0, RHEALTH_STAGE_TEXT_SIZE + 2)
+			stageLbl.Font = UI_FONT
+			stageLbl.Text = tostring(i)
+			stageLbl.TextColor3 = WHITE
+			stageLbl.TextScaled = false
+			stageLbl.TextSize = RHEALTH_STAGE_TEXT_SIZE
+			stageLbl.TextYAlignment = Enum.TextYAlignment.Center
+			stageLbl.LayoutOrder = 2
+			stageLbl.ZIndex = col.ZIndex + 1
+			stageLbl.Parent = col
+
+			local statLbl = Instance.new("TextLabel")
+			statLbl.Name = "Stat"
+			statLbl.BackgroundTransparency = 1
+			statLbl.Size = UDim2.new(1, 0, 0, 0)
+			statLbl.AutomaticSize = Enum.AutomaticSize.Y
+			statLbl.Font = UI_FONT
+			statLbl.Text = "Max 10"
+			statLbl.TextColor3 = Color3.fromRGB(190, 210, 230)
+			statLbl.TextScaled = false
+			statLbl.TextSize = RHEALTH_STAT_TEXT_SIZE
+			statLbl.TextWrapped = true
+			statLbl.TextYAlignment = Enum.TextYAlignment.Top
+			statLbl.LayoutOrder = 3
+			statLbl.ZIndex = col.ZIndex + 1
+			statLbl.Parent = col
+
+			local unlockSlot = Instance.new("Frame")
+			unlockSlot.Name = "UnlockSlot"
+			unlockSlot.BackgroundTransparency = 1
+			unlockSlot.Size = UDim2.new(1, 0, 0, 36)
+			unlockSlot.LayoutOrder = 4
+			unlockSlot.ZIndex = col.ZIndex + 1
+			unlockSlot.Parent = col
+
+			local stageIndex = i
+			bubble.Activated:Connect(function()
+				if not popupOpen or activeSkillId ~= "RHealth" or not powerUpClickGuard() then
+					return
+				end
+				if confirmGui then
+					return
+				end
+				local unlocked = unlockedStage("RHealth")
+				if stageIndex > unlocked then
+					SkillPowerUpUI.requestUnlockNext()
+					return
+				end
+				if stageIndex == currentStage("RHealth") then
+					return
+				end
+				requestSetActiveStage("RHealth", stageIndex)
+			end)
+
+			table.insert(rHealthCols, {
+				root = col,
+				bubble = bubble,
+				check = check,
+				stageLbl = stageLbl,
+				statLbl = statLbl,
+				unlockSlot = unlockSlot,
+			})
+		end
+
+		local unlock = Instance.new("TextButton")
+		unlock.Name = "RHealthUNLOCK"
+		unlock.Text = "UNLOCK"
+		unlock.Font = UI_FONT
+		unlock.TextSize = 16
+		unlock.TextScaled = true
+		unlock.TextColor3 = WHITE
+		unlock.BackgroundColor3 = GREEN
+		unlock.BorderSizePixel = 0
+		unlock.Size = UDim2.fromScale(1.5, 1)
+		unlock.Visible = false
+		unlock.Active = false
+		unlock.Selectable = false
+		unlock.ZIndex = POWERUP_Z + 650
+		unlock.Parent = host
+		local uc = Instance.new("UICorner")
+		uc.CornerRadius = UDim.new(0, 8)
+		uc.Parent = unlock
+		applyUnlockStroke(unlock)
+		bindButtonPress(unlock, "_OceanTD_RHealthUnlockBound", onUnlockPressed)
+		rHealthUnlockBtn = unlock
+	end
+
+	local function refreshRHealthLayout()
+		ensureRHealthLayout()
+		if not rHealthLayout or not rHealthUnlockBtn then
+			return
+		end
+		-- Hide Studio power-up panel + floating skill bubble behind this full-screen layout.
+		if template then
+			template.Visible = false
+		end
+		setStudioRingChromeVisible(false)
+		rHealthLayout.Visible = true
+		raiseTreeAboveBubbles(rHealthLayout)
+		local bg = rHealthLayout:FindFirstChild("FullBleedBg")
+		if bg and bg:IsA("GuiObject") then
+			-- Keep gradient behind the stage columns / title.
+			bg.ZIndex = rHealthLayout.ZIndex
+		end
+		local content = rHealthLayout:FindFirstChild("Content")
+		if content and content:IsA("GuiObject") then
+			content.ZIndex = rHealthLayout.ZIndex + 1
+			for _, d in ipairs(content:GetDescendants()) do
+				if d:IsA("GuiObject") then
+					d.ZIndex = math.max(d.ZIndex, content.ZIndex + 1)
+				end
+			end
+		end
+
+		local active = currentStage("RHealth")
+		local unlocked = unlockedStage("RHealth")
+		local nextS = SkillStages.nextStageFor("RHealth", unlocked)
+
+		for i, col in ipairs(rHealthCols) do
+			local hp = SkillStages.reefHealthAtStage(i)
+			col.stageLbl.Text = tostring(i)
+			if i <= unlocked then
+				col.statLbl.Text = "Max " .. tostring(hp)
+				col.statLbl.TextColor3 = if i == active then DESC_PULSE_GREEN else Color3.fromRGB(190, 210, 230)
+			else
+				local inc = SkillStages.reefHealthIncrementAtStage(i)
+				if inc > 0 then
+					col.statLbl.Text = "Max " .. tostring(hp) .. "\n+" .. tostring(inc)
+				else
+					col.statLbl.Text = "Max " .. tostring(hp)
+				end
+				col.statLbl.TextColor3 = Color3.fromRGB(150, 160, 175)
+			end
+		end
+
+		local runIntro = playStageIntroOnNextRefresh
+		if runIntro then
+			playStageIntroOnNextRefresh = false
+			playRHealthStageIntro(active, unlocked, nextS)
+		elseif stageIntroActive then
+			-- Keep staggered open animation; sync can refresh labels without resetting circles.
+		else
+			clearLockOverlays()
+			for i, col in ipairs(rHealthCols) do
+				applyRHealthStageResting(col, i, active, unlocked, nextS)
+			end
+		end
+
+		-- Park UNLOCK under the next locked stage column (50% wider than the column).
+		local unlock = rHealthUnlockBtn
+		if nextS and rHealthCols[nextS] then
+			local slot = rHealthCols[nextS].unlockSlot
+			unlock.Parent = slot
+			unlock.AnchorPoint = Vector2.new(0.5, 0)
+			unlock.Position = UDim2.fromScale(0.5, 0)
+			unlock.Size = UDim2.new(1.5, 0, 0, 28)
+			unlock.Text = "UNLOCK"
+			unlock.Visible = true
+			unlock.Active = true
+			raiseInteractive(unlock, POWERUP_Z + 650)
+			startUnlockBtnPulse()
+			local cost = SkillStages.stageCost("RHealth", nextS)
+			local costLbl = slot:FindFirstChild("_OceanTD_UnlockCost")
+			if not (costLbl and costLbl:IsA("TextLabel")) then
+				if costLbl then
+					costLbl:Destroy()
+				end
+				costLbl = Instance.new("TextLabel")
+				costLbl.Name = "_OceanTD_UnlockCost"
+				costLbl.BackgroundTransparency = 1
+				costLbl.Font = UI_FONT
+				costLbl.TextSize = 18 -- +2 vs prior 16
+				costLbl.TextScaled = false
+				costLbl.TextColor3 = COST_GREEN
+				costLbl.TextXAlignment = Enum.TextXAlignment.Center
+				costLbl.ZIndex = POWERUP_Z + 80
+				costLbl.Parent = slot
+			end
+			local cl = costLbl :: TextLabel
+			cl.Text = tostring(cost) .. " $D"
+			cl.TextSize = 18
+			cl.Visible = true
+			cl.AnchorPoint = Vector2.new(0.5, 0)
+			cl.Position = UDim2.new(0.5, 0, 0, 30)
+			cl.Size = UDim2.new(1.5, 0, 0, 20)
+		else
+			unlock.Visible = false
+			unlock.Active = false
+			unlock.Parent = rHealthLayout
+			stopUnlockBtnPulse()
+		end
+
+		if closeBtn and popupOpen then
+			applyRHealthCloseLayout()
+			raiseInteractive(closeBtn, POWERUP_Z + 700)
+			if closeHitBtn then
+				closeHitBtn.ZIndex = POWERUP_Z + 710
+			end
+			ensureCloseXVisible()
+		end
+		if popupOpen then
+			beginGamepadNav()
+		end
+	end
+
+	return {
+		hide = hideRHealthLayout,
+		refresh = refreshRHealthLayout,
+	}
+end)()
 
 refreshTemplate = function()
 	if not template or not activeSkillId then
@@ -1545,11 +2527,11 @@ refreshTemplate = function()
 		return
 	end
 
-	if activeSkillId == "RHealth" then
-		refreshRHealthLayout()
+	if useRHealthLineLayout() then
+		RHealthUI.refresh()
 		return
 	end
-	hideRHealthLayout()
+	RHealthUI.hide()
 	if template then
 		template.Visible = true
 	end
@@ -1591,16 +2573,15 @@ refreshTemplate = function()
 		end
 	end
 	local nextS = SkillStages.nextStageFor(activeSkillId, unlocked)
-	if nextStageLbl then
-		if nextS then
-			local cost = SkillStages.stageCost(activeSkillId, nextS)
-			nextStageLbl.Text = tostring(cost) .. " $D"
-			nextStageLbl.Visible = true
-		else
-			nextStageLbl.Text = "Max Stage"
-			nextStageLbl.Visible = true
+	layoutStageLabelAboveUnlock(nextS)
+	-- Title / STAGE N after layout AbsoluteSize settles.
+	task.defer(function()
+		if not popupOpen then
+			return
 		end
-	end
+		layoutTitleBesideSkillBubble()
+		layoutStageLabelAboveUnlock(nextS)
+	end)
 	if unlockDescLbl then
 		-- Climbing unlocks (active at unlocked tip): preview the next purchase.
 		-- Maxed or dialed down: show what the *active* stage currently gives.
@@ -1854,10 +2835,12 @@ refreshTemplate = function()
 		unlockBtn.Visible = nextS ~= nil
 		unlockBtn.Active = nextS ~= nil
 		if nextS ~= nil then
+			setUnlockButtonLabel("UNLOCK")
 			raiseInteractive(unlockBtn, POWERUP_Z + 650)
 			startUnlockBtnPulse()
 		else
 			stopUnlockBtnPulse()
+			hideUnlockCostLabel()
 		end
 		if unlockBtn:IsA("TextButton") or unlockBtn:IsA("ImageButton") then
 			if nextS == nil then
@@ -1874,38 +2857,53 @@ refreshTemplate = function()
 			textChild.TextColor3 = Color3.new(1, 1, 1)
 		end
 	end
+	-- STAGE N above, cost below — button is UNLOCK only.
+	layoutStageLabelAboveUnlock(nextS)
+	layoutUnlockCostBelow(nextS)
+	-- Side title layer (far right) — Studio name/desc stay hidden in the circle.
+	if unlockNameLbl then
+		unlockNameLbl.Visible = false
+	end
+	if unlockDescLbl then
+		unlockDescLbl.Visible = false
+	end
+	layoutTitleBesideSkillBubble()
+	task.defer(function()
+		if not popupOpen then
+			return
+		end
+		layoutStageLabelAboveUnlock(nextS)
+		layoutUnlockCostBelow(nextS)
+		if unlockNameLbl then
+			unlockNameLbl.Visible = false
+		end
+		if unlockDescLbl then
+			unlockDescLbl.Visible = false
+		end
+		layoutTitleBesideSkillBubble()
+	end)
 
-	clearLockOverlays()
 	local maxS = SkillStages.maxStageFor(activeSkillId)
 	local nextUnlock = if nextS then nextS else nil
-	for i = 1, SkillStages.MAX_STAGE do
-		local sb = stageButtons[i]
-		if not sb then
-			continue
-		end
-		if i > maxS then
-			sb.Visible = false
-			continue
-		end
-		sb.Visible = true
-		local leftoverNum = sb:FindFirstChild("_OceanTD_StageNum")
-		if leftoverNum then
-			leftoverNum:Destroy()
-		end
-		local stageScale = ensureStageScale(sb)
-		stageScale.Scale = 1
-		if nextUnlock and i == nextUnlock then
-			-- Red locked circle; lock icon ↔ N; ring pulses red→green.
-			placeNextUnlockOn(sb, i)
-		elseif i > unlocked then
-			placeLockOn(sb)
-		elseif i == active then
-			-- Active stage: white checkmark, +20% size.
-			paintStageCheckmarks(sb, "active")
-			stageScale.Scale = ACTIVE_STAGE_SCALE
-		else
-			-- Unlocked but not active: grey background (not dark green).
-			paintStageCheckmarks(sb, "idle")
+	local runIntro = playStageIntroOnNextRefresh
+	if runIntro then
+		playStageIntroOnNextRefresh = false
+		playStudioStageIntro(active, unlocked, nextUnlock, maxS)
+	elseif stageIntroActive then
+		-- Keep staggered open animation; sync can refresh labels without resetting circles.
+	else
+		clearLockOverlays()
+		for i = 1, SkillStages.MAX_STAGE do
+			local sb = stageButtons[i]
+			if not sb then
+				continue
+			end
+			if i > maxS then
+				sb.Visible = false
+				continue
+			end
+			sb.Visible = true
+			applyStudioStageResting(i, sb, active, unlocked, nextUnlock)
 		end
 	end
 	-- Locks / stage chrome can cover UNLOCK — keep interactives above.
@@ -2265,6 +3263,8 @@ function SkillPowerUpUI.close()
 	hideConfirm()
 	popupOpen = false
 	activeSkillId = nil
+	playStageIntroOnNextRefresh = false
+	cancelStageIntro()
 	stopUnlockDescPulse()
 	stopUnlockBtnPulse()
 	stopNextUnlockPulse()
@@ -2273,7 +3273,9 @@ function SkillPowerUpUI.close()
 	endGamepadNav()
 	stopCloseXOverlay()
 	clearLockOverlays()
-	hideRHealthLayout()
+	RHealthUI.hide()
+	restoreTitleLayouts()
+	hideUnlockCostLabel()
 	if unlockDescLbl then
 		unlockDescLbl.RichText = false
 	end
@@ -2317,9 +3319,11 @@ function SkillPowerUpUI.open(skillId: string)
 	lastOpenAt = now
 	activeSkillId = skillId
 	popupOpen = true
-	-- Reef Health uses a full-screen layout — hide all skill bubbles (no blue bubble behind).
-	-- Other skills keep the selected bubble visible at +20%.
-	if skillId == "RHealth" then
+	-- Staggered stage-circle scale-in (N first, then check/lock) on each open.
+	playStageIntroOnNextRefresh = true
+	-- LINE Reef Health: full-screen layout — hide all skill bubbles.
+	-- RING (default) + other skills: keep the selected bubble visible at +20%.
+	if skillId == "RHealth" and RHEALTH_LAYOUT_MODE == "LINE" then
 		SkillsBubbleSim.setSuppressed(true)
 		template.Visible = false
 	else
@@ -2363,6 +3367,8 @@ function SkillPowerUpUI.open(skillId: string)
 	if unlockBtn and unlockBtn.Visible then
 		raiseInteractive(unlockBtn, POWERUP_Z + 650)
 	end
+	-- Bubble AbsoluteSize is ready after suppress/layout — place title to its right.
+	task.defer(layoutTitleBesideSkillBubble)
 end
 
 function SkillPowerUpUI.openFromButtonName(buttonName: string)
@@ -2573,7 +3579,7 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
 				onUnlockPressed()
 				return
 			end
-			if activeSkillId == "RHealth" and not confirmGui then
+			if useRHealthLineLayout() and not confirmGui then
 				for stageIndex, col in ipairs(rHealthCols) do
 					if obj == col.bubble or obj:IsDescendantOf(col.bubble) or obj:IsDescendantOf(col.root) then
 						local unlocked = unlockedStage("RHealth")

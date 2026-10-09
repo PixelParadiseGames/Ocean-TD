@@ -1,7 +1,8 @@
 --!strict
 --[[
 	Background music playlist from Workspace.Audio["BG Music"].
-	Shuffle, skip, play/pause; volume via AudioSettings BGM group.
+	Shuffle, skip, play/pause; loudness via AudioSettings BGM SoundGroup.
+	Sound.Volume stays at NOMINAL (1) except during shark overlay / VO soft-duck.
 ]]
 
 local RunService = game:GetService("RunService")
@@ -15,6 +16,10 @@ local BgmController = {}
 
 local BG_FOLDER_PATH = { "Audio", "BG Music" }
 local FADE_SEC = 0.35
+-- Playlist Sound.Volume baseline. Soft-duck / overlay temporarily lower this;
+-- the Settings BGM slider only drives SoundGroup.Volume, so a stuck Sound.Volume
+-- makes music stay quiet no matter how high the slider goes.
+local NOMINAL_BGM_SOUND_VOLUME = 1
 
 local bgmSound: Sound? = nil
 local overlaySound: Sound? = nil
@@ -26,12 +31,25 @@ local started = false
 local paused = false
 local overlayToken = 0
 local duckActive = false
-local savedBgmVolume = 1
+local savedBgmVolume = NOMINAL_BGM_SOUND_VOLUME
 local savedBgmTime = 0
 local overlayEndedConn: RBXScriptConnection? = nil
 
+-- Soft duck: fade BGM Sound.Volume to a fraction during tutorial VO, then restore.
+local softDuckToken = 0
+local softDuckActive = false
+local softDuckBaseVolume = NOMINAL_BGM_SOUND_VOLUME
+local softDuckPendingFactor: number? = nil -- applied when BGM starts mid-VO
+
 local stateChanged = Instance.new("BindableEvent")
 BgmController.StateChanged = stateChanged.Event
+
+local function sanitizeSoundVolume(v: number): number
+	if typeof(v) ~= "number" or v ~= v or v <= 0.05 then
+		return NOMINAL_BGM_SOUND_VOLUME
+	end
+	return math.clamp(v, 0.05, 1)
+end
 
 local function fireState()
 	stateChanged:Fire()
@@ -89,7 +107,7 @@ local function ensureSound(): Sound
 	local s = Instance.new("Sound")
 	s.Name = "OceanTD_BgmPlayer"
 	s.Looped = false
-	s.Volume = 1
+	s.Volume = NOMINAL_BGM_SOUND_VOLUME
 	s.RollOffMaxDistance = 10000
 	s.Parent = SoundService
 	AudioSettings.markBgmSound(s)
@@ -134,6 +152,8 @@ local function applyTrack(soundId: string)
 	-- Keep VO duck if dialogue is already playing when a track starts / skips.
 	if softDuckActive then
 		applySoftDuckToSound(s)
+	elseif not duckActive then
+		s.Volume = NOMINAL_BGM_SOUND_VOLUME
 	end
 	s:Play()
 	paused = false
@@ -205,6 +225,12 @@ function BgmController.resume()
 	if not s then
 		BgmController.play()
 		return
+	end
+	-- Heal stuck soft-duck volume from a VO that ended while BGM was paused.
+	if not duckActive and not softDuckActive and s.Volume + 1e-3 < NOMINAL_BGM_SOUND_VOLUME then
+		s.Volume = NOMINAL_BGM_SOUND_VOLUME
+	elseif softDuckActive and not duckActive then
+		applySoftDuckToSound(s)
 	end
 	if s.IsPlaying then
 		paused = false
@@ -361,7 +387,12 @@ function BgmController.playOverlay(soundId: string, fadeSec: number?, onEnded: (
 	local bgm = bgmSound
 	if bgm then
 		if not duckActive then
-			savedBgmVolume = bgm.Volume
+			-- Don't bake a VO soft-duck level into the overlay restore target.
+			if softDuckActive then
+				savedBgmVolume = sanitizeSoundVolume(softDuckBaseVolume)
+			else
+				savedBgmVolume = sanitizeSoundVolume(bgm.Volume)
+			end
 			savedBgmTime = bgm.TimePosition
 		end
 		duckActive = true
@@ -375,9 +406,7 @@ function BgmController.playOverlay(soundId: string, fadeSec: number?, onEnded: (
 		end)
 	else
 		duckActive = true
-		if savedBgmVolume <= 0 then
-			savedBgmVolume = 1
-		end
+		savedBgmVolume = sanitizeSoundVolume(savedBgmVolume)
 		savedBgmTime = 0
 	end
 
@@ -427,12 +456,22 @@ function BgmController.stopOverlay(fadeSec: number?)
 	end
 	duckActive = false
 
-	-- Respect player pause: don't force BGM back on.
+	local bgm = bgmSound
+	local restore = sanitizeSoundVolume(savedBgmVolume)
+	if softDuckActive then
+		local factor = if typeof(softDuckPendingFactor) == "number" then softDuckPendingFactor :: number else 0.08
+		restore = softDuckBaseVolume * math.clamp(factor, 0, 1)
+	end
+
+	-- Respect player pause: don't force BGM back on, but always restore Sound.Volume
+	-- so Play / the Settings slider aren't stuck on a muted Sound.
 	if paused then
+		if bgm then
+			bgm.Volume = restore
+		end
 		return
 	end
 
-	local bgm = bgmSound
 	if not bgm then
 		return
 	end
@@ -450,14 +489,8 @@ function BgmController.stopOverlay(fadeSec: number?)
 		end
 		bgm:Play()
 	end
-	tweenVolume(bgm, savedBgmVolume > 0 and savedBgmVolume or 1, fade, my, nil)
+	tweenVolume(bgm, restore, fade, my, nil)
 end
-
--- Soft duck: fade BGM to a fraction of its current volume (e.g. intro VO), then restore.
-local softDuckToken = 0
-local softDuckActive = false
-local softDuckBaseVolume = 1
-local softDuckPendingFactor: number? = nil -- applied when BGM starts mid-VO
 
 local function tweenBgmSoft(toVol: number, fadeSec: number, token: number, onDone: (() -> ())?)
 	local sound = bgmSound
@@ -517,10 +550,12 @@ function BgmController.fadeBgmToFactor(factor: number, fadeSec: number?)
 	local my = softDuckToken
 	local bgm = bgmSound
 	if not softDuckActive then
-		-- Prefer overlay's saved volume if shark theme already ducked BGM to 0.
-		softDuckBaseVolume = if duckActive then savedBgmVolume elseif bgm then bgm.Volume else 1
-		if softDuckBaseVolume <= 0 then
-			softDuckBaseVolume = 1
+		-- Always restore toward nominal Sound.Volume — never capture a mid-duck level
+		-- (that permanently "locks" music quiet; Settings only adjusts SoundGroup).
+		if duckActive then
+			softDuckBaseVolume = sanitizeSoundVolume(savedBgmVolume)
+		else
+			softDuckBaseVolume = NOMINAL_BGM_SOUND_VOLUME
 		end
 		softDuckActive = true
 	end
@@ -543,21 +578,45 @@ function BgmController.clearBgmFactor(fadeSec: number?)
 	local fade = if typeof(fadeSec) == "number" then math.max(0, fadeSec) else FADE_SEC
 	softDuckToken += 1
 	local my = softDuckToken
-	local base = softDuckBaseVolume
+	local base = sanitizeSoundVolume(softDuckBaseVolume)
 	softDuckActive = false
 	softDuckPendingFactor = nil
+	softDuckBaseVolume = NOMINAL_BGM_SOUND_VOLUME
 	if duckActive then
+		-- Overlay still owns playback; hand the unducked base to stopOverlay.
 		savedBgmVolume = base
-		return
-	end
-	if paused then
 		return
 	end
 	local bgm = bgmSound
 	if not bgm then
 		return
 	end
+	-- Always put Sound.Volume back even if paused — otherwise resume stays quiet
+	-- and the Settings BGM slider (SoundGroup only) cannot fix it.
+	if paused or fade <= 0 then
+		bgm.Volume = base
+		return
+	end
 	tweenBgmSoft(base, fade, my, nil)
+end
+
+-- Called when the Settings BGM slider moves. Heals a stuck soft-duck Sound.Volume
+-- so mixer changes become audible again.
+function BgmController.notifyMixerVolumeChanged()
+	local bgm = bgmSound
+	if not bgm then
+		return
+	end
+	if duckActive then
+		return
+	end
+	if softDuckActive then
+		applySoftDuckToSound(bgm)
+		return
+	end
+	if bgm.Volume + 1e-3 < NOMINAL_BGM_SOUND_VOLUME then
+		bgm.Volume = NOMINAL_BGM_SOUND_VOLUME
+	end
 end
 
 return BgmController

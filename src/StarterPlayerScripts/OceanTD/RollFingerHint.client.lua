@@ -1097,12 +1097,23 @@ local function startHint(mode: HintMode)
 		local id = SeedWheelRevealApi.lastAwardedItemId
 		if typeof(id) == "string" then
 			InventoryState.revealItemInBackpack(id)
+			-- Open tween / list layout can finish after the first reveal attempt.
+			task.delay(0.35, function()
+				if playerGui:GetAttribute(HINT_ATTR) == "equip" then
+					InventoryState.revealItemInBackpack(id)
+				end
+			end)
 		end
 	elseif mode == "plot" then
 		rerollPlotTapOffset()
 		local id = InventoryState.getSelectedId() or SeedWheelRevealApi.lastAwardedItemId
 		if typeof(id) == "string" and id ~= "" then
 			InventoryState.revealItemInBackpack(id)
+			task.delay(0.35, function()
+				if playerGui:GetAttribute(HINT_ATTR) == "plot" then
+					InventoryState.revealItemInBackpack(id)
+				end
+			end)
 		end
 	elseif mode == "waves" then
 		waitingWaveEnd = true

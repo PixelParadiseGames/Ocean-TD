@@ -1,7 +1,7 @@
 --!strict
 --[[
 	Studio anchor: PlayerGui.MobileLeftUI.dPad.Settings (♪ opens volume UI).
-	Settings modal: SFX/BGM volume, BGM shuffle/skip/play-pause.
+	Settings modal: SFX / Narrator / BGM volume, BGM shuffle/skip/play-pause.
 	Close: button, B (gamepad), Backspace, Escape. Dim tap closes.
 ]]
 
@@ -34,7 +34,7 @@ local CLOSE_RED = Color3.fromRGB(200, 45, 55)
 local MUSIC_GLYPH = "♪"
 local STUDIO_SETTINGS_NAME = "Settings"
 local PANEL_W = 420
-local PANEL_H = 400
+local PANEL_H = 480
 local PANEL_STROKE = 2
 local VIEWPORT_MARGIN = 12
 
@@ -52,13 +52,14 @@ local playBtn: TextButton? = nil
 local skipBtn: TextButton? = nil
 local trackLabel: TextLabel? = nil
 local sfxSlider: UiSlider.SliderHandle? = nil
+local narratorSlider: UiSlider.SliderHandle? = nil
 local bgmSlider: UiSlider.SliderHandle? = nil
 
 local function fittedPanelSize(vp: Vector2): Vector2
 	local scale = UiPopupScale.get(vp)
 	local maxW = math.min(PANEL_W, math.floor(vp.X * 0.92 / scale))
 	local maxH = math.min(PANEL_H, math.floor(vp.Y * 0.88 / scale))
-	return Vector2.new(math.max(320, maxW), math.max(340, maxH))
+	return Vector2.new(math.max(320, maxW), math.max(400, maxH))
 end
 
 local function positionPanelNearAnchor()
@@ -376,8 +377,8 @@ local function ensureSettingsUi()
 	panelPad.PaddingRight = UDim.new(0, PANEL_STROKE)
 	panelPad.Parent = panel
 	local sizeConstraint = Instance.new("UISizeConstraint")
-	sizeConstraint.MinSize = Vector2.new(320, 340)
-	sizeConstraint.MaxSize = Vector2.new(520, 520)
+	sizeConstraint.MinSize = Vector2.new(320, 400)
+	sizeConstraint.MaxSize = Vector2.new(520, 600)
 	sizeConstraint.Parent = panel
 
 	local chrome = Instance.new("Frame")
@@ -447,14 +448,28 @@ local function ensureSettingsUi()
 	})
 	sfxSlider.setValue(AudioSettings.getSfxVolume(), false)
 
-	makeSectionLabel(body, "Background Music", 3)
-	bgmSlider = UiSlider.create(body, {
-		name = "BgmSlider",
+	makeSectionLabel(body, "Narrator", 3)
+	narratorSlider = UiSlider.create(body, {
+		name = "NarratorSlider",
 		layoutOrder = 4,
 		height = 44,
 		accentColor = ACCENT,
 		onChanged = function(v)
+			AudioSettings.setNarratorVolume(v)
+		end,
+	})
+	narratorSlider.setValue(AudioSettings.getNarratorVolume(), false)
+
+	makeSectionLabel(body, "Background Music", 5)
+	bgmSlider = UiSlider.create(body, {
+		name = "BgmSlider",
+		layoutOrder = 6,
+		height = 44,
+		accentColor = ACCENT,
+		onChanged = function(v)
 			AudioSettings.setBgmVolume(v)
+			-- Soft-duck / overlay edit Sound.Volume; slider only hits SoundGroup.
+			BgmController.notifyMixerVolumeChanged()
 		end,
 	})
 	bgmSlider.setValue(AudioSettings.getBgmVolume(), false)
@@ -468,14 +483,14 @@ local function ensureSettingsUi()
 	trackLabel.TextColor3 = Color3.fromRGB(170, 185, 205)
 	trackLabel.TextSize = 16
 	trackLabel.TextXAlignment = Enum.TextXAlignment.Left
-	trackLabel.LayoutOrder = 5
+	trackLabel.LayoutOrder = 7
 	trackLabel.Parent = body
 
 	local transportRow = Instance.new("Frame")
 	transportRow.Name = "Transport"
 	transportRow.BackgroundTransparency = 1
 	transportRow.Size = UDim2.new(1, 0, 0, 44)
-	transportRow.LayoutOrder = 6
+	transportRow.LayoutOrder = 8
 	transportRow.Parent = body
 	local transportLayout = Instance.new("UIListLayout")
 	transportLayout.FillDirection = Enum.FillDirection.Horizontal
@@ -505,10 +520,14 @@ local function ensureSettingsUi()
 	end)
 
 	local sfxTrack = sfxSlider.root:FindFirstChild("Track") :: GuiObject?
+	local narratorTrack = narratorSlider.root:FindFirstChild("Track") :: GuiObject?
 	local bgmTrack = bgmSlider.root:FindFirstChild("Track") :: GuiObject?
 	close.NextSelectionDown = sfxTrack
 	if sfxTrack then
-		sfxTrack.NextSelectionDown = bgmTrack
+		sfxTrack.NextSelectionDown = narratorTrack
+	end
+	if narratorTrack then
+		narratorTrack.NextSelectionDown = bgmTrack
 	end
 	if bgmTrack then
 		bgmTrack.NextSelectionDown = shuffleBtn
@@ -551,6 +570,9 @@ function SettingsUI.open()
 	positionPanelNearAnchor()
 	if sfxSlider then
 		sfxSlider.setValue(AudioSettings.getSfxVolume(), false)
+	end
+	if narratorSlider then
+		narratorSlider.setValue(AudioSettings.getNarratorVolume(), false)
 	end
 	if bgmSlider then
 		bgmSlider.setValue(AudioSettings.getBgmVolume(), false)

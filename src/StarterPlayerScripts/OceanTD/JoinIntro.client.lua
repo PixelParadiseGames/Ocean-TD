@@ -662,15 +662,22 @@ local function smoothstep(u: number): number
 end
 
 local hiddenHud: { { gui: GuiObject, wasVisible: boolean } } = {}
+local hiddenHudSet: { [GuiObject]: boolean } = {}
 local hiddenScreens: { [ScreenGui]: boolean } = {}
 local hudSuppressConn: RBXScriptConnection? = nil
 local hudChildConn: RBXScriptConnection? = nil
+local leftHudOrderSaved: number? = nil
+-- Above OceanTD_JoinIntroLoad (2000) so ♪ stays clickable over the loading chrome.
+local INTRO_SETTINGS_DISPLAY_ORDER = 2500
 
 local HUD_SKIP_NAMES = {
 	OceanTD_JoinIntro = true,
 	OceanTD_JoinIntroLoad = true,
 	OceanTD_HideUiFly = true,
 	TouchGui = true,
+	-- Sound settings button (♪) + volume modal stay available during loading / intro.
+	MobileLeftUI = true,
+	OceanTD_Settings = true,
 }
 
 local function shouldKeepScreenGui(sg: ScreenGui): boolean
@@ -689,12 +696,61 @@ local function suppressScreenGui(sg: ScreenGui)
 	end
 end
 
+local function rememberHideGui(gui: GuiObject)
+	if hiddenHudSet[gui] then
+		gui.Visible = false
+		return
+	end
+	hiddenHudSet[gui] = true
+	table.insert(hiddenHud, { gui = gui, wasVisible = gui.Visible })
+	gui.Visible = false
+end
+
+-- Keep only MobileLeftUI.dPad.Settings visible; hide the rest of the left HUD.
+local function pinSettingsButtonVisible()
+	local left = playerGui:FindFirstChild("MobileLeftUI")
+	if not (left and left:IsA("ScreenGui")) then
+		return
+	end
+	left.Enabled = true
+	if leftHudOrderSaved == nil then
+		leftHudOrderSaved = left.DisplayOrder
+	end
+	left.DisplayOrder = math.max(left.DisplayOrder, INTRO_SETTINGS_DISPLAY_ORDER)
+	left.IgnoreGuiInset = true
+	pcall(function()
+		(left :: any).ClipToDeviceSafeArea = false
+	end)
+
+	local dPad = left:FindFirstChild("dPad")
+	if dPad and dPad:IsA("GuiObject") then
+		dPad.Visible = true
+		for _, ch in ipairs(dPad:GetChildren()) do
+			if ch:IsA("GuiObject") then
+				if ch.Name == "Settings" then
+					ch.Visible = true
+					ch.Active = true
+				else
+					-- Include dPadIcon — only ♪ Settings stays during load/intro.
+					rememberHideGui(ch)
+				end
+			end
+		end
+	end
+	for _, ch in ipairs(left:GetChildren()) do
+		if ch:IsA("GuiObject") and ch.Name ~= "dPad" then
+			rememberHideGui(ch)
+		end
+	end
+end
+
 local function hideHud()
 	for _, ch in ipairs(playerGui:GetChildren()) do
 		if ch:IsA("ScreenGui") then
 			suppressScreenGui(ch)
 		end
 	end
+	pinSettingsButtonVisible()
 end
 
 local function startHudSuppress()
@@ -708,6 +764,7 @@ local function startHudSuppress()
 				task.defer(function()
 					if playerGui:GetAttribute(ATTR_BUSY) == true and ch.Parent then
 						suppressScreenGui(ch)
+						pinSettingsButtonVisible()
 					end
 				end)
 			end
@@ -724,6 +781,7 @@ local function startHudSuppress()
 					suppressScreenGui(ch)
 				end
 			end
+			pinSettingsButtonVisible()
 		end)
 	end
 end
@@ -753,6 +811,17 @@ local function restoreHud()
 		end
 	end
 	table.clear(hiddenHud)
+	table.clear(hiddenHudSet)
+	local left = playerGui:FindFirstChild("MobileLeftUI")
+	if left and left:IsA("ScreenGui") and leftHudOrderSaved ~= nil then
+		left.DisplayOrder = leftHudOrderSaved
+	end
+	leftHudOrderSaved = nil
+end
+
+-- Load bar already up from bootstrapImmediateLoadBar — pin ♪ above it now, not only at beginEarlyIntroHold.
+if playerGui:GetAttribute(ATTR_BUSY) == true then
+	startHudSuppress()
 end
 
 local DEFAULT_WALK_SPEED = 16
