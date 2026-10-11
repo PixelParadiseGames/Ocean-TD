@@ -97,6 +97,8 @@ export type PlayerProfile = {
 	skillActiveStages: { [string]: number }, -- skillId → currently enabled stage (≤ unlocked)
 	-- itemId → color index string → true when that paint swatch is unlocked for that coral type.
 	coralColorUnlocks: { [string]: { [string]: boolean } },
+	-- Species the player has ever received a seed for (backpack collection / "?" greyout).
+	discoveredCorals: { [string]: boolean },
 	-- Purchased once: dPad HideUI toggles HUD visibility.
 	hideUiUnlocked: boolean,
 	-- Player has finished (or skipped after first) the join Wave-100 showcase intro.
@@ -147,6 +149,7 @@ function PlotTypes.defaultProfile(): PlayerProfile
 		skillStages = SkillStages.defaultMap(),
 		skillActiveStages = SkillStages.defaultMap(),
 		coralColorUnlocks = {},
+		discoveredCorals = {},
 		hideUiUnlocked = true, -- free for all players from the start
 		hasSeenJoinIntro = false,
 	}

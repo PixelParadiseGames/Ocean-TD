@@ -367,17 +367,22 @@ function PlaceArmDisarmAnim.playDisarmOutro(env: Env, thenExit: () -> ())
 	local moveStartSize = if moveHintImage then moveHintImage.AbsoluteSize.X else MOVE_ICON_SIZE
 
 	if confirmGui then
+		-- Buttons may already be destroyed if a billboard Destroy raced; never hard-set Parent.
 		if cancelBtn then
-			cancelBtn.Parent = confirmGui
-			cancelBtn.AnchorPoint = Vector2.new(0.5, 0.5)
-			cancelBtn.Position = UDim2.fromOffset(cancelStart.X, cancelStart.Y)
+			pcall(function()
+				cancelBtn.Parent = confirmGui
+				cancelBtn.AnchorPoint = Vector2.new(0.5, 0.5)
+				cancelBtn.Position = UDim2.fromOffset(cancelStart.X, cancelStart.Y)
+			end)
 		end
 		if checkBtn then
-			checkBtn.Parent = confirmGui
-			checkBtn.AnchorPoint = Vector2.new(0.5, 0.5)
-			if checkStart then
-				checkBtn.Position = UDim2.fromOffset(checkStart.X, checkStart.Y)
-			end
+			pcall(function()
+				checkBtn.Parent = confirmGui
+				checkBtn.AnchorPoint = Vector2.new(0.5, 0.5)
+				if checkStart then
+					checkBtn.Position = UDim2.fromOffset(checkStart.X, checkStart.Y)
+				end
+			end)
 		end
 	end
 

@@ -2202,6 +2202,9 @@ local function commitRecycle()
 		if typeof(result.itemId) == "string" then
 			creditedId = result.itemId
 		end
+		if typeof(result.inventory) == "table" then
+			InventoryState.setSeedCounts(result.inventory)
+		end
 		-- Server destroys the part; drop local refs so clearState won't restore it.
 		if warnLabel then
 			local bb = warnLabel.Parent

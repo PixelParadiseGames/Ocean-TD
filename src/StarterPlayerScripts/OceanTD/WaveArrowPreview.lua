@@ -255,10 +255,8 @@ local function ensurePlanningLegend(): ScreenGui
 		return lbl
 	end
 
-	makePart("Dangerous", "DANGEROUS", Color3.fromRGB(230, 45, 55), 1)
-	makePart("Slash", "/", Color3.new(1, 1, 1), 2)
-	makePart("Friendly", "FRIENDLY", Color3.fromRGB(40, 255, 120), 3)
-	makePart("Critters", " CRITTERS PATHS", Color3.new(1, 1, 1), 4)
+	-- Red / dangerous trains are off — legend is friendly-only.
+	makePart("Friendly", "FRIENDLY FISH PATH", Color3.fromRGB(40, 255, 120), 1)
 
 	planningLegendSg = sg
 	return sg
@@ -522,35 +520,18 @@ function WaveArrowPreview.startGreen(opts: StartOpts?)
 	end
 end
 
-function WaveArrowPreview.startRed(opts: StartOpts?)
-	if WaveArrowPreview.hasActiveRedTrains() then
-		return
-	end
-	local includeShark = if opts and opts.includeShark ~= nil then opts.includeShark else true
-	local forceGround = if opts and opts.forceGroundTrains ~= nil then opts.forceGroundTrains else false
-	local redLabelText = if opts then opts.redLabelText else nil
-	redSpawnPending = true
+function WaveArrowPreview.startRed(_opts: StartOpts?)
+	-- Disabled: no red dangerous-critter arrow trains (friendly green only).
 	startGeneration += 1
-	local gen = startGeneration
-	task.defer(function()
-		if gen ~= startGeneration then
-			return
-		end
-		startCrabArrowPreview(forceGround, redLabelText)
-		if includeShark then
-			startSharkArrowPreview()
-		end
-		if gen == startGeneration then
-			redSpawnPending = false
-		end
-	end)
+	redSpawnPending = false
+	clearRedTrains()
 end
 
 function WaveArrowPreview.start(opts: StartOpts?)
 	clearGreenTrains()
 	clearRedTrains()
 	WaveArrowPreview.startGreen(opts)
-	WaveArrowPreview.startRed(opts)
+	-- Red trains intentionally omitted.
 end
 
 function WaveArrowPreview.tick(dt: number)

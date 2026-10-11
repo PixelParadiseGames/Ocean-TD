@@ -22,6 +22,7 @@ local WaveEndVfx = require(script.Parent:WaitForChild("WaveEndVfx"))
 local ReefDefeatCam = require(script.Parent:WaitForChild("ReefDefeatCam"))
 local HideUiController = require(script.Parent:WaitForChild("HideUiController"))
 local InventoryState = require(script.Parent:WaitForChild("InventoryState"))
+local GameOverTitle = require(script.Parent:WaitForChild("GameOverTitle"))
 
 local WaveSlotSummary = {}
 
@@ -570,10 +571,31 @@ function WaveSlotSummary.show(summary: WaveSim.Summary)
 	end)
 	summaryOpen = true
 	summaryIsDefeat = summary.defeated == true
-	local origin = summaryScaleOrigin(summary)
-	local scaleInfo = if summary.defeated then SUMMARY_SCALE_IN_DEFEAT else SUMMARY_SCALE_IN
 	h.setHudVisible(false)
 	h.applyIcon(false)
+
+	-- Defeat: hold cam on reef heart through GAME OVER, then Out Of Reef Health.
+	if summaryIsDefeat then
+		local world = summary.defeatOrigin
+		if typeof(world) ~= "Vector3" then
+			world = WaveEndVfx.getEndHeartWorldPos()
+		end
+		if typeof(world) == "Vector3" then
+			ReefDefeatCam.focusAndHold(world)
+		end
+		local holdConn: RBXScriptConnection? = RunService.RenderStepped:Connect(function()
+			ReefDefeatCam.reassertHold()
+		end)
+		GameOverTitle.playAndWait(if typeof(world) == "Vector3" then world else nil)
+		if holdConn then
+			holdConn:Disconnect()
+		end
+		-- Keep heart pose for the popup; busy stays until Retry/Finish.
+		ReefDefeatCam.reassertHold()
+	end
+
+	local origin = summaryScaleOrigin(summary)
+	local scaleInfo = if summary.defeated then SUMMARY_SCALE_IN_DEFEAT else SUMMARY_SCALE_IN
 
 	local records = WaveSummaryUi.reportAndReadRecords(summary)
 

@@ -754,6 +754,9 @@ local function isFingerTutorialActive(): boolean
 	if playerGui:GetAttribute("OceanTD_TutorialGateCam") == true then
 		return true
 	end
+	if playerGui:GetAttribute("OceanTD_TutorialGateShop") == true then
+		return true
+	end
 	return false
 end
 
@@ -792,6 +795,7 @@ local function skipEntireFingerTutorial()
 	playerGui:SetAttribute("OceanTD_TutorialGateWaves", false)
 	playerGui:SetAttribute("OceanTD_TutorialGateLeftHud", false)
 	playerGui:SetAttribute("OceanTD_TutorialGateCam", false)
+	playerGui:SetAttribute("OceanTD_TutorialGateShop", false)
 	playerGui:SetAttribute("OceanTD_TutorialWavesSlotReady", true)
 	playerGui:SetAttribute("OceanTD_TutorialSummaryFinished", nil)
 	playerGui:SetAttribute("OceanTD_TutorialRollThenSkills", nil)
@@ -1024,9 +1028,10 @@ local function resolveTarget(mode: HintMode): Vector2?
 	elseif mode == "reselectCoral" then
 		return tutorialHueCoralScreenCenter() or plotScreenCenter()
 	elseif mode == "upgrade" then
-		-- Ensure size confirm is open so UNLOCK exists for the finger.
-		CoralInspectPanel.openTutorialSizeConfirm()
-		local a = findUpgradeUnlockButton()
+		-- Prefer UNLOCK only after the player opened the confirm; otherwise aim at UPGRADE.
+		-- Re-open inspect on the planted tutorial coral if place→relocate raced.
+		CoralInspectPanel.ensureTutorialUpgradeTarget()
+		local a = findUpgradeUnlockButton() or CoralInspectPanel.getTutorialUpgradeButton()
 		if not a then
 			return nil
 		end
@@ -1436,6 +1441,12 @@ local function applyAttr(raw: any)
 		syncSkipTutorialBtn()
 		return
 	end
+	-- Intro owns the screen until JoinIntroBusy clears (roll finger = training start).
+	if playerGui:GetAttribute(JOIN_INTRO_BUSY_ATTR) == true then
+		stopHint()
+		syncSkipTutorialBtn()
+		return
+	end
 	local mode = parseMode(raw)
 	if mode then
 		if mode == "backpack" then
@@ -1449,6 +1460,14 @@ local function applyAttr(raw: any)
 	end
 	syncSkipTutorialBtn()
 end
+
+-- When intro ends, apply any pending roll-finger hint that was blocked while busy.
+playerGui:GetAttributeChangedSignal(JOIN_INTRO_BUSY_ATTR):Connect(function()
+	if playerGui:GetAttribute(JOIN_INTRO_BUSY_ATTR) == true then
+		return
+	end
+	applyAttr(playerGui:GetAttribute(HINT_ATTR))
+end)
 
 playerGui:GetAttributeChangedSignal(HINT_ATTR):Connect(function()
 	applyAttr(playerGui:GetAttribute(HINT_ATTR))
@@ -1591,7 +1610,17 @@ local LEFT_HUD_LOCK_BTN: { [string]: boolean } = {
 	Skills = true,
 	-- Settings / audio stays usable during the tutorial gate.
 	HideUI = true,
-	-- Cart / info stays usable (build mode → reef report). Do not lock it.
+}
+
+-- Shop / cart locked until plot-size upgrade finger tutorial completes.
+local LEFT_SHOP_LOCK_BTN: { [string]: boolean } = {
+	CartIcon = true,
+	Cart = true,
+	CartBTN = true,
+	CartBtn = true,
+	Report = true,
+	ReefReport = true,
+	ShoppingCart = true,
 }
 
 -- Camera cycle icons — locked until build mode closes after the first coral hue.
@@ -1743,6 +1772,7 @@ end
 local function applyLeftHudGate()
 	local gate = playerGui:GetAttribute("OceanTD_TutorialGateLeftHud") == true
 	local gateCam = playerGui:GetAttribute("OceanTD_TutorialGateCam") == true
+	local gateShop = playerGui:GetAttribute("OceanTD_TutorialGateShop") == true
 	local skillsOpen = playerGui:GetAttribute(SKILLS_OPEN_ATTR) == true
 	local left = playerGui:FindFirstChild("MobileLeftUI")
 	if not (left and left:IsA("ScreenGui")) then
@@ -1770,17 +1800,24 @@ local function applyLeftHudGate()
 	if mid and mid:IsA("GuiObject") then
 		clearTutorialLockOn(mid)
 	end
+	local lockedShopHosts: { [GuiObject]: boolean } = {}
 	for _, ch in ipairs(dPad:GetChildren()) do
 		if not ch:IsA("GuiObject") then
 			continue
 		end
 		local lockHud = LEFT_HUD_LOCK_BTN[ch.Name] == true
 		local lockCam = LEFT_CAM_LOCK_BTN[ch.Name] == true
-		if not lockHud and not lockCam then
+		local lockShop = LEFT_SHOP_LOCK_BTN[ch.Name] == true
+		if not lockHud and not lockCam and not lockShop then
 			continue
 		end
 		local shouldLock = false
-		if lockHud then
+		if lockShop then
+			shouldLock = gateShop
+			if shouldLock then
+				lockedShopHosts[ch] = true
+			end
+		elseif lockHud then
 			-- Skills close must stay usable while bubbles are open (WaveSpeed/Skip ForceOpen).
 			shouldLock = gate and not (skillsOpen and ch.Name == "Skills")
 		elseif lockCam then
@@ -1792,10 +1829,30 @@ local function applyLeftHudGate()
 			clearTutorialLockOn(ch)
 		end
 	end
+	-- Cart may be nested / aliased — match ReefReport preferred names so the red lock always lands.
+	if gateShop then
+		local preferred = { "CartIcon", "CartBTN", "CartBtn", "Cart", "cart", "Report", "ReefReport", "ShoppingCart" }
+		for _, name in ipairs(preferred) do
+			local gui = dPad:FindFirstChild(name, true)
+			if gui and gui:IsA("GuiObject") and not lockedShopHosts[gui] then
+				ensureTutorialLockOn(gui)
+				lockedShopHosts[gui] = true
+				break
+			end
+		end
+	else
+		for _, name in ipairs({ "CartIcon", "CartBTN", "CartBtn", "Cart", "cart", "Report", "ReefReport", "ShoppingCart" }) do
+			local gui = dPad:FindFirstChild(name, true)
+			if gui and gui:IsA("GuiObject") and LEFT_SHOP_LOCK_BTN[gui.Name] == true then
+				clearTutorialLockOn(gui)
+			end
+		end
+	end
 end
 
 playerGui:GetAttributeChangedSignal("OceanTD_TutorialGateLeftHud"):Connect(applyLeftHudGate)
 playerGui:GetAttributeChangedSignal("OceanTD_TutorialGateCam"):Connect(applyLeftHudGate)
+playerGui:GetAttributeChangedSignal("OceanTD_TutorialGateShop"):Connect(applyLeftHudGate)
 playerGui:GetAttributeChangedSignal(SKILLS_OPEN_ATTR):Connect(applyLeftHudGate)
 playerGui.ChildAdded:Connect(function(ch)
 	if ch.Name == "MobileLeftUI" then
@@ -1803,6 +1860,7 @@ playerGui.ChildAdded:Connect(function(ch)
 		ch.ChildAdded:Connect(function()
 			if playerGui:GetAttribute("OceanTD_TutorialGateLeftHud") == true
 				or playerGui:GetAttribute("OceanTD_TutorialGateCam") == true
+				or playerGui:GetAttribute("OceanTD_TutorialGateShop") == true
 				or playerGui:GetAttribute(SKILLS_OPEN_ATTR) == true
 			then
 				task.defer(applyLeftHudGate)
@@ -1816,6 +1874,7 @@ do
 		existing.ChildAdded:Connect(function()
 			if playerGui:GetAttribute("OceanTD_TutorialGateLeftHud") == true
 				or playerGui:GetAttribute("OceanTD_TutorialGateCam") == true
+				or playerGui:GetAttribute("OceanTD_TutorialGateShop") == true
 				or playerGui:GetAttribute(SKILLS_OPEN_ATTR) == true
 			then
 				task.defer(applyLeftHudGate)
@@ -1847,4 +1906,5 @@ playerGui:GetAttributeChangedSignal("OceanTD_TutorialGateBackpack"):Connect(sync
 playerGui:GetAttributeChangedSignal("OceanTD_TutorialGateWaves"):Connect(syncSkipTutorialBtn)
 playerGui:GetAttributeChangedSignal("OceanTD_TutorialGateLeftHud"):Connect(syncSkipTutorialBtn)
 playerGui:GetAttributeChangedSignal("OceanTD_TutorialGateCam"):Connect(syncSkipTutorialBtn)
+playerGui:GetAttributeChangedSignal("OceanTD_TutorialGateShop"):Connect(syncSkipTutorialBtn)
 task.defer(syncSkipTutorialBtn)

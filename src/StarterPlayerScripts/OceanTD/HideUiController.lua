@@ -116,6 +116,7 @@ local KEEP_ENABLED_WHILE_HIDDEN = {
 	TouchGui = true,
 	-- Belt-and-suspenders if forceShow races ChildAdded (Out Of Reef Health summary).
 	OceanTD_WaveSummary = true,
+	OceanTD_GameOverTitle = true, -- defeat GAME OVER before summary
 }
 local animEntries: { AnimEntry } = {}
 local hiddenScreenGuis: { ScreenGuiEntry } = {}

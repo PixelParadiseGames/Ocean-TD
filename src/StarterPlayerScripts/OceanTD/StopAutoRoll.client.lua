@@ -17,6 +17,7 @@ local playerGui = player:WaitForChild("PlayerGui")
 
 local oceanRoot = ReplicatedStorage:WaitForChild("OceanTD")
 local Remotes = require(oceanRoot:WaitForChild("Remotes"))
+local AudioSettings = require(oceanRoot:WaitForChild("Shared"):WaitForChild("AudioSettings"))
 local LeftHudLayout = require(oceanRoot:WaitForChild("Shared"):WaitForChild("LeftHudLayout"))
 local UiTheme = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiTheme"))
 local UiHaptics = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiHaptics"))
@@ -89,9 +90,14 @@ local rollPressSound = Instance.new("Sound")
 rollPressSound.Name = "OceanTD_RollPress"
 rollPressSound.SoundId = ROLL_PRESS_SOUND_ID
 rollPressSound.Volume = 0.85
+-- Full SFX slider volume even while tutorial VO ducks regular SFX.
+AudioSettings.markPrioritySfx(rollPressSound)
 rollPressSound.Parent = SoundService
+AudioSettings.markPrioritySfx(rollPressSound)
 
 local function playRollPressSound()
+	-- Re-assert priority in case SoundService auto-route reassigned the group.
+	AudioSettings.markPrioritySfx(rollPressSound)
 	if rollPressSound.IsPlaying then
 		rollPressSound:Stop()
 	end

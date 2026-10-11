@@ -22,8 +22,16 @@ local sizeConn: RBXScriptConnection? = nil
 local lastIs720p: boolean? = nil
 local dualTagWarned: { [Instance]: boolean } = {}
 
+local function joinIntroBusy(): boolean
+	return playerGui:GetAttribute("OceanTD_JoinIntroBusy") == true
+end
+
 local function applyGui(gui: Instance, is720p: boolean)
 	if not gui:IsA("ScreenGui") or not gui:IsDescendantOf(playerGui) then
+		return
+	end
+	-- Join intro owns HUD visibility — don't fight its suppress (wave/start flash).
+	if joinIntroBusy() then
 		return
 	end
 	local hasMobile = CollectionService:HasTag(gui, TAG_MOBILE)
@@ -47,6 +55,10 @@ local function applyGui(gui: Instance, is720p: boolean)
 end
 
 local function applyKnownRightHuds(is720p: boolean)
+	-- Join intro owns HUD visibility — don't re-enable wave/start chrome mid-intro.
+	if joinIntroBusy() then
+		return
+	end
 	-- Name-based so a missing CollectionService tag can't leave 720pRightHUD stuck disabled.
 	local order = UiViewportTags.RIGHT_HUD_DISPLAY_ORDER
 	local mobile = playerGui:FindFirstChild(UiViewportTags.MOBILE_RIGHT_HUD)
@@ -62,6 +74,11 @@ local function applyKnownRightHuds(is720p: boolean)
 end
 
 local function refreshAll(force: boolean?)
+	if joinIntroBusy() then
+		-- Still track class so the first post-intro refresh applies the right HUD.
+		lastIs720p = UiViewportTags.is720p(UiViewportTags.readViewport())
+		return
+	end
 	local vp = UiViewportTags.readViewport()
 	local is720p = UiViewportTags.is720p(vp)
 	if not force and lastIs720p == is720p then
@@ -94,6 +111,11 @@ end
 bindCamera(Workspace.CurrentCamera)
 Workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function()
 	bindCamera(Workspace.CurrentCamera)
+end)
+playerGui:GetAttributeChangedSignal("OceanTD_JoinIntroBusy"):Connect(function()
+	if not joinIntroBusy() then
+		refreshAll(true)
+	end
 end)
 
 local function onTagged(inst: Instance)

@@ -30,6 +30,7 @@ return {
 
 	PlacedCoralIndex = require(parent:WaitForChild("PlacedCoralIndex")),
 	WaveArrowPreview = require(parent:WaitForChild("WaveArrowPreview")),
+	WavePathLines = require(parent:WaitForChild("WavePathLines")),
 	SharkCam = require(parent:WaitForChild("SharkCam")),
 	UrchinCam = require(parent:WaitForChild("UrchinCam")),
 	TangCam = require(parent:WaitForChild("TangCam")),

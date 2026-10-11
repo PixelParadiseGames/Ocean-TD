@@ -132,7 +132,7 @@ function PlaceConfirmChrome.ensureConfirmCheckIcon(btn: GuiObject): ImageLabel
 	return icon
 end
 
--- Alternate CONFIRM text ↔ check graphic (same 1s cadence as CANCEL/X). Gamepad stays on "A".
+-- Alternate CONFIRM text ↔ check graphic (same 1s cadence as Close/X). Gamepad stays on "A".
 function PlaceConfirmChrome.syncConfirmFace(btn: TextButton, showWord: boolean, gamepadLetter: boolean?)
 	local icon = PlaceConfirmChrome.ensureConfirmCheckIcon(btn)
 	if gamepadLetter then
@@ -523,7 +523,9 @@ function PlaceConfirmChrome.layoutAt(
 	local doRot = showRot == true and rotLeftBtn ~= nil and rotRightBtn ~= nil
 	local function parentToGui(btn: GuiObject?)
 		if btn and btn.Parent ~= confirmGui then
-			btn.Parent = confirmGui
+			pcall(function()
+				btn.Parent = confirmGui
+			end)
 		end
 	end
 	parentToGui(checkBtn)
@@ -591,7 +593,9 @@ function PlaceConfirmChrome.layoutOnMoveBillboard(
 
 	local function parentToBb(btn: GuiObject?)
 		if btn and btn.Parent ~= bb then
-			btn.Parent = bb
+			pcall(function()
+				btn.Parent = bb
+			end)
 		end
 	end
 	parentToBb(checkBtn)

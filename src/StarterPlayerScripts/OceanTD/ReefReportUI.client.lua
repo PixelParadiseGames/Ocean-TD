@@ -169,10 +169,27 @@ local function ensureHitOverlay(btn: GuiObject): GuiButton
 	return hit
 end
 
+local function shopTutorialLocked(): boolean
+	return playerGui:GetAttribute("OceanTD_TutorialGateShop") == true
+end
+
 -- Cart hit must always receive clicks for store / report / info. Tutorial locks may have
 -- saved Active=false; never leave Interactable false on this proxy.
+-- Exception: while OceanTD_TutorialGateShop, keep the red lock overlay (don't strip it).
 local function forceCartHitLive(btn: GuiObject?): GuiButton?
 	if not btn then
+		return nil
+	end
+	if shopTutorialLocked() then
+		local hit = btn:FindFirstChild("_OceanTD_CartHit")
+		if hit and hit:IsA("GuiButton") then
+			hit.Active = false
+			hit.Visible = false
+			pcall(function()
+				(hit :: any).Interactable = false
+			end)
+			return hit
+		end
 		return nil
 	end
 	local lockOv = btn:FindFirstChild("_OceanTD_TutorialLeftLock")
@@ -251,8 +268,11 @@ local function hideCartBtnContent(hide: boolean)
 				and ch.Name ~= "_OceanTD_StoreClose"
 				and ch.Name ~= "_OceanTD_CartInfoChrome"
 			then
-				-- Never keep tutorial locks under / over the info chrome.
+				-- Keep shop-gate lock chrome; Strip only when not shop-locked.
 				if ch.Name == "_OceanTD_TutorialLeftLock" or ch.Name == "_OceanTD_TutorialLeftLockIcon" then
+					if shopTutorialLocked() then
+						continue
+					end
 					ch:Destroy()
 					continue
 				end
@@ -513,6 +533,24 @@ local function ensureInfoChrome()
 end
 
 syncCartChrome = function()
+	-- Shop tutorial lock owns the cart glyph (red overlay + lock icon via RollFingerHint).
+	if shopTutorialLocked() then
+		destroyInfoChrome(false)
+		if closeChrome then
+			stopClosePulse()
+			stopCloseSync()
+			closeChrome:Destroy()
+			closeChrome = nil
+			closeLabel = nil
+			closeScale = nil
+		end
+		if cartBtn then
+			cartBtn.Visible = true
+			-- Disarm hit only — do not strip _OceanTD_TutorialLeftLock*.
+			forceCartHitLive(cartBtn)
+		end
+		return
+	end
 	if open then
 		destroyInfoChrome(false)
 		ensureCloseChrome()
@@ -1929,6 +1967,10 @@ local function toggle()
 	if InventoryState.isOpen() then
 		applyOpen(true)
 	else
+		-- Shop locked until plot-size upgrade finger tutorial completes.
+		if playerGui:GetAttribute("OceanTD_TutorialGateShop") == true then
+			return
+		end
 		destroyInfoChrome(false)
 		StoreUI.open()
 		syncCartChrome()
@@ -2031,6 +2073,9 @@ InventoryState.onOpenChanged(function(_isOpen: boolean)
 end)
 
 playerGui:GetAttributeChangedSignal("OceanTD_SyncCartChrome"):Connect(function()
+	syncCartChrome()
+end)
+playerGui:GetAttributeChangedSignal("OceanTD_TutorialGateShop"):Connect(function()
 	syncCartChrome()
 end)
 

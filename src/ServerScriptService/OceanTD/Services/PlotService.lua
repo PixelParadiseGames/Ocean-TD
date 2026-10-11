@@ -519,6 +519,11 @@ function PlotService.clearSpawnSeat(player: Player)
 	spawnSeatedThisLife[player] = nil
 end
 
+-- Join intro: client already seated locally — remember so respawn/idle paths don't hard-drop again.
+function PlotService.markSpawnSeated(player: Player)
+	spawnSeatedThisLife[player] = true
+end
+
 function PlotService.teleportToPlot(player: Player, force: boolean?)
 	local payload = PlotService.getBoundsPayload(player)
 	if not payload or not payload.spawnCFrame then
@@ -554,6 +559,13 @@ function PlotService.teleportToPlot(player: Player, force: boolean?)
 	end
 	local hip = if humanoid then math.max(2.5, humanoid.HipHeight + 1.5) else 3
 	local pos = spawnCf.Position + Vector3.new(0, hip, 0)
+	-- Join intro seats the avatar after bleach (local); JoinIntroComplete must not hard-drop again.
+	if (hrp.Position - pos).Magnitude <= 16 then
+		hrp.AssemblyLinearVelocity = Vector3.zero
+		hrp.AssemblyAngularVelocity = Vector3.zero
+		spawnSeatedThisLife[player] = true
+		return
+	end
 	hrp.CFrame = CFrame.lookAt(pos, pos + flatLook, Vector3.yAxis)
 	hrp.AssemblyLinearVelocity = Vector3.zero
 	hrp.AssemblyAngularVelocity = Vector3.zero

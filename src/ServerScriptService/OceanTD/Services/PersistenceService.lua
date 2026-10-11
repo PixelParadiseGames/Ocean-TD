@@ -494,6 +494,21 @@ local function sanitizeProfile(raw: any): PlayerProfile
 	profile.skillStages = SkillStages.sanitizeMap(raw.skillStages)
 	profile.skillActiveStages = SkillStages.sanitizeActiveMap(raw.skillActiveStages, profile.skillStages)
 	profile.coralColorUnlocks = {}
+	-- Species ever credited a seed (backpack "?" until first grant).
+	profile.discoveredCorals = {}
+	if typeof(raw.discoveredCorals) == "table" then
+		for itemId, flag in pairs(raw.discoveredCorals) do
+			if typeof(itemId) == "string" and itemId ~= "" and flag == true then
+				profile.discoveredCorals[itemId] = true
+			end
+		end
+	end
+	-- Backfill: any species with seeds in inventory counts as discovered.
+	for itemId, _ in pairs(profile.inventory) do
+		if typeof(itemId) == "string" and HueSeeds.getSpeciesTotal(profile.inventory, itemId) > 0 then
+			profile.discoveredCorals[itemId] = true
+		end
+	end
 	-- Hide UI is free / unlocked for everyone (legacy locked profiles migrate on load).
 	profile.hideUiUnlocked = true
 	profile.hasSeenJoinIntro = raw.hasSeenJoinIntro == true
@@ -1260,6 +1275,10 @@ function PersistenceService.creditHueSeed(
 	end
 	local inv = ensureInventory(profile)
 	local nextCount = HueSeeds.credit(inv, itemId, colorIndex, amount)
+	if typeof(profile.discoveredCorals) ~= "table" then
+		profile.discoveredCorals = {}
+	end
+	profile.discoveredCorals[itemId] = true
 	log("Credit hue", itemId, "idx", colorIndex, "→", nextCount, "for", player.Name)
 	PersistenceService.syncInventoryToClient(player)
 	return nextCount
@@ -1540,6 +1559,30 @@ function PersistenceService.getInventoryPayload(player: Player): { [string]: { [
 	return HueSeeds.toClientPayload(ensureInventory(profile))
 end
 
+function PersistenceService.getDiscoveredCoralsPayload(player: Player): { [string]: boolean }
+	local profile = profiles[player]
+	if not profile then
+		return {}
+	end
+	if typeof(profile.discoveredCorals) ~= "table" then
+		profile.discoveredCorals = {}
+	end
+	local out: { [string]: boolean } = {}
+	for itemId, flag in pairs(profile.discoveredCorals) do
+		if typeof(itemId) == "string" and flag == true then
+			out[itemId] = true
+		end
+	end
+	-- Keep in sync with live inventory totals.
+	for itemId, _ in pairs(ensureInventory(profile)) do
+		if typeof(itemId) == "string" and HueSeeds.getSpeciesTotal(profile.inventory, itemId) > 0 then
+			out[itemId] = true
+			profile.discoveredCorals[itemId] = true
+		end
+	end
+	return out
+end
+
 export type HueAuditRow = {
 	itemId: string,
 	total: number,
@@ -1670,11 +1713,14 @@ function PersistenceService.repairHueInventory(
 end
 
 local inventorySyncQueued: { [Player]: boolean } = {}
+local inventorySyncDirty: { [Player]: boolean } = {}
 
 function PersistenceService.syncInventoryToClient(player: Player)
 	if not player or not player.Parent then
 		return
 	end
+	-- Always mark dirty so a debit during an in-flight sync still ships the latest payload.
+	inventorySyncDirty[player] = true
 	if inventorySyncQueued[player] then
 		return
 	end
@@ -1682,9 +1728,22 @@ function PersistenceService.syncInventoryToClient(player: Player)
 	task.defer(function()
 		inventorySyncQueued[player] = nil
 		if not player.Parent then
+			inventorySyncDirty[player] = nil
 			return
 		end
-		Remotes.get("InventorySync"):FireClient(player, PersistenceService.getInventoryPayload(player))
+		if not inventorySyncDirty[player] then
+			return
+		end
+		inventorySyncDirty[player] = nil
+		Remotes.get("InventorySync"):FireClient(
+			player,
+			PersistenceService.getInventoryPayload(player),
+			PersistenceService.getDiscoveredCoralsPayload(player)
+		)
+		-- Another mutate landed while we were firing — push again.
+		if inventorySyncDirty[player] then
+			PersistenceService.syncInventoryToClient(player)
+		end
 	end)
 end
 
@@ -1784,6 +1843,7 @@ function PersistenceService.save(player: Player, layoutOverride: { LayoutObject 
 		skillStages = SkillStages.sanitizeMap(profile.skillStages),
 		skillActiveStages = SkillStages.sanitizeActiveMap(profile.skillActiveStages, profile.skillStages),
 		coralColorUnlocks = {},
+		discoveredCorals = profile.discoveredCorals or {},
 		hideUiUnlocked = profile.hideUiUnlocked == true,
 		hasSeenJoinIntro = profile.hasSeenJoinIntro == true,
 	}

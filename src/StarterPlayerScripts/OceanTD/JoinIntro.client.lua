@@ -4,7 +4,7 @@
 	1) Loading buffer (sky-up cam + pill bar) so IntroElements / décor can stream
 	2) Pan down to CamStartFocus; avatar visible at IntroPosition
 	3) Live mid–wave-100 sim; CamStart→CamEnd over 9s; hold through bleach
-	4) Bleach + plot-size tween, drop-in, teleport to plot spawn, return follow cam
+	4) Bleach + plot-size tween, drop-in, teleport to plot spawn, tween up into Plot Cam
 ]]
 
 local ContextActionService = game:GetService("ContextActionService")
@@ -96,14 +96,18 @@ local LOAD_TIPS = {
 	"Removing the aiptasia",
 	"Waiting for the snails to arrive",
 }
-local CAM_DOWN_SEC = 9
+local CAM_DOWN_SEC = 12 -- CamStart→CamEnd through the reef (+3s)
 local LOAD_BAR_FILL_SEC = 4 -- player-facing fill: always a full 4s from empty, never less
-local INTRO_EXPLAINER_SOUND_ID = "rbxassetid://75344299140384"
-local CAM_HANDOFF_SEC = 1.05
-local CAM_HANDOFF_SKIP_SEC = 0.45
+local INTRO_EXPLAINER_SOUND_ID = "rbxassetid://75344299140384" -- "your reef"
+local INTRO_PLOT_SOUND_ID = "rbxassetid://97343154059938" -- "the plot" after your-reef ends
+local CAM_HANDOFF_SEC = 1.35 -- intro cam → Plot Cam seat
+local CAM_HANDOFF_SKIP_SEC = 0.55
 local PAN_DOWN_SEC = 1.15
 -- Bleach: hard cap total wait; tight stagger + high starts/frame = fewer stragglers.
-local BLEACH_TOTAL_MAX_SEC = 2.5
+local BLEACH_TOTAL_MAX_SEC = 6.5
+local HOLD_AFTER_BLEACH_SEC = 4 -- pause on clear reef before shrink (+2s)
+local PLOT_SHRINK_SEC = 2 -- plot footprint scale-down
+local HOLD_AFTER_PLOT_SHRINK_SEC = 5 -- "PLOT" hold after shrink (includes former +2s beat)
 local COLOR_WINDOW_SEC = 0.85
 local FALL_Y = -100
 local CLONE_BATCH = 24
@@ -117,6 +121,8 @@ local BLEACH_WAIT_MIN_SEC = 1.5
 
 -- While true, avatar stays visible at IntroPosition (not hidden by early hold).
 local introAvatarShown = false
+-- True after bleach fall: avatar is kept on the plot start seat for the rest of intro.
+local avatarSeatedAtPlot = false
 local introStandCf: CFrame? = nil
 
 -- Load bar is shown ASAP (before OceanTD modules / SessionReady) so device joins
@@ -129,13 +135,27 @@ local loadBarAnimating = false
 local loadBarAnimGen = 0 -- bump to cancel any in-flight fill (bootstrap vs final)
 local loadTipToken = 0
 local TutorialVo = require(script.Parent:WaitForChild("TutorialVo"))
+-- When false, chained intro narrator onEnded hooks must not start the next clip.
+local introNarratorLive = false
 
 local function stopIntroExplainerSound()
+	introNarratorLive = false
 	TutorialVo.stop()
 end
 
 local function playIntroExplainerSound()
-	TutorialVo.play(INTRO_EXPLAINER_SOUND_ID, "OceanTD_JoinIntroExplainer")
+	introNarratorLive = true
+	TutorialVo.play(INTRO_EXPLAINER_SOUND_ID, "OceanTD_JoinIntroExplainer", {
+		onEnded = function()
+			if not introNarratorLive then
+				return
+			end
+			-- Clip has ~0.5s leading silence; skip it so the handoff isn't a dead pause.
+			TutorialVo.play(INTRO_PLOT_SOUND_ID, "OceanTD_JoinIntroPlot", {
+				startOffsetSec = 0.5,
+			})
+		end,
+	})
 end
 
 local function setLoadFillProgress(fill: Frame, u: number)
@@ -283,6 +303,13 @@ local function bootstrapImmediateLoadBar()
 	end
 	playerGui:SetAttribute(ATTR_BUSY, true)
 	playerGui:SetAttribute(ATTR_FORCE_CAM, "off")
+	-- Hide path ribbon + reef heart as early as the load bar (before SessionReady).
+	pcall(function()
+		require(script.Parent:WaitForChild("WavePathLines")).destroy()
+	end)
+	pcall(function()
+		require(script.Parent:WaitForChild("WaveEndVfx")).setHeartIntroHoldHidden(true)
+	end)
 	local cam = Workspace.CurrentCamera
 	if cam then
 		cam.CameraType = Enum.CameraType.Scriptable
@@ -349,9 +376,11 @@ local UiTheme = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiTheme")
 local ClientPlot = require(script.Parent:WaitForChild("ClientPlot"))
 local PlotLoadDropIn = require(script.Parent:WaitForChild("PlotLoadDropIn"))
 local PlotSizeCinematic = require(script.Parent:WaitForChild("PlotSizeCinematic"))
+local JoinIntroExampleCorals = require(script.Parent:WaitForChild("JoinIntroExampleCorals"))
 local SkillPowerUpUI = require(script.Parent:WaitForChild("SkillPowerUpUI"))
 local WaveSign = require(script.Parent:WaitForChild("WaveSign"))
 local WaveSim = require(script.Parent:WaitForChild("WaveSim"))
+local WavePathLines = require(script.Parent:WaitForChild("WavePathLines"))
 
 local syncPayload: { hasSeenJoinIntro: boolean, introSourceCFrame: CFrame }? = nil
 local syncEvent = Instance.new("BindableEvent")
@@ -673,6 +702,11 @@ local INTRO_SETTINGS_DISPLAY_ORDER = 2500
 local HUD_SKIP_NAMES = {
 	OceanTD_JoinIntro = true,
 	OceanTD_JoinIntroLoad = true,
+	OceanTD_JoinIntroPlotTitle = true, -- centered PLOT pop after shrink
+	OceanTD_GameOverTitle = true, -- intro rating GAME OVER title
+	OceanTD_InkIntroReefBar = true, -- intro example reef health bar
+	OceanTD_InkIntroSandDollar = true, -- intro $D counter during happy burst
+	OceanTD_SandDollarFly = true, -- $D fly glyphs heart → counter
 	OceanTD_HideUiFly = true,
 	TouchGui = true,
 	-- Sound settings button (♪) + volume modal stay available during loading / intro.
@@ -706,7 +740,7 @@ local function rememberHideGui(gui: GuiObject)
 	gui.Visible = false
 end
 
--- Keep only MobileLeftUI.dPad.Settings visible; hide the rest of the left HUD.
+	-- Keep only MobileLeftUI.dPad.Settings visible; hide the rest of the left HUD.
 local function pinSettingsButtonVisible()
 	local left = playerGui:FindFirstChild("MobileLeftUI")
 	if not (left and left:IsA("ScreenGui")) then
@@ -725,21 +759,36 @@ local function pinSettingsButtonVisible()
 	local dPad = left:FindFirstChild("dPad")
 	if dPad and dPad:IsA("GuiObject") then
 		dPad.Visible = true
-		for _, ch in ipairs(dPad:GetChildren()) do
-			if ch:IsA("GuiObject") then
-				if ch.Name == "Settings" then
-					ch.Visible = true
-					ch.Active = true
-				else
-					-- Include dPadIcon — only ♪ Settings stays during load/intro.
-					rememberHideGui(ch)
+		local settingsBtn = dPad:FindFirstChild("Settings")
+		if settingsBtn and settingsBtn:IsA("GuiObject") then
+			settingsBtn.Visible = true
+			settingsBtn.Active = true
+		end
+		-- Hide every other dPad control (nested or direct) — only ♪ Settings stays.
+		for _, d in ipairs(dPad:GetDescendants()) do
+			if d:IsA("GuiObject") then
+				local underSettings = settingsBtn ~= nil and d:IsDescendantOf(settingsBtn)
+				if d ~= settingsBtn and not underSettings then
+					rememberHideGui(d)
 				end
+			end
+		end
+		for _, ch in ipairs(dPad:GetChildren()) do
+			if ch:IsA("GuiObject") and ch.Name ~= "Settings" then
+				rememberHideGui(ch)
 			end
 		end
 	end
 	for _, ch in ipairs(left:GetChildren()) do
 		if ch:IsA("GuiObject") and ch.Name ~= "dPad" then
 			rememberHideGui(ch)
+		end
+	end
+	-- Sand-dollar chrome often re-reveals when the avatar becomes visible — keep forced off.
+	for _, name in ipairs({ "$D", "$DCount", "OceanTD_SandDollarRow", "D", "$DLabel" }) do
+		local gui = left:FindFirstChild(name, true)
+		if gui and gui:IsA("GuiObject") then
+			rememberHideGui(gui)
 		end
 	end
 end
@@ -1240,48 +1289,138 @@ local function destroyFolder(folder: Folder?)
 	end
 end
 
-local function finishCamToFollow()
+-- Centered "PLOT" title: overshoots large, then bounces to rest. Returns gui to destroy later.
+local function playPlotTitlePop(): ScreenGui
+	local sg = Instance.new("ScreenGui")
+	sg.Name = "OceanTD_JoinIntroPlotTitle"
+	sg.IgnoreGuiInset = true
+	sg.ResetOnSpawn = false
+	sg.DisplayOrder = 5200
+	sg.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+	sg.Enabled = true
+	sg.Parent = playerGui
+	-- Intro HUD suppress can race ChildAdded — keep this title enabled.
+	sg.Enabled = true
+
+	local lbl = Instance.new("TextLabel")
+	lbl.Name = "PlotTitle"
+	lbl.BackgroundTransparency = 1
+	lbl.AnchorPoint = Vector2.new(0.5, 0.5)
+	lbl.Position = UDim2.fromScale(0.5, 0.5)
+	lbl.Size = UDim2.fromScale(0.92, 0.42)
+	lbl.Font = UiTheme.Font
+	lbl.Text = "PLOT"
+	lbl.TextColor3 = Color3.new(1, 1, 1)
+	lbl.TextStrokeColor3 = Color3.new(0, 0, 0)
+	lbl.TextStrokeTransparency = 0.35
+	lbl.TextScaled = true
+	lbl.Visible = true
+	lbl.ZIndex = 10
+	lbl.Parent = sg
+
+	local sizeConstraint = Instance.new("UITextSizeConstraint")
+	sizeConstraint.MaxTextSize = 220
+	sizeConstraint.MinTextSize = 48
+	sizeConstraint.Parent = lbl
+
+	local scale = Instance.new("UIScale")
+	scale.Scale = 0.15
+	scale.Parent = lbl
+
+	local peak = 1.55
+	local rest = 1
+	local upSec = 0.38
+	local downSec = 0.42
+	local t0 = os.clock()
+	while sg.Parent and os.clock() - t0 < upSec do
+		sg.Enabled = true
+		local u = math.clamp((os.clock() - t0) / upSec, 0, 1)
+		local e = 1 - (1 - u) ^ 3
+		scale.Scale = 0.15 + (peak - 0.15) * e
+		RunService.RenderStepped:Wait()
+	end
+	scale.Scale = peak
+	local t1 = os.clock()
+	while sg.Parent and os.clock() - t1 < downSec do
+		sg.Enabled = true
+		local u = math.clamp((os.clock() - t1) / downSec, 0, 1)
+		-- Ease-out back into rest (small settle bounce).
+		local t = u - 1
+		local e = 1 + t * t * (2.70158 * t + 1.70158)
+		scale.Scale = peak + (rest - peak) * math.clamp(e, 0, 1.15)
+		RunService.RenderStepped:Wait()
+	end
+	scale.Scale = rest
+	sg.Enabled = true
+	return sg
+end
+
+local function finishCamToPlot()
 	-- Default seat after intro: Plot Cam (not avatar follow / Off).
+	-- Keep JoinIntroBusy true through ink path / rating so left HUD + Waves stay hidden
+	-- until finishIntro restores chrome and starts the roll finger.
 	playerGui:SetAttribute(ATTR_CAM_POS, nil)
-	playerGui:SetAttribute(ATTR_BUSY, false)
 	playerGui:SetAttribute(ATTR_FORCE_CAM, "plotcam")
 end
 
-local function followHandoffCFrame(hrp: BasePart): CFrame
+-- After drop-in: ease from the intro framing up into the Plot Cam 2 seat (no snap).
+-- startInkReveal: false when Skip jumps past the intro cinematic (green line → GAME OVER).
+-- shouldAbortInk: optional; when true mid-tween (Skip pressed), never start the cinematic draw.
+local function tweenCamToPlotView(durationSec: number, startInkReveal: boolean?, shouldAbortInk: (() -> boolean)?)
 	local cam = Workspace.CurrentCamera
-	local dist = 12.5
-	if cam then
-		local d = (cam.CFrame.Position - hrp.Position).Magnitude
-		if d > 2 then
-			dist = math.clamp(d, 8, 20)
-		end
-	end
-	local back = -hrp.CFrame.LookVector * dist
-	local camPos = hrp.Position + Vector3.new(0, 2, 0) + back
-	local lookAt = hrp.Position + Vector3.new(0, 1.5, 0)
-	return CFrame.lookAt(camPos, lookAt)
-end
-
-local function tweenCamToFollowHandoff(durationSec: number)
-	local cam = Workspace.CurrentCamera
-	local char = player.Character
-	local hrp = char and char:FindFirstChild("HumanoidRootPart")
-	local hum = char and char:FindFirstChildOfClass("Humanoid")
-	if not (cam and hrp and hrp:IsA("BasePart") and hum) then
-		finishCamToFollow()
+	if not cam then
+		finishCamToPlot()
 		return
 	end
+	local PlotCam2 = require(script.Parent:WaitForChild("PlotCam2"))
 	cam.CameraType = Enum.CameraType.Scriptable
+	if not PlotCam2.begin(nil) then
+		finishCamToPlot()
+		return
+	end
+	local goal = PlotCam2.getCFrame()
+	if not goal then
+		PlotCam2.stop()
+		finishCamToPlot()
+		return
+	end
 	local startCf = cam.CFrame
 	local t0 = os.clock()
 	while os.clock() - t0 < durationSec and player.Parent do
+		if shouldAbortInk and shouldAbortInk() then
+			break
+		end
 		local u = smoothstep((os.clock() - t0) / durationSec)
-		local goal = followHandoffCFrame(hrp)
-		cam.CFrame = startCf:Lerp(goal, u)
+		-- Refresh goal each frame in case plot hydrate settles mid-tween.
+		local g = PlotCam2.getCFrame() or goal
+		cam.CFrame = startCf:Lerp(g, u)
 		playerGui:SetAttribute(ATTR_CAM_POS, cam.CFrame.Position)
 		RunService.RenderStepped:Wait()
 	end
-	finishCamToFollow()
+	local final = PlotCam2.getCFrame()
+	if final then
+		cam.CFrame = final
+		playerGui:SetAttribute(ATTR_CAM_POS, final.Position)
+	end
+	-- Leave PlotCam2 active; FreeCam ForceCamMode will adopt it without a hard snap.
+	finishCamToPlot()
+	pcall(function()
+		local stage = SkillPowerUpUI.getStage("PlotSize")
+		WaveSim.rebuildRouteForPlotSize(stage, { skipPathLines = true })
+		local WaveEndVfx = require(script.Parent:WaitForChild("WaveEndVfx"))
+		-- Intro hold must not outlive ink prep (HUD/route sync used to leave heart stuck dark).
+		WaveEndVfx.syncToPlotSizeStage(stage)
+		local aborted = shouldAbortInk ~= nil and shouldAbortInk() == true
+		if aborted or startInkReveal == false then
+			-- Skip Intro: snap to finished path — never begin the cinematic draw.
+			local WavePathLines = require(script.Parent:WaitForChild("WavePathLines"))
+			WavePathLines.finishIntroCinematicSkipped()
+		else
+			-- Intro cinematic: green line → heart → fish → fork/rating → GAME OVER.
+			local WavePathLines = require(script.Parent:WaitForChild("WavePathLines"))
+			WavePathLines.playInkReveal()
+		end
+	end)
 end
 
 local function markSeen()
@@ -1462,10 +1601,30 @@ end
 
 -- Claim Scriptable cam + hide reef/avatar before SessionReady so join spawn isn't seen.
 -- Loading buffer looks straight up at the sky from CamStart (when available).
+local function suppressIntroPathAndHeart()
+	pcall(function()
+		local WavePathLines = require(script.Parent:WaitForChild("WavePathLines"))
+		WavePathLines.destroy()
+	end)
+	pcall(function()
+		local WaveEndVfx = require(script.Parent:WaitForChild("WaveEndVfx"))
+		WaveEndVfx.setHeartIntroHoldHidden(true)
+	end)
+end
+
+local function releaseIntroHeartHold()
+	pcall(function()
+		local WaveEndVfx = require(script.Parent:WaitForChild("WaveEndVfx"))
+		WaveEndVfx.setHeartIntroHoldHidden(false)
+		WaveEndVfx.restoreHeartAfterInkCancel()
+	end)
+end
+
 local function beginEarlyIntroHold()
 	playerGui:SetAttribute(ATTR_BUSY, true)
 	playerGui:SetAttribute(ATTR_FORCE_CAM, "off")
 	playerGui:SetAttribute("OceanTD_ForceCloseFreeCam", os.clock())
+	suppressIntroPathAndHeart()
 	startHudSuppress()
 	-- Show the pill bar immediately — SessionReady / DataStore can take seconds on device.
 	showEarlyLoadBar()
@@ -1540,6 +1699,8 @@ local function runIntro()
 	end
 	running = true
 	skipRequested = false
+	introAvatarShown = false
+	avatarSeatedAtPlot = false
 	local finishedNotified = false
 	local savedPlot: ClientPlot.MirroredPlot? = nil
 	local realPlotSizeStage = 1
@@ -1560,16 +1721,21 @@ local function runIntro()
 		finished = true
 		introAvatarShown = false
 		introStandCf = nil
+		avatarSeatedAtPlot = false
 		stopIntroExplainerSound()
 		stopEarlyCamHold()
 		pcall(function()
 			WaveSim.stopJoinIntroDemo()
+		end)
+		pcall(function()
+			JoinIntroExampleCorals.clear()
 		end)
 		WaveSign.endJoinIntroDisplay()
 		if savedPlot then
 			restorePlotMirror(savedPlot)
 			PlotSizeCinematic.applyStageLocal(realPlotSizeStage)
 		end
+		releaseIntroHeartHold()
 		setOwnedPlotHidden(false)
 		hideCharacterLocal(false)
 		bindFreeze(false)
@@ -1588,6 +1754,7 @@ local function runIntro()
 	end
 
 	hideIntroTemplate()
+	suppressIntroPathAndHeart()
 
 	-- PlotAssigned (early, before DataStore) is enough for cam remap — don't wait SessionReady.
 	if not ClientPlot.get() then
@@ -1657,7 +1824,8 @@ local function runIntro()
 	local token = { cancelled = false }
 	local showcase: Folder? = nil
 	local camConn: RBXScriptConnection? = nil
-	local camState = { tweenDone = false, hold = true }
+	-- zoomU: 0 = CamEnd framing, 1 = 30% closer to focus (during example-coral drop).
+	local camState = { tweenDone = false, hold = true, zoomU = 0 }
 	local skipConns: { RBXScriptConnection } = {}
 	local sg: ScreenGui? = nil
 	local skipBtn: TextButton? = nil
@@ -1684,12 +1852,19 @@ local function runIntro()
 			return
 		end
 		finished = true
+		-- Once Skip is requested, always jump to end-of-intro (never start/keep the cinematic).
+		local jumpToEnd = skipped or skipRequested
+		if jumpToEnd then
+			skipRequested = true
+		end
 		token.cancelled = true
 		camState.tweenDone = true
 		camState.hold = false
 		introAvatarShown = false
 		introStandCf = nil
-		if skipped then
+		-- Never show roll-finger / training until this function reaches the handoff below.
+		playerGui:SetAttribute(ATTR_ROLL_FINGER, false)
+		if jumpToEnd then
 			stopIntroExplainerSound()
 		end
 
@@ -1712,82 +1887,148 @@ local function runIntro()
 		end
 
 		local owned = PlotLoadDropIn.gatherOwnedPlotParts()
-		if skipped then
+		if jumpToEnd then
+			pcall(function()
+				JoinIntroExampleCorals.clear()
+			end)
 			for _, part in ipairs(owned) do
 				PlotLoadDropIn.setPartHiddenLocal(part, false)
 			end
 		else
+			-- Keep the player's real reef hidden through the intro cinematic.
 			for _, part in ipairs(owned) do
 				PlotLoadDropIn.setPartHiddenLocal(part, true)
 			end
-			local span = if #owned >= 400 then 3 elseif #owned >= 80 then 2 else 1
-			PlotLoadDropIn.play(#owned, span)
-			task.wait(math.min(span + 0.5, 3.2))
+			if JoinIntroExampleCorals.count() == 0 then
+				pcall(function()
+					JoinIntroExampleCorals.spawnAndDrop()
+				end)
+				task.wait(0.9)
+			end
 		end
 
-		-- Server owns the one spawn seat (JoinIntroComplete). Wait for it, fallback local snap.
-		finishAndNotify()
-		do
-			local plotNow = ClientPlot.get()
-			local spawnCf = plotNow and plotNow.spawnCFrame
-			local deadline = os.clock() + 0.9
-			local near = false
-			while os.clock() < deadline and player.Parent do
-				local char = player.Character
-				local hrp = char and char:FindFirstChild("HumanoidRootPart")
-				local hum = char and char:FindFirstChildOfClass("Humanoid")
-				if spawnCf and hrp and hrp:IsA("BasePart") then
-					local hip = if hum then math.max(2.5, hum.HipHeight + 1.5) else 3
-					local target = spawnCf.Position + Vector3.new(0, hip, 0)
-					if (hrp.Position - target).Magnitude < 16 then
-						hrp.AssemblyLinearVelocity = Vector3.zero
-						hrp.AssemblyAngularVelocity = Vector3.zero
-						near = true
-						break
-					end
-				end
-				task.wait()
-			end
-			if not near then
-				teleportToPlotSpawn()
-			end
-		end
+		-- Re-seat once at the post-shrink spawn (bleach seat was on the oversized plot).
+		avatarSeatedAtPlot = true
+		teleportToPlotSpawn()
 		hideCharacterLocal(false)
 		if camConn and camConn.Connected then
 			camConn:Disconnect()
 		end
 		stopEarlyCamHold()
-		tweenCamToFollowHandoff(if skipped then CAM_HANDOFF_SKIP_SEC else CAM_HANDOFF_SEC)
+		-- Skip: seat on plot cam + snap finished path. Normal: start intro cinematic.
+		tweenCamToPlotView(
+			if jumpToEnd then CAM_HANDOFF_SKIP_SEC else CAM_HANDOFF_SEC,
+			not jumpToEnd,
+			function()
+				return skipRequested
+			end
+		)
 		bindFreeze(false)
-		cleanupSkipUi()
-		restoreHud()
+		-- Keep Skip Intro through the cinematic (cleanup when intro fully ends).
+		startHudSuppress()
 		markSeen()
 		running = false
-		-- Player can walk — nudge them to roll for corals.
+
+		if jumpToEnd or skipRequested then
+			-- End-of-intro immediately (no drop-in wait — that was the multi-second Skip stall).
+			pcall(function()
+				local stage = SkillPowerUpUI.getStage("PlotSize")
+				WaveSim.rebuildRouteForPlotSize(stage, { skipPathLines = true })
+				WavePathLines.finishIntroCinematicSkipped()
+				WavePathLines.ensureFinishedPathVisible(0.5)
+			end)
+			pcall(function()
+				JoinIntroExampleCorals.clear()
+			end)
+			owned = PlotLoadDropIn.gatherOwnedPlotParts()
+			for _, part in ipairs(owned) do
+				PlotLoadDropIn.setPartHiddenLocal(part, false)
+			end
+		else
+			-- Full intro cinematic must finish (or Skip aborts it via finishIntroCinematicSkipped).
+			pcall(function()
+				WavePathLines.waitRevealComplete(120)
+			end)
+			-- Skip pressed mid-cinematic while we were waiting — snap to end, no slow drop-in.
+			if skipRequested then
+				pcall(function()
+					local stage = SkillPowerUpUI.getStage("PlotSize")
+					WaveSim.rebuildRouteForPlotSize(stage, { skipPathLines = true })
+					WavePathLines.finishIntroCinematicSkipped()
+					WavePathLines.ensureFinishedPathVisible(0.5)
+				end)
+				pcall(function()
+					JoinIntroExampleCorals.clear()
+				end)
+				owned = PlotLoadDropIn.gatherOwnedPlotParts()
+				for _, part in ipairs(owned) do
+					PlotLoadDropIn.setPartHiddenLocal(part, false)
+				end
+			else
+				pcall(function()
+					JoinIntroExampleCorals.clear()
+				end)
+				owned = PlotLoadDropIn.gatherOwnedPlotParts()
+				for _, part in ipairs(owned) do
+					PlotLoadDropIn.setPartHiddenLocal(part, true)
+				end
+				local span = if #owned >= 400 then 3 elseif #owned >= 80 then 2 else 1
+				if #owned > 0 then
+					PlotLoadDropIn.play(#owned, span)
+					task.wait(math.min(span + 0.5, 3.2))
+				else
+					for _, part in ipairs(owned) do
+						PlotLoadDropIn.setPartHiddenLocal(part, false)
+					end
+				end
+			end
+		end
+
+		-- —— INTRO OVER / TRAINING STARTS ——
+		task.wait(if jumpToEnd or skipRequested then 0.05 else 1)
+		cleanupSkipUi()
+		finishAndNotify()
+		-- Clear busy only now so roll finger / locked HUD cannot overlap the intro cinematic.
+		playerGui:SetAttribute(ATTR_BUSY, false)
+		restoreHud()
+		-- Re-assert full heart after HUD restore (can race with plot sync).
+		if jumpToEnd or skipRequested then
+			pcall(function()
+				local WaveEndVfx = require(script.Parent:WaitForChild("WaveEndVfx"))
+				WaveEndVfx.settleHeartAfterIntroSkip()
+			end)
+		end
 		playerGui:SetAttribute(ATTR_ROLL_FINGER, "roll")
 		playerGui:SetAttribute("OceanTD_TutorialFreeUpgrade", true)
-		-- Tutorial gates: waves unlock after first place; left HUD after first wave session ends.
-		-- Backpack stays gated until first roll (unless they already rolled this session).
 		if playerGui:GetAttribute("OceanTD_HasRolledThisSession") ~= true then
 			playerGui:SetAttribute("OceanTD_TutorialGateBackpack", true)
 		end
 		playerGui:SetAttribute("OceanTD_TutorialGateWaves", true)
 		playerGui:SetAttribute("OceanTD_TutorialGateLeftHud", true)
-		-- Cam cycle locked until they close build mode after the first coral hue.
 		playerGui:SetAttribute("OceanTD_TutorialGateCam", true)
+		playerGui:SetAttribute("OceanTD_TutorialGateShop", true)
 		playerGui:SetAttribute("OceanTD_TutorialWavesSlotReady", false)
-		-- Planning arrow trains start from WaveSim when JoinIntroBusy clears (player in control).
 	end
 
 	local function requestSkip()
-		if skipRequested or finished then
+		if skipRequested then
 			return
 		end
 		skipRequested = true
 		if skipBtn then
 			flashSkipButton(skipBtn)
 		end
-		task.delay(0.1, function()
+		stopIntroExplainerSound()
+		-- Already in finishIntro / cinematic: snap to end-of-intro (unblocks waitRevealComplete).
+		-- Keep JoinIntroBusy true — training handoff stays at the bottom of finishIntro.
+		if finished then
+			pcall(function()
+				WavePathLines.finishIntroCinematicSkipped()
+			end)
+			return
+		end
+		-- First half: jump to end-of-intro (plot seat + finished path, no cinematic).
+		task.defer(function()
 			finishIntro(true)
 		end)
 	end
@@ -1911,6 +2152,8 @@ local function runIntro()
 		return
 	end
 	destroyEarlyLoadBar()
+	-- Load chrome was covering the game HUD — re-pin suppress so buttons don't flash during the pan.
+	startHudSuppress()
 	WaveSign.beginJoinIntroDisplay(true)
 
 	local camStart = ClientPlot.remapCFrameFromPlot1(pose.camStart).Position
@@ -2009,7 +2252,14 @@ local function runIntro()
 			camState.tweenDone = true
 			u = 1
 		end
-		applyIntroCam(camStart:Lerp(camEnd, u), focusStart:Lerp(focusEnd, u))
+		local focus = focusStart:Lerp(focusEnd, u)
+		local pos = camStart:Lerp(camEnd, u)
+		local z = math.clamp(camState.zoomU, 0, 1)
+		if z > 0 then
+			-- 30% more zoomed in at z=1 (pull camera 30% of the way toward focus).
+			pos = focus:Lerp(pos, 1 - 0.3 * z)
+		end
+		applyIntroCam(pos, focus)
 	end)
 
 	-- (F) Wave demo only after A–E prerequisites.
@@ -2040,41 +2290,114 @@ local function runIntro()
 		return
 	end
 
-	local waitUntil = os.clock() + CAM_DOWN_SEC
-	while os.clock() < waitUntil and not token.cancelled and not finished do
+	-- Start bleach before CamStart→CamEnd finishes (cam keeps lerping through the overlap).
+	local bleachStartAt = camT0 + math.max(0, CAM_DOWN_SEC - 2)
+	while os.clock() < bleachStartAt and not token.cancelled and not finished do
 		task.wait(0.05)
 	end
 	if finished then
 		return
 	end
-	camState.tweenDone = true
 
 	WaveSim.stopJoinIntroDemo()
 
 	local fallWindow = 0
+	local didBleach = false
 	if not token.cancelled and #showcaseParts > 0 then
 		fallWindow = bleachAndFall(showcaseParts, token)
-		task.spawn(function()
-			PlotSizeCinematic.tweenStagesLocal(SkillStages.MAX_STAGE, realPlotSizeStage, {
-				duration = BLEACH_TOTAL_MAX_SEC,
-				cancelled = function()
-					return token.cancelled or finished
-				end,
-			})
-		end)
+		didBleach = true
 	elseif savedPlot then
 		restorePlotMirror(savedPlot)
 	end
 
+	local camEndAt = camT0 + CAM_DOWN_SEC
 	local bleachWait = os.clock() + math.max(fallWindow, BLEACH_WAIT_MIN_SEC)
-	while os.clock() < bleachWait and not token.cancelled and not finished do
+	while (os.clock() < bleachWait or os.clock() < camEndAt) and not token.cancelled and not finished do
+		task.wait(0.05)
+	end
+	camState.tweenDone = true
+	if finished then
+		return
+	end
+
+	-- Bleached coral is gone: seat the avatar at plot start (don't wait for finishIntro).
+	if not token.cancelled then
+		introAvatarShown = false
+		introStandCf = nil
+		avatarSeatedAtPlot = true
+		teleportToPlotSpawn()
+		hideCharacterLocal(false)
+	end
+
+	-- Hold on the cleared-reef framing before the plot scales down.
+	local holdUntil = os.clock() + HOLD_AFTER_BLEACH_SEC
+	while os.clock() < holdUntil and not token.cancelled and not finished do
 		task.wait(0.05)
 	end
 	if finished then
 		return
 	end
 
-	finishIntro(false)
+	local plotTitleGui: ScreenGui? = nil
+	if didBleach and not token.cancelled then
+		PlotSizeCinematic.tweenStagesLocal(SkillStages.MAX_STAGE, realPlotSizeStage, {
+			duration = PLOT_SHRINK_SEC,
+			cancelled = function()
+				return token.cancelled or finished
+			end,
+		})
+		if finished then
+			return
+		end
+		-- Plot settled at real size: start example corals immediately (player reef stays hidden).
+		if not token.cancelled then
+			for _, part in ipairs(PlotLoadDropIn.gatherOwnedPlotParts()) do
+				PlotLoadDropIn.setPartHiddenLocal(part, true)
+			end
+			pcall(function()
+				JoinIntroExampleCorals.spawnAndDrop()
+			end)
+			-- Slow zoom-in while examples drop / upgrade (30% closer by end of PLOT hold).
+			task.spawn(function()
+				local zoomDur = math.max(2.5, HOLD_AFTER_PLOT_SHRINK_SEC * 0.85)
+				local t0 = os.clock()
+				while os.clock() - t0 < zoomDur and not token.cancelled and not finished and camState.hold do
+					local zu = math.clamp((os.clock() - t0) / zoomDur, 0, 1)
+					camState.zoomU = 1 - (1 - zu) * (1 - zu) -- ease-out
+					task.wait()
+				end
+				if not finished and not token.cancelled then
+					camState.zoomU = 1
+				end
+			end)
+		end
+		-- Shrink done: hold "PLOT", then cam handoff in finishIntro.
+		local holdPlotUntil = os.clock() + HOLD_AFTER_PLOT_SHRINK_SEC
+		if not token.cancelled then
+			local okTitle, titleOrErr = pcall(playPlotTitlePop)
+			if okTitle and typeof(titleOrErr) == "Instance" and (titleOrErr :: Instance):IsA("ScreenGui") then
+				plotTitleGui = titleOrErr :: ScreenGui
+				plotTitleGui.Enabled = true
+			else
+				warn("[JoinIntro] PLOT title failed:", titleOrErr)
+			end
+		end
+		while os.clock() < holdPlotUntil and not token.cancelled and not finished do
+			if plotTitleGui and plotTitleGui.Parent then
+				plotTitleGui.Enabled = true
+			end
+			task.wait(0.05)
+		end
+	end
+	if plotTitleGui and plotTitleGui.Parent then
+		plotTitleGui:Destroy()
+	end
+	if finished then
+		return
+	end
+
+	-- If Skip was pressed on the last frame of the first half, jump to end-of-intro.
+	finishIntro(skipRequested)
 end
 
 task.spawn(function()
@@ -2095,7 +2418,24 @@ task.spawn(function()
 		end
 		task.defer(function()
 			bindFreeze(true)
-			if introAvatarShown then
+			if avatarSeatedAtPlot then
+				-- Already on the plot start seat; only re-seat if a respawn knocked them away.
+				local plot = ClientPlot.get()
+				local spawnCf = plot and plot.spawnCFrame
+				local char = player.Character
+				local hrp = char and char:FindFirstChild("HumanoidRootPart")
+				local hum = char and char:FindFirstChildOfClass("Humanoid")
+				local needSeat = true
+				if spawnCf and hrp and hrp:IsA("BasePart") then
+					local hip = if hum then math.max(2.5, hum.HipHeight + 1.5) else 3
+					local target = spawnCf.Position + Vector3.new(0, hip, 0)
+					needSeat = (hrp.Position - target).Magnitude > 16
+				end
+				if needSeat then
+					teleportToPlotSpawn()
+				end
+				hideCharacterLocal(false)
+			elseif introAvatarShown then
 				if introStandCf then
 					standAtIntroFacingCam()
 				end
@@ -2122,6 +2462,7 @@ task.spawn(function()
 		stopEarlyCamHold()
 		destroyEarlyLoadBar()
 		hideCharacterLocal(false)
+		releaseIntroHeartHold()
 		playerGui:SetAttribute(ATTR_BUSY, false)
 		playerGui:SetAttribute(ATTR_CAM_POS, nil)
 		bindFreeze(false)

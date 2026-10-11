@@ -38,8 +38,9 @@ local DEFAULT_FOCUS_HEIGHT = 30
 local DEFAULT_DIST_FRONT = 28
 local DEFAULT_DIST_BACK = 200
 local DEFAULT_DIST_OFFSET = -110 -- max zoom-in (DistOff floor); manual +/- / wheel can reach this
--- Session start: pulled back. Opening BUILD keeps this zoom (no auto slam to max).
-local START_DIST_OFFSET = 55
+-- Session start / post-intro seat: pulled back. Opening BUILD eases toward max zoom-in.
+-- Was 55; +30% more zoomed out for the intro→plot handoff.
+local START_DIST_OFFSET = 72
 local DEFAULT_PAN_OUT = 200
 local DEFAULT_PAN_IN = 20
 local DEFAULT_PAN_SIDE = 90

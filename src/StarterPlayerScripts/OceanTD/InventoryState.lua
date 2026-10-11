@@ -16,6 +16,8 @@ local countsChanged: BindableEvent = Instance.new("BindableEvent")
 local itemSlotScreenPosProvider: ((string) -> Vector2?)? = nil
 local hueCounts: HueSeeds.HueInventory = {}
 local placementHueByItem: { [string]: number } = {}
+-- Species the player has ever received a seed for (server + local backfill).
+local discoveredCorals: { [string]: boolean } = {}
 
 function InventoryState.isOpen(): boolean
 	return open
@@ -38,6 +40,27 @@ end
 
 function InventoryState.getSeedCount(itemId: string): number
 	return HueSeeds.getSpeciesTotal(hueCounts, itemId)
+end
+
+function InventoryState.hasDiscoveredSpecies(itemId: string): boolean
+	if discoveredCorals[itemId] == true then
+		return true
+	end
+	-- Live seeds count as discovered before / without a discovery sync.
+	return InventoryState.getSeedCount(itemId) > 0
+end
+
+function InventoryState.setDiscoveredCorals(raw: any)
+	if typeof(raw) ~= "table" then
+		return
+	end
+	-- Merge only (never un-discover).
+	for itemId, flag in pairs(raw) do
+		if typeof(itemId) == "string" and itemId ~= "" and flag == true then
+			discoveredCorals[itemId] = true
+		end
+	end
+	countsChanged:Fire()
 end
 
 function InventoryState.getOwnedHueIndices(itemId: string): { number }
@@ -103,6 +126,12 @@ function InventoryState.setSeedCounts(raw: any)
 	for itemId, hue in pairs(placementHueByItem) do
 		if InventoryState.getHueSeedCount(itemId, hue) <= 0 then
 			placementHueByItem[itemId] = nil
+		end
+	end
+	-- Any species with seeds now is permanently discovered on this client.
+	for itemId, _ in pairs(hueCounts) do
+		if typeof(itemId) == "string" and HueSeeds.getSpeciesTotal(hueCounts, itemId) > 0 then
+			discoveredCorals[itemId] = true
 		end
 	end
 	countsChanged:Fire()
@@ -300,8 +329,11 @@ end
 
 task.spawn(function()
 	local sync = Remotes.get("InventorySync")
-	sync.OnClientEvent:Connect(function(payload)
+	sync.OnClientEvent:Connect(function(payload, discovered)
 		InventoryState.setSeedCounts(payload)
+		if typeof(discovered) == "table" then
+			InventoryState.setDiscoveredCorals(discovered)
+		end
 	end)
 end)
 

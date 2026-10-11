@@ -184,13 +184,16 @@ local function waitMainHUD(): ScreenGui
 	local is720 = UiViewportTags.is720p(UiViewportTags.readViewport())
 	local vp = UiViewportTags.readViewport()
 	-- Don't rely on ViewportHudTags script order — force the known right HUDs now.
-	local mobile = playerGui:FindFirstChild(UiViewportTags.MOBILE_RIGHT_HUD)
-	if mobile and mobile:IsA("ScreenGui") then
-		mobile.Enabled = not is720
-	end
-	local p720 = playerGui:FindFirstChild(UiViewportTags.P720_RIGHT_HUD)
-	if p720 and p720:IsA("ScreenGui") then
-		p720.Enabled = is720
+	-- Skip while join intro is suppressing HUD (avoids wave/start flash mid-pan).
+	if playerGui:GetAttribute("OceanTD_JoinIntroBusy") ~= true then
+		local mobile = playerGui:FindFirstChild(UiViewportTags.MOBILE_RIGHT_HUD)
+		if mobile and mobile:IsA("ScreenGui") then
+			mobile.Enabled = not is720
+		end
+		local p720 = playerGui:FindFirstChild(UiViewportTags.P720_RIGHT_HUD)
+		if p720 and p720:IsA("ScreenGui") then
+			p720.Enabled = is720
+		end
 	end
 	log(
 		"Main HUD:",
@@ -1649,6 +1652,9 @@ local function activateGamepadFocusedItem()
 	if typeof(itemId) ~= "string" then
 		return
 	end
+	if not InventoryState.hasDiscoveredSpecies(itemId) then
+		return
+	end
 	local icon = btn:FindFirstChild("Circle")
 	local stroke = icon and icon:FindFirstChild("_SelectPulse")
 	disableGamepadSelect()
@@ -1732,6 +1738,30 @@ local function makeItemButton(def, layoutOrder: number, instanceSuffix: string?,
 	aspect.DominantAxis = Enum.DominantAxis.Width
 	aspect.Parent = icon
 
+	-- Unknown species: black veil + white "?" until the player has gotten a seed.
+	local unknownVeil = Instance.new("Frame")
+	unknownVeil.Name = "UnknownVeil"
+	unknownVeil.BackgroundColor3 = Color3.new(0, 0, 0)
+	unknownVeil.BackgroundTransparency = 0.5
+	unknownVeil.BorderSizePixel = 0
+	unknownVeil.Size = UDim2.fromScale(1, 1)
+	unknownVeil.ZIndex = icon.ZIndex + 1
+	unknownVeil.Active = false
+	unknownVeil.Visible = false
+	unknownVeil.Parent = icon
+	UiCircles.ensure(unknownVeil)
+	local unknownMark = Instance.new("TextLabel")
+	unknownMark.Name = "UnknownMark"
+	unknownMark.BackgroundTransparency = 1
+	unknownMark.Size = UDim2.fromScale(1, 1)
+	unknownMark.Font = UiTheme.Font
+	unknownMark.Text = "?"
+	unknownMark.TextColor3 = Color3.new(1, 1, 1)
+	unknownMark.TextScaled = true
+	unknownMark.ZIndex = unknownVeil.ZIndex + 1
+	unknownMark.Active = false
+	unknownMark.Parent = unknownVeil
+
 	-- Seed count badge: black circle, white N, top-left of the item slot.
 	local seedBadge = Instance.new("Frame")
 	seedBadge.Name = "SeedCount"
@@ -1802,6 +1832,9 @@ local function makeItemButton(def, layoutOrder: number, instanceSuffix: string?,
 		if input.UserInputType ~= Enum.UserInputType.MouseButton1 and input.UserInputType ~= Enum.UserInputType.Touch then
 			return
 		end
+		if not InventoryState.hasDiscoveredSpecies(def.id) then
+			return
+		end
 		PlacementController.setGamepadPlacement(false)
 		refreshGamepadCloseLabel()
 		local start = Vector2.new(input.Position.X, input.Position.Y)
@@ -1835,6 +1868,8 @@ local function makeItemButton(def, layoutOrder: number, instanceSuffix: string?,
 					gesture = "pull"
 					clearAllPulses()
 					startPulse(stroke)
+					-- Select on pull so tutorial equip→plot fires before place (not only on tap).
+					InventoryState.setSelected(def.id)
 					PlacementController.notifyPointerDownFromBackpack(
 						def.id,
 						now,
@@ -2073,13 +2108,25 @@ local function refreshSeedCountBadges()
 	for _, btn in ipairs(itemButtons) do
 		local itemId = btn:GetAttribute("OceanTD_ItemId")
 		if typeof(itemId) == "string" then
+			local discovered = InventoryState.hasDiscoveredSpecies(itemId)
+			local icon = btn:FindFirstChild("Circle")
+			local veil = icon and icon:FindFirstChild("UnknownVeil")
+			if veil and veil:IsA("GuiObject") then
+				veil.Visible = not discovered
+			end
+			local nameLbl = btn:FindFirstChild("Name")
+			if nameLbl and nameLbl:IsA("TextLabel") then
+				nameLbl.TextTransparency = if discovered then 0 else 0.35
+			end
+			btn.AutoButtonColor = discovered
 			local badge = btn:FindFirstChild("SeedCount")
 			local amount = badge and badge:FindFirstChild("Amount")
 			if amount and amount:IsA("TextLabel") and badge and badge:IsA("GuiObject") then
+				badge.Visible = discovered
 				local nextText = InventoryState.formatSeedCount(itemId)
 				local changed = amount.Text ~= nextText
 				amount.Text = nextText
-				if backpackOpen and changed then
+				if backpackOpen and changed and discovered then
 					local punch = badge:FindFirstChild("_CountPunch")
 					if not punch or not punch:IsA("UIScale") then
 						punch = Instance.new("UIScale")

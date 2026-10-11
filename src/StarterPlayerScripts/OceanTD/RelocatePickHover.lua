@@ -135,12 +135,12 @@ local function pickProbeWorld(coral: BasePart): Vector3
 	return coral.Position
 end
 
--- Small −30%, medium −20%, large full base radius.
+-- Small −30% then +15% (net ~0.805×), medium −20%, large full base radius.
 local function pickScreenRadiusFor(coral: BasePart): number
 	local base = if isUsingGamepad() then math.max(C.PICK_SCREEN_PX, 36) else C.PICK_SCREEN_PX
 	local _, class = CoralSize.readFromPart(coral)
 	if class <= CoralSize.SMALL then
-		return base * 0.7
+		return base * 0.7 * 1.15
 	elseif class == CoralSize.MEDIUM then
 		return base * 0.8
 	end

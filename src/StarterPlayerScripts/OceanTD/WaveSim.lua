@@ -805,7 +805,12 @@ L.WaveArrowPreview.bind({
 		return pathData
 	end,
 	getFishPaths = function()
-		return listFishPaths()
+		-- Arrow trains: WaveRoute.A only (never A2).
+		local out: { PathData } = {}
+		if pathData then
+			table.insert(out, pathData)
+		end
+		return out
 	end,
 	getGroundPaths = function()
 		return WaveCrab.listGroundPaths(pathDataGroundA, pathDataGroundB)
@@ -818,6 +823,25 @@ L.WaveArrowPreview.bind({
 	end,
 	sampleFishPath = function(path, dist)
 		return Path.samplePath(path, dist)
+	end,
+})
+
+-- Always-on green friendly path ribbon (route A only).
+-- Prefer pathData from rebuildRouteForPlotSize(stage) so the line matches the moved heart
+-- even before SkillPowerUpUI stage mirrors (join-intro MAX path falls back to live stage).
+L.WavePathLines.bind({
+	getFishPath = function()
+		if joinIntroDemo then
+			-- Showcase uses the full MAX plot route; don't reuse that after intro.
+			return Path.buildPath(L.SkillStages.MAX_STAGE)
+		end
+		return pathData or Path.buildPath()
+	end,
+	sampleFishPath = function(path, dist)
+		return Path.samplePath(path, dist)
+	end,
+	getPlotSizeStage = function()
+		return L.SkillPowerUpUI.getStage("PlotSize")
 	end,
 })
 
@@ -2086,12 +2110,13 @@ local function finishFish(agent: FishAgent, skipHappyVfx: boolean?)
 		if dealt > 0 then
 			L.UiHaptics.pulseReef()
 		end
-		-- Final heart: pause, zoom to this fish, then stop + Out Of Reef Health UI.
+		-- Final heart: pause, zoom to reef heart, then GAME OVER + Out Of Reef Health UI.
 		if wasAlive and reefHealth <= 0 and not defeatBusy then
 			defeatBusy = true
 			agent.finished = true
 			lastStopDefeated = true
-			lastDefeatOrigin = L.WaveEndVfx.getEndHeartWorldPos() or agent.lastWorld or endPos
+			local heartPos = L.WaveEndVfx.getEndHeartWorldPos() or endPos or agent.lastWorld
+			lastDefeatOrigin = heartPos
 			if not firstVoPlayed.reefEmpty then
 				firstVoPlayed.reefEmpty = true
 				L.TutorialVo.play(L.VO_REEF_EMPTY, "OceanTD_ReefEmpty")
@@ -2103,7 +2128,10 @@ local function finishFish(agent: FishAgent, skipHappyVfx: boolean?)
 			notifyHud()
 			flushHud()
 			local focusAgent = agent
-			L.ReefDefeatCam.play(agent.lastWorld, agent.smoothTang, function()
+			local lookDir = if heartPos and agent.lastWorld
+				then (heartPos - agent.lastWorld)
+				else agent.smoothTang
+			L.ReefDefeatCam.play(heartPos or agent.lastWorld, lookDir, function()
 				if focusAgent.model and focusAgent.model.Parent then
 					destroyFish(focusAgent)
 				end
@@ -4286,6 +4314,8 @@ function WaveSim.setHideUiSuppressesCritterUi(suppress: boolean)
 	end
 	hideUiSuppressesCritterUi = suppress
 	HungerUi.applyCritterHungerBarsVisible()
+	-- Path ribbons count as HUD chrome — hide with Hide UI.
+	L.WavePathLines.setVisible(not suppress)
 end
 
 function WaveSim.healReef(amount: number): boolean
@@ -4768,6 +4798,7 @@ function WaveSim.continueWithHearts(hearts: number, retrySameWave: boolean?): bo
 	if not pathData then
 		return false
 	end
+	L.WavePathLines.rebuild()
 	if not WaveEntityPool.hasFishKind(WaveEntityPool.FISH_TANG) then
 		warn("[WAVE] L.ReplicatedStorage.HungryFish missing")
 		return false
@@ -4843,12 +4874,14 @@ function WaveSim.startPlanningArrowPreview(): boolean
 	local planningOpts = {
 		playSound = false,
 		includeShark = false,
-		forceGroundTrains = true,
+		forceGroundTrains = false,
 		greenLabelText = "Friendly Fish",
-		redLabelText = "Dangerous Critters",
 	}
 	L.WaveArrowPreview.setTickSpeedMult(0.5)
-	L.WaveArrowPreview.start(planningOpts)
+	-- Friendly green trains only — no red dangerous-critter arrows.
+	L.WaveArrowPreview.startGreen(planningOpts)
+	-- Ink once after intro; pathData is already the current Plot Size trim.
+	L.WavePathLines.ensureInkReveal()
 	syncPlanningLegendVisible(true)
 	if not planningArrowConn then
 		planningArrowConn = L.RunService.Heartbeat:Connect(function(dt)
@@ -4859,12 +4892,8 @@ function WaveSim.startPlanningArrowPreview(): boolean
 				return
 			end
 			L.WaveArrowPreview.tick(dt)
-			-- Independent loops: each color finishes its own path before restarting.
 			if not L.WaveArrowPreview.hasActiveGreenTrains() then
 				L.WaveArrowPreview.startGreen(planningOpts)
-			end
-			if not L.WaveArrowPreview.hasActiveRedTrains() then
-				L.WaveArrowPreview.startRed(planningOpts)
 			end
 		end)
 	end
@@ -4920,6 +4949,7 @@ function WaveSim.start(): boolean
 	nextFishId = 1
 	ensureFolder()
 	hardCleanup()
+	L.WavePathLines.rebuild()
 	L.WaveEndVfx.refreshLocalEndHeart()
 	beginWave(1)
 	notifyHud()
@@ -4985,6 +5015,8 @@ function WaveSim.startJoinIntroDemo(coralParts: { BasePart }, wave: number?): bo
 	hardCleanup()
 	demoCoralParts = coralParts
 	joinIntroDemo = true
+	-- Don't paint the MAX-stage ribbon during the showcase; ink draws the real route after handoff.
+	L.WavePathLines.destroy()
 	L.WaveEndVfx.refreshLocalEndHeart()
 	L.WaveEndVfx.setHappyExitVisible(false)
 	HungerUi.applyCritterHungerBarsVisible()
@@ -5017,9 +5049,15 @@ function WaveSim.stopJoinIntroDemo()
 		preserveAmmoFade = preserveAmmoFade,
 		preserveCritterFade = preserveCritterFade,
 	})
+	-- Replace MAX-stage intro path with the player's current Plot Size route (no ribbon flash).
+	pathData = Path.buildPath()
+	pathDataA2 = Path.buildNamedPath(C.FISH_ROUTE_A2_NAME)
+	pathDataGroundA, pathDataGroundB = WaveCrab.buildBothLocal()
+	pathDataShark = WaveShark.buildLocal()
+	L.WavePathLines.destroy()
 end
 
-function WaveSim.rebuildRouteForPlotSize(plotSizeStage: number?): boolean
+function WaveSim.rebuildRouteForPlotSize(plotSizeStage: number?, opts: { skipPathLines: boolean? }?): boolean
 	local p = Path.buildPath(plotSizeStage)
 	if not p then
 		return false
@@ -5028,6 +5066,9 @@ function WaveSim.rebuildRouteForPlotSize(plotSizeStage: number?): boolean
 	pathDataA2 = Path.buildNamedPath(C.FISH_ROUTE_A2_NAME, plotSizeStage)
 	pathDataGroundA, pathDataGroundB = WaveCrab.buildBothLocal()
 	pathDataShark = WaveShark.buildLocal()
+	if not (opts and opts.skipPathLines) and not L.WavePathLines.isRevealing() then
+		L.WavePathLines.rebuild()
+	end
 	-- Fish already past the new end finish there; others keep swimming on the longer/shorter route.
 	for _, agent in ipairs(fishList) do
 		if agent.isCrab or agent.isUrchin or agent.isShark then
@@ -5045,16 +5086,12 @@ function WaveSim.rebuildRouteForPlotSize(plotSizeStage: number?): boolean
 		local planningOpts = {
 			playSound = false,
 			includeShark = false,
-			forceGroundTrains = true,
+			forceGroundTrains = false,
 			greenLabelText = "Friendly Fish",
-			redLabelText = "Dangerous Critters",
 		}
 		L.WaveArrowPreview.setTickSpeedMult(0.5)
 		if not L.WaveArrowPreview.hasActiveGreenTrains() then
 			L.WaveArrowPreview.startGreen(planningOpts)
-		end
-		if not L.WaveArrowPreview.hasActiveRedTrains() then
-			L.WaveArrowPreview.startRed(planningOpts)
 		end
 		syncPlanningLegendVisible(true)
 	end

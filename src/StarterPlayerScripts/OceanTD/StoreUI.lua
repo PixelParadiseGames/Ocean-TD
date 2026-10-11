@@ -964,6 +964,10 @@ function StoreUI.open()
 	if playerGui:GetAttribute(SKILLS_OPEN_ATTR) == true then
 		return
 	end
+	-- Locked until plot-size upgrade finger tutorial completes.
+	if playerGui:GetAttribute("OceanTD_TutorialGateShop") == true then
+		return
+	end
 	playerGui:SetAttribute("OceanTD_ForceCloseReefReport", os.clock())
 	playerGui:SetAttribute("OceanTD_ForceCloseSkills", os.clock())
 	lastToggleAt = os.clock()

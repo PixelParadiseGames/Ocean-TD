@@ -85,6 +85,7 @@ export type PlaceResult = {
 	scaleMult: number?,
 	sizeClass: number?,
 	facingYaw: number?,
+	inventory: { [string]: { [string]: number } }?,
 }
 
 local PlacementService = {}
@@ -1043,6 +1044,8 @@ function PlacementService.placeFromSave(
 		speciesId = species.speciesId,
 		itemId = itemId,
 		placeId = placeId,
+		-- Client applies immediately so backpack / hue-circle N don't wait on InventorySync.
+		inventory = PersistenceService.getInventoryPayload(player),
 	}
 end
 
@@ -1713,6 +1716,7 @@ function PlacementService.recycle(player: Player, placeId: string, worldPos: Vec
 		itemId = creditedId,
 		placeId = placeId,
 		seedCount = seedCount,
+		inventory = PersistenceService.getInventoryPayload(player),
 	}
 end
 

@@ -107,6 +107,8 @@ local function reopenPlotSizeSkills()
 		end
 		if restoreCloseHint then
 			playerGui:SetAttribute("OceanTD_RollFingerHint", "closePlotSize")
+			-- Plot-size upgrade finger done — unlock shop / cart.
+			playerGui:SetAttribute("OceanTD_TutorialGateShop", false)
 		end
 		setTutorialSuppress(false)
 	end)
@@ -240,11 +242,24 @@ local function tweenGrowBox(
 	duration: number,
 	my: number,
 	heartFrom: Vector3?,
-	heartTo: Vector3?
+	heartTo: Vector3?,
+	fromStage: number?,
+	toStage: number?
 )
 	local WaveEndVfx = require(script.Parent:WaitForChild("WaveEndVfx"))
+	local WavePathLines = require(script.Parent:WaitForChild("WavePathLines"))
+	local WaveSimPath = require(script.Parent:WaitForChild("WaveSimPath"))
 	if heartFrom then
 		WaveEndVfx.setRouteEndWorldPos(heartFrom)
+	end
+	-- Prebuild stage paths once so the green ribbon can grow/shrink with the heart each frame.
+	local pathFrom = if typeof(fromStage) == "number" then WaveSimPath.buildPath(fromStage) else nil
+	local pathTo = if typeof(toStage) == "number" then WaveSimPath.buildPath(toStage) else nil
+	local lenFrom = if pathFrom then pathFrom.totalLen else 0
+	local lenTo = if pathTo then pathTo.totalLen else 0
+	local samplePath = if lenTo >= lenFrom then pathTo else pathFrom
+	if samplePath then
+		WavePathLines.rebuildForPath(samplePath, lenFrom)
 	end
 	local t0 = os.clock()
 	while os.clock() - t0 < duration do
@@ -257,6 +272,9 @@ local function tweenGrowBox(
 		part.CFrame = fromCf:Lerp(toCf, e)
 		if heartFrom and heartTo then
 			WaveEndVfx.setRouteEndWorldPos(heartFrom:Lerp(heartTo, e))
+		end
+		if samplePath then
+			WavePathLines.rebuildForPath(samplePath, lenFrom + (lenTo - lenFrom) * e)
 		end
 		local plot = ClientPlot.get()
 		if plot then
@@ -276,6 +294,9 @@ local function tweenGrowBox(
 		part.CFrame = toCf
 		if heartTo then
 			WaveEndVfx.setRouteEndWorldPos(heartTo)
+		end
+		if samplePath then
+			WavePathLines.rebuildForPath(samplePath, lenTo)
 		end
 	end
 end
@@ -406,9 +427,9 @@ function PlotSizeCinematic.play(
 		WaveEndVfx.setRouteHeartDriveLocked(false)
 		WaveEndVfx.syncToPlotSizeStage(newStage)
 		local WaveSim = require(script.Parent:WaitForChild("WaveSim"))
-		if WaveSim.isRunning() then
-			WaveSim.rebuildRouteForPlotSize(newStage)
-		end
+		-- Always rebuild (path ribbon + live route) — not only mid-wave. Heart move
+		-- in build/planning must redraw the green line immediately.
+		WaveSim.rebuildRouteForPlotSize(newStage)
 		if okCommit then
 			pcall(function()
 				Remotes.get("ReportPlotSizeCinematicDone"):FireServer(newStage)
@@ -482,7 +503,7 @@ function PlotSizeCinematic.play(
 	local heartTo = WaveEndVfx.getRouteEndWorldPosForStage(newStage)
 	local box = makeGrowBox(fromCf, fromSize)
 	playGrowSound()
-	tweenGrowBox(box, fromSize, toSize, fromCf, toCf, growSec, my, heartFrom, heartTo)
+	tweenGrowBox(box, fromSize, toSize, fromCf, toCf, growSec, my, heartFrom, heartTo, prevStage, newStage)
 	if box.Parent then
 		local fade = TweenService:Create(box, TweenInfo.new(0.35), { Transparency = 1 })
 		fade:Play()
@@ -596,6 +617,7 @@ function PlotSizeCinematic.tweenStagesLocal(
 	local cancelled = if opts then opts.cancelled else nil
 
 	local WaveEndVfx = require(script.Parent:WaitForChild("WaveEndVfx"))
+	-- Join-intro bleach only: do not paint the green ribbon here — ink draw owns first reveal.
 	local heartFrom = WaveEndVfx.getRouteEndWorldPosForStage(fromStage)
 	local heartTo = WaveEndVfx.getRouteEndWorldPosForStage(toStage)
 	local box = makeGrowBox(fromCf, fromSize)

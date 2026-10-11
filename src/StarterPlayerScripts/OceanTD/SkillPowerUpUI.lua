@@ -1023,8 +1023,12 @@ local function applyGameplayForActiveStages()
 		end
 		WaveSim.applyReefHealthStage(currentStage("RHealth"))
 		WaveSim.clampSpeedToMaxStep(SkillStages.waveSpeedMaxStep(currentStage("WaveSpeed")))
-		if WaveSim.isRunning() and not introBusy and not WaveSim.isJoinIntroDemo() then
-			WaveSim.rebuildRouteForPlotSize(currentStage("PlotSize"))
+		if not introBusy and not WaveSim.isJoinIntroDemo() then
+			local WavePathLines = require(script.Parent:WaitForChild("WavePathLines"))
+			-- Don't tear down join-intro ink / heart pop when HUD re-applies stages.
+			if not WavePathLines.isRevealing() then
+				WaveSim.rebuildRouteForPlotSize(currentStage("PlotSize"))
+			end
 		end
 		if SkillsBubbleSim.isRunning() then
 			SkillsBubbleSim.refreshStageLayouts()
@@ -3887,9 +3891,7 @@ syncRemote.OnClientEvent:Connect(function(payload)
 	local WaveSim = require(script.Parent:WaitForChild("WaveSim"))
 	WaveSim.applyReefHealthStage(currentStage("RHealth"))
 	WaveSim.clampSpeedToMaxStep(SkillStages.waveSpeedMaxStep(currentStage("WaveSpeed")))
-	if WaveSim.isRunning() then
-		WaveSim.rebuildRouteForPlotSize(currentStage("PlotSize"))
-	end
+	WaveSim.rebuildRouteForPlotSize(currentStage("PlotSize"))
 end)
 
 return SkillPowerUpUI

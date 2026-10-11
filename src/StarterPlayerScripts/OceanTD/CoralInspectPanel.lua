@@ -350,7 +350,8 @@ end
 
 local function noteTutorialUpgradeSucceeded()
 	suppressTutorialSizeConfirm = false
-	if playerGui:GetAttribute(TUTORIAL_FREE_ATTR) == true then
+	local hadFreeUpgrade = playerGui:GetAttribute(TUTORIAL_FREE_ATTR) == true
+	if hadFreeUpgrade then
 		playerGui:SetAttribute(TUTORIAL_FREE_ATTR, false)
 	end
 	local hint = playerGui:GetAttribute(HINT_ATTR)
@@ -360,9 +361,12 @@ local function noteTutorialUpgradeSucceeded()
 		return
 	end
 	-- Still on upgrade, or reselect/false after a cinematic flicker — advance to hue.
+	-- Also accept plot/equip when free-upgrade just consumed (place→upgrade attr was missed).
 	local fromUpgrade = hint == "upgrade"
 		or (hint == "reselectCoral" and resume == "upgrade")
 		or ((hint == false or hint == nil) and resume == "upgrade")
+		or (hadFreeUpgrade and (hint == "plot" or hint == "equip" or hint == "reselectCoral"))
+		or (resume == "upgrade" and (hint == "plot" or hint == "equip"))
 	if not fromUpgrade then
 		return
 	end
@@ -2208,8 +2212,7 @@ local function refreshColorSeedLabels()
 		local btn = colorSwatchBtns[idx]
 		local countLbl = colorSwatchCounts[idx]
 		local isActive = activeColorIndex ~= nil and idx == activeColorIndex
-		-- Label = owned inventory seeds (matches backpack total). Dim when no paint slots left.
-		local owned = if typeof(itemId) == "string" then InventoryState.getHueSeedCount(itemId, idx) else 0
+		-- Label = remaining paint slots (inventory + seed-backed places − already painted).
 		local available = if typeof(itemId) == "string" then getHueAvailableSlots(itemId, idx) else 0
 		if lock then
 			lock.Visible = false
@@ -2220,7 +2223,7 @@ local function refreshColorSeedLabels()
 				countLbl.Visible = false
 			else
 				countLbl.Visible = true
-				countLbl.Text = tostring(owned)
+				countLbl.Text = tostring(available)
 				countLbl.TextColor3 = seedCountLabelColor(idx)
 			end
 		end
@@ -4299,6 +4302,56 @@ function CoralInspectPanel.getTutorialUnlockButton(): GuiObject?
 		return nil
 	end
 	return unlock
+end
+
+-- Tutorial finger: UPGRADE on the inspect panel (before size-confirm opens).
+function CoralInspectPanel.getTutorialUpgradeButton(): GuiObject?
+	if not root or not root.Visible then
+		return nil
+	end
+	local btn = upgradeBtn
+	if not (btn and btn.Parent and btn.Visible and btn.AbsoluteSize.X >= 2) then
+		return nil
+	end
+	return btn
+end
+
+-- After first plant, keep trying to open inspect on the tracked coral so the upgrade finger has a target.
+function CoralInspectPanel.ensureTutorialUpgradeTarget(): boolean
+	if playerGui:GetAttribute(HINT_ATTR) ~= "upgrade" then
+		return CoralInspectPanel.getTutorialUpgradeButton() ~= nil
+	end
+	if CoralInspectPanel.getTutorialUpgradeButton() then
+		return true
+	end
+	if RelocateController.isActive() then
+		ensureInspectVisibleForHue()
+		return CoralInspectPanel.getTutorialUpgradeButton() ~= nil
+	end
+	if not InventoryState.isOpen() then
+		return false
+	end
+	local pid = playerGui:GetAttribute(HUE_PLACE_ATTR)
+	if typeof(pid) ~= "string" or pid == "" then
+		return false
+	end
+	local okPlace, PlacementController = pcall(function()
+		return require(script.Parent:WaitForChild("PlacementController"))
+	end)
+	if okPlace and PlacementController and PlacementController.isActive() then
+		return false
+	end
+	local okHover, RelocatePickHover = pcall(function()
+		return require(script.Parent:WaitForChild("RelocatePickHover"))
+	end)
+	if not (okHover and RelocatePickHover) then
+		return false
+	end
+	local part = RelocatePickHover.findByPlaceId(pid)
+	if part and part.Parent then
+		RelocateController.begin(part)
+	end
+	return CoralInspectPanel.getTutorialUpgradeButton() ~= nil
 end
 
 function CoralInspectPanel.getTutorialHueSwatch(): GuiObject?

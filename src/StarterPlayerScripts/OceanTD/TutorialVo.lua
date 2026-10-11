@@ -19,6 +19,8 @@ export type PlayOpts = {
 	onEnded: (() -> ())?,
 	-- Optional louder/quieter than default (some source clips are mastered quieter).
 	volume: number?,
+	-- Skip leading silence / dead air at the start of the clip (seconds).
+	startOffsetSec: number?,
 }
 
 -- Roblox Sound.Volume allows >1; keep dialogue above ducked BGM even if masters are quiet.
@@ -136,9 +138,25 @@ playNow = function(soundId: string, name: string?, opts: PlayOpts?)
 			return
 		end
 		s.Volume = vol
-		s:Play()
+		local startOffset = 0
+		if opts and typeof(opts.startOffsetSec) == "number" then
+			local raw = opts.startOffsetSec :: number
+			if raw == raw and raw > 0 then
+				startOffset = raw
+			end
+		end
 		local len = s.TimeLength
-		local maxSec = if len > 0.05 then len / math.max(0.2, s.PlaybackSpeed) + 1.5 else DEFAULT_MAX_SEC
+		if startOffset > 0 and len > 0.05 then
+			startOffset = math.clamp(startOffset, 0, math.max(0, len - 0.05))
+			s.TimePosition = startOffset
+		end
+		s:Play()
+		if startOffset > 0 then
+			-- Play() can reset TimePosition on some platforms; re-apply after start.
+			s.TimePosition = startOffset
+		end
+		local remain = if len > 0.05 then math.max(0.05, len - startOffset) else 0
+		local maxSec = if remain > 0.05 then remain / math.max(0.2, s.PlaybackSpeed) + 1.5 else DEFAULT_MAX_SEC
 		task.delay(maxSec, complete)
 	end)
 end

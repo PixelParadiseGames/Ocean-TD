@@ -16,6 +16,8 @@ local ATTR_NARRATOR = "OceanTD_NarratorVolume"
 local ATTR_SHUFFLE = "OceanTD_BgmShuffle"
 
 local sfxGroup: SoundGroup? = nil
+-- Same slider as SFX, but never ducked under tutorial VO (heartbeats, GAME OVER, …).
+local sfxPriorityGroup: SoundGroup? = nil
 local bgmGroup: SoundGroup? = nil
 local narratorGroup: SoundGroup? = nil
 local initialized = false
@@ -58,12 +60,32 @@ local function isVoSound(sound: Sound): boolean
 	return g ~= nil and sound.SoundGroup == g
 end
 
+local function isPrioritySfx(sound: Sound): boolean
+	if sound:GetAttribute("OceanTD_SfxPriority") == true then
+		return true
+	end
+	local g = sfxPriorityGroup
+	return g ~= nil and sound.SoundGroup == g
+end
+
 local function routeSound(sound: Sound)
+	-- Explicit opt-out: never assign a SoundGroup (immune to SFX VO-duck).
+	if sound:GetAttribute("OceanTD_NoSoundGroup") == true then
+		sound.SoundGroup = nil
+		return
+	end
 	if isBgmSound(sound) then
 		return
 	end
 	if isVoSound(sound) then
 		local g = narratorGroup
+		if g then
+			sound.SoundGroup = g
+		end
+		return
+	end
+	if isPrioritySfx(sound) then
+		local g = sfxPriorityGroup
 		if g then
 			sound.SoundGroup = g
 		end
@@ -93,10 +115,13 @@ function AudioSettings.init()
 	initialized = true
 
 	sfxGroup = ensureGroup("OceanTD_SFX")
+	sfxPriorityGroup = ensureGroup("OceanTD_SFX_Priority")
 	bgmGroup = ensureGroup("OceanTD_BGM")
 	narratorGroup = ensureGroup("OceanTD_Narrator")
 
-	sfxGroup.Volume = readAttr(ATTR_SFX, 1)
+	local sfxVol = readAttr(ATTR_SFX, 1)
+	sfxGroup.Volume = sfxVol
+	sfxPriorityGroup.Volume = sfxVol
 	bgmGroup.Volume = readAttr(ATTR_BGM, 0.7)
 	narratorGroup.Volume = readAttr(ATTR_NARRATOR, 1)
 
@@ -153,6 +178,10 @@ function AudioSettings.setSfxVolume(v: number)
 	local player = Players.LocalPlayer
 	if player then
 		player:SetAttribute(ATTR_SFX, n)
+	end
+	-- Priority SFX always tracks the slider (never VO-ducked).
+	if sfxPriorityGroup then
+		sfxPriorityGroup.Volume = n
 	end
 	if sfxDuckActive then
 		sfxDuckBase = n
@@ -211,6 +240,10 @@ function AudioSettings.fadeSfxToFactor(factor: number, fadeSec: number?)
 		sfxDuckActive = true
 	end
 	sfxDuckFactor = clamped
+	-- Priority group stays at full slider while regular SFX ducks.
+	if sfxPriorityGroup then
+		sfxPriorityGroup.Volume = sfxDuckBase
+	end
 	tweenSfxGroup(sfxDuckBase * clamped, fade, my)
 end
 
@@ -224,6 +257,9 @@ function AudioSettings.clearSfxFactor(fadeSec: number?)
 	local base = sfxDuckBase
 	sfxDuckActive = false
 	sfxDuckFactor = 1
+	if sfxPriorityGroup then
+		sfxPriorityGroup.Volume = base
+	end
 	tweenSfxGroup(base, fade, my)
 end
 
@@ -274,6 +310,24 @@ function AudioSettings.markVoSound(sound: Sound)
 	else
 		sound.SoundGroup = nil
 	end
+end
+
+-- SFX that must stay full volume under tutorial VO (heartbeats, GAME OVER sting, …).
+function AudioSettings.markPrioritySfx(sound: Sound)
+	sound:SetAttribute("OceanTD_SfxPriority", true)
+	AudioSettings.init()
+	local g = sfxPriorityGroup
+	if g then
+		sound.SoundGroup = g
+	else
+		sound.SoundGroup = nil
+	end
+end
+
+-- Bypass all SoundGroups (and SFX VO-duck). Use for one-shots that must always be heard.
+function AudioSettings.markNoSoundGroup(sound: Sound)
+	sound:SetAttribute("OceanTD_NoSoundGroup", true)
+	sound.SoundGroup = nil
 end
 
 return AudioSettings

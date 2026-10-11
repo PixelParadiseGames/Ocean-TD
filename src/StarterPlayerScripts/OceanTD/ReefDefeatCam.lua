@@ -1,8 +1,7 @@
 --!strict
 --[[
-	Reef death: 3s Scriptable zoom onto the fish that spent the last heart,
-	then callback so WaveSlot can open the Out Of Reef Health popup.
-	Camera stays on the defeat pose during the summary; Retry/Continue/Finish must
+	Reef death: 3s Scriptable zoom onto the reef heart, then GAME OVER + Out Of Reef Health.
+	Camera stays on the heart through GAME OVER and the summary; Retry/Continue/Finish must
 	call releaseHeldPose() (WaveSim.stop's stopImmediate must NOT cancel that).
 ]]
 
@@ -23,10 +22,19 @@ local holdPose = false
 local savedType: Enum.CameraType? = nil
 local savedSubject: Instance? = nil
 local activeTween: Tween? = nil
+local heldFocus: Vector3? = nil
+local heldLook: Vector3? = nil
 
 local function getPlayerGui(): PlayerGui?
 	local plr = Players.LocalPlayer
 	return plr and plr:FindFirstChildOfClass("PlayerGui")
+end
+
+local function setBusyAttr(on: boolean)
+	local pg = getPlayerGui()
+	if pg then
+		pg:SetAttribute("OceanTD_ReefDefeatCamBusy", on)
+	end
 end
 
 local function restoreCamera()
@@ -68,14 +76,13 @@ function ReefDefeatCam.releaseHeldPose()
 	token += 1
 	busy = false
 	holdPose = false
+	heldFocus = nil
+	heldLook = nil
 	if activeTween then
 		activeTween:Cancel()
 		activeTween = nil
 	end
-	local pg = getPlayerGui()
-	if pg then
-		pg:SetAttribute("OceanTD_ReefDefeatCamBusy", false)
-	end
+	setBusyAttr(false)
 	restoreCamera()
 end
 
@@ -87,13 +94,13 @@ function ReefDefeatCam.stopImmediate()
 		activeTween:Cancel()
 		activeTween = nil
 	end
-	local pg = getPlayerGui()
-	if pg then
-		pg:SetAttribute("OceanTD_ReefDefeatCamBusy", false)
-	end
 	-- Mid-zoom abort (not yet holding for summary): restore now.
+	-- While holding the heart for GAME OVER / Out Of Reef Health, keep Scriptable + busy.
 	if not holdPose then
+		setBusyAttr(false)
 		restoreCamera()
+	else
+		setBusyAttr(true)
 	end
 end
 
@@ -110,6 +117,55 @@ local function focusFrom(target: Vector3, look: Vector3): Vector3
 	end
 	local side = Vector3.new(-flat.Z, 0, flat.X)
 	return target - flat * CAM_DIST + side * (CAM_DIST * 0.18) + Vector3.new(0, CAM_HEIGHT, 0)
+end
+
+local function applyFocus(focusPos: Vector3, lookDir: Vector3?)
+	local cam = Workspace.CurrentCamera
+	if not cam then
+		return
+	end
+	if not savedType then
+		savedType = cam.CameraType
+		savedSubject = cam.CameraSubject
+		if savedType == Enum.CameraType.Scriptable then
+			savedType = Enum.CameraType.Custom
+		end
+	end
+	cam.CameraType = Enum.CameraType.Scriptable
+	local look = lookDir or heldLook or Vector3.new(0, 0, -1)
+	cam.CFrame = lookAt(focusFrom(focusPos, look), focusPos)
+	heldFocus = focusPos
+	heldLook = look
+	holdPose = true
+	setBusyAttr(true)
+end
+
+-- Snap/hold Scriptable on a world focus (reef heart during GAME OVER).
+function ReefDefeatCam.focusAndHold(focusPos: Vector3, lookDir: Vector3?)
+	if activeTween then
+		activeTween:Cancel()
+		activeTween = nil
+	end
+	busy = false
+	applyFocus(focusPos, lookDir)
+	local pg = getPlayerGui()
+	if pg then
+		pg:SetAttribute("OceanTD_ForceCloseFreeCam", os.clock())
+	end
+end
+
+-- Re-assert the held heart pose each frame-ish if something nudged the cam.
+function ReefDefeatCam.reassertHold()
+	if not holdPose or not heldFocus then
+		return
+	end
+	local cam = Workspace.CurrentCamera
+	if not cam then
+		return
+	end
+	cam.CameraType = Enum.CameraType.Scriptable
+	cam.CFrame = lookAt(focusFrom(heldFocus, heldLook or Vector3.new(0, 0, -1)), heldFocus)
+	setBusyAttr(true)
 end
 
 -- Zoom camera to focus over ZOOM_SEC, then onDone.
@@ -139,9 +195,7 @@ function ReefDefeatCam.play(focusPos: Vector3, lookDir: Vector3?, onDone: (() ->
 		local cam = Workspace.CurrentCamera
 		if not cam then
 			busy = false
-			if pg then
-				pg:SetAttribute("OceanTD_ReefDefeatCamBusy", false)
-			end
+			setBusyAttr(false)
 			if onDone then
 				onDone()
 			end
@@ -157,6 +211,8 @@ function ReefDefeatCam.play(focusPos: Vector3, lookDir: Vector3?, onDone: (() ->
 
 		local look = lookDir or Vector3.new(0, 0, -1)
 		local goal = lookAt(focusFrom(focusPos, look), focusPos)
+		heldFocus = focusPos
+		heldLook = look
 		local tween = TweenService:Create(
 			cam,
 			TweenInfo.new(ZOOM_SEC, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
@@ -170,12 +226,10 @@ function ReefDefeatCam.play(focusPos: Vector3, lookDir: Vector3?, onDone: (() ->
 			return
 		end
 
-		-- Keep Scriptable on the defeat pose for the Out Of Reef Health popup.
+		-- Keep Scriptable on the heart through GAME OVER + Out Of Reef Health.
 		holdPose = true
 		busy = false
-		if pg and pg.Parent then
-			pg:SetAttribute("OceanTD_ReefDefeatCamBusy", false)
-		end
+		setBusyAttr(true)
 		if onDone then
 			onDone()
 		end

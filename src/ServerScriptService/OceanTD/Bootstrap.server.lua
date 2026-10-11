@@ -155,12 +155,11 @@ do
 			clearIntroPending(player)
 			-- One free coral size upgrade this session while join-intro finger tutorial runs.
 			PlayerSession.grantTutorialFreeCoralSize(player)
+			-- Mark seated without moving — client already parked at post-shrink spawn.
+			-- A second teleport here was yanking the avatar when the green path started.
+			PlotService.markSpawnSeated(player)
 		end
 		ensureNeighborPlotsLoaded("intro complete")
-		-- Single authoritative spawn seat after showcase (client no longer double-teleports).
-		if typeof(player) == "Instance" and player:IsA("Player") and player.Parent then
-			PlotService.teleportToPlot(player, true)
-		end
 	end)
 	-- Safety: only seat players still stuck in intro — never re-drop everyone after ~1 min.
 	task.delay(75, function()

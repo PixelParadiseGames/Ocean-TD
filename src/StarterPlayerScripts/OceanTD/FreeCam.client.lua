@@ -42,6 +42,7 @@ local FC = require(script.Parent:WaitForChild("FreeCamConfig"))
 local FreeCamModeLabel = require(script.Parent:WaitForChild("FreeCamModeLabel"))
 local PlotCam2 = require(script.Parent:WaitForChild("PlotCam2"))
 local PlotCam2Tune = require(script.Parent:WaitForChild("PlotCam2Tune"))
+local FishCamTune = require(script.Parent:WaitForChild("FishCamTune"))
 
 playerGui:SetAttribute(FC.ATTR_CAROUSEL_COLLAPSED, false)
 
@@ -664,6 +665,9 @@ local function isUserSteeringOrbit(): boolean
 	if mode ~= "fishcam" then
 		return false
 	end
+	if FishCamTune.isSteeringOrbit() then
+		return true
+	end
 	if isMouseLookHeld() then
 		return true
 	end
@@ -868,8 +872,9 @@ local function fishChaseOffset(dt: number): Vector3
 	if not isUserSteeringOrbit() then
 		fishSt.orbitAngle -= radPerSec * math.max(dt, 0)
 	end
-	local dist = FC.FISH_CHASE_DIST * mult
-	local height = FC.FISH_CHASE_HEIGHT * mult
+	local zoom = FishCamTune.getDistScale()
+	local dist = FC.FISH_CHASE_DIST * mult * zoom
+	local height = FC.FISH_CHASE_HEIGHT * mult * zoom
 	local r = math.sqrt(dist * dist + height * height)
 	local baseElev = math.atan2(height, dist)
 	local elev = math.clamp(baseElev + fishSt.orbitElev, 0.12, 1.25)
@@ -1387,6 +1392,7 @@ setMode = function(nextMode: CamMode)
 	local prev = mode
 	mode = nextMode
 	publishMode()
+	FishCamTune.setVisible(nextMode == "fishcam")
 	playCamCarousel(prev, nextMode, true)
 	-- Wait for the revolve so the active icon is on the top slot before measuring.
 	local labelToken = carouselToken
@@ -1400,6 +1406,7 @@ setMode = function(nextMode: CamMode)
 	if nextMode == "off" then
 		PlotCam2.stop()
 		PlotCam2Tune.setVisible(false)
+		FishCamTune.setVisible(false)
 		restoreDefaultCamera()
 		return
 	end
@@ -1414,6 +1421,7 @@ setMode = function(nextMode: CamMode)
 		if not ensureScriptableFromCurrent() then
 			mode = "off"
 			publishMode()
+			FishCamTune.setVisible(false)
 			playCamCarousel(nextMode, "off", false)
 			return
 		end
@@ -1434,6 +1442,7 @@ setMode = function(nextMode: CamMode)
 			if not PlotCam2.begin(resumeCf) then
 				mode = "off"
 				publishMode()
+				FishCamTune.setVisible(false)
 				PlotCam2.stop()
 				PlotCam2Tune.setVisible(false)
 				restoreDefaultCamera()
@@ -2003,6 +2012,12 @@ local function wireDPadIcon(icon: GuiObject)
 end
 
 publishMode()
+FishCamTune.bind({
+	onYaw = function(deltaRad: number)
+		fishSt.orbitAngle -= deltaRad
+	end,
+})
+FishCamTune.setVisible(mode == "fishcam")
 
 local leftHudListenersBound = false
 local boundLeftUi: Instance? = nil
@@ -2193,7 +2208,9 @@ local function bindMobileLeftUi(left: Instance)
 				end
 			end
 			-- Wave-1 Tang handoff: keep the behind-fish / heart-ahead framing.
+			-- Post-intro: JoinIntro already tweened into PlotCam2 — keep that seat (no snap).
 			local preserve = raw == "fishcam"
+				or (raw == "plotcam" and PlotCam2.isActive())
 			forceModeOverride = true
 			if preserve then
 				resumePreserveView = true

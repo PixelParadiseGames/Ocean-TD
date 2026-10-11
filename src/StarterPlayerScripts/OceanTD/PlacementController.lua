@@ -462,6 +462,36 @@ local function clearGhost()
 	placeAnchor = nil
 end
 
+-- Cancel/check/rot live on the move Billboard while parked. Always peel them off
+-- before Destroy — otherwise Parent locks and disarm/rebuild throw.
+local function tryReparentGui(gui: GuiObject?, parent: Instance?): boolean
+	if not gui or not parent then
+		return false
+	end
+	if gui.Parent == parent then
+		return true
+	end
+	local ok = pcall(function()
+		gui.Parent = parent
+	end)
+	return ok and gui.Parent == parent
+end
+
+local function peelChromeOffMoveBillboard()
+	if not confirmGui then
+		return
+	end
+	tryReparentGui(checkBtn, confirmGui)
+	tryReparentGui(cancelBtn, confirmGui)
+	tryReparentGui(rotLeftBtn, confirmGui)
+	tryReparentGui(rotRightBtn, confirmGui)
+	if moveHintImage then
+		moveHintImage.AnchorPoint = Vector2.new(0.5, 0.5)
+		moveHintImage.Size = UDim2.fromOffset(MOVE_ICON_SIZE, MOVE_ICON_SIZE)
+		tryReparentGui(moveHintImage, confirmGui)
+	end
+end
+
 local function destroyConfirmUi()
 	PlaceConfirmChrome.stopRotateHold()
 	if checkPromptConn then
@@ -469,6 +499,8 @@ local function destroyConfirmUi()
 		checkPromptConn = nil
 	end
 	stopMoveHintAttract()
+	-- Peel before Destroy so we never leave locked-Parent refs if a later rebuild races.
+	peelChromeOffMoveBillboard()
 	if moveHintBillboard then
 		moveHintBillboard:Destroy()
 		moveHintBillboard = nil
@@ -655,18 +687,7 @@ local function setMoveHintVisible(visible: boolean)
 end
 
 detachMoveHintToScreen = function()
-	if not moveHintImage then
-		if moveHintBillboard then
-			moveHintBillboard:Destroy()
-			moveHintBillboard = nil
-		end
-		return
-	end
-	if confirmGui and moveHintImage.Parent ~= confirmGui then
-		moveHintImage.AnchorPoint = Vector2.new(0.5, 0.5)
-		moveHintImage.Size = UDim2.fromOffset(MOVE_ICON_SIZE, MOVE_ICON_SIZE)
-		moveHintImage.Parent = confirmGui
-	end
+	peelChromeOffMoveBillboard()
 	if moveHintBillboard then
 		moveHintBillboard:Destroy()
 		moveHintBillboard = nil
@@ -681,12 +702,11 @@ attachMoveHintToGhost = function()
 	end
 	if moveHintBillboard and moveHintBillboard.Parent and moveHintBillboard.Adornee == ghost then
 		moveHintImage.Visible = true
-		if moveHintImage.Parent ~= moveHintBillboard then
-			moveHintImage.Parent = moveHintBillboard
-		end
+		tryReparentGui(moveHintImage, moveHintBillboard)
 		-- Size/Position owned by layoutOnMoveBillboard when chrome is up.
 		return
 	end
+	peelChromeOffMoveBillboard()
 	if moveHintBillboard then
 		moveHintBillboard:Destroy()
 		moveHintBillboard = nil
@@ -706,7 +726,7 @@ attachMoveHintToGhost = function()
 	moveHintImage.Position = UDim2.new(0.5, 0, 0.5, 0)
 	moveHintImage.Size = UDim2.fromOffset(MOVE_ICON_SIZE, MOVE_ICON_SIZE)
 	moveHintImage.Visible = true
-	moveHintImage.Parent = bb
+	tryReparentGui(moveHintImage, bb)
 	moveHintBillboard = bb
 end
 
@@ -989,11 +1009,15 @@ local function syncConfirmButtonsImpl()
 		return
 	end
 
-	-- Hot-reload / partial UI: rebuild so SeaFan rotate controls exist.
+	-- Hot-reload / billboard Destroy race: rebuild if any chrome button was orphaned.
+	local chromeAlive = checkBtn.Parent ~= nil and cancelBtn.Parent ~= nil
 	local rotAlive = rotLeftBtn ~= nil and rotLeftBtn.Parent ~= nil and rotRightBtn ~= nil and rotRightBtn.Parent ~= nil
-	if not rotAlive then
+	if not chromeAlive or not rotAlive then
 		makeConfirmUi()
 		if not confirmGui or not checkBtn or not cancelBtn or not ghost then
+			return
+		end
+		if checkBtn.Parent == nil or cancelBtn.Parent == nil then
 			return
 		end
 	end
@@ -1030,7 +1054,7 @@ local function syncConfirmButtonsImpl()
 	end
 	chromeScreenPos = PlaceConfirmChrome.guiPosFromWorld(ghost.Position)
 	local showWord = (math.floor(os.clock()) % 2) == 1
-	cancelBtn.Text = if showWord then "CANCEL" else "X"
+	cancelBtn.Text = if showWord then "Close" else "X"
 	cancelBtn.TextStrokeColor3 = if showWord then Color3.fromRGB(60, 15, 18) else Color3.new(1, 1, 1)
 	cancelBtn.TextStrokeTransparency = 0
 	if checkBtn.Visible then
@@ -1752,12 +1776,39 @@ local function commitPlace()
 	if typeof(result) == "table" and result.ok then
 		log("Committed", armedItemId)
 		local placedId = result.placeId
+		if typeof(result.inventory) == "table" then
+			InventoryState.setSeedCounts(result.inventory)
+		end
 		-- Join-intro place tutorial: next point at coral UPGRADE (first upgrade free).
-		if playerGui:GetAttribute("OceanTD_RollFingerHint") == "plot" then
-			playerGui:SetAttribute("OceanTD_RollFingerHint", "upgrade")
-			if typeof(placedId) == "string" and placedId ~= "" then
-				playerGui:SetAttribute("OceanTD_TutorialHuePlaceId", placedId)
-				playerGui:SetAttribute("OceanTD_TutorialHueResume", "upgrade")
+		-- Drag-from-backpack can skip equip→plot; accept equip/backpack/plot + free-upgrade.
+		do
+			local hint = playerGui:GetAttribute("OceanTD_RollFingerHint")
+			local freeUp = playerGui:GetAttribute("OceanTD_TutorialFreeUpgrade") == true
+			local pastUpgrade = hint == "hue"
+				or hint == "hueReroll"
+				or hint == "closeBackpack"
+				or hint == "waves"
+				or hint == "skills"
+				or hint == "plotSize"
+				or hint == "plotSizeUpgrade"
+				or hint == "closePlotSize"
+				or hint == "closeSkills"
+				or hint == "cam"
+			local shouldUpgradeFinger = not pastUpgrade
+				and (
+					hint == "plot"
+					or hint == "equip"
+					or hint == "backpack"
+					or hint == "upgrade"
+					or hint == "reselectCoral"
+					or (freeUp and (hint == "plot" or hint == "equip" or hint == "backpack"))
+				)
+			if shouldUpgradeFinger then
+				playerGui:SetAttribute("OceanTD_RollFingerHint", "upgrade")
+				if typeof(placedId) == "string" and placedId ~= "" then
+					playerGui:SetAttribute("OceanTD_TutorialHuePlaceId", placedId)
+					playerGui:SetAttribute("OceanTD_TutorialHueResume", "upgrade")
+				end
 			end
 		end
 		-- Unlock Start Waves once the player has planted something.
@@ -1788,10 +1839,11 @@ local function commitPlace()
 				task.spawn(function()
 					local RelocatePickHover = require(script.Parent:WaitForChild("RelocatePickHover"))
 					local RelocateController = require(script.Parent:WaitForChild("RelocateController"))
+					-- Replication can lag after InvokeServer; keep trying so the upgrade finger has a target.
 					local part: BasePart? = nil
-					for _ = 1, 20 do
+					for _ = 1, 90 do
 						part = RelocatePickHover.findByPlaceId(placedId)
-						if part then
+						if part and part.Parent then
 							break
 						end
 						task.wait()
@@ -1799,13 +1851,22 @@ local function commitPlace()
 					if not part or not part.Parent then
 						return
 					end
-					if not InventoryState.isOpen() then
-						return
+					for _ = 1, 60 do
+						if not InventoryState.isOpen() then
+							return
+						end
+						if PlacementController.isActive() then
+							PlacementController.forceExit()
+						end
+						if RelocateController.isActive() and RelocateController.getSelectedPart() == part then
+							return
+						end
+						RelocateController.begin(part)
+						if RelocateController.isActive() then
+							return
+						end
+						task.wait()
 					end
-					if PlacementController.isActive() then
-						PlacementController.forceExit()
-					end
-					RelocateController.begin(part)
 				end)
 			end
 		end
@@ -1926,17 +1987,24 @@ local function enterConfirm(worldPos: Vector3)
 	log("Confirm mode", if validSpot then "valid" else (rejectReason or "invalid"))
 end
 
--- Place immediately at worldPos (no ✓/X). Invalid spots stay in aim.
+-- Park / place on pointer-up. Rotate-chrome species stay in Confirm so ✓/Close/rot work;
+-- others plant immediately. Invalid spots stay in aim.
 local function parkOrQuickPlace(worldPos: Vector3)
 	confirmPos = worldPos
 	placeAnchor = worldPos
 	updateGhostAt(worldPos)
-	if validSpot and armedItemId then
-		-- Before InvokeServer yields so mouse-up can't re-enter place mid-request.
-		suppressAimParkOnce = true
-		commitPlace()
+	if not (validSpot and armedItemId) then
 		return
 	end
+	local sid = getSpeciesIdForItem(armedItemId)
+	if CoralVisual.hasYawRotateChrome(sid) then
+		-- SeaFan: release parks with rotate + Confirm (quick-place skipped ✓/rot).
+		enterConfirm(worldPos)
+		return
+	end
+	-- Before InvokeServer yields so mouse-up can't re-enter place mid-request.
+	suppressAimParkOnce = true
+	commitPlace()
 end
 
 -- World press (or drag off the backpack): keep aiming under the finger; place on release.
@@ -2162,6 +2230,11 @@ function PlacementController.notifyPointerUp(_screenPos: Vector2)
 	end
 	if mode == MODE_CONFIRM then
 		confirmDragging = false
+		-- Rotate-chrome parks in Confirm on release — wait for ✓ (don't auto-plant).
+		local sid = if armedItemId then getSpeciesIdForItem(armedItemId) else nil
+		if CoralVisual.hasYawRotateChrome(sid) then
+			return
+		end
 		-- Legacy confirm: release places immediately (same as ✓).
 		if placeAnchor and validSpot and armedItemId then
 			suppressAimParkOnce = true
