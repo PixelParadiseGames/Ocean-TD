@@ -1991,13 +1991,6 @@ local function runIntro()
 		-- Clear busy only now so roll finger / locked HUD cannot overlap the intro cinematic.
 		playerGui:SetAttribute(ATTR_BUSY, false)
 		restoreHud()
-		-- Re-assert full heart after HUD restore (can race with plot sync).
-		if jumpToEnd or skipRequested then
-			pcall(function()
-				local WaveEndVfx = require(script.Parent:WaitForChild("WaveEndVfx"))
-				WaveEndVfx.settleHeartAfterIntroSkip()
-			end)
-		end
 		playerGui:SetAttribute(ATTR_ROLL_FINGER, "roll")
 		playerGui:SetAttribute("OceanTD_TutorialFreeUpgrade", true)
 		if playerGui:GetAttribute("OceanTD_HasRolledThisSession") ~= true then

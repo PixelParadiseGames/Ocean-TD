@@ -24,6 +24,8 @@ local routeHeartDriveLocked = false
 local heartIntroHoldHidden = false
 -- True while the ink tip scale-up is running — block ClientPlot heart teardown.
 local heartPopBusy = false
+-- Skip Intro finished heart settle — never re-apply ink shrink / teardown races.
+local heartSkipSettled = false
 
 local REEF_TICK_SOUND_ID = "rbxassetid://128707491647978"
 local REEF_TICK_PITCH_START = 1.2
@@ -143,6 +145,8 @@ local heartHideToken = 0
 local heartHideUntil = 0
 local heartInkScaleToken = 0
 local heartNativeScaleByPlot: { [string]: number } = {}
+-- Survives destroyRouteHeartClone — Skip must not forget full size after a mid-ink teardown.
+local heartFullNativeByPlot: { [string]: number } = {}
 local heartScaleMulByPlot: { [string]: number } = {}
 local heartRestSizeByPlot: { [string]: Vector3 } = {}
 local reefTickStreak = 0
@@ -235,7 +239,30 @@ end
 
 local function nameLooksLikeOrb(name: string): boolean
 	local n = string.lower(name)
-	return n == "orb" or string.find(n, "orb", 1, true) ~= nil or string.find(n, "glow", 1, true) ~= nil
+	return n == "orb"
+		or string.find(n, "orb", 1, true) ~= nil
+		or string.find(n, "glow", 1, true) ~= nil
+		or string.find(n, "sphere", 1, true) ~= nil
+		or string.find(n, "bubble", 1, true) ~= nil
+		or string.find(n, "glass", 1, true) ~= nil
+end
+
+-- Glass sphere may not be named "orb" — detect by material / see-through size too.
+local function isGlassOrbPart(p: BasePart): boolean
+	if nameLooksLikeHeart(p.Name) then
+		return false
+	end
+	if nameLooksLikeOrb(p.Name) then
+		return true
+	end
+	local mat = p.Material
+	if mat == Enum.Material.Glass or mat == Enum.Material.ForceField then
+		return true
+	end
+	if p.Transparency > 0.05 and p.Transparency < 0.98 and p.Size.Magnitude >= 3 then
+		return true
+	end
+	return false
 end
 
 local function findHeartIn(root: Instance?): BasePart?
@@ -259,49 +286,166 @@ local function findHeartIn(root: Instance?): BasePart?
 end
 
 local function packageHasOrb(root: Instance): boolean
+	if root:IsA("BasePart") and isGlassOrbPart(root) then
+		return true
+	end
 	for _, d in ipairs(root:GetDescendants()) do
-		if d:IsA("BasePart") and nameLooksLikeOrb(d.Name) then
+		if d:IsA("BasePart") and isGlassOrbPart(d) then
 			return true
 		end
-	end
-	if root:IsA("BasePart") and nameLooksLikeOrb(root.Name) then
-		return true
 	end
 	return false
 end
 
--- Collect orb siblings sitting next to EndPoint (not under it) so the clone includes them.
+-- Companion visuals sitting next to EndPoint (glass sphere, glow, etc.).
+-- Use proximity — name/material checks alone were missing the authored orb.
 local function collectOrbSiblings(endPoint: Instance): { Instance }
 	local out: { Instance } = {}
 	local parent = endPoint.Parent
 	if not parent or parent == Workspace then
 		return out
 	end
+	local heart = findHeartIn(endPoint)
+	local origin: Vector3? = nil
+	if heart then
+		origin = heart.Position
+	elseif endPoint:IsA("BasePart") then
+		origin = endPoint.Position
+	else
+		local p = endPoint:FindFirstChildWhichIsA("BasePart", true)
+		origin = if p then p.Position else nil
+	end
+
+	local function alreadyListed(inst: Instance): boolean
+		return table.find(out, inst) ~= nil
+	end
+
 	for _, ch in ipairs(parent:GetChildren()) do
-		if ch == endPoint then
+		if ch == endPoint or alreadyListed(ch) then
 			continue
 		end
-		if ch:IsA("BasePart") and nameLooksLikeOrb(ch.Name) then
+		-- Classic name/material match.
+		if ch:IsA("BasePart") and isGlassOrbPart(ch) then
 			table.insert(out, ch)
-		elseif ch:IsA("Model") or ch:IsA("Folder") then
-			if packageHasOrb(ch) and not findHeartIn(ch) then
-				table.insert(out, ch)
+			continue
+		end
+		if (ch:IsA("Model") or ch:IsA("Folder")) and packageHasOrb(ch) then
+			table.insert(out, ch)
+			continue
+		end
+		-- Proximity fallback: nearby ball / see-through / glass (not opaque path bricks).
+		if origin then
+			local sample: BasePart? = if ch:IsA("BasePart") then ch else ch:FindFirstChildWhichIsA("BasePart", true)
+			if sample and not nameLooksLikeHeart(ch.Name) and not nameLooksLikeHeart(sample.Name) then
+				local near = (sample.Position - origin).Magnitude <= 30
+				local ball = sample:IsA("Part") and (sample :: Part).Shape == Enum.PartType.Ball
+				local seeThrough = sample.Transparency > 0.1
+				local glassMat = sample.Material == Enum.Material.Glass
+					or sample.Material == Enum.Material.ForceField
+					or sample.Material == Enum.Material.Ice
+				if near and (ball or seeThrough or glassMat or nameLooksLikeOrb(sample.Name)) then
+					table.insert(out, ch)
+				end
 			end
 		end
 	end
 	return out
 end
 
+local FULL_NATIVE_ATTR = "OceanTD_FullNativeScale"
+
+local function rememberFullNative(plotId: string, scale: number)
+	if scale < 0.85 then
+		return
+	end
+	heartFullNativeByPlot[plotId] = scale
+	heartNativeScaleByPlot[plotId] = scale
+	local clone = routeHeartCloneByPlot[plotId]
+	if clone then
+		clone:SetAttribute(FULL_NATIVE_ATTR, scale)
+	end
+end
+
+local function getFullNative(plotId: string): number
+	-- Prefer scale stamped on the live package (survives table clears).
+	local clone = routeHeartCloneByPlot[plotId]
+	if clone then
+		local attr = clone:GetAttribute(FULL_NATIVE_ATTR)
+		if typeof(attr) == "number" and attr >= 0.85 then
+			return attr
+		end
+	end
+	local durable = heartFullNativeByPlot[plotId]
+	if typeof(durable) == "number" and durable >= 0.85 then
+		return durable
+	end
+	local native = heartNativeScaleByPlot[plotId]
+	if typeof(native) == "number" and native >= 0.85 then
+		return native
+	end
+	return 1
+end
+
+local ensureOrbInPackage: (Instance?, Instance?) -> boolean
+local finishInkHeartVisible: (string) -> ()
+
 local AUTHORED_T_ATTR = "OceanTD_AuthoredT"
+local AUTHORED_MAT_ATTR = "OceanTD_AuthoredMat"
+local AUTHORED_REF_ATTR = "OceanTD_AuthoredRef"
+
+type PartAppearance = {
+	transparency: number,
+	material: Enum.Material,
+	reflectance: number,
+	materialVariant: string,
+}
+
+local function readPartAppearance(p: BasePart): PartAppearance
+	return {
+		transparency = p.Transparency,
+		material = p.Material,
+		reflectance = p.Reflectance,
+		materialVariant = p.MaterialVariant,
+	}
+end
+
+local function applyPartAppearance(p: BasePart, app: PartAppearance)
+	p.Transparency = app.transparency
+	p.Material = app.material
+	p.Reflectance = app.reflectance
+	p.MaterialVariant = app.materialVariant
+end
+
+local function capturePartAppearanceAttrs(p: BasePart)
+	-- Always refresh from current values at clone time (source glass / ForceField).
+	p:SetAttribute(AUTHORED_T_ATTR, p.Transparency)
+	p:SetAttribute(AUTHORED_MAT_ATTR, p.Material.Name)
+	p:SetAttribute(AUTHORED_REF_ATTR, p.Reflectance)
+end
+
+local function restoreAuthoredAppearance(p: BasePart)
+	local t = p:GetAttribute(AUTHORED_T_ATTR)
+	if typeof(t) == "number" then
+		p.Transparency = t
+	end
+	local matName = p:GetAttribute(AUTHORED_MAT_ATTR)
+	if typeof(matName) == "string" then
+		local mat = (Enum.Material :: any)[matName]
+		if typeof(mat) == "EnumItem" then
+			p.Material = mat
+		end
+	end
+	local ref = p:GetAttribute(AUTHORED_REF_ATTR)
+	if typeof(ref) == "number" then
+		p.Reflectance = ref
+	end
+end
 
 -- Keep welds so heart + orb stay one rigid assembly. Only neutralize physics.
 -- Must be defined before cloneHeartOrbPackage (Luau locals are not hoisted).
 local function prepareLocalHeartClone(inst: Instance)
 	local function prepPart(p: BasePart)
-		-- Remember glass/see-through orb transparency so skip restore doesn't force opaque.
-		if p:GetAttribute(AUTHORED_T_ATTR) == nil then
-			p:SetAttribute(AUTHORED_T_ATTR, p.Transparency)
-		end
+		capturePartAppearanceAttrs(p)
 		p.Anchored = true
 		p.CanCollide = false
 		p.CanQuery = false
@@ -321,20 +465,127 @@ local function prepareLocalHeartClone(inst: Instance)
 	end
 end
 
-local function restoreAuthoredTransparency(p: BasePart)
-	local authored = p:GetAttribute(AUTHORED_T_ATTR)
-	if typeof(authored) == "number" then
-		p.Transparency = authored
+-- If the route package lost its glass sphere, clone it back from authored source.
+-- Companions are rebased to the clone heart (source is at W8; clone may already sit at route end).
+ensureOrbInPackage = function(clone: Instance?, sourceRoot: Instance?): boolean
+	if not clone or not clone.Parent then
+		return false
+	end
+	if packageHasOrb(clone) then
+		return true
+	end
+	if not sourceRoot or not sourceRoot.Parent then
+		return false
+	end
+	local cloneHeart = findHeartIn(clone)
+	local srcHeart = findHeartIn(sourceRoot) or (sourceRoot:IsA("BasePart") and sourceRoot or nil)
+	if not cloneHeart or not srcHeart or not srcHeart:IsA("BasePart") then
+		return false
+	end
+
+	local function rebaseToCloneHeart(inst: Instance)
+		local function rebasePart(p: BasePart)
+			local offset = srcHeart.CFrame:ToObjectSpace(p.CFrame)
+			p.CFrame = cloneHeart.CFrame * offset
+		end
+		if inst:IsA("BasePart") then
+			rebasePart(inst)
+		end
+		for _, d in ipairs(inst:GetDescendants()) do
+			if d:IsA("BasePart") then
+				rebasePart(d)
+			end
+		end
+	end
+
+	local added = false
+	for _, sib in ipairs(collectOrbSiblings(sourceRoot)) do
+		local c = sib:Clone()
+		c.Parent = clone
+		prepareLocalHeartClone(c)
+		rebaseToCloneHeart(c)
+		added = true
+	end
+	for _, d in ipairs(sourceRoot:GetDescendants()) do
+		if d:IsA("BasePart") and isGlassOrbPart(d) then
+			local existing = clone:FindFirstChild(d.Name, true)
+			if not existing then
+				local c = d:Clone()
+				c.Parent = clone
+				capturePartAppearanceAttrs(c)
+				c.Anchored = true
+				c.CanCollide = false
+				c.CanQuery = false
+				c.CanTouch = false
+				c.CastShadow = false
+				c.LocalTransparencyModifier = 0
+				rebaseToCloneHeart(c)
+				added = true
+			end
+		end
+	end
+	return packageHasOrb(clone) or added
+end
+
+local function collectAppearanceByName(root: Instance, into: { [string]: PartAppearance })
+	local function consider(p: BasePart)
+		if nameLooksLikeHeart(p.Name) then
+			return
+		end
+		into[string.lower(p.Name)] = readPartAppearance(p)
+	end
+	if root:IsA("BasePart") then
+		consider(root)
+	end
+	for _, d in ipairs(root:GetDescendants()) do
+		if d:IsA("BasePart") then
+			consider(d)
+		end
+	end
+end
+
+-- Re-apply glass/sphere look from authored source (Skip / force-visible must not leave opaque Plastic).
+local function syncNonHeartAppearanceFromSource(cloneRoot: Instance?, sourceRoot: Instance?)
+	if not cloneRoot or not cloneRoot.Parent or not sourceRoot or not sourceRoot.Parent then
+		return
+	end
+	local byName: { [string]: PartAppearance } = {}
+	collectAppearanceByName(sourceRoot, byName)
+	for _, sib in ipairs(collectOrbSiblings(sourceRoot)) do
+		collectAppearanceByName(sib, byName)
+	end
+	local function applyTo(p: BasePart)
+		if nameLooksLikeHeart(p.Name) then
+			return
+		end
+		local app = byName[string.lower(p.Name)]
+		if app then
+			applyPartAppearance(p, app)
+			capturePartAppearanceAttrs(p)
+		else
+			restoreAuthoredAppearance(p)
+		end
+		p.LocalTransparencyModifier = 0
+	end
+	if cloneRoot:IsA("BasePart") then
+		applyTo(cloneRoot)
+	end
+	for _, d in ipairs(cloneRoot:GetDescendants()) do
+		if d:IsA("BasePart") then
+			applyTo(d)
+		end
 	end
 end
 
 -- Clone EndPoint (+ nearby orb siblings) into one Model so ScaleTo/PivotTo keep them together.
 local function cloneHeartOrbPackage(sourceRoot: Instance, sourceHeart: BasePart): Model
+	local companions = collectOrbSiblings(sourceRoot)
+
 	local model = Instance.new("Model")
 	model.Name = "OceanTD_RouteHeartPkg"
 	local endClone = sourceRoot:Clone()
 	endClone.Parent = model
-	for _, sib in ipairs(collectOrbSiblings(sourceRoot)) do
+	for _, sib in ipairs(companions) do
 		local c = sib:Clone()
 		c.Parent = model
 	end
@@ -344,6 +595,12 @@ local function cloneHeartOrbPackage(sourceRoot: Instance, sourceHeart: BasePart)
 		hc.Parent = model
 	end
 	prepareLocalHeartClone(model)
+	-- Clear hide left over from cloning a LocalTransparencyModifier=1 source.
+	for _, d in ipairs(model:GetDescendants()) do
+		if d:IsA("BasePart") then
+			d.LocalTransparencyModifier = 0
+		end
+	end
 	local heart = findHeartIn(model) or sourceHeart
 	if heart and heart:IsA("BasePart") then
 		model.PrimaryPart = if heart:IsDescendantOf(model) then heart else findHeartIn(model)
@@ -403,6 +660,7 @@ end
 local function clearHeartScaleCache(plotId: string)
 	heartNativeScaleByPlot[plotId] = nil
 	heartRestSizeByPlot[plotId] = nil
+	-- Keep heartFullNativeByPlot — Skip settle needs the pre-ink full size after teardown.
 	-- Keep mul so a recreated clone can stay shrunk during ink reveal.
 end
 
@@ -551,16 +809,18 @@ local function applyHeartScaleMul(plotId: string, mul: number, forceVisible: boo
 	end
 
 	if model then
-		local native = heartNativeScaleByPlot[plotId]
+		local native = heartNativeScaleByPlot[plotId] or heartFullNativeByPlot[plotId]
 		if native == nil or native < 0.85 then
 			local cur = model:GetScale()
 			-- Never cache a mid-ink shrunk scale as "native" (Skip used to leave a tiny heart).
 			if cur >= 0.85 then
 				native = cur
+				rememberFullNative(plotId, cur)
 			elseif m > 1e-3 and cur >= 0.05 then
 				native = math.max(0.85, cur / m)
+				rememberFullNative(plotId, native)
 			else
-				native = 1
+				native = getFullNative(plotId)
 			end
 			heartNativeScaleByPlot[plotId] = native
 		end
@@ -594,14 +854,17 @@ local function forceHeartFullyVisible(plotId: string)
 	local root = heartVisualRoot(plotId)
 	local heart = heartPartForScale(plotId, root) or endHeartPart
 	if root and root:IsA("Model") then
-		local native = heartNativeScaleByPlot[plotId]
-		if native == nil or native < 0.85 then
-			native = 1
+		local cur = root:GetScale()
+		if cur >= 0.85 then
+			-- Already full size — never ScaleTo(1) over a larger authored package.
+			rememberFullNative(plotId, cur)
+		else
+			local native = getFullNative(plotId)
 			heartNativeScaleByPlot[plotId] = native
+			pcall(function()
+				root:ScaleTo(native)
+			end)
 		end
-		pcall(function()
-			root:ScaleTo(native)
-		end)
 	elseif heart then
 		local rest = heartRestSizeByPlot[plotId]
 		if rest then
@@ -633,25 +896,18 @@ local function forceHeartFullyVisible(plotId: string)
 		end
 		local function unhidePart(p: BasePart)
 			p.LocalTransparencyModifier = 0
-			local n = string.lower(p.Name)
 			if nameLooksLikeHeart(p.Name) then
 				p.Transparency = 0
-			elseif nameLooksLikeOrb(p.Name) then
-				-- Keep glass/see-through; only clear hide (LTM). Never force opaque.
-				restoreAuthoredTransparency(p)
-			elseif p.Transparency > 0.95 and p.Name ~= "HumanoidRootPart" then
-				if string.find(n, "shell", 1, true) then
-					restoreAuthoredTransparency(p)
-					if p.Transparency > 0.95 then
-						p.Transparency = 0
-					end
-				end
+			else
+				-- Orbs / spheres / shells: restore glass Material + Transparency (never force opaque).
+				restoreAuthoredAppearance(p)
 			end
 		end
 		if inst:IsA("BasePart") then
 			unhidePart(inst)
 		elseif inst:IsA("Decal") or inst:IsA("Texture") then
-			inst.Transparency = 0
+			local prev = inst:GetAttribute("OceanTD_PrevDecalT")
+			inst.Transparency = if typeof(prev) == "number" then prev else inst.Transparency
 		elseif inst:IsA("ParticleEmitter") or inst:IsA("Beam") or inst:IsA("Trail") then
 			(inst :: any).Enabled = true
 		end
@@ -659,7 +915,10 @@ local function forceHeartFullyVisible(plotId: string)
 			if d:IsA("BasePart") then
 				unhidePart(d)
 			elseif d:IsA("Decal") or d:IsA("Texture") then
-				d.Transparency = 0
+				local prev = d:GetAttribute("OceanTD_PrevDecalT")
+				if typeof(prev) == "number" then
+					d.Transparency = prev
+				end
 			elseif d:IsA("ParticleEmitter") or d:IsA("Beam") or d:IsA("Trail") then
 				(d :: any).Enabled = true
 			end
@@ -773,13 +1032,14 @@ local function applyRouteHeartForPlot(plotId: string): BasePart?
 		-- Capture native scale once at full size (before any ink shrink).
 		local captured = model:GetScale()
 		if captured < 0.85 then
-			heartNativeScaleByPlot[plotId] = 1
+			rememberFullNative(plotId, 1)
 			pcall(function()
 				model:ScaleTo(1)
 			end)
 		else
-			heartNativeScaleByPlot[plotId] = captured
+			rememberFullNative(plotId, captured)
 		end
+		ensureOrbInPackage(clone, sourceRoot)
 	end
 
 	local cloneHeart = findHeartIn(clone) or (clone:IsA("BasePart") and clone or nil)
@@ -803,7 +1063,7 @@ local function applyRouteHeartForPlot(plotId: string): BasePart?
 	endHeartPlotId = plotId
 	heartByPlotId[plotId] = cloneHeart
 	reapplyHeartScaleMul(plotId)
-	if heartIntroHoldHidden then
+	if heartIntroHoldHidden and not heartSkipSettled then
 		applyHeartScaleMul(plotId, 0, false)
 	end
 	return cloneHeart
@@ -990,6 +1250,7 @@ end
 function WaveEndVfx.prepareHeartShrunkForInkReveal(stage: number?, plotId: string?)
 	-- Cancel any in-flight pop; finalize that gen as hidden for the new ink draw.
 	heartInkScaleToken += 1
+	heartSkipSettled = false
 	-- Hold ClientPlot.onChanged from tearing down the clone for the whole ink draw.
 	heartPopBusy = true
 	local plot = ClientPlot.get()
@@ -1005,19 +1266,16 @@ function WaveEndVfx.prepareHeartShrunkForInkReveal(stage: number?, plotId: strin
 		local cur = root:GetScale()
 		-- Always prefer a full-size native; never cache a shrunk ink scale as "native".
 		if cur >= 0.85 then
-			heartNativeScaleByPlot[id] = cur
-		elseif heartNativeScaleByPlot[id] == nil or (heartNativeScaleByPlot[id] :: number) < 0.85 then
-			heartNativeScaleByPlot[id] = 1
-			pcall(function()
-				root:ScaleTo(1)
-			end)
-			snapHeartRootToRouteEnd(id)
+			rememberFullNative(id, cur)
 		else
+			local full = getFullNative(id)
+			rememberFullNative(id, full)
 			pcall(function()
-				root:ScaleTo(heartNativeScaleByPlot[id] :: number)
+				root:ScaleTo(full)
 			end)
 			snapHeartRootToRouteEnd(id)
 		end
+		ensureOrbInPackage(root, findPlotEndHeartRoot(id))
 	end
 	if heart then
 		local sz = heart.Size
@@ -1038,12 +1296,7 @@ local function runHeartScaleInFromInk(durationSec: number?, plotId: string?, wai
 	heartPopBusy = true
 
 	local function finalizeVisible()
-		heartIntroHoldHidden = false
-		heartScaleMulByPlot[id] = nil
-		heartPopBusy = false
-		waitForHeartRoot(id, 1.0)
-		forceHeartFullyVisible(id)
-		WaveEndVfx.ensureHeartVisibleAfterInk(id)
+		finishInkHeartVisible(id)
 	end
 
 	local root = waitForHeartRoot(id, 2.5)
@@ -1124,83 +1377,113 @@ function WaveEndVfx.playHeartScaleInFromInkAndWait(durationSec: number?, plotId:
 	return runHeartScaleInFromInk(durationSec, plotId, true)
 end
 
+-- Shared by normal ink pop end + Skip Intro. Never destroys the live package.
+finishInkHeartVisible = function(plotId: string)
+	heartIntroHoldHidden = false
+	heartScaleMulByPlot[plotId] = nil
+	heartPopBusy = true
+
+	local clone = routeHeartCloneByPlot[plotId]
+	if not clone or not clone.Parent then
+		if not routeHeartDriveLocked then
+			WaveEndVfx.syncToPlotSizeStage(nil, plotId)
+		end
+		resolveEndHeartForPlot(plotId)
+		clone = routeHeartCloneByPlot[plotId]
+	end
+	if not clone or not clone.Parent then
+		heartPopBusy = false
+		return
+	end
+
+	local native = getFullNative(plotId)
+	heartNativeScaleByPlot[plotId] = native
+	clone:SetAttribute(FULL_NATIVE_ATTR, native)
+	if clone:IsA("Model") then
+		pcall(function()
+			clone:ScaleTo(native)
+		end)
+	end
+
+	setTreeLocalHidden(clone, false)
+	local heartPart: BasePart? = nil
+	for _, d in ipairs(clone:GetDescendants()) do
+		if d:IsA("BasePart") then
+			d.LocalTransparencyModifier = 0
+			if nameLooksLikeHeart(d.Name) then
+				d.Transparency = 0
+				d.Color = END_HEART_RED
+				heartPart = d
+			end
+		end
+	end
+	if clone:IsA("BasePart") then
+		clone.LocalTransparencyModifier = 0
+		if nameLooksLikeHeart(clone.Name) then
+			clone.Transparency = 0
+			clone.Color = END_HEART_RED
+			heartPart = clone
+		end
+	end
+	if clone:IsA("Model") and clone.PrimaryPart then
+		local pp = clone.PrimaryPart
+		pp.LocalTransparencyModifier = 0
+		pp.Transparency = 0
+		pp.Color = END_HEART_RED
+		heartPart = pp
+	end
+	if not heartPart then
+		heartPart = findHeartIn(clone)
+	end
+	if heartPart then
+		heartPart.LocalTransparencyModifier = 0
+		heartPart.Transparency = 0
+		heartPart.Color = END_HEART_RED
+		endHeartPart = heartPart
+		heartByPlotId[plotId] = heartPart
+	end
+
+	-- Authored source stays hidden (clone is what you see at the route end).
+	local src = findPlotEndHeartRoot(plotId)
+	if src and src.Parent then
+		setTreeLocalHidden(src, true)
+		for _, sib in ipairs(collectOrbSiblings(src)) do
+			setTreeLocalHidden(sib, true)
+		end
+		hiddenSourceRootByPlot[plotId] = src
+	end
+
+	snapHeartRootToRouteEnd(plotId)
+	heartPopBusy = false
+end
+
 -- If ink is cancelled mid-draw, snap the heart back to full size.
 function WaveEndVfx.restoreHeartAfterInkCancel(plotId: string?)
 	heartInkScaleToken += 1
 	local plot = ClientPlot.get()
 	local id = plotId or (if plot then plot.plotId else "Plot1")
-	heartIntroHoldHidden = false
-	heartPopBusy = false
-	heartScaleMulByPlot[id] = nil
-	resolveEndHeartForPlot(id)
-	forceHeartFullyVisible(id)
-	WaveEndVfx.ensureHeartVisibleAfterInk(id)
+	heartSkipSettled = true
+	finishInkHeartVisible(id)
+	task.delay(0.35, function()
+		heartSkipSettled = false
+	end)
 end
 
 --[[
-	Skip Intro: fast settle to full-size heart+orb (same as end of cinematic).
-	No multi-second waits — rebuild once, restore authored scale, unhide.
+	Skip Intro: same finish as watching the ink heart pop.
+	Keeps the live package (heart + glass orb). Never destroy/rebuild.
 ]]
 function WaveEndVfx.settleHeartAfterIntroSkip(plotId: string?): boolean
 	heartInkScaleToken += 1
 	local plot = ClientPlot.get()
 	local id = plotId or (if plot then plot.plotId else "Plot1")
-	heartIntroHoldHidden = false
-	heartPopBusy = false
-	heartScaleMulByPlot[id] = nil
-	-- Drop mid-ink package (tiny ScaleTo) and rebuild from source at authored size.
-	destroyRouteHeartClone(id)
-	heartNativeScaleByPlot[id] = nil
-	heartRestSizeByPlot[id] = nil
-
-	if not routeHeartDriveLocked then
-		WaveEndVfx.syncToPlotSizeStage(nil, id)
-	end
-	resolveEndHeartForPlot(id)
-
-	local root = heartVisualRoot(id)
-	if not root or not root.Parent then
-		-- One short resolve retry only (keep Skip snappy).
-		task.wait()
-		if not routeHeartDriveLocked then
-			WaveEndVfx.syncToPlotSizeStage(nil, id)
-		end
-		resolveEndHeartForPlot(id)
-		root = heartVisualRoot(id)
-	end
-
-	if root and root:IsA("Model") then
-		-- Fresh clone is already at authored full size — never hammer ScaleTo(1)
-		-- (that shrinks packages whose native GetScale is > 1).
-		local captured = root:GetScale()
-		if captured < 0.85 then
-			heartNativeScaleByPlot[id] = 1
-			pcall(function()
-				root:ScaleTo(1)
-			end)
-		else
-			heartNativeScaleByPlot[id] = captured
-		end
-		snapHeartRootToRouteEnd(id)
-	end
-	forceHeartFullyVisible(id)
-
-	-- Beat any same-frame ink/hold re-shrink without blocking Skip.
-	task.defer(function()
-		if heartIntroHoldHidden then
-			heartIntroHoldHidden = false
-		end
-		heartScaleMulByPlot[id] = nil
-		forceHeartFullyVisible(id)
+	heartSkipSettled = true
+	finishInkHeartVisible(id)
+	-- Hold off plot teardown long enough for JoinIntro busy-clear / HUD restore.
+	task.delay(0.6, function()
+		heartSkipSettled = false
 	end)
-	task.delay(0.1, function()
-		if heartIntroHoldHidden then
-			return
-		end
-		heartScaleMulByPlot[id] = nil
-		forceHeartFullyVisible(id)
-	end)
-	return root ~= nil and root.Parent ~= nil
+	return routeHeartCloneByPlot[id] ~= nil
 end
 
 function WaveEndVfx.getEndHeartPart(): BasePart?
@@ -1668,9 +1951,9 @@ function WaveEndVfx.playReefHealthTicks(amount: number, endPos: Vector3?, tintHe
 end
 
 ClientPlot.onChanged(function(plot)
-	-- Plot Size grow / intro ink: never tear down the heart+orb package mid-sequence.
+	-- Plot Size grow / intro ink / Skip settle: never tear down the heart+orb package mid-sequence.
 	-- Teardown was the main reason the orb vanished (clone rebuilt without welds / mid-ScaleTo).
-	if routeHeartDriveLocked or heartPopBusy or heartIntroHoldHidden then
+	if routeHeartDriveLocked or heartPopBusy or heartIntroHoldHidden or heartSkipSettled then
 		if plot and not routeHeartDriveLocked then
 			local id = plot.plotId
 			if routeEndPosByPlot[id] then
@@ -1678,7 +1961,7 @@ ClientPlot.onChanged(function(plot)
 			else
 				WaveEndVfx.syncToPlotSizeStage(nil, id)
 			end
-			if heartIntroHoldHidden then
+			if heartIntroHoldHidden and not heartSkipSettled then
 				applyHeartScaleMul(id, 0, false)
 			end
 		end
