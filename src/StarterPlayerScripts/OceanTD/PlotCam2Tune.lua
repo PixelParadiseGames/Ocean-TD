@@ -23,8 +23,6 @@ local InventoryState = require(script.Parent:WaitForChild("InventoryState"))
 local PlotCam2Tune = {}
 
 local STEP = 5
--- DistOff quick +/- : ~10% of zoom span per click (DistOff -110..160).
-local DIST_QUICK_STEP = 27
 local YAW_STEP = 10
 local GUI_NAME = "OceanTD_PlotCam2Tune"
 local SHOW_DEBUG_PANEL = false
@@ -37,7 +35,7 @@ local TITLE_H = 22
 local RESET_H = 28
 local READOUT_H = 56
 local GAP = 6
-local QUICK_SCALE = 0.52 -- vs PlotCam button size
+local QUICK_SCALE = 0.52 * 1.15 -- +15% vs PlotCam button size
 local QUICK_GAP = 6
 local QUICK_ROW_GAP = 6
 local BTN_BLACK = Color3.new(0, 0, 0)
@@ -432,28 +430,57 @@ local function ensureQuickPad(): Frame?
 	end
 	wireQuick(yawLeft, "yawDeg", -YAW_STEP)
 	wireQuick(yawRight, "yawDeg", YAW_STEP)
-	-- "-" zooms out (raise DistOff); "+" zooms in (lower DistOff).
-	wireQuick(offMinus, "distOffset", DIST_QUICK_STEP)
-	wireQuick(offPlus, "distOffset", -DIST_QUICK_STEP)
+	-- DistOff step scales with zoom: ~2% near max in, ~12% near max out.
+	offMinus.Activated:Connect(function()
+		local ok = PlotCam2.nudge("distOffset", PlotCam2.distOffsetZoomStep())
+		flashQuickButton(offMinus, ok)
+		refreshReadout()
+	end)
+	offPlus.Activated:Connect(function()
+		local ok = PlotCam2.nudge("distOffset", -PlotCam2.distOffsetZoomStep())
+		flashQuickButton(offPlus, ok)
+		refreshReadout()
+	end)
 
 	quickHolder = holder
 	layoutQuickButtons()
 	return holder
 end
 
-local function setQuickVisible(on: boolean)
-	local holder = ensureQuickPad()
-	if holder then
-		holder.Visible = on
+local function hideAllQuickPads()
+	local left = playerGui:FindFirstChild("MobileLeftUI")
+	local dPad = left and left:FindFirstChild("dPad")
+	if dPad then
+		for _, ch in ipairs(dPad:GetChildren()) do
+			if ch.Name == QUICK_NAME and ch:IsA("GuiObject") then
+				ch.Visible = false
+			end
+		end
+	end
+	if quickHolder and quickHolder.Parent then
+		quickHolder.Visible = false
 	end
 	if layoutConn then
 		layoutConn:Disconnect()
 		layoutConn = nil
 	end
-	if on then
-		layoutQuickButtons()
-		layoutConn = RunService.RenderStepped:Connect(layoutQuickButtons)
+end
+
+local function setQuickVisible(on: boolean)
+	if not on then
+		hideAllQuickPads()
+		return
 	end
+	local holder = ensureQuickPad()
+	if holder then
+		holder.Visible = true
+	end
+	if layoutConn then
+		layoutConn:Disconnect()
+		layoutConn = nil
+	end
+	layoutQuickButtons()
+	layoutConn = RunService.RenderStepped:Connect(layoutQuickButtons)
 end
 
 local function hudBlocksQuick(): boolean
@@ -472,6 +499,12 @@ local function hudBlocksQuick(): boolean
 end
 
 local function syncQuickVisibility()
+	-- Only while Plot Cam is the active cycle mode (never Fish Cam / POV / drone / off).
+	local camMode = playerGui:GetAttribute(FreeCamConfig.ATTR_MODE)
+	if camMode ~= "plotcam" or playerGui:GetAttribute(FreeCamConfig.ATTR_FISH_CAM_POV) == true then
+		setQuickVisible(false)
+		return
+	end
 	-- Yaw / DistOff quick pad under Plot Cam — keep these even when the full tuner panel is off.
 	setQuickVisible(visible and carouselCollapsedReady() and not hudBlocksQuick())
 end
@@ -508,6 +541,8 @@ end
 playerGui:GetAttributeChangedSignal(FreeCamConfig.ATTR_CAROUSEL_COLLAPSED):Connect(function()
 	syncQuickVisibility()
 end)
+playerGui:GetAttributeChangedSignal(FreeCamConfig.ATTR_MODE):Connect(syncQuickVisibility)
+playerGui:GetAttributeChangedSignal(FreeCamConfig.ATTR_FISH_CAM_POV):Connect(syncQuickVisibility)
 playerGui:GetAttributeChangedSignal("OceanTD_StoreOpen"):Connect(syncQuickVisibility)
 playerGui:GetAttributeChangedSignal("OceanTD_SkillsBubblesOpen"):Connect(syncQuickVisibility)
 playerGui:GetAttributeChangedSignal("OceanTD_ReefReportOpen"):Connect(syncQuickVisibility)

@@ -8,25 +8,27 @@ local BrainStack = {}
 BrainStack.SPECIES_ID = "BrainCoral"
 BrainStack.ITEM_ID = "BrainCoral"
 
--- Horizontal offset as a fraction of host radius (top-nest overhang).
-BrainStack.OFFSET_MIN_FRAC = 0.32
-BrainStack.OFFSET_MAX_FRAC = 0.62
--- New center lands in the upper 40% of host sphere height.
-BrainStack.TOP_HEIGHT_FRAC = 0.40
+-- Horizontal offset as a fraction of host radius (lump lean on the host sphere surface).
+BrainStack.OFFSET_MIN_FRAC = 0.18
+BrainStack.OFFSET_MAX_FRAC = 0.42
+-- Fixed lean for multi-seat hosts (Option A discrete seats). Single seat uses top (0).
+BrainStack.SEAT_LEAN_FRAC = 0.32
+-- Keep nests on the upper hemisphere (child center on host sphere, Y >= this * hostR).
+BrainStack.TOP_HEIGHT_FRAC = 0.55
 -- Center snap-dot diameter (studs).
 BrainStack.SNAP_DOT_DIAM = 0.5
--- Finger/cursor must be within this many studs of the dot center to snap.
-BrainStack.SNAP_DOT_HIT_STUDS = 1.35
--- Screen-space fallback when projecting the dot (px).
-BrainStack.SNAP_DOT_HIT_PX = 48
+-- Finger/cursor must be within this many studs of the seat dot to snap.
+BrainStack.SNAP_DOT_HIT_STUDS = 1.55
+-- Screen-space fallback when projecting the seat (px).
+BrainStack.SNAP_DOT_HIT_PX = 56
 -- How far aim can be from a host (XZ) to show the host as a candidate.
 BrainStack.ENGAGE_PAD = 1.25
 -- Total XZ wander from stack root.
 BrainStack.MAX_ROOT_DRIFT = 10
--- Orbit step when rotating a snapped child around its parent.
-BrainStack.ORBIT_ROT_STEP = math.rad(15) -- was 10°; match relocate yaw step
+-- Orbit step when rotating a snapped child around its parent (legacy continuous).
+BrainStack.ORBIT_ROT_STEP = math.rad(15)
 BrainStack.MIN_REROLL_ANGLE = math.rad(55)
--- Max children by parent size class (S/M/L).
+-- Max children / seat count by parent size class (S/M/L).
 BrainStack.MAX_CHILDREN_BY_CLASS = {
 	[1] = 1,
 	[2] = 2,
@@ -70,6 +72,10 @@ function BrainStack.maxChildrenForPart(part: BasePart): number
 	return BrainStack.maxChildrenForClass(class)
 end
 
+function BrainStack.seatCountForPart(part: BasePart): number
+	return BrainStack.maxChildrenForPart(part)
+end
+
 function BrainStack.classFromDiameter(d: number): number
 	if d <= 4 then
 		return 1
@@ -78,6 +84,71 @@ function BrainStack.classFromDiameter(d: number): number
 		return 2
 	end
 	return 3
+end
+
+-- Stable seat ring orientation from placeId (doesn't spin when the ball yaws).
+function BrainStack.seatBaseYaw(placeId: string?): number
+	if typeof(placeId) ~= "string" or placeId == "" then
+		return 0
+	end
+	local h = 0
+	for i = 1, #placeId do
+		h = (h * 31 + string.byte(placeId, i)) % 997
+	end
+	return (h / 997) * math.pi * 2
+end
+
+function BrainStack.seatAngle(seatIndex: number, seatCount: number, baseYaw: number): number
+	local n = math.max(1, math.floor(seatCount))
+	local i = ((math.floor(seatIndex) - 1) % n) + 1
+	return baseYaw + (i - 1) * (math.pi * 2 / n)
+end
+
+function BrainStack.seatLeanFrac(seatCount: number): number
+	if seatCount <= 1 then
+		return 0 -- pure top nest for S
+	end
+	return BrainStack.SEAT_LEAN_FRAC
+end
+
+-- Discrete seat on host sphere (child center on host radius).
+function BrainStack.seatWorldPos(
+	hostPos: Vector3,
+	hostDiam: number,
+	newDiam: number,
+	seatIndex: number,
+	seatCount: number,
+	baseYaw: number
+): (Vector3, number, number)
+	local lean = BrainStack.seatLeanFrac(seatCount)
+	local angle = BrainStack.seatAngle(seatIndex, seatCount, baseYaw)
+	local dist = hostDiam * 0.5 * lean
+	local ox = math.cos(angle) * dist
+	local oz = math.sin(angle) * dist
+	local world = BrainStack.topNestCenter(hostPos, hostDiam, newDiam, ox, oz)
+	return world, angle, lean
+end
+
+function BrainStack.nearestSeatIndex(
+	hostPos: Vector3,
+	hostDiam: number,
+	newDiam: number,
+	seatCount: number,
+	baseYaw: number,
+	worldPos: Vector3
+): number
+	local n = math.max(1, math.floor(seatCount))
+	local best = 1
+	local bestDist = math.huge
+	for i = 1, n do
+		local seatPos = BrainStack.seatWorldPos(hostPos, hostDiam, newDiam, i, n, baseYaw)
+		local d = (seatPos - worldPos).Magnitude
+		if d < bestDist then
+			bestDist = d
+			best = i
+		end
+	end
+	return best
 end
 
 -- Orbit nest: Y from sink nest, XZ on a horizontal circle facing `angle`.
@@ -104,21 +175,20 @@ function BrainStack.approachAngle(fromPos: Vector3, hostPos: Vector3): number
 	return math.atan2(dz, dx)
 end
 
--- How far the new ball center sinks into the lower ball (overlap).
-function BrainStack.sinkAmount(belowDiam: number, newDiam: number): number
-	-- Light kiss — enough nest to read as stacked, not buried.
-	return math.clamp(math.min(belowDiam, newDiam) * 0.12, 0.22, 0.55)
+-- Radial distance from host center → child center = host radius (child center on host surface).
+-- That sinks ~50% of the child into the parent along the nest axis, for any size pair.
+function BrainStack.surfaceNestDistance(hostDiam: number, _newDiam: number): number
+	return hostDiam * 0.5
 end
 
-function BrainStack.stackCenterY(belowY: number, belowDiam: number, newDiam: number): number
-	local sink = BrainStack.sinkAmount(belowDiam, newDiam)
-	if newDiam > belowDiam then
-		-- Large on small: rest the child's bottom 5% on the host top nest (not child center).
-		local hostTop = belowY + belowDiam * 0.5
-		local bottomFrac = 0.05
-		return hostTop - sink + newDiam * (0.5 - bottomFrac)
-	end
-	return belowY + (belowDiam + newDiam) * 0.5 - sink
+-- Legacy alias: overlap depth along the nest axis ≈ child radius when using surface nesting.
+function BrainStack.sinkAmount(belowDiam: number, newDiam: number): number
+	return math.min(belowDiam, newDiam) * 0.5
+end
+
+function BrainStack.stackCenterY(belowY: number, belowDiam: number, _newDiam: number): number
+	-- Pure top nest (no XZ lean): child center on host north pole.
+	return belowY + belowDiam * 0.5
 end
 
 function BrainStack.snapDotWorldPos(hostPos: Vector3, _hostDiam: number?): Vector3
@@ -184,17 +254,19 @@ function BrainStack.pickSnapOffset(hostDiam: number, avoidAngle: number?): SnapO
 	return { angle = angle, frac = frac }
 end
 
--- Nest on host top with XZ offset; Y uses sink overlap (center stays in upper host band).
+-- Nest on host: child CENTER lies on the host sphere (≈50% sunk). XZ lean keeps upper hemisphere.
 function BrainStack.topNestCenter(
 	hostPos: Vector3,
 	hostDiam: number,
-	newDiam: number,
+	_newDiam: number,
 	offsetX: number,
 	offsetZ: number
 ): Vector3
 	local hostR = hostDiam * 0.5
-	-- Allow the authored offset range (plus a little slack for side-lean).
-	local maxOff = hostR * BrainStack.OFFSET_MAX_FRAC * 1.25
+	-- Stay on upper hemisphere so lumps read as a mound, not under-hangs.
+	local minYLocal = hostR * BrainStack.TOP_HEIGHT_FRAC
+	local maxHoriz = math.sqrt(math.max(0, hostR * hostR - minYLocal * minYLocal))
+	local maxOff = math.min(hostR * BrainStack.OFFSET_MAX_FRAC * 1.15, maxHoriz * 0.98)
 	local ox = offsetX
 	local oz = offsetZ
 	local len = math.sqrt(ox * ox + oz * oz)
@@ -204,16 +276,8 @@ function BrainStack.topNestCenter(
 		oz *= s
 		len = maxOff
 	end
-	-- Keep contact in top 40% of host height: clamp radial offset vs height band.
-	local minYLocal = hostR * (1 - BrainStack.TOP_HEIGHT_FRAC) -- 0.6R below top → 0.2R above center
-	local maxSlice = math.sqrt(math.max(0, hostR * hostR - minYLocal * minYLocal))
-	if len > maxSlice * 0.98 and len > 1e-4 then
-		local s = (maxSlice * 0.98) / len
-		ox *= s
-		oz *= s
-	end
-	local y = BrainStack.stackCenterY(hostPos.Y, hostDiam, newDiam)
-	return Vector3.new(hostPos.X + ox, y, hostPos.Z + oz)
+	local yOff = math.sqrt(math.max(0, hostR * hostR - ox * ox - oz * oz))
+	return Vector3.new(hostPos.X + ox, hostPos.Y + yOff, hostPos.Z + oz)
 end
 
 function BrainStack.stackedCenterFromSnap(
@@ -228,7 +292,7 @@ function BrainStack.stackedCenterFromSnap(
 	return BrainStack.topNestCenter(hostPos, hostDiam, newDiam, ox, oz)
 end
 
--- Side nest used when attaching to a host that already has a child on top.
+-- Side nest when host already has a top child — still on host sphere, just further around.
 function BrainStack.sideBranchCenter(
 	hostPos: Vector3,
 	hostDiam: number,
@@ -236,23 +300,13 @@ function BrainStack.sideBranchCenter(
 	angle: number,
 	frac: number?
 ): Vector3
-	local hostR = hostDiam * 0.5
-	local newR = newDiam * 0.5
 	local f = if typeof(frac) == "number" then frac else (BrainStack.OFFSET_MIN_FRAC + BrainStack.OFFSET_MAX_FRAC) * 0.5
-	-- Push further out than a top nest so it sits on the flank of the host.
-	local radial = hostR * math.clamp(f + 0.35, 0.4, 0.85) + newR * 0.15
-	local ox = math.cos(angle) * radial
-	local oz = math.sin(angle) * radial
-	-- Stable height in top 40% band from frac (no per-frame random).
-	local yLocal = hostR * (0.25 + math.clamp(f, 0.15, 0.3) * 1.4)
-	local y = hostPos.Y + yLocal
-	local sink = BrainStack.sinkAmount(hostDiam, newDiam) * 0.55
-	local toward = Vector3.new(ox, yLocal, oz)
-	if toward.Magnitude > 1e-4 then
-		toward = toward.Unit * sink
-		return Vector3.new(hostPos.X + ox - toward.X, y - toward.Y * 0.35, hostPos.Z + oz - toward.Z)
-	end
-	return Vector3.new(hostPos.X + ox, y, hostPos.Z + oz)
+	-- Wider lean than top-nest, still clamped onto the sphere surface by topNestCenter.
+	local lean = math.clamp(f + 0.28, 0.40, 0.72)
+	local hostR = hostDiam * 0.5
+	local ox = math.cos(angle) * hostR * lean
+	local oz = math.sin(angle) * hostR * lean
+	return BrainStack.topNestCenter(hostPos, hostDiam, newDiam, ox, oz)
 end
 
 -- True when no overlapping brain sits clearly above this one.
@@ -391,38 +445,16 @@ function BrainStack.ammoLocalOffsets(
 	return out
 end
 
--- Keep XZ offset from parent; lift Y so balls don't bury after a size change.
+-- Keep XZ lean from parent; re-seat child center on the parent sphere after a size change.
 function BrainStack.restackChildCenter(
 	parentPos: Vector3,
 	parentDiam: number,
 	childDiam: number,
 	offsetX: number,
 	offsetZ: number,
-	oldYRel: number?
+	_oldYRel: number?
 ): Vector3
-	local hostR = parentDiam * 0.5
-	local childR = childDiam * 0.5
-	local ox = offsetX
-	local oz = offsetZ
-	local horiz = math.sqrt(ox * ox + oz * oz)
-	local nestY = BrainStack.stackCenterY(parentPos.Y, parentDiam, childDiam)
-	local y: number
-	if horiz > hostR * BrainStack.OFFSET_MAX_FRAC * 1.25 and typeof(oldYRel) == "number" then
-		-- Side nest: preserve relative height, then enforce clearance.
-		y = parentPos.Y + oldYRel
-		local minY = parentPos.Y + hostR * 0.15
-		local maxY = nestY
-		y = math.clamp(y, minY, maxY)
-	else
-		y = nestY
-	end
-	local pos = Vector3.new(parentPos.X + ox, y, parentPos.Z + oz)
-	local delta = pos - parentPos
-	local minDist = (hostR + childR) - BrainStack.sinkAmount(parentDiam, childDiam)
-	if delta.Magnitude > 1e-4 and delta.Magnitude < minDist then
-		pos = parentPos + delta.Unit * minDist
-	end
-	return pos
+	return BrainStack.topNestCenter(parentPos, parentDiam, childDiam, offsetX, offsetZ)
 end
 
 -- Ground root: keep bottom on the plot floor when diameter changes.

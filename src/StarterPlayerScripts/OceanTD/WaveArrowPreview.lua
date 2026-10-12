@@ -283,6 +283,8 @@ end
 
 -- Wave 2+: next-wave sting at full volume (not the half-vol round-start arrow).
 function WaveArrowPreview.playWaveAdvanceSound()
+	-- Keep SoundId live so consts edits apply without module reload mixups.
+	waveAdvanceSound.SoundId = C.WAVE_ADVANCE_SOUND_ID or "rbxassetid://117570443671176"
 	local vol = C.WAVE_ADVANCE_VOLUME or 1
 	WaveEntityPool.playSound("waveAdvance", waveAdvanceSound, 1, vol, true)
 end

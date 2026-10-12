@@ -11,6 +11,7 @@ local RunService = game:GetService("RunService")
 local Workspace = game:GetService("Workspace")
 
 local C = require(script.Parent:WaitForChild("WaveSimConsts"))
+local FreeCamConfig = require(script.Parent:WaitForChild("FreeCamConfig"))
 local WaveEndVfx = require(script.Parent:WaitForChild("WaveEndVfx"))
 local JoinIntroExampleCorals = require(script.Parent:WaitForChild("JoinIntroExampleCorals"))
 local GameOverTitle = require(script.Parent:WaitForChild("GameOverTitle"))
@@ -103,7 +104,16 @@ local livePath: PathLike? = nil
 local livePoints: { Vector3 } = {}
 local liveAtts: { Attachment } = {}
 local liveBeams: { Beam } = {}
+local liveBeamMids: { Vector3 } = {}
+local liveBeamLastT: { number } = {}
 local liveAnchors: BasePart? = nil
+
+-- POV coaster: invisible near cam → default green far (smoothstep 10→90).
+local POV_NEAR_CLEAR_STUDS = 10 -- ≤ this: 100% transparent (gone)
+local POV_FAR_DEFAULT_STUDS = 90 -- ≥ this: default visible green
+local POV_T_EPS = 0.01
+local povFadeConn: RBXScriptConnection? = nil
+local povFadeOn = false
 
 local inkToken = 0
 local inkActive = false
@@ -122,9 +132,24 @@ local endRatingAnchor: BasePart? = nil
 local revealDoneEvent = Instance.new("BindableEvent")
 local paintFullPathIfPossible: () -> boolean
 local applyBeamEnabled: (boolean) -> ()
+local syncPovFadeFromAttr: () -> ()
 
 function WavePathLines.bind(h: Host)
 	host = h
+	local plr = Players.LocalPlayer
+	local pg = plr and plr:FindFirstChildOfClass("PlayerGui")
+	if pg then
+		if pg:GetAttribute(FreeCamConfig.ATTR_FISH_CAM_POV) == nil then
+			pg:SetAttribute(FreeCamConfig.ATTR_FISH_CAM_POV, false)
+		end
+		pg:GetAttributeChangedSignal(FreeCamConfig.ATTR_FISH_CAM_POV):Connect(function()
+			syncPovFadeFromAttr()
+		end)
+		-- Defer until locals below are assigned (bind can run mid-module init).
+		task.defer(function()
+			syncPovFadeFromAttr()
+		end)
+	end
 end
 
 local function ensureFolder(): Folder
@@ -873,13 +898,154 @@ local function clearLiveCache()
 	table.clear(livePoints)
 	table.clear(liveAtts)
 	table.clear(liveBeams)
+	table.clear(liveBeamMids)
+	table.clear(liveBeamLastT)
 	liveAnchors = nil
+end
+
+local function povBlendU(dist: number): number
+	-- 0 at/near cam, 1 at far default band.
+	if dist <= POV_NEAR_CLEAR_STUDS then
+		return 0
+	end
+	if dist >= POV_FAR_DEFAULT_STUDS then
+		return 1
+	end
+	local u = (dist - POV_NEAR_CLEAR_STUDS) / (POV_FAR_DEFAULT_STUDS - POV_NEAR_CLEAR_STUDS)
+	u = math.clamp(u, 0, 1)
+	return u * u * (3 - 2 * u) -- smoothstep
+end
+
+local function transparencyForPovDist(dist: number): number
+	-- Close = fully invisible (1); far = default green (BEAM_TRANSPARENCY).
+	local u = povBlendU(dist)
+	return 1 + (BEAM_TRANSPARENCY - 1) * u
+end
+
+local function widthForPovDist(dist: number): number
+	local u = povBlendU(dist)
+	-- Collapse near segments so they can't glow through.
+	return 0.01 + (BEAM_WIDTH - 0.01) * u
+end
+
+local function emissionForPovDist(dist: number): number
+	local u = povBlendU(dist)
+	return 0 + 0.55 * u
+end
+
+local function isFishCamPovAttrOn(): boolean
+	local plr = Players.LocalPlayer
+	local pg = plr and plr:FindFirstChildOfClass("PlayerGui")
+	return pg ~= nil and pg:GetAttribute(FreeCamConfig.ATTR_FISH_CAM_POV) == true
+end
+
+local function restoreBeamDefaultTransparency()
+	for i, beam in ipairs(liveBeams) do
+		if beam.Parent then
+			beam.Transparency = NumberSequence.new(BEAM_TRANSPARENCY)
+			beam.Width0 = BEAM_WIDTH
+			beam.Width1 = BEAM_WIDTH
+			beam.LightEmission = 0.55
+			beam.Segments = 1
+			if not hiddenByUi then
+				beam.Enabled = true
+			end
+		end
+		liveBeamLastT[i] = BEAM_TRANSPARENCY
+	end
+end
+
+local function applyPovFadeToBeams()
+	local cam = Workspace.CurrentCamera
+	if not cam or #liveBeams == 0 then
+		return
+	end
+	local camPos = cam.CFrame.Position
+	for i, beam in ipairs(liveBeams) do
+		if not beam.Parent then
+			continue
+		end
+		-- Beams are built between livePoints[i] → livePoints[i+1].
+		local p0 = livePoints[i]
+		local p1 = livePoints[i + 1]
+		local d0: number
+		local d1: number
+		if typeof(p0) == "Vector3" and typeof(p1) == "Vector3" then
+			d0 = (p0 - camPos).Magnitude
+			d1 = (p1 - camPos).Magnitude
+		elseif liveBeamMids[i] then
+			d0 = (liveBeamMids[i] - camPos).Magnitude
+			d1 = d0
+		else
+			continue
+		end
+		local t0 = transparencyForPovDist(d0)
+		local t1 = transparencyForPovDist(d1)
+		local midT = (t0 + t1) * 0.5
+		local prev = liveBeamLastT[i]
+		if typeof(prev) == "number" and math.abs(midT - prev) < POV_T_EPS then
+			continue
+		end
+		beam.Transparency = NumberSequence.new({
+			NumberSequenceKeypoint.new(0, t0),
+			NumberSequenceKeypoint.new(1, t1),
+		})
+		beam.Width0 = widthForPovDist(d0)
+		beam.Width1 = widthForPovDist(d1)
+		beam.LightEmission = emissionForPovDist((d0 + d1) * 0.5)
+		beam.Segments = 6
+		-- Fully hide segments that are essentially invisible.
+		if not hiddenByUi then
+			beam.Enabled = midT < 0.97
+		end
+		liveBeamLastT[i] = midT
+	end
+end
+
+local function ensurePovFadeWatcher()
+	if povFadeConn then
+		return
+	end
+	-- Always watch: attr can flip while the ribbon already exists.
+	povFadeConn = RunService.RenderStepped:Connect(function()
+		local want = isFishCamPovAttrOn()
+		if want then
+			povFadeOn = true
+			applyPovFadeToBeams()
+		elseif povFadeOn then
+			povFadeOn = false
+			restoreBeamDefaultTransparency()
+		end
+	end)
+end
+
+local function setPovFadeActive(on: boolean)
+	ensurePovFadeWatcher()
+	local want = on == true
+	if want then
+		povFadeOn = true
+		applyPovFadeToBeams()
+	elseif povFadeOn then
+		povFadeOn = false
+		restoreBeamDefaultTransparency()
+	end
+end
+
+syncPovFadeFromAttr = function()
+	ensurePovFadeWatcher()
+	setPovFadeActive(isFishCamPovAttrOn())
 end
 
 function WavePathLines.destroy()
 	cancelInkReveal()
 	inkCompleted = false
 	inkSkipSettled = false
+	povFadeOn = false
+	if povFadeConn then
+		povFadeConn:Disconnect()
+		povFadeConn = nil
+	end
+	restoreBeamDefaultTransparency()
 	clearLiveCache()
 	if linesFolder and linesFolder.Parent then
 		linesFolder:Destroy()
@@ -1029,6 +1195,7 @@ local function buildPolylineFromPoints(points: { Vector3 }, path: PathLike?)
 	livePath = path
 
 	local prevAtt: Attachment? = nil
+	local prevPos: Vector3? = nil
 	for i, worldPos in ipairs(points) do
 		local att = Instance.new("Attachment")
 		att.Name = "P" .. tostring(i)
@@ -1036,7 +1203,7 @@ local function buildPolylineFromPoints(points: { Vector3 }, path: PathLike?)
 		att.Parent = anchors
 		table.insert(livePoints, worldPos)
 		table.insert(liveAtts, att)
-		if prevAtt then
+		if prevAtt and prevPos then
 			local beam = Instance.new("Beam")
 			beam.Name = "Seg" .. tostring(i - 1)
 			beam.Attachment0 = prevAtt
@@ -1052,8 +1219,16 @@ local function buildPolylineFromPoints(points: { Vector3 }, path: PathLike?)
 			beam.Enabled = not hiddenByUi
 			beam.Parent = anchors
 			table.insert(liveBeams, beam)
+			table.insert(liveBeamMids, (prevPos + worldPos) * 0.5)
+			table.insert(liveBeamLastT, BEAM_TRANSPARENCY)
 		end
 		prevAtt = att
+		prevPos = worldPos
+	end
+	-- Path may rebuild while POV is already on — re-sync attr and apply fade.
+	syncPovFadeFromAttr()
+	if povFadeOn then
+		updatePovBeamFade()
 	end
 end
 

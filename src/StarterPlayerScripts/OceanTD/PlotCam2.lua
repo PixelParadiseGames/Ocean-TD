@@ -53,7 +53,9 @@ local DIST_MAX = 360
 local PAN_AT_REF_DIST = 70
 local PAN_EXTRA_MIN = 0
 local PAN_EXTRA_MAX = 400
-local WHEEL_ZOOM_STEP = 5
+-- DistOff zoom step scales with closeness: ~2% near max zoom-in, ~12% near max zoom-out.
+local DIST_ZOOM_PCT_NEAR = 0.02
+local DIST_ZOOM_PCT_FAR = 0.12
 local WHEEL_ACTION = "OceanTD_PlotCam2Wheel"
 local WHEEL_PRIORITY = Enum.ContextActionPriority.High.Value + 20
 local DIST_TWEEN_RATE = 3.5 -- ease toward pan-based baseline (lower = softer)
@@ -380,6 +382,17 @@ local function zoomBlockedByBackpack(): boolean
 	return false
 end
 
+-- DistOff step magnitude: small when zoomed in (precision), large when zoomed out (speed).
+function PlotCam2.distOffsetZoomStep(): number
+	local span = DIST_OFFSET_MAX - DIST_OFFSET_MIN
+	if span <= 1e-3 then
+		return 1
+	end
+	local t = math.clamp((tune.distOffset - DIST_OFFSET_MIN) / span, 0, 1)
+	local pct = DIST_ZOOM_PCT_NEAR + (DIST_ZOOM_PCT_FAR - DIST_ZOOM_PCT_NEAR) * t
+	return math.max(1, span * pct)
+end
+
 -- Same as DistOff +/- quick buttons: scroll up zooms in (-DistOff), down zooms out.
 local function applyWheelZoom(wheelZ: number): boolean
 	if not active or wheelZ == 0 or wheelZ ~= wheelZ then
@@ -389,7 +402,7 @@ local function applyWheelZoom(wheelZ: number): boolean
 		return false
 	end
 	-- Multi-notch wheels: |Z| can be >1. Scroll up (+Z) -> zoom in -> lower DistOff.
-	local delta = -wheelZ * WHEEL_ZOOM_STEP
+	local delta = -wheelZ * PlotCam2.distOffsetZoomStep()
 	return PlotCam2.nudge("distOffset", delta)
 end
 

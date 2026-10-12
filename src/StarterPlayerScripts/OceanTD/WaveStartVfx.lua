@@ -1,7 +1,7 @@
 --!strict
 --[[
 	Wave-start callout:
-	1) Huge "Wave N" at screen center, then flies into the hunger / wave bar.
+	1) Huge "Wave N" rises from bottom → center hold → flies down into the wave bar.
 	2) Critter emoji counts appear center-screen, then scale/fly into the wave bar.
 ]]
 
@@ -17,7 +17,8 @@ local UiTheme = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiTheme")
 local WaveStartVfx = {}
 
 local HOLD_SEC = 0.35
-local FLY_SEC = 0.7 -- Wave N total dwell ~0.5s shorter than before (was 1.2)
+local RISE_SEC = 0.45 -- bottom → center
+local FLY_SEC = 0.7 -- center → wave bar (bottom)
 local WHITE_SEC = 0.7 -- stay white this long after appear, then flip green
 local CRITTER_HOLD_SEC = 1.55 -- center hold (+1s)
 local CRITTER_FLY_SEC = 1.15 -- smooth settle into wave bar
@@ -325,11 +326,15 @@ function WaveStartVfx.play(wave: number, _startWorld: Vector3, critters: Critter
 		gui.Parent = pg
 		activeGui = gui
 
+		local bottomY = vp.Y + h * 0.55
+		local centerPos = Vector2.new(vp.X * 0.5, vp.Y * 0.5)
+		local startPos = Vector2.new(vp.X * 0.5, bottomY)
+
 		local label = Instance.new("TextLabel")
 		label.Name = "WaveLabel"
 		label.BackgroundTransparency = 1
 		label.AnchorPoint = Vector2.new(0.5, 0.5)
-		label.Position = UDim2.fromScale(0.5, 0.5)
+		label.Position = UDim2.fromOffset(startPos.X, startPos.Y)
 		label.Size = UDim2.fromOffset(w, h)
 		label.Font = UiTheme.Font
 		label.Text = "Wave " .. tostring(math.max(1, math.floor(wave)))
@@ -362,20 +367,59 @@ function WaveStartVfx.play(wave: number, _startWorld: Vector3, critters: Critter
 			end
 		end
 
-		local tHold = appearedAt
+		local function easeInOut(u: number): number
+			return if u < 0.5
+				then 16 * u * u * u * u * u
+				else 1 - ((-2 * u + 2) ^ 5) / 2
+		end
+
+		-- Rise from bottom → center.
+		local tRise = os.clock()
+		while os.clock() - tRise < RISE_SEC do
+			if my ~= token or not label.Parent then
+				return
+			end
+			tickColor()
+			local camNow = Workspace.CurrentCamera
+			if camNow then
+				local vpNow = camNow.ViewportSize
+				local hNow = math.max(70, math.min(vpNow.X, vpNow.Y) * START_H_FRAC)
+				local wNow = math.min(vpNow.X * 0.92, hNow * START_W_MULT)
+				label.Size = UDim2.fromOffset(wNow, hNow)
+				centerPos = Vector2.new(vpNow.X * 0.5, vpNow.Y * 0.5)
+				startPos = Vector2.new(vpNow.X * 0.5, vpNow.Y + hNow * 0.55)
+			end
+			local u = math.clamp((os.clock() - tRise) / RISE_SEC, 0, 1)
+			local a = easeInOut(u)
+			local x = startPos.X + (centerPos.X - startPos.X) * a
+			local y = startPos.Y + (centerPos.Y - startPos.Y) * a
+			label.Position = UDim2.fromOffset(x, y)
+			RunService.RenderStepped:Wait()
+		end
+		label.Position = UDim2.fromOffset(centerPos.X, centerPos.Y)
+
+		-- Hold at center.
+		local tHold = os.clock()
 		while os.clock() - tHold < HOLD_SEC do
 			if my ~= token or not label.Parent then
 				return
 			end
 			tickColor()
+			local camHold = Workspace.CurrentCamera
+			if camHold then
+				local vpHold = camHold.ViewportSize
+				centerPos = Vector2.new(vpHold.X * 0.5, vpHold.Y * 0.5)
+				label.Position = UDim2.fromOffset(centerPos.X, centerPos.Y)
+			end
 			RunService.RenderStepped:Wait()
 		end
 		if my ~= token or not label.Parent then
 			return
 		end
 
-		local from = Vector2.new(vp.X * 0.5, vp.Y * 0.5)
-		local lockedTarget = findWaveBarTarget(pg) or Vector2.new(vp.X * 0.78, vp.Y * 0.92)
+		-- Drop down to wave bar / bottom of screen.
+		local from = centerPos
+		local lockedTarget = findWaveBarTarget(pg) or Vector2.new(vp.X * 0.5, vp.Y * 0.92)
 		local t0 = os.clock()
 		while os.clock() - t0 < FLY_SEC do
 			if my ~= token or not label.Parent then
@@ -388,10 +432,7 @@ function WaveStartVfx.play(wave: number, _startWorld: Vector3, critters: Critter
 			end
 			local vpNow = camNow.ViewportSize
 			local u = math.clamp((os.clock() - t0) / FLY_SEC, 0, 1)
-			-- Smooth ease-in-out toward hunger / wave bar.
-			local a = if u < 0.5
-				then 16 * u * u * u * u * u
-				else 1 - ((-2 * u + 2) ^ 5) / 2
+			local a = easeInOut(u)
 			lockedTarget = findWaveBarTarget(pg) or lockedTarget
 			local x = from.X + (lockedTarget.X - from.X) * a
 			local y = from.Y + (lockedTarget.Y - from.Y) * a

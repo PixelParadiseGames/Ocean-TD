@@ -531,12 +531,22 @@ local function isSelectedBrain(): boolean
 	return part ~= nil and BrainStack.isBrainId(part:GetAttribute("OceanTD_SpeciesId"))
 end
 
+local function selectedBrainShouldOrbit(): boolean
+	if not isSelectedBrain() or not part then
+		return false
+	end
+	if BrainSnapPreview.isSnapped() then
+		return true
+	end
+	return BrainStack.readParentPlaceId(part) ~= nil
+end
+
 local function layoutWaistChrome(btnPx: number, _showCheck: boolean): boolean
 	if not checkBtn or not cancelBtn or not gui then
 		hideWaistChrome()
 		return false
 	end
-	local showRot = ((isSelectedYawRotate() or (isSelectedBrain() and BrainSnapPreview.isSnapped())) and not recyclePending)
+	local showRot = ((isSelectedYawRotate() or selectedBrainShouldOrbit()) and not recyclePending)
 	local adornee = if moveAdorneePart and moveAdorneePart.Parent then moveAdorneePart else part
 	if not adornee or not moveBillboard or not moveIcon then
 		hideWaistChrome()
@@ -721,7 +731,7 @@ local function makeUi()
 			local dir = if target == "rotLeft" then 1 else -1
 			local btn = if target == "rotLeft" then rotLeftBtn else rotRightBtn
 			PlaceConfirmChrome.beginRotateHold(btn, function()
-				if BrainSnapPreview.isSnapped() then
+				if selectedBrainShouldOrbit() then
 					rotateBrainSnapOrbit(dir)
 				else
 					rotateSelectedSeaFan(dir)
@@ -1322,6 +1332,28 @@ local function syncChrome()
 	end
 end
 
+local function applyBrainAtCenter(surfacePos: Vector3)
+	-- Brain snap / ground pos is the ball CENTER — never alignMeshToSurface (that treats
+	-- the point as a plant foot and lifts Size.Y/2, which fights snap and jitters).
+	local yaw = relocateFacingYaw
+	if typeof(yaw) ~= "number" then
+		yaw = CoralVisual.readFacingYaw(part :: BasePart)
+		relocateFacingYaw = yaw
+	end
+	local yawCf = CFrame.Angles(0, yaw, 0)
+	local mir = ClientPlot.get()
+	if mir then
+		yawCf = (mir.cframe - mir.cframe.Position) * yawCf
+	end
+	local p = part :: BasePart
+	p.CFrame = CFrame.new(surfacePos) * yawCf
+	p:SetAttribute("OceanTD_FacingYaw", yaw)
+	p:SetAttribute("OceanTD_GridAnchorX", surfacePos.X)
+	p:SetAttribute("OceanTD_GridAnchorY", surfacePos.Y)
+	p:SetAttribute("OceanTD_GridAnchorZ", surfacePos.Z)
+	moveGridAnchor = surfacePos
+end
+
 local function updateAt(worldPos: Vector3)
 	if recyclePending then
 		return
@@ -1333,14 +1365,17 @@ local function updateAt(worldPos: Vector3)
 		return
 	end
 	local surfacePos = resolveRelocatePos(worldPos)
-	if CoralVisual.needsFacingYaw(part:GetAttribute("OceanTD_SpeciesId")) then
+	local sid = part:GetAttribute("OceanTD_SpeciesId")
+	if BrainStack.isBrainId(sid) then
+		applyBrainAtCenter(surfacePos)
+	elseif CoralVisual.needsFacingYaw(sid) then
 		if typeof(relocateFacingYaw) ~= "number" then
 			relocateFacingYaw = CoralVisual.readFacingYaw(part)
 		end
 		local mir = ClientPlot.get()
 		CoralVisual.alignMeshToSurface(part, surfacePos, relocateFacingYaw, nil, if mir then mir.cframe else nil)
 		moveGridAnchor = surfacePos
-	elseif CoralVisual.isMeshSpecies(part:GetAttribute("OceanTD_SpeciesId")) then
+	elseif CoralVisual.isMeshSpecies(sid) then
 		CoralVisual.alignMeshToSurface(part, surfacePos)
 		moveGridAnchor = surfacePos
 	else
@@ -1370,7 +1405,8 @@ rotateSelectedSeaFan = function(dir: number)
 	if recyclePending or not part or not part.Parent then
 		return
 	end
-	if not CoralVisual.hasYawRotateChrome(part:GetAttribute("OceanTD_SpeciesId")) then
+	local sid = part:GetAttribute("OceanTD_SpeciesId")
+	if not CoralVisual.hasYawRotateChrome(sid) then
 		return
 	end
 	local yaw = relocateFacingYaw
@@ -1381,8 +1417,12 @@ rotateSelectedSeaFan = function(dir: number)
 	relocateFacingYaw = yaw
 	hasRotated = true
 	local anchor = moveGridAnchor or gridAnchorPos or CoralVisual.readGridAnchor(part) or part.Position
-	local mir = ClientPlot.get()
-	CoralVisual.alignMeshToSurface(part, anchor, yaw, nil, if mir then mir.cframe else nil)
+	if BrainStack.isBrainId(sid) then
+		applyBrainAtCenter(anchor)
+	else
+		local mir = ClientPlot.get()
+		CoralVisual.alignMeshToSurface(part, anchor, yaw, nil, if mir then mir.cframe else nil)
+	end
 	UiHaptics.pulseShort()
 	syncChrome()
 end
@@ -1395,12 +1435,29 @@ rotateBrainSnapOrbit = function(dir: number)
 		return
 	end
 	local diam = BrainStack.diameterOfPart(part)
+	if not BrainSnapPreview.ensureOrbitForChild(part) and not BrainSnapPreview.isSnapped() then
+		return
+	end
 	if BrainSnapPreview.nudgeOrbit(dir, diam, part) then
 		local snap = BrainSnapPreview.getActive()
 		if snap then
-			part.CFrame = CFrame.new(snap.worldPos)
+			local yaw = relocateFacingYaw
+			if typeof(yaw) ~= "number" then
+				yaw = CoralVisual.readFacingYaw(part)
+				relocateFacingYaw = yaw
+			end
+			local yawCf = CFrame.Angles(0, yaw, 0)
+			local mir = ClientPlot.get()
+			if mir then
+				yawCf = (mir.cframe - mir.cframe.Position) * yawCf
+			end
+			part.CFrame = CFrame.new(snap.worldPos) * yawCf
+			part:SetAttribute("OceanTD_GridAnchorX", snap.worldPos.X)
+			part:SetAttribute("OceanTD_GridAnchorY", snap.worldPos.Y)
+			part:SetAttribute("OceanTD_GridAnchorZ", snap.worldPos.Z)
 			moveGridAnchor = snap.worldPos
-			gridAnchorPos = snap.worldPos
+			hasRotated = true
+			hasMoved = true
 		end
 		UiHaptics.pulseShort()
 		syncChrome()
@@ -2089,18 +2146,41 @@ function RelocateController.cancel(instant: boolean?)
 
 	local function snapHome()
 		if p and p.Parent then
-			if CoralVisual.needsFacingYaw(p:GetAttribute("OceanTD_SpeciesId")) and gridAnchorPos then
+			local sid = p:GetAttribute("OceanTD_SpeciesId")
+			local homeAnchor = gridAnchorPos or origin
+			if BrainStack.isBrainId(sid) and homeAnchor then
+				-- Center = grid anchor; plant-foot align would loft Size.Y/2.
+				local yaw = originFacingYaw
+				if typeof(yaw) ~= "number" then
+					yaw = CoralVisual.readFacingYaw(p)
+				end
+				local yawCf = CFrame.Angles(0, yaw, 0)
+				local mir = ClientPlot.get()
+				if mir then
+					yawCf = (mir.cframe - mir.cframe.Position) * yawCf
+				end
+				p.CFrame = CFrame.new(homeAnchor) * yawCf
+				p:SetAttribute("OceanTD_FacingYaw", yaw)
+				p:SetAttribute("OceanTD_GridAnchorX", homeAnchor.X)
+				p:SetAttribute("OceanTD_GridAnchorY", homeAnchor.Y)
+				p:SetAttribute("OceanTD_GridAnchorZ", homeAnchor.Z)
+			elseif CoralVisual.needsFacingYaw(sid) and homeAnchor then
 				local yaw = originFacingYaw
 				if typeof(yaw) ~= "number" then
 					yaw = CoralVisual.readFacingYaw(p)
 				end
 				local mir = ClientPlot.get()
-				CoralVisual.alignMeshToSurface(p, gridAnchorPos, yaw, nil, if mir then mir.cframe else nil)
-			elseif CoralVisual.isMeshSpecies(p:GetAttribute("OceanTD_SpeciesId")) and gridAnchorPos then
-				CoralVisual.alignMeshToSurface(p, gridAnchorPos)
+				CoralVisual.alignMeshToSurface(p, homeAnchor, yaw, nil, if mir then mir.cframe else nil)
+			elseif CoralVisual.isMeshSpecies(sid) and homeAnchor then
+				CoralVisual.alignMeshToSurface(p, homeAnchor)
 			elseif origin then
 				p.CFrame = CFrame.new(origin)
+				p:SetAttribute("OceanTD_GridAnchorX", origin.X)
+				p:SetAttribute("OceanTD_GridAnchorY", origin.Y)
+				p:SetAttribute("OceanTD_GridAnchorZ", origin.Z)
 			end
+			-- Preview writes GridAnchor on the drag cell; reindex so open spots stay free.
+			PlacedCoralIndex.reindex(p)
 		end
 		clearState()
 	end
@@ -2156,11 +2236,32 @@ function RelocateController.beginRecycleConfirm()
 	end
 	-- Snap home so recycle matches the grid cell about to be vacated.
 	clearBlockHighlight()
-	if CoralVisual.isMeshSpecies(part:GetAttribute("OceanTD_SpeciesId")) and gridAnchorPos then
-		CoralVisual.alignMeshToSurface(part, gridAnchorPos)
+	local sid = part:GetAttribute("OceanTD_SpeciesId")
+	local homeAnchor = gridAnchorPos or originPos
+	if BrainStack.isBrainId(sid) and homeAnchor then
+		local yaw = originFacingYaw
+		if typeof(yaw) ~= "number" then
+			yaw = CoralVisual.readFacingYaw(part)
+		end
+		local yawCf = CFrame.Angles(0, yaw, 0)
+		local mir = ClientPlot.get()
+		if mir then
+			yawCf = (mir.cframe - mir.cframe.Position) * yawCf
+		end
+		part.CFrame = CFrame.new(homeAnchor) * yawCf
+		part:SetAttribute("OceanTD_FacingYaw", yaw)
+		part:SetAttribute("OceanTD_GridAnchorX", homeAnchor.X)
+		part:SetAttribute("OceanTD_GridAnchorY", homeAnchor.Y)
+		part:SetAttribute("OceanTD_GridAnchorZ", homeAnchor.Z)
+	elseif CoralVisual.isMeshSpecies(sid) and homeAnchor then
+		CoralVisual.alignMeshToSurface(part, homeAnchor)
 	else
 		part.CFrame = CFrame.new(originPos)
+		part:SetAttribute("OceanTD_GridAnchorX", originPos.X)
+		part:SetAttribute("OceanTD_GridAnchorY", originPos.Y)
+		part:SetAttribute("OceanTD_GridAnchorZ", originPos.Z)
 	end
+	PlacedCoralIndex.reindex(part)
 	hasMoved = false
 	validSpot = true
 	rejectReason = nil
@@ -2516,11 +2617,27 @@ function RelocateController.commit()
 		UiHaptics.pulseShort()
 		if part and part.Parent then
 			local finalPos = if typeof(result.worldPos) == "Vector3" then result.worldPos else toPos
-			if CoralVisual.needsFacingYaw(part:GetAttribute("OceanTD_SpeciesId")) then
+			local sid = part:GetAttribute("OceanTD_SpeciesId")
+			if BrainStack.isBrainId(sid) then
+				local finalYaw = if typeof(result.facingYaw) == "number" then result.facingYaw else yaw
+				if typeof(finalYaw) ~= "number" then
+					finalYaw = CoralVisual.readFacingYaw(part)
+				end
+				local yawCf = CFrame.Angles(0, finalYaw :: number, 0)
+				local mir = ClientPlot.get()
+				if mir then
+					yawCf = (mir.cframe - mir.cframe.Position) * yawCf
+				end
+				part.CFrame = CFrame.new(finalPos) * yawCf
+				part:SetAttribute("OceanTD_FacingYaw", finalYaw)
+				part:SetAttribute("OceanTD_GridAnchorX", finalPos.X)
+				part:SetAttribute("OceanTD_GridAnchorY", finalPos.Y)
+				part:SetAttribute("OceanTD_GridAnchorZ", finalPos.Z)
+			elseif CoralVisual.needsFacingYaw(sid) then
 				local finalYaw = if typeof(result.facingYaw) == "number" then result.facingYaw else yaw
 				local mir = ClientPlot.get()
 				CoralVisual.alignMeshToSurface(part, finalPos, finalYaw, nil, if mir then mir.cframe else nil)
-			elseif CoralVisual.isMeshSpecies(part:GetAttribute("OceanTD_SpeciesId")) then
+			elseif CoralVisual.isMeshSpecies(sid) then
 				CoralVisual.alignMeshToSurface(part, finalPos)
 			else
 				part.CFrame = CFrame.new(finalPos)
@@ -2860,7 +2977,7 @@ table.insert(inputConns, UserInputService.InputBegan:Connect(function(input, _pr
 					local dir = if chromeTarget == "rotLeft" then 1 else -1
 					local btn = if chromeTarget == "rotLeft" then rotLeftBtn else rotRightBtn
 					PlaceConfirmChrome.beginRotateHold(btn, function()
-						if BrainSnapPreview.isSnapped() then
+						if selectedBrainShouldOrbit() then
 							rotateBrainSnapOrbit(dir)
 						else
 							rotateSelectedSeaFan(dir)

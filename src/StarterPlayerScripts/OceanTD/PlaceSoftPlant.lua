@@ -13,6 +13,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local oceanRoot = ReplicatedStorage:WaitForChild("OceanTD")
 local Remotes = require(oceanRoot:WaitForChild("Remotes"))
+local BrainStack = require(oceanRoot:WaitForChild("Shared"):WaitForChild("BrainStack"))
 local CoralVisual = require(oceanRoot:WaitForChild("Shared"):WaitForChild("CoralVisual"))
 
 local InventoryState = require(script.Parent:WaitForChild("InventoryState"))
@@ -349,43 +350,70 @@ function PlaceSoftPlant.updateAt(anchorPos: Vector3)
 	if not part or not part.Parent then
 		return
 	end
-	anchorPos = e.resolvePlaceAnchor(anchorPos)
-	e.setPlaceAnchor(anchorPos)
-	e.setConfirmPos(anchorPos)
-	-- Do not follow the coral with place-zoom while dragging — same cam lock as relocate.
-	local function alignPartDirect()
-		local ok, reason = e.evaluatePos(anchorPos)
+	-- Bridge path resolves brain snap once inside RelocateController.updateAt.
+	-- Pre-resolving here double-snapped / self-hosted and fought alignMeshToSurface.
+	local rawPos = anchorPos
+	local function alignPartDirect(resolved: Vector3)
+		e.setPlaceAnchor(resolved)
+		e.setConfirmPos(resolved)
+		local ok, reason = e.evaluatePos(resolved)
 		e.setValidSpot(ok)
 		e.setRejectReason(reason)
-		local yaw = e.getGhostPlaceFacingYaw()
-		if typeof(yaw) ~= "number" then
-			yaw = CoralVisual.readFacingYaw(part)
-		end
-		if CoralVisual.needsFacingYaw(part:GetAttribute("OceanTD_SpeciesId")) and typeof(yaw) == "number" then
+		local sid = part:GetAttribute("OceanTD_SpeciesId")
+		if BrainStack.isBrainId(sid) then
+			-- Ball center = resolved pos (same as relocate); do not plant-foot align.
+			local yaw = e.getGhostPlaceFacingYaw()
+			if typeof(yaw) ~= "number" then
+				yaw = CoralVisual.readFacingYaw(part)
+			end
+			local yawCf = CFrame.Angles(0, yaw :: number, 0)
 			local mir = ClientPlot.get()
-			CoralVisual.alignMeshToSurface(part, anchorPos, yaw, nil, if mir then mir.cframe else nil)
-		elseif CoralVisual.isMeshSpecies(part:GetAttribute("OceanTD_SpeciesId")) then
-			CoralVisual.alignMeshToSurface(part, anchorPos)
+			if mir then
+				yawCf = (mir.cframe - mir.cframe.Position) * yawCf
+			end
+			part.CFrame = CFrame.new(resolved) * yawCf
+			part:SetAttribute("OceanTD_FacingYaw", yaw)
+			part:SetAttribute("OceanTD_GridAnchorX", resolved.X)
+			part:SetAttribute("OceanTD_GridAnchorY", resolved.Y)
+			part:SetAttribute("OceanTD_GridAnchorZ", resolved.Z)
+		elseif CoralVisual.needsFacingYaw(sid) then
+			local yaw = e.getGhostPlaceFacingYaw()
+			if typeof(yaw) ~= "number" then
+				yaw = CoralVisual.readFacingYaw(part)
+			end
+			local mir = ClientPlot.get()
+			CoralVisual.alignMeshToSurface(part, resolved, yaw, nil, if mir then mir.cframe else nil)
+		elseif CoralVisual.isMeshSpecies(sid) then
+			CoralVisual.alignMeshToSurface(part, resolved)
 		else
-			part.CFrame = CFrame.new(anchorPos)
+			part.CFrame = CFrame.new(resolved)
 		end
 	end
 	if RelocateController.isPlaceConfirmBridge() then
-		local ok, reason = RelocateController.bridgePreviewAt(anchorPos)
+		local ok, reason = RelocateController.bridgePreviewAt(rawPos)
 		-- busy / inactive bridge returns false,nil — fall back so chrome doesn't drag alone.
 		if ok == false and reason == nil then
-			alignPartDirect()
+			alignPartDirect(e.resolvePlaceAnchor(rawPos))
 		else
+			local live = RelocateController.getSelectedPart()
+			local foot = if live and live.Parent
+				then (CoralVisual.readGridAnchor(live) or live.Position)
+				else rawPos
+			e.setPlaceAnchor(foot)
+			e.setConfirmPos(foot)
 			e.setValidSpot(ok)
 			e.setRejectReason(reason)
+			anchorPos = foot
 		end
 	else
-		alignPartDirect()
+		anchorPos = e.resolvePlaceAnchor(rawPos)
+		alignPartDirect(anchorPos)
 	end
 	local chromeAdorneePart = e.getChromeAdorneePart()
 	if chromeAdorneePart and chromeAdorneePart.Parent then
+		local foot = e.getPlaceAnchor() or anchorPos
 		local p = chromeAdorneePart.Position
-		chromeAdorneePart.CFrame = CFrame.new(anchorPos.X, p.Y, anchorPos.Z)
+		chromeAdorneePart.CFrame = CFrame.new(foot.X, p.Y, foot.Z)
 	end
 	local rejectReason = e.getRejectReason()
 	PlaceSoftPlant.noteOutOfPlotAim(rejectReason == "Out Of Plot")

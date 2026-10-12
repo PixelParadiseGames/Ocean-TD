@@ -7,8 +7,8 @@
 	  PlotCam   — Plot Cam 2 by default (locked RTS / isometric over plot).
 	                FreeCamConfig.PLOT_CAM_VARIANT = 1 restores Plot Cam 1
 	                (SkyCam volume free-fly → SkyCamFocus).
-	  FishCam   — always orbit furthest unfed fish; if none during waves, orbit W1;
-	                idle (no waves): orbit while focus patrols W1→W2→…→Wn then reverses
+	  FishCam   — Orbit: circle furthest unfed fish (or W1 / idle path patrol).
+	                POV (backpack / build): curved WaveRoute W1→reef heart (C controls), smooth look, loop.
 	  DroneCam  — free-look fly (old FishCam-idle). Studio instance stays named FreeCam.
 	                Attr value is "dronecam" (say "drone" if you mean this; "freecam" = old PlotCam).
 
@@ -37,6 +37,7 @@ local PlacementController = require(script.Parent:WaitForChild("PlacementControl
 local RelocateController = require(script.Parent:WaitForChild("RelocateController"))
 local RelocatePickHover = require(script.Parent:WaitForChild("RelocatePickHover"))
 local WaveSim = require(script.Parent:WaitForChild("WaveSim"))
+local WaveSimPath = require(script.Parent:WaitForChild("WaveSimPath"))
 local Wave1FishCam = require(script.Parent:WaitForChild("Wave1FishCam"))
 local SkyCamParts = require(script.Parent:WaitForChild("SkyCamParts"))
 local FC = require(script.Parent:WaitForChild("FreeCamConfig"))
@@ -45,6 +46,7 @@ local PlotCam2 = require(script.Parent:WaitForChild("PlotCam2"))
 local PlotCam2Tune = require(script.Parent:WaitForChild("PlotCam2Tune"))
 local FishCamTune = require(script.Parent:WaitForChild("FishCamTune"))
 local CamPinchZoom = require(script.Parent:WaitForChild("CamPinchZoom"))
+local SkillPowerUpUI = require(script.Parent:WaitForChild("SkillPowerUpUI"))
 
 playerGui:SetAttribute(FC.ATTR_CAROUSEL_COLLAPSED, false)
 
@@ -103,7 +105,13 @@ local moveOrigin = Vector2.zero
 local touchMoveVec = Vector2.zero -- -1..1
 local lookTouch: InputObject? = nil
 local lookTouchLast = Vector2.zero
+local lookTouchOrigin = Vector2.zero
+local lookTouchArmed = false
 local mouseLookLast: Vector2? = nil
+local mouseLookOrigin: Vector2? = nil
+local mouseLookArmed = false
+-- Ignore brief tap/shoot clicks; only treat as look after a real drag.
+local LOOK_DRAG_ARM_PX = 14
 local touchDownCount = 0
 -- Plot Cam: mouse click-drag pans as a virtual stick (hold away from press = keep panning).
 local plotMousePanOrigin: Vector2? = nil
@@ -133,6 +141,9 @@ local fishSt = {
 	orbitElev = 0,
 	waveStartBoostUntil = 0,
 	lastWaveIndex = 0,
+	camPathDist = 0, -- smoothed ribbon progress for wave POV (avoids back-jerk on feed)
+	camLookAt = Vector3.zero, -- damped look target (ahead cam looking back into pack)
+	pathSnap = false, -- one-shot hard park onto ribbon (wave start / POV toggle)
 }
 local route = {
 	waypoints = {} :: { Vector3 },
@@ -141,12 +152,87 @@ local route = {
 	patrolDir = 1,
 }
 
+-- Fish Cam POV ride: curved WaveRoute (W + C control points) W1 → plot heart, then loop.
+local pov = {
+	path = nil :: WaveSimPath.PathData?,
+	dist = 0,
+	lookTang = Vector3.new(0, 0, -1),
+	lookCf = nil :: CFrame?,
+	cacheKey = "",
+	-- Free look offsets (hold-drag); ease back to 0 when released (if not paused).
+	freeYaw = 0,
+	freePitch = 0,
+}
+
 local function getCamera(): Camera?
 	return Workspace.CurrentCamera
 end
 
+-- Fish Cam pad POV toggle (coaster). Off = classic orbit (Fish Cam A).
+local function fishCamUsePov(): boolean
+	return mode == "fishcam" and FishCamTune.isPovOn()
+end
+
+local function clearPovFreeLook()
+	pov.freeYaw = 0
+	pov.freePitch = 0
+end
+
+local povFovSaved: number? = nil
+local povFovTween: Tween? = nil
+local povFovWant = false
+
+local function tweenCamFov(cam: Camera, goal: number)
+	if povFovTween then
+		povFovTween:Cancel()
+		povFovTween = nil
+	end
+	if math.abs(cam.FieldOfView - goal) < 0.05 then
+		cam.FieldOfView = goal
+		return
+	end
+	povFovTween = TweenService:Create(cam, FC.FISH_POV_FOV_TWEEN, { FieldOfView = goal })
+	povFovTween:Play()
+end
+
+local function syncPovFov()
+	local cam = getCamera()
+	if not cam then
+		return
+	end
+	local want = fishCamUsePov()
+	if want == povFovWant and (want == false or povFovSaved ~= nil) then
+		if want then
+			tweenCamFov(cam, FC.FISH_POV_FOV)
+		end
+		return
+	end
+	povFovWant = want
+	if want then
+		if povFovSaved == nil then
+			povFovSaved = cam.FieldOfView
+		end
+		tweenCamFov(cam, FC.FISH_POV_FOV)
+	else
+		local restore = povFovSaved
+		povFovSaved = nil
+		if typeof(restore) == "number" then
+			tweenCamFov(cam, restore)
+		end
+	end
+end
+
+local function publishFishCamPov()
+	local on = fishCamUsePov()
+	if playerGui:GetAttribute(FC.ATTR_FISH_CAM_POV) ~= on then
+		playerGui:SetAttribute(FC.ATTR_FISH_CAM_POV, on)
+	end
+	syncPovFov()
+end
+
 local function publishMode()
 	playerGui:SetAttribute(FC.ATTR_MODE, mode)
+	publishFishCamPov()
 end
 
 local function clearSkyCache()
@@ -304,19 +390,27 @@ local function skillsBubblesOpen(): boolean
 		or playerGui:GetAttribute("OceanTD_StoreOpen") == true
 end
 
--- Skills / backpack own the left HUD â€” never force cam triangle icons back on.
+-- Skills / store / report own the left HUD — hide all cam triangles.
+-- Backpack / build: keep the active cam button (above PlotCam ± pads) visible.
 local function camModeIconsSuppressed(): boolean
-	return InventoryState.isOpen() or skillsBubblesOpen()
+	return skillsBubblesOpen()
+end
+
+local function camModeIconsBackpackOnly(): boolean
+	return InventoryState.isOpen() and not skillsBubblesOpen()
 end
 
 local function applyIconChrome(icon: ModeIcon, relativeTo: CamMode, collapsed: boolean)
 	local isActive = icon.mode == relativeTo
 	-- Collapsed stack: only the front (active) icon should eat clicks / hand cursor.
 	local interactive = isActive or not collapsed
-	-- Pending carousel collapse used to re-show the active icon after skills hid the dPad.
 	if camModeIconsSuppressed() then
 		icon.root.Visible = false
 		interactive = false
+	elseif camModeIconsBackpackOnly() then
+		-- Build mode: only the active cam circle (Plot Cam sits above its 4 quick buttons).
+		icon.root.Visible = isActive
+		interactive = isActive
 	else
 		-- Collapsed = only the active mode circle (normal left HUD). Expanded carousel shows all.
 		icon.root.Visible = isActive or not collapsed
@@ -437,6 +531,11 @@ local function scheduleCollapse(token: number, relativeTo: CamMode)
 			setCarouselCollapsedAttr(true)
 			return
 		end
+		if camModeIconsBackpackOnly() then
+			setCarouselCollapsedAttr(true)
+			snapIconsToLayout(relativeTo, true)
+			return
+		end
 		tweenIconsToLayout(relativeTo, true, FC.COLLAPSE_INFO, token, function()
 			if token ~= carouselToken then
 				return
@@ -458,6 +557,14 @@ local function playCamCarousel(fromMode: CamMode, toMode: CamMode, animate: bool
 		for _, icon in ipairs(camIcons) do
 			applyIconChrome(icon, toMode, true)
 		end
+		return
+	end
+	if camModeIconsBackpackOnly() then
+		-- Build: stay on the single active icon — no full diamond expand.
+		carouselToken += 1
+		carouselCollapsed = true
+		setCarouselCollapsedAttr(true)
+		snapIconsToLayout(toMode, true)
 		return
 	end
 	carouselToken += 1
@@ -494,17 +601,20 @@ local function playCamCarousel(fromMode: CamMode, toMode: CamMode, animate: bool
 end
 
 -- Cancel delayed carousel collapse so it cannot unhide FreeCam/FishCam/OffCam over skills.
--- Do not set Visible here while suppressed â€” MobileSkillsA rememberHide must record wasVisible=true.
+-- Do not set Visible here while skills-suppressed — MobileSkillsA rememberHide must record wasVisible=true.
 local function syncCamModeIconsForHud()
 	if camModeIconsSuppressed() then
 		carouselToken += 1
 		carouselCollapsed = true
 		setCarouselCollapsedAttr(true)
 		FreeCamModeLabel.hide()
+		for _, icon in ipairs(camIcons) do
+			applyIconChrome(icon, mode, true)
+		end
 		return
 	end
 	if carouselReady and #camIcons > 0 then
-		-- Always snap collapsed after skills/backpack — never leave the full diamond up.
+		-- Collapsed active icon (backpack keeps it; skills path returned above).
 		carouselCollapsed = true
 		snapIconsToLayout(mode, true)
 		setCarouselCollapsedAttr(true)
@@ -658,6 +768,14 @@ end
 local function clearTouchLook()
 	lookTouch = nil
 	lookTouchLast = Vector2.zero
+	lookTouchOrigin = Vector2.zero
+	lookTouchArmed = false
+end
+
+local function clearMouseLookDrag()
+	mouseLookLast = nil
+	mouseLookOrigin = nil
+	mouseLookArmed = false
 end
 
 local function isDroneCamLook(): boolean
@@ -677,6 +795,23 @@ local function isMouseLookHeld(): boolean
 		or UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton2)
 end
 
+local function isLookSteeringHeld(): boolean
+	-- Mouse/touch look only counts after drag-arm so tap-to-feed doesn't jerk the cam.
+	if mouseLookArmed and isMouseLookHeld() then
+		return true
+	end
+	if lookStick.Magnitude > 0.12 then
+		return true
+	end
+	if lookTouch ~= nil and lookTouchArmed then
+		return true
+	end
+	return keysDown[Enum.KeyCode.Left] == true
+		or keysDown[Enum.KeyCode.Right] == true
+		or keysDown[Enum.KeyCode.Up] == true
+		or keysDown[Enum.KeyCode.Down] == true
+end
+
 local function isUserSteeringOrbit(): boolean
 	if mode ~= "fishcam" then
 		return false
@@ -684,19 +819,7 @@ local function isUserSteeringOrbit(): boolean
 	if FishCamTune.isSteeringOrbit() then
 		return true
 	end
-	if isMouseLookHeld() then
-		return true
-	end
-	if lookStick.Magnitude > 0.12 then
-		return true
-	end
-	if lookTouch ~= nil then
-		return true
-	end
-	return keysDown[Enum.KeyCode.Left] == true
-		or keysDown[Enum.KeyCode.Right] == true
-		or keysDown[Enum.KeyCode.Up] == true
-		or keysDown[Enum.KeyCode.Down] == true
+	return isLookSteeringHeld()
 end
 
 local function mouseScreenPos(): Vector2
@@ -836,6 +959,17 @@ local function beginFishSwitch(toPos: Vector3)
 	fishSt.switching = true
 end
 
+local function fishSwitchDuration(): number
+	-- During waves: longer blend so lead swaps don't gas/brake (POV + orbit).
+	if WaveSim.isRunning() then
+		if fishCamUsePov() then
+			return FC.FISH_POV_SCHOOL_SWITCH_SEC
+		end
+		return FC.FISH_ORBIT_SWITCH_SEC
+	end
+	return FC.FISH_SWITCH_SEC
+end
+
 local function resetFishOrbitClock()
 	fishSt.orbitT0 = os.clock()
 	local flat = Vector3.new(camPos.X - fishSt.focusPos.X, 0, camPos.Z - fishSt.focusPos.Z)
@@ -910,7 +1044,13 @@ local function applyLookDelta(dx: number, dy: number)
 		return
 	end
 	if mode == "fishcam" then
-		-- Steer around the fish / W1; auto orbit continues from this heading.
+		if fishCamUsePov() then
+			-- POV: free-look anytime (paused = hold; playing = look then slow recenter).
+			pov.freeYaw -= dx
+			pov.freePitch = math.clamp(pov.freePitch - dy, -1.15, 1.15)
+			return
+		end
+		-- Orbit (Fish Cam A): steer around the fish / W1.
 		fishSt.orbitAngle -= dx
 		fishSt.orbitElev = math.clamp(fishSt.orbitElev - dy, -0.7, 0.85)
 		return
@@ -920,13 +1060,23 @@ local function applyLookDelta(dx: number, dy: number)
 end
 
 local function tickMouseDragLook()
-	-- GetMouseDelta is 0 with a free cursor â€” track screen position instead.
+	-- GetMouseDelta is 0 with a free cursor — track screen position instead.
 	-- Never mix this with touch: emulated cursor coords fight the finger look.
 	if not isFishCamLook() or not isMouseLookHeld() then
-		mouseLookLast = nil
+		clearMouseLookDrag()
 		return
 	end
 	local loc = mouseScreenPos()
+	if not mouseLookArmed then
+		local origin = mouseLookOrigin or loc
+		mouseLookOrigin = origin
+		if (loc - origin).Magnitude < LOOK_DRAG_ARM_PX then
+			return
+		end
+		mouseLookArmed = true
+		mouseLookLast = loc
+		return
+	end
 	local prev = mouseLookLast
 	if prev then
 		local d = loc - prev
@@ -1214,6 +1364,150 @@ local function tickRoutePatrol(dt: number): Vector3
 	return a:Lerp(b, route.segAlpha)
 end
 
+local function blendLookTangents(a: Vector3, b: Vector3, u: number): Vector3
+	local t = math.clamp(u, 0, 1)
+	t = t * t * (3 - 2 * t)
+	if a.Magnitude < 1e-5 then
+		return if b.Magnitude > 1e-5 then b.Unit else Vector3.new(0, 0, -1)
+	end
+	if b.Magnitude < 1e-5 then
+		return a.Unit
+	end
+	local au, bu = a.Unit, b.Unit
+	if au:Dot(bu) < -0.92 then
+		return if t < 0.5 then au else bu
+	end
+	local v = au:Lerp(bu, t)
+	if v.Magnitude < 1e-5 then
+		return if t < 0.5 then au else bu
+	end
+	return v.Unit
+end
+
+local function povCacheKey(): string
+	local mir = ClientPlot.get()
+	local plotId = if mir then mir.plotId else "?"
+	local stage = SkillPowerUpUI.getStage("PlotSize")
+	return plotId .. ":" .. tostring(stage)
+end
+
+local function ensurePovPath(): WaveSimPath.PathData?
+	local key = povCacheKey()
+	if pov.path and pov.cacheKey == key and pov.path.totalLen > 1e-3 then
+		return pov.path
+	end
+	local built = WaveSimPath.buildPath()
+	pov.path = built
+	pov.cacheKey = key
+	pov.dist = 0
+	pov.lookCf = nil
+	if built then
+		local _pos, tang = WaveSimPath.samplePath(built, 0)
+		pov.lookTang = tang
+	end
+	return built
+end
+
+local function resetPovRideToW1()
+	pov.cacheKey = ""
+	local path = ensurePovPath()
+	pov.dist = 0
+	pov.lookCf = nil
+	if not path then
+		return
+	end
+	local pos, tang = WaveSimPath.samplePath(path, 0)
+	pov.lookTang = tang
+	local eye = pos + Vector3.new(0, FC.FISH_POV_EYE_HEIGHT, 0)
+	camPos = eye
+	pov.lookCf = CFrame.lookAt(eye, eye + tang * FC.FISH_POV_LOOK_AHEAD)
+	fishSt.focusPos = pos
+	fishSt.dampPos = pos
+	fishSt.lookPos = pos
+	fishSt.targetId = nil
+	fishSt.switching = false
+end
+
+local function tickFishPov(dt: number, cam: Camera)
+	local path = ensurePovPath()
+	if not path or path.totalLen < 1e-3 then
+		return
+	end
+	local paused = FishCamTune.isPaused()
+	if not paused then
+		-- Step 6 = 1× baseline loop; pad slow/fast adjusts 1…10.
+		local speed = (path.totalLen / math.max(FC.FISH_POV_LOOP_SEC, 1)) * FishCamTune.getPovSpeedMult()
+		pov.dist += speed * math.max(dt, 0)
+		if pov.dist >= path.totalLen - 1e-3 then
+			-- Hit reef heart — restart at W1.
+			clearPovFreeLook()
+			resetPovRideToW1()
+			if pov.lookCf then
+				cam.CFrame = pov.lookCf
+				syncLookFromCFrame(cam.CFrame)
+			end
+			return
+		end
+	end
+
+	local pos, tang = WaveSimPath.samplePath(path, pov.dist)
+	local lookA = 1 - math.exp(-FC.FISH_POV_LOOK_SMOOTH * math.max(dt, 0))
+	if not paused then
+		pov.lookTang = blendLookTangents(pov.lookTang, tang, lookA)
+	end
+
+	local eye = pos + Vector3.new(0, FC.FISH_POV_EYE_HEIGHT, 0)
+	if paused then
+		camPos = eye
+	else
+		camPos = dampToward(camPos, eye, FC.FISH_POV_POS_SMOOTH, dt, nil)
+	end
+	fishSt.focusPos = pos
+	fishSt.dampPos = pos
+	fishSt.lookPos = pos
+
+	-- While riding: after look release, ease offsets back toward path-forward.
+	if not paused and not isLookSteeringHeld() then
+		local recentera = 1 - math.exp(-FC.FISH_POV_RECENTER_SMOOTH * math.max(dt, 0))
+		pov.freeYaw += (0 - pov.freeYaw) * recentera
+		pov.freePitch += (0 - pov.freePitch) * recentera
+		if math.abs(pov.freeYaw) < 1e-4 then
+			pov.freeYaw = 0
+		end
+		if math.abs(pov.freePitch) < 1e-4 then
+			pov.freePitch = 0
+		end
+	end
+
+	local base = CFrame.lookAt(camPos, camPos + pov.lookTang * FC.FISH_POV_LOOK_AHEAD)
+	local want: CFrame
+	if paused then
+		-- Absolute FPS seat (seeded on pause) — horizon stays level.
+		want = CFrame.new(camPos)
+			* CFrame.Angles(0, pov.freeYaw, 0)
+			* CFrame.Angles(pov.freePitch, 0, 0)
+	else
+		-- Path forward + free-look offsets (yaw world-up, pitch local — no roll).
+		local basePitch, baseYaw = base:ToOrientation()
+		want = CFrame.new(camPos)
+			* CFrame.Angles(0, baseYaw + pov.freeYaw, 0)
+			* CFrame.Angles(math.clamp(basePitch + pov.freePitch, -1.15, 1.15), 0, 0)
+	end
+	local cfA = if paused then 1 else (1 - math.exp(-FC.FISH_POV_CF_SMOOTH * math.max(dt, 0)))
+	if pov.lookCf and not paused then
+		-- Don't fight active look-drag with CF smooth — snap orientation while steering.
+		if isLookSteeringHeld() then
+			pov.lookCf = CFrame.new(camPos) * (want - want.Position)
+		else
+			pov.lookCf = pov.lookCf:Lerp(want, cfA)
+		end
+	else
+		pov.lookCf = want
+	end
+	cam.CFrame = pov.lookCf :: CFrame
+	syncLookFromCFrame(cam.CFrame)
+end
+
 local setMode: (CamMode) -> ()
 local forceModeOverride = false
 
@@ -1305,6 +1599,218 @@ local function tickPlotCam(dt: number)
 	end
 end
 
+-- Sit on the WaveRoute ribbon ahead of the lead fish, looking back at the pack.
+-- Use path `dist` when known so lateral fish wander doesn't pull the cam off-ribbon.
+local function schoolCamOnPath(fishWorld: Vector3, fishPathDist: number?): (Vector3, Vector3)
+	local path = ensurePovPath()
+	if path and path.totalLen > 1 then
+		local fishDist = if typeof(fishPathDist) == "number"
+			then math.clamp(fishPathDist, 0, path.totalLen)
+			else (WaveSimPath.projectPointOntoPath(path, fishWorld))
+		local aheadDist = math.min(path.totalLen, fishDist + FC.FISH_POV_SCHOOL_DIST)
+		local pathPos, tang = WaveSimPath.samplePath(path, aheadDist)
+		local lookDist = math.max(0, fishDist - FC.FISH_POV_SCHOOL_LOOK_INTO)
+		local lookOnPath = WaveSimPath.samplePath(path, lookDist)
+		local fwd = Vector3.new(tang.X, 0, tang.Z)
+		if fwd.Magnitude < 1e-4 then
+			fwd = Vector3.new(0, 0, -1)
+		else
+			fwd = fwd.Unit
+		end
+		local cam = pathPos + Vector3.new(0, FC.FISH_POV_SCHOOL_HEIGHT, 0)
+		-- Face back along the ribbon into the school (not at offset bodies).
+		local lookAt = lookOnPath + Vector3.new(0, FC.FISH_POV_SCHOOL_HEIGHT * 0.35, 0)
+		-- If cam and look collapsed (near path end), nudge look opposite swim direction.
+		if (lookAt - cam).Magnitude < 2 then
+			lookAt = cam - fwd * math.max(6, FC.FISH_POV_SCHOOL_DIST * 0.5)
+				+ Vector3.new(0, FC.FISH_POV_SCHOOL_HEIGHT * 0.2, 0)
+		end
+		return cam, lookAt
+	end
+	-- Fallback if path missing: stand ahead along W→heart, look back at fish.
+	local pts = route.waypoints
+	if #pts == 0 then
+		pts = loadRouteWaypoints()
+	end
+	local fwd = Vector3.new(0, 0, -1)
+	if #pts >= 2 then
+		local tang = pts[math.min(2, #pts)] - pts[1]
+		local flat = Vector3.new(tang.X, 0, tang.Z)
+		if flat.Magnitude > 1e-4 then
+			fwd = flat.Unit
+		end
+	end
+	local cam = fishWorld + fwd * FC.FISH_POV_SCHOOL_DIST + Vector3.new(0, FC.FISH_POV_SCHOOL_HEIGHT, 0)
+	local lookAt = fishWorld - fwd * FC.FISH_POV_SCHOOL_LOOK_INTO + Vector3.new(0, 2.5, 0)
+	return cam, lookAt
+end
+
+-- POV during waves: ahead of the pack on the path, facing back to feed.
+local function tickFishPovSchool(dt: number, cam: Camera)
+	local now = os.clock()
+	local running = WaveSim.isRunning()
+	local waveIdx = if running then WaveSim.getWaveIndex() else 0
+	local pathDist: number? = nil
+	if waveIdx > 0 and waveIdx ~= fishSt.lastWaveIndex then
+		fishSt.lastWaveIndex = waveIdx
+		clearPovFreeLook()
+		local spawnFocus = resolveFishSpawnFocus()
+		local lead = WaveSim.getFurthestUnfedFish()
+		local focus = if lead then lead.position else spawnFocus
+		pathDist = if lead then lead.dist else 0
+		if focus then
+			seedFishFocus(focus)
+			fishSt.targetId = if lead then lead.id else nil
+			fishSt.switching = false
+			fishSt.waveStartBoostUntil = now + FC.FISH_WAVE_START_SEC
+			fishSt.camPathDist = pathDist or 0
+			fishSt.pathSnap = true
+			local desired, lookAt = schoolCamOnPath(focus, fishSt.camPathDist)
+			camPos = desired
+			fishSt.camLookAt = lookAt
+			cam.CFrame = CFrame.lookAt(camPos, lookAt)
+			syncLookFromCFrame(cam.CFrame)
+			pov.lookCf = cam.CFrame
+		end
+	elseif not running then
+		fishSt.lastWaveIndex = 0
+		fishSt.waveStartBoostUntil = 0
+	end
+
+	local waveStartBoost = now < fishSt.waveStartBoostUntil
+	local fish = WaveSim.getFurthestUnfedFish()
+	local goal: Vector3
+	if fish then
+		goal = fish.position
+		pathDist = fish.dist
+		if fishSt.targetId ~= fish.id then
+			local firstOfWave = fishSt.targetId == nil or waveStartBoost
+			fishSt.targetId = fish.id
+			if firstOfWave then
+				seedFishFocus(goal)
+				fishSt.switching = false
+			else
+				beginFishSwitch(goal)
+			end
+		elseif fishSt.switching then
+			fishSt.switchTo = goal
+		end
+	else
+		local held = if fishSt.targetId then WaveSim.getFishPosition(fishSt.targetId) else nil
+		pathDist = if fishSt.targetId then WaveSim.getFishPathDist(fishSt.targetId) else pathDist
+		if held then
+			goal = held
+			if fishSt.switching then
+				fishSt.switchTo = goal
+			end
+		else
+			fishSt.targetId = nil
+			local spawnFocus = resolveFishSpawnFocus()
+			goal = spawnFocus or fishSt.focusPos
+			pathDist = 0
+			if spawnFocus and (fishSt.focusPos - spawnFocus).Magnitude > 1.5 then
+				if waveStartBoost then
+					seedFishFocus(spawnFocus)
+					fishSt.switching = false
+				elseif not fishSt.switching then
+					beginFishSwitch(spawnFocus)
+				else
+					fishSt.switchTo = spawnFocus
+				end
+			end
+		end
+	end
+
+	-- Softer focus chase during school POV so lead swaps don't whip.
+	local focusErr = (goal - fishSt.dampPos).Magnitude
+	local dampRate = if waveStartBoost then FC.FISH_WAVE_START_DAMP_RATE else FC.FISH_DAMP_RATE * 0.55
+	if not waveStartBoost and focusErr > FC.FISH_DAMP_CATCHUP_STUDS then
+		local catchT = math.clamp((focusErr - FC.FISH_DAMP_CATCHUP_STUDS) / 14, 0, 1)
+		dampRate = dampRate + (FC.FISH_DAMP_RATE_CATCHUP * 0.45 - dampRate) * catchT * 0.5
+	end
+	local maxFocusSpeed = if waveStartBoost then nil else FC.FISH_FOCUS_MAX_SPEED * 0.45
+	fishSt.dampPos = dampToward(fishSt.dampPos, goal, dampRate, dt, maxFocusSpeed)
+
+	if fishSt.switching then
+		local u = math.clamp((now - fishSt.switchT0) / fishSwitchDuration(), 0, 1)
+		local e = u * u * (3 - 2 * u)
+		fishSt.switchTo = fishSt.dampPos
+		fishSt.focusPos = fishSt.switchFrom:Lerp(fishSt.switchTo, e)
+		if u >= 1 then
+			fishSt.switching = false
+			fishSt.focusPos = fishSt.dampPos
+		end
+	else
+		fishSt.focusPos = fishSt.dampPos
+	end
+
+	local lookRate = if waveStartBoost then FC.FISH_WAVE_START_LOOK_RATE else FC.FISH_LOOK_RATE * 0.5
+	fishSt.lookPos = dampToward(fishSt.lookPos, goal, lookRate, dt, maxFocusSpeed)
+
+	-- Soft path progress + hard speed cap (kills gas/brake on hungry-lead swap).
+	local targetDist = if typeof(pathDist) == "number" then pathDist else fishSt.camPathDist
+	if fishSt.pathSnap or waveStartBoost then
+		fishSt.camPathDist = targetDist
+		fishSt.pathSnap = false
+	else
+		local goingFwd = targetDist >= fishSt.camPathDist
+		local distRate = if goingFwd then FC.FISH_POV_PATH_DIST_FWD else FC.FISH_POV_PATH_DIST_BACK
+		local maxSpeed = if goingFwd then FC.FISH_POV_PATH_DIST_MAX_SPEED_FWD else FC.FISH_POV_PATH_DIST_MAX_SPEED_BACK
+		local a = 1 - math.exp(-distRate * math.max(dt, 0))
+		local nextDist = fishSt.camPathDist + (targetDist - fishSt.camPathDist) * a
+		local maxStep = maxSpeed * math.max(dt, 0)
+		local step = nextDist - fishSt.camPathDist
+		if math.abs(step) > maxStep then
+			nextDist = fishSt.camPathDist + math.sign(step) * maxStep
+		end
+		fishSt.camPathDist = nextDist
+	end
+
+	local desired, lookTarget = schoolCamOnPath(fishSt.lookPos, fishSt.camPathDist)
+	if waveStartBoost then
+		camPos = desired
+		fishSt.camLookAt = lookTarget
+		pov.lookCf = CFrame.lookAt(camPos, lookTarget)
+	else
+		camPos = dampToward(camPos, desired, FC.FISH_POV_SCHOOL_CAM_RATE, dt, nil)
+		if fishSt.camLookAt.Magnitude < 1e-3 then
+			fishSt.camLookAt = lookTarget
+		else
+			fishSt.camLookAt = dampToward(fishSt.camLookAt, lookTarget, FC.FISH_POV_SCHOOL_LOOK_RATE, dt, nil)
+		end
+	end
+
+	if not isLookSteeringHeld() then
+		local recentera = 1 - math.exp(-FC.FISH_POV_RECENTER_SMOOTH * math.max(dt, 0))
+		pov.freeYaw += (0 - pov.freeYaw) * recentera
+		pov.freePitch += (0 - pov.freePitch) * recentera
+		if math.abs(pov.freeYaw) < 1e-4 then
+			pov.freeYaw = 0
+		end
+		if math.abs(pov.freePitch) < 1e-4 then
+			pov.freePitch = 0
+		end
+	end
+
+	local base = CFrame.lookAt(camPos, fishSt.camLookAt)
+	local basePitch, baseYaw = base:ToOrientation()
+	local want = CFrame.new(camPos)
+		* CFrame.Angles(0, baseYaw + pov.freeYaw, 0)
+		* CFrame.Angles(math.clamp(basePitch + pov.freePitch, -1.15, 1.15), 0, 0)
+	if isLookSteeringHeld() then
+		pov.lookCf = want
+	else
+		local cfA = 1 - math.exp(-FC.FISH_POV_SCHOOL_CF_SMOOTH * math.max(dt, 0))
+		if pov.lookCf then
+			pov.lookCf = pov.lookCf:Lerp(want, cfA)
+		else
+			pov.lookCf = want
+		end
+	end
+	cam.CFrame = pov.lookCf :: CFrame
+	syncLookFromCFrame(cam.CFrame)
+end
+
 local function tickFishFollow(dt: number)
 	local cam = getCamera()
 	if not cam then
@@ -1318,6 +1824,20 @@ local function tickFishFollow(dt: number)
 	else
 		tickLookInput(dt)
 	end
+
+	cam.CameraType = Enum.CameraType.Scriptable
+	if fishCamUsePov() then
+		publishFishCamPov()
+		if WaveSim.isRunning() then
+			-- Waves: ahead of the pack looking back so tap-feed stays on target.
+			tickFishPovSchool(dt, cam)
+		else
+			-- Idle: coaster ride W1 → reef heart.
+			tickFishPov(dt, cam)
+		end
+		return
+	end
+	publishFishCamPov()
 
 	local now = os.clock()
 	local running = WaveSim.isRunning()
@@ -1371,7 +1891,7 @@ local function tickFishFollow(dt: number)
 				fishSt.switchTo = goal
 			end
 		elseif not running then
-			-- Idle: keep orbiting while focus slowly patrols W1â†’Wnâ†’W1â€¦
+			-- Idle: keep orbiting while focus slowly patrols W1→Wn→W1…
 			fishSt.targetId = nil
 			fishSt.switching = false
 			goal = tickRoutePatrol(dt)
@@ -1393,18 +1913,28 @@ local function tickFishFollow(dt: number)
 		end
 	end
 
-	-- Tight follow; when far behind, catch up harder (never ease off).
+	-- Soft follow during waves (matches POV lead-swap feel); idle stays snappy.
+	local softOrbit = running and not waveStartBoost
 	local focusErr = (goal - fishSt.dampPos).Magnitude
 	local dampRate = if waveStartBoost then FC.FISH_WAVE_START_DAMP_RATE else FC.FISH_DAMP_RATE
-	if not waveStartBoost and focusErr > FC.FISH_DAMP_CATCHUP_STUDS then
+	if softOrbit then
+		dampRate = FC.FISH_DAMP_RATE * FC.FISH_ORBIT_DAMP_MULT
+		if focusErr > FC.FISH_DAMP_CATCHUP_STUDS then
+			local catchT = math.clamp((focusErr - FC.FISH_DAMP_CATCHUP_STUDS) / 14, 0, 1)
+			dampRate = dampRate + (FC.FISH_DAMP_RATE_CATCHUP * 0.45 - dampRate) * catchT * 0.5
+		end
+	elseif not waveStartBoost and focusErr > FC.FISH_DAMP_CATCHUP_STUDS then
 		local catchT = math.clamp((focusErr - FC.FISH_DAMP_CATCHUP_STUDS) / 10, 0, 1)
 		dampRate = FC.FISH_DAMP_RATE + (FC.FISH_DAMP_RATE_CATCHUP - FC.FISH_DAMP_RATE) * catchT
 	end
-	local maxFocusSpeed = if waveStartBoost then nil else FC.FISH_FOCUS_MAX_SPEED
+	local maxFocusSpeed = if waveStartBoost
+		then nil
+		elseif softOrbit then FC.FISH_ORBIT_FOCUS_MAX_SPEED
+		else FC.FISH_FOCUS_MAX_SPEED
 	fishSt.dampPos = dampToward(fishSt.dampPos, goal, dampRate, dt, maxFocusSpeed)
 
 	if fishSt.switching then
-		local u = math.clamp((now - fishSt.switchT0) / FC.FISH_SWITCH_SEC, 0, 1)
+		local u = math.clamp((now - fishSt.switchT0) / fishSwitchDuration(), 0, 1)
 		local e = u * u * (3 - 2 * u)
 		fishSt.switchTo = fishSt.dampPos
 		fishSt.focusPos = fishSt.switchFrom:Lerp(fishSt.switchTo, e)
@@ -1417,13 +1947,19 @@ local function tickFishFollow(dt: number)
 	end
 
 	-- Look-at tracks the live fish goal (not a second lag behind focus).
-	local lookRate = if waveStartBoost then FC.FISH_WAVE_START_LOOK_RATE else FC.FISH_LOOK_RATE
+	local lookRate = if waveStartBoost
+		then FC.FISH_WAVE_START_LOOK_RATE
+		elseif softOrbit then FC.FISH_LOOK_RATE * FC.FISH_ORBIT_LOOK_MULT
+		else FC.FISH_LOOK_RATE
 	fishSt.lookPos = dampToward(fishSt.lookPos, goal, lookRate, dt, maxFocusSpeed)
 
+	-- Orbit: circle the lead fish / path focus.
 	local desired = fishSt.lookPos + fishChaseOffset(dt)
-	local camRate = if waveStartBoost then FC.FISH_WAVE_START_CAM_RATE else FC.FISH_CAM_RATE
+	local camRate = if waveStartBoost
+		then FC.FISH_WAVE_START_CAM_RATE
+		elseif softOrbit then FC.FISH_CAM_RATE * FC.FISH_ORBIT_CAM_MULT
+		else FC.FISH_CAM_RATE
 	camPos = dampToward(camPos, desired, camRate, dt, nil)
-	cam.CameraType = Enum.CameraType.Scriptable
 	cam.CFrame = lookAtFocus(fishSt.lookPos)
 	syncLookFromCFrame(cam.CFrame)
 end
@@ -1551,6 +2087,9 @@ setMode = function(nextMode: CamMode)
 	mode = nextMode
 	publishMode()
 	FishCamTune.setVisible(nextMode == "fishcam")
+	if nextMode ~= "plotcam" then
+		PlotCam2Tune.setVisible(false)
+	end
 	playCamCarousel(prev, nextMode, true)
 	-- Wait for the revolve so the active icon is on the top slot before measuring.
 	local labelToken = carouselToken
@@ -1631,6 +2170,8 @@ setMode = function(nextMode: CamMode)
 		end
 		setDroneLookCapture(false)
 	elseif nextMode == "fishcam" then
+		-- Keep last POV/orbit + pause choice (same open or closed backpack).
+		publishFishCamPov()
 		local cam = getCamera()
 		if resumePreserveView and cam then
 			cam.CameraType = Enum.CameraType.Scriptable
@@ -1665,8 +2206,15 @@ setMode = function(nextMode: CamMode)
 					seedFishFocus(spawnFocus)
 					fishSt.targetId = nil
 				end
-				camPos = fishSt.focusPos + fishChaseOffset(0)
-				cam.CFrame = lookAtFocus(fishSt.lookPos)
+				if fishCamUsePov() then
+					resetPovRideToW1()
+					if pov.lookCf then
+						cam.CFrame = pov.lookCf
+					end
+				else
+					camPos = fishSt.focusPos + fishChaseOffset(0)
+					cam.CFrame = lookAtFocus(fishSt.lookPos)
+				end
 				syncLookFromCFrame(cam.CFrame)
 			end
 		end
@@ -1817,7 +2365,10 @@ UserInputService.InputBegan:Connect(function(input, _gameProcessed)
 			and not isOverCamCycleButton(input.Position)
 			and not pointerOnCoralMoveHandle(mousePos)
 		then
-			mouseLookLast = mousePos
+			-- Arm look only after drag — tap-to-feed must not nudge the view.
+			mouseLookOrigin = mousePos
+			mouseLookArmed = false
+			mouseLookLast = nil
 		end
 		return
 	end
@@ -1855,6 +2406,8 @@ UserInputService.InputBegan:Connect(function(input, _gameProcessed)
 			if lookTouch == nil and (moveTouch ~= nil or rightSide) then
 				lookTouch = input
 				lookTouchLast = pos
+				lookTouchOrigin = pos
+				lookTouchArmed = false
 				return
 			end
 		end
@@ -1889,6 +2442,15 @@ UserInputService.InputChanged:Connect(function(input, _gameProcessed)
 	if input.UserInputType == Enum.UserInputType.Touch then
 		if input == lookTouch then
 			local pos = Vector2.new(input.Position.X, input.Position.Y)
+			if not lookTouchArmed then
+				if (pos - lookTouchOrigin).Magnitude < LOOK_DRAG_ARM_PX then
+					lookTouchLast = pos
+					return
+				end
+				lookTouchArmed = true
+				lookTouchLast = pos
+				return
+			end
 			local delta = pos - lookTouchLast
 			lookTouchLast = pos
 			if delta.Magnitude < 180 then
@@ -1915,8 +2477,11 @@ UserInputService.InputEnded:Connect(function(input, _gameProcessed)
 	if input.KeyCode == Enum.KeyCode.Thumbstick2 then
 		lookStick = Vector2.zero
 	end
-	if input.UserInputType == Enum.UserInputType.MouseButton1 then
+	if input.UserInputType == Enum.UserInputType.MouseButton1
+		or input.UserInputType == Enum.UserInputType.MouseButton2
+	then
 		clearPlotMousePan()
+		clearMouseLookDrag()
 	end
 	if input == lookTouch then
 		clearTouchLook()
@@ -2206,8 +2771,83 @@ FishCamTune.bind({
 	onYaw = function(deltaRad: number)
 		fishSt.orbitAngle -= deltaRad
 	end,
+	onPovChanged = function(on: boolean)
+		clearPovFreeLook()
+		FishCamTune.setPaused(false, true)
+		publishFishCamPov()
+		local cam = getCamera()
+		if not cam or mode ~= "fishcam" then
+			return
+		end
+		if on then
+			cam.CameraType = Enum.CameraType.Scriptable
+			if WaveSim.isRunning() then
+				-- Waves: park ahead on the ribbon looking back at the school (not W1 coaster / orbit).
+				local lead = WaveSim.getFurthestUnfedFish()
+				local spawnFocus = resolveFishSpawnFocus()
+				local focus = if lead then lead.position else spawnFocus
+				local pathDist = if lead then lead.dist else 0
+				if focus then
+					seedFishFocus(focus)
+					fishSt.targetId = if lead then lead.id else nil
+					fishSt.switching = false
+					fishSt.camPathDist = pathDist
+					fishSt.pathSnap = true
+					local desired, lookAt = schoolCamOnPath(focus, pathDist)
+					camPos = desired
+					fishSt.camLookAt = lookAt
+					cam.CFrame = CFrame.lookAt(camPos, lookAt)
+					pov.lookCf = cam.CFrame
+					syncLookFromCFrame(cam.CFrame)
+				else
+					resetPovRideToW1()
+					if pov.lookCf then
+						cam.CFrame = pov.lookCf
+						syncLookFromCFrame(cam.CFrame)
+					end
+				end
+			else
+				resetPovRideToW1()
+				if pov.lookCf then
+					cam.CFrame = pov.lookCf
+					syncLookFromCFrame(cam.CFrame)
+				end
+			end
+		else
+			-- Back to Fish Cam A orbit at current focus.
+			local focus = fishSt.focusPos
+			if focus.Magnitude < 1e-3 then
+				focus = cam.CFrame.Position
+				seedFishFocus(focus)
+			end
+			resetFishOrbitClock()
+			camPos = focus + fishChaseOffset(0)
+			cam.CameraType = Enum.CameraType.Scriptable
+			cam.CFrame = lookAtFocus(fishSt.lookPos)
+			syncLookFromCFrame(cam.CFrame)
+		end
+	end,
+	onPauseChanged = function(pausedOn: boolean)
+		if pausedOn then
+			-- Seed FPS yaw/pitch from the current view so drag continues smoothly.
+			local cam = getCamera()
+			local cf = if cam then cam.CFrame elseif pov.lookCf then pov.lookCf else nil
+			if cf then
+				local pitch, yaw = cf:ToOrientation()
+				pov.freePitch = math.clamp(pitch, -1.15, 1.15)
+				pov.freeYaw = yaw
+			else
+				clearPovFreeLook()
+			end
+		else
+			clearPovFreeLook()
+		end
+	end,
 })
+-- POV default lives in FishCamTune; do not retie it to backpack open/closed.
 FishCamTune.setVisible(mode == "fishcam")
+PlotCam2Tune.setVisible(mode == "plotcam")
+publishFishCamPov()
 
 -- Pinch / pointer zoom for Plot + Fish cams (Player Cam = PlayerModule; Free Cam = none).
 do
@@ -2618,8 +3258,15 @@ local function bindMobileLeftUi(left: Instance)
 		playerGui:GetAttributeChangedSignal("OceanTD_ResumeBuildCam"):Connect(onResumeBuildCam)
 
 		InventoryState.onOpenChanged(function(open)
+			-- Same Fish Cam (POV/orbit/pad) open or closed — no force-POV, no W1 snap.
+			publishFishCamPov()
+			PlotCam2Tune.setVisible(mode == "plotcam")
+			FishCamTune.setVisible(mode == "fishcam")
 			if open then
 				PlotCam2.notifyBuildOpened()
+				if mode == "fishcam" then
+					PlotCam2Tune.setVisible(false)
+				end
 			else
 				task.defer(tryResumeBuildCam)
 			end

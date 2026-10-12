@@ -1112,6 +1112,8 @@ function HungerUi.playFeedSound()
 	if joinIntroDemo then
 		return
 	end
+	-- Always the coral-food hit asset (not coin / not next-wave).
+	feedSound.SoundId = C.FEED_SOUND_ID
 	local pitch = feedPitchCursor
 	feedPitchCursor += C.FEED_PITCH_STEP
 	if feedPitchCursor > C.FEED_PITCH_MAX then
@@ -2133,11 +2135,16 @@ local function finishFish(agent: FishAgent, skipHappyVfx: boolean?)
 			local lookDir = if heartPos and agent.lastWorld
 				then (heartPos - agent.lastWorld)
 				else agent.smoothTang
-			L.ReefDefeatCam.play(heartPos or agent.lastWorld, lookDir, function()
-				if focusAgent.model and focusAgent.model.Parent then
-					destroyFish(focusAgent)
-				end
-				WaveSim.stop()
+			local defeatFocus = heartPos or agent.lastWorld
+			-- Partial-wave $D stream from HUD bar before defeat cam / GAME OVER.
+			task.spawn(function()
+				L.WaveFeedPayout.playWaveClearStreamAndWait()
+				L.ReefDefeatCam.play(defeatFocus, lookDir, function()
+					if focusAgent.model and focusAgent.model.Parent then
+						destroyFish(focusAgent)
+					end
+					WaveSim.stop()
+				end)
 			end)
 			return
 		end
@@ -2689,6 +2696,7 @@ local function beginWave(wave: number)
 	waveFishExpected = waveFishCount(wave)
 	waveFishSpawned = 0
 	waveFishFullyFed = 0
+	L.WaveFeedPayout.onWaveBegin()
 	-- Join intro: fish + shark only (no crabs / urchins).
 	if joinIntroDemo then
 		WaveCrab.beginWave(0)
@@ -4371,9 +4379,10 @@ function WaveSim.getHudSnapshot(): HudSnapshot
 	}
 end
 
--- Furthest hungry critter for Fish Cam:
--- unfed shark → Tang school → crabs/urchins (only after the shark is fed).
-function WaveSim.getFurthestUnfedFish(): { id: number, position: Vector3 }?
+-- Furthest hungry critter for Fish Cam POV:
+-- Tang school first; once all fish are fed → shark → crabs/urchins.
+-- `dist` = progress along the swim path (for path-locked POV).
+function WaveSim.getFurthestUnfedFish(): { id: number, position: Vector3, dist: number }?
 	local bestShark: FishAgent? = nil
 	local bestFish: FishAgent? = nil
 	local bestGround: FishAgent? = nil
@@ -4393,15 +4402,15 @@ function WaveSim.getFurthestUnfedFish(): { id: number, position: Vector3 }?
 			bestFish = f
 		end
 	end
-	local best = bestShark or bestFish or bestGround
+	local best = bestFish or bestShark or bestGround
 	if not best then
 		return nil
 	end
-	return { id = best.id, position = best.root.Position }
+	return { id = best.id, position = best.root.Position, dist = best.dist }
 end
 
 -- Furthest along the route among fish still swimming (fed or hungry).
-function WaveSim.getFurthestLiveFish(): { id: number, position: Vector3 }?
+function WaveSim.getFurthestLiveFish(): { id: number, position: Vector3, dist: number }?
 	local best: FishAgent? = nil
 	for _, f in ipairs(fishList) do
 		if f.finished or Path.isGroundCritter(f) or not f.root.Parent then
@@ -4414,7 +4423,7 @@ function WaveSim.getFurthestLiveFish(): { id: number, position: Vector3 }?
 	if not best then
 		return nil
 	end
-	return { id = best.id, position = best.root.Position }
+	return { id = best.id, position = best.root.Position, dist = best.dist }
 end
 
 -- Live world pose for a fish still on the path (fed or hungry).
@@ -4422,6 +4431,29 @@ function WaveSim.getFishPosition(id: number): Vector3?
 	for _, f in ipairs(fishList) do
 		if f.id == id and not f.finished and f.root.Parent then
 			return f.root.Position
+		end
+	end
+	return nil
+end
+
+function WaveSim.getFishPathDist(id: number): number?
+	for _, f in ipairs(fishList) do
+		if f.id == id and not f.finished and f.root.Parent then
+			return f.dist
+		end
+	end
+	return nil
+end
+
+-- Facing for Fish Cam POV (coaster view along the swim).
+function WaveSim.getFishLookVector(id: number): Vector3?
+	for _, f in ipairs(fishList) do
+		if f.id == id and not f.finished and f.root.Parent then
+			local look = f.root.CFrame.LookVector
+			if look.Magnitude > 1e-3 then
+				return look.Unit
+			end
+			return nil
 		end
 	end
 	return nil
@@ -4456,19 +4488,12 @@ function WaveSim.finishWaveEarly(): boolean
 	if not complete then
 		return false
 	end
-	local burstEmojis = WaveSim.getFinishEmojis()
-	local endPos = if pathData then pathData.endPos else nil
-	if not endPos then
-		endPos = L.WaveEndVfx.getEndHeartWorldPos()
-	end
+	-- Happy firework already played when NEXT WAVE unlocked (WaveSlot).
 	-- Credit remaining full fish/crabs/urchins; sharks keep their route.
 	for _, f in ipairs(fishList) do
 		if not f.finished and not isWaveLingerer(f) and f.hunger >= f.maxHunger then
 			finishFish(f, true)
 		end
-	end
-	if endPos and #burstEmojis > 0 then
-		L.WaveEndVfx.burstHappyFirework(burstEmojis, endPos)
 	end
 	awardCoralWaveCompleted(waveIndex)
 	Feed.clearActiveWaveEntities()

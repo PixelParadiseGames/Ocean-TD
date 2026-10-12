@@ -65,19 +65,37 @@ local function clearGridForPart(bucket: PlotBucket, part: BasePart)
 	bucket.partKey[part] = nil
 end
 
+-- Relocate/soft-plant previews write GridAnchor every frame; a cancelled move can leave
+-- attrs on a distant cell while the mesh sits at home. Never trust an anchor that far.
+local ANCHOR_MAX_XZ = GridMath.CELL_SIZE * 1.25
+
+local function sampleGridPos(part: BasePart): Vector3
+	local ax = part:GetAttribute("OceanTD_GridAnchorX")
+	local ay = part:GetAttribute("OceanTD_GridAnchorY")
+	local az = part:GetAttribute("OceanTD_GridAnchorZ")
+	if typeof(ax) == "number" and typeof(ay) == "number" and typeof(az) == "number" then
+		local dx = ax - part.Position.X
+		local dz = az - part.Position.Z
+		if dx * dx + dz * dz <= ANCHOR_MAX_XZ * ANCHOR_MAX_XZ then
+			return Vector3.new(ax, ay, az)
+		end
+		-- Heal stale XZ; keep authored Y so tall meshes still map to ground gy.
+		local healed = Vector3.new(part.Position.X, ay, part.Position.Z)
+		part:SetAttribute("OceanTD_GridAnchorX", healed.X)
+		part:SetAttribute("OceanTD_GridAnchorZ", healed.Z)
+		return healed
+	end
+	return part.Position
+end
+
 local function assignGrid(plotId: string, bucket: PlotBucket, part: BasePart)
 	clearGridForPart(bucket, part)
 	local plot = ClientPlot.get()
 	if not plot or plot.plotId ~= plotId then
 		return
 	end
-	-- SeaGrass/SeaFan sit above the plant cell — prefer authored grid anchor.
-	local ax = part:GetAttribute("OceanTD_GridAnchorX")
-	local ay = part:GetAttribute("OceanTD_GridAnchorY")
-	local az = part:GetAttribute("OceanTD_GridAnchorZ")
-	local sample = if typeof(ax) == "number" and typeof(ay) == "number" and typeof(az) == "number"
-		then Vector3.new(ax, ay, az)
-		else part.Position
+	-- SeaGrass/SeaFan sit above the plant cell — prefer authored grid anchor (when sane).
+	local sample = sampleGridPos(part)
 	local lp = GridMath.worldToPlotLocal(sample, plot.cframe)
 	local gx, gy, gz = GridMath.worldToGrid(lp, Vector3.zero)
 	local key = GridMath.key(gx, gy, gz)
@@ -486,7 +504,28 @@ end
 function PlacedCoralIndex.getAtWorld(plotId: string, worldPos: Vector3, plotCf: CFrame, ignore: BasePart?): BasePart?
 	local localPos = GridMath.worldToPlotLocal(worldPos, plotCf)
 	local gx, gy, gz = GridMath.worldToGrid(localPos, Vector3.zero)
-	return PlacedCoralIndex.getAtGrid(plotId, gx, gy, gz, ignore)
+	local part = PlacedCoralIndex.getAtGrid(plotId, gx, gy, gz, ignore)
+	if not part then
+		return nil
+	end
+	-- Stale index: coral visually far from the aimed cell (attrs claimed this key).
+	local maxDist = GridMath.CELL_SIZE * 1.5
+	local dx = part.Position.X - worldPos.X
+	local dz = part.Position.Z - worldPos.Z
+	if dx * dx + dz * dz <= maxDist * maxDist then
+		return part
+	end
+	PlacedCoralIndex.reindex(part)
+	local again = PlacedCoralIndex.getAtGrid(plotId, gx, gy, gz, ignore)
+	if not again then
+		return nil
+	end
+	local dx2 = again.Position.X - worldPos.X
+	local dz2 = again.Position.Z - worldPos.Z
+	if dx2 * dx2 + dz2 * dz2 <= maxDist * maxDist then
+		return again
+	end
+	return nil
 end
 
 -- Highest BrainCoral in the XZ column under worldPos (any Y).
@@ -702,14 +741,14 @@ function PlacedCoralIndex.countBrainStackSize(plotId: string, host: BasePart, ig
 	return n
 end
 
-function PlacedCoralIndex.countBrainChildren(plotId: string, host: BasePart, ignore: BasePart?): number
+function PlacedCoralIndex.getBrainChildren(plotId: string, host: BasePart, ignore: BasePart?): { BasePart }
 	PlacedCoralIndex.ensure()
 	local bucket = buckets[plotId]
 	if not bucket then
-		return 0
+		return {}
 	end
 	local hostId = BrainStack.readPlaceId(host)
-	local n = 0
+	local out: { BasePart } = {}
 	local hostR = BrainStack.diameterOfPart(host) * 0.5
 	for _, part in ipairs(bucket.parts) do
 		if part ~= host and part ~= ignore and part.Parent and BrainStack.isBrainId(part:GetAttribute("OceanTD_SpeciesId")) then
@@ -720,11 +759,15 @@ function PlacedCoralIndex.countBrainChildren(plotId: string, host: BasePart, ign
 				spatial = BrainStack.horizontalDist(part.Position, host.Position) <= (hostR + otherR) * 0.85
 			end
 			if linked or spatial then
-				n += 1
+				table.insert(out, part)
 			end
 		end
 	end
-	return n
+	return out
+end
+
+function PlacedCoralIndex.countBrainChildren(plotId: string, host: BasePart, ignore: BasePart?): number
+	return #PlacedCoralIndex.getBrainChildren(plotId, host, ignore)
 end
 
 function PlacedCoralIndex.brainHasFreeSlot(plotId: string, host: BasePart, ignore: BasePart?): boolean

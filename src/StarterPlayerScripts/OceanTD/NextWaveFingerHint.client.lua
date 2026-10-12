@@ -41,6 +41,10 @@ local gen = 0
 local activeWave: number? = nil
 local rng = Random.new()
 
+local function skillsBubblesOpen(): boolean
+	return playerGui:GetAttribute("OceanTD_SkillsBubblesOpen") == true
+end
+
 local function easeOutCubic(t: number): number
 	local u = math.clamp(t, 0, 1)
 	local inv = 1 - u
@@ -364,8 +368,8 @@ local function startHint(wave: number)
 				return
 			end
 
-			-- Button gone / wave advanced → hide.
-			if not WaveSlot.isFinishReady() then
+			-- Button gone / wave advanced / skills open → hide.
+			if not WaveSlot.isFinishReady() or skillsBubblesOpen() then
 				stopHint()
 				return
 			end
@@ -455,6 +459,7 @@ WaveSim.onHud(function(snap)
 		and snap.feedComplete == true
 		and wave >= 1
 		and wave <= MAX_HINT_WAVE
+		and not skillsBubblesOpen()
 	if want then
 		startHint(wave)
 	elseif activeWave ~= nil then
@@ -464,4 +469,10 @@ end)
 
 WaveSim.onStopped(function()
 	stopHint()
+end)
+
+playerGui:GetAttributeChangedSignal("OceanTD_SkillsBubblesOpen"):Connect(function()
+	if skillsBubblesOpen() then
+		stopHint()
+	end
 end)

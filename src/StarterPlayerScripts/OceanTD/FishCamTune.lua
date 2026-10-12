@@ -1,7 +1,10 @@
 --!strict
 --[[
-	Four quick buttons under MobileLeftUI.dPad.FishCam (yaw ‹ ›, zoom -/+).
-	Mirrors PlotCam2Tune's quick pad; zoom scales chase distance, yaw spins orbit.
+	Fish Cam quick pad under MobileLeftUI.dPad.FishCam:
+	  Top-left  POV  — toggle coaster POV vs classic orbit (Fish Cam A)
+	  Top-right II/▶ — pause path; hold-drag look while paused
+	  Bottom (orbit): - / + zoom
+	  Bottom (POV playing): slow / fast path rate (10 steps, default 6)
 ]]
 
 local Players = game:GetService("Players")
@@ -17,21 +20,25 @@ local InventoryState = require(script.Parent:WaitForChild("InventoryState"))
 
 local FishCamTune = {}
 
-local YAW_STEP_RAD = math.rad(15)
 local ZOOM_STEP = 0.12
-local DIST_SCALE_MIN = 0.2 -- twice as close as prior 0.4 floor
+local DIST_SCALE_MIN = 0.2
 local DIST_SCALE_MAX = 2.5
+local POV_SPEED_STEPS = 10
+local POV_SPEED_DEFAULT = 6 -- step 6 = 1× baseline loop rate
+local POV_SLOW_ICON = "rbxassetid://82552395380168"
+local POV_FAST_ICON = "rbxassetid://89015939761469"
 local QUICK_NAME = "OceanTD_FishCamQuick"
 local DEBUG_GUI_NAME = "OceanTD_FishCamDebug"
-local QUICK_SCALE = 0.52
+local QUICK_SCALE = 0.52 * 1.15 -- +15% vs cam icon
 local QUICK_GAP = 6
 local QUICK_ROW_GAP = 6
 local BTN_BLACK = Color3.new(0, 0, 0)
 local BTN_GREEN = Color3.fromRGB(40, 220, 90)
+local BTN_POV_GREEN = Color3.fromRGB(28, 150, 68) -- slightly darker than pad green
 local BTN_RED = Color3.fromRGB(220, 55, 55)
+local BTN_DIM = Color3.fromRGB(28, 28, 32)
 local FLASH_IN = TweenInfo.new(0.06, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 local FLASH_OUT = TweenInfo.new(0.28, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
-local STEER_HOLD_SEC = 0.85
 
 local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui") :: PlayerGui
@@ -59,22 +66,118 @@ local fishCamBtn: GuiObject? = nil
 local layoutConn: RBXScriptConnection? = nil
 local visible = false
 local distScale = 1
-local steerUntil = 0
+-- Default POV on (backpack ride); pad toggle is remembered for the session.
+local povOn = true
+local paused = false
+local povSpeedStep = POV_SPEED_DEFAULT
 local yawHandler: ((number) -> ())? = nil
+local onPovChanged: ((boolean) -> ())? = nil
+local onPauseChanged: ((boolean) -> ())? = nil
 local flashToken: { [TextButton]: number } = {}
 local debugGui: ScreenGui? = nil
 local zoomLabel: TextLabel? = nil
 
-function FishCamTune.bind(handlers: { onYaw: (number) -> () })
+local povBtn: TextButton? = nil
+local pauseBtn: TextButton? = nil
+local pauseIcon: Frame? = nil -- two-bar pause glyph (❚❚ often missing from fonts)
+local pausePlayLbl: TextLabel? = nil
+local zoomOutBtn: TextButton? = nil
+local zoomInBtn: TextButton? = nil
+local povSlowBtn: TextButton? = nil
+local povFastBtn: TextButton? = nil
+
+local refreshToggleChrome: () -> ()
+local syncBottomRow: () -> ()
+local layoutQuickButtons: () -> ()
+local syncPauseGlyph: () -> ()
+
+function FishCamTune.bind(handlers: {
+	onYaw: ((number) -> ())?,
+	onPovChanged: ((boolean) -> ())?,
+	onPauseChanged: ((boolean) -> ())?,
+})
 	yawHandler = handlers.onYaw
+	onPovChanged = handlers.onPovChanged
+	onPauseChanged = handlers.onPauseChanged
 end
 
 function FishCamTune.getDistScale(): number
 	return distScale
 end
 
+function FishCamTune.isPovOn(): boolean
+	return povOn
+end
+
+function FishCamTune.isPaused(): boolean
+	return paused
+end
+
+function FishCamTune.getPovSpeedStep(): number
+	return povSpeedStep
+end
+
+-- Step 6 = 1× FISH_POV_LOOP_SEC baseline; 1 = slowest, 10 = fastest.
+function FishCamTune.getPovSpeedMult(): number
+	return povSpeedStep / POV_SPEED_DEFAULT
+end
+
+-- Kept for FreeCam orbit steer hold compatibility (yaw buttons removed).
 function FishCamTune.isSteeringOrbit(): boolean
-	return os.clock() < steerUntil
+	return false
+end
+
+function FishCamTune.setPovOn(on: boolean, silent: boolean?)
+	local nextOn = on == true
+	if povOn == nextOn then
+		refreshToggleChrome()
+		syncBottomRow()
+		return
+	end
+	povOn = nextOn
+	if not povOn then
+		-- Orbit mode: pause only applies to the POV ride.
+		if paused then
+			paused = false
+			local fn = onPauseChanged
+			if fn and not silent then
+				fn(false)
+			end
+		end
+	end
+	refreshToggleChrome()
+	syncBottomRow()
+	layoutQuickButtons()
+	local fn = onPovChanged
+	if fn and not silent then
+		fn(povOn)
+	end
+end
+
+function FishCamTune.setPaused(on: boolean, silent: boolean?)
+	local nextOn = on == true
+	if not povOn then
+		nextOn = false
+	end
+	if paused == nextOn then
+		refreshToggleChrome()
+		syncBottomRow()
+		return
+	end
+	paused = nextOn
+	refreshToggleChrome()
+	syncBottomRow()
+	layoutQuickButtons()
+	local fn = onPauseChanged
+	if fn and not silent then
+		fn(paused)
+	end
+end
+
+local function nudgePovSpeed(delta: number): boolean
+	local before = povSpeedStep
+	povSpeedStep = math.clamp(povSpeedStep + delta, 1, POV_SPEED_STEPS)
+	return before ~= povSpeedStep
 end
 
 local function destroyZoomDebug()
@@ -85,47 +188,6 @@ local function destroyZoomDebug()
 	zoomLabel = nil
 end
 
-local function ensureZoomDebug(): TextLabel?
-	if zoomLabel and zoomLabel.Parent and debugGui and debugGui.Parent then
-		return zoomLabel
-	end
-	destroyZoomDebug()
-	local sg = Instance.new("ScreenGui")
-	sg.Name = DEBUG_GUI_NAME
-	sg.ResetOnSpawn = false
-	sg.IgnoreGuiInset = true
-	sg.DisplayOrder = 9200
-	sg.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-	sg.Parent = playerGui
-
-	local lbl = Instance.new("TextLabel")
-	lbl.Name = "ZoomLevel"
-	lbl.AnchorPoint = Vector2.new(1, 0.5)
-	lbl.Position = UDim2.new(1, -18, 0.5, 0)
-	lbl.Size = UDim2.fromOffset(120, 36)
-	lbl.BackgroundColor3 = Color3.fromRGB(12, 18, 28)
-	lbl.BackgroundTransparency = 0.25
-	lbl.BorderSizePixel = 0
-	lbl.Font = UiTheme.Font
-	lbl.TextSize = 18
-	lbl.TextColor3 = Color3.fromRGB(220, 245, 255)
-	lbl.TextXAlignment = Enum.TextXAlignment.Center
-	lbl.Text = "Zoom 1.00"
-	lbl.Parent = sg
-	local corner = Instance.new("UICorner")
-	corner.CornerRadius = UDim.new(0, 8)
-	corner.Parent = lbl
-	local stroke = Instance.new("UIStroke")
-	stroke.Color = Color3.fromRGB(80, 160, 200)
-	stroke.Thickness = 1.5
-	stroke.Transparency = 0.35
-	stroke.Parent = lbl
-
-	debugGui = sg
-	zoomLabel = lbl
-	return lbl
-end
-
 local function refreshZoomLabel()
 	local lbl = zoomLabel
 	if not lbl or not lbl.Parent then
@@ -134,8 +196,10 @@ local function refreshZoomLabel()
 	lbl.Text = string.format("Zoom %.2f", distScale)
 end
 
--- BaseCamera-style pinch: beginDistScale / clamp(touchScale).
 function FishCamTune.applyPinchScale(beginDistScale: number, touchScale: number): boolean
+	if povOn then
+		return false
+	end
 	if typeof(beginDistScale) ~= "number" or typeof(touchScale) ~= "number" then
 		return false
 	end
@@ -152,8 +216,10 @@ function FishCamTune.applyPinchScale(beginDistScale: number, touchScale: number)
 	return true
 end
 
--- PointerAction pinch delta: positive → zoom in (closer).
 function FishCamTune.nudgeZoomByDelta(delta: number): boolean
+	if povOn then
+		return false
+	end
 	if typeof(delta) ~= "number" or delta ~= delta or delta == 0 then
 		return false
 	end
@@ -166,7 +232,6 @@ function FishCamTune.nudgeZoomByDelta(delta: number): boolean
 end
 
 local function setDebugVisible(_on: boolean)
-	-- Zoom readout debug stays off in shipping builds.
 	destroyZoomDebug()
 end
 
@@ -196,7 +261,9 @@ local function flashQuickButton(btn: TextButton, ok: boolean)
 		if flashToken[btn] ~= my then
 			return
 		end
-		local twOut = TweenService:Create(btn, FLASH_OUT, { BackgroundColor3 = BTN_BLACK })
+		local twOut = TweenService:Create(btn, FLASH_OUT, {
+			BackgroundColor3 = BTN_BLACK,
+		})
 		twOut:Play()
 		twOut.Completed:Once(function()
 			if flashToken[btn] == my then
@@ -205,6 +272,67 @@ local function flashQuickButton(btn: TextButton, ok: boolean)
 			end
 		end)
 	end)
+end
+
+local function paintToggle(btn: TextButton?, on: boolean, enabled: boolean, offColor: Color3?)
+	if not btn then
+		return
+	end
+	btn.AutoButtonColor = false
+	if not enabled then
+		btn.BackgroundColor3 = BTN_DIM
+		btn.TextTransparency = 0.45
+		return
+	end
+	btn.TextTransparency = 0
+	btn.BackgroundColor3 = if on then BTN_GREEN else (offColor or BTN_BLACK)
+end
+
+syncPauseGlyph = function()
+	if pauseBtn then
+		pauseBtn.Text = ""
+		pauseBtn.Active = povOn
+		pauseBtn.AutoButtonColor = false
+	end
+	if pauseIcon then
+		pauseIcon.Visible = povOn and not paused
+	end
+	if pausePlayLbl then
+		pausePlayLbl.Visible = povOn and paused
+	end
+end
+
+refreshToggleChrome = function()
+	-- POV on = darker green, off = red. Pause/play stays black (glyph only swaps).
+	if povBtn then
+		povBtn.AutoButtonColor = false
+		povBtn.Text = "POV"
+		povBtn.TextTransparency = 0
+		povBtn.BackgroundColor3 = if povOn then BTN_POV_GREEN else BTN_RED
+	end
+	if pauseBtn then
+		pauseBtn.AutoButtonColor = false
+		pauseBtn.BackgroundColor3 = if povOn then BTN_BLACK else BTN_DIM
+		pauseBtn.TextTransparency = 0
+	end
+	syncPauseGlyph()
+end
+
+syncBottomRow = function()
+	local showZoom = not povOn
+	local showPovSpeed = povOn and not paused
+	if zoomOutBtn then
+		zoomOutBtn.Visible = showZoom
+	end
+	if zoomInBtn then
+		zoomInBtn.Visible = showZoom
+	end
+	if povSlowBtn then
+		povSlowBtn.Visible = showPovSpeed
+	end
+	if povFastBtn then
+		povFastBtn.Visible = showPovSpeed
+	end
 end
 
 local function makeRoundQuick(parent: Frame, name: string, text: string, order: number, sizePx: number): TextButton
@@ -217,7 +345,7 @@ local function makeRoundQuick(parent: Frame, name: string, text: string, order: 
 	b.BorderSizePixel = 0
 	b.AutoButtonColor = true
 	b.Font = UiTheme.Font
-	b.TextSize = math.clamp(math.floor(sizePx * 0.55), 14, 22)
+	b.TextSize = math.clamp(math.floor(sizePx * 0.42), 11, 18)
 	b.TextColor3 = Color3.new(1, 1, 1)
 	b.Text = text
 	b.ZIndex = 50
@@ -237,7 +365,7 @@ local function carouselCollapsedReady(): boolean
 	return playerGui:GetAttribute(FreeCamConfig.ATTR_CAROUSEL_COLLAPSED) == true
 end
 
-local function layoutQuickButtons()
+layoutQuickButtons = function()
 	local holder = quickHolder
 	local fish = resolveFishCamButton()
 	if not holder or not fish then
@@ -260,7 +388,9 @@ local function layoutQuickButtons()
 
 	local side = math.max(22, math.floor(math.min(as.X, as.Y) * QUICK_SCALE))
 	local width = side * 2 + QUICK_GAP
-	local height = side * 2 + QUICK_ROW_GAP
+	-- One row only while POV is paused (play); otherwise top + bottom.
+	local rows = if (povOn and paused) then 1 else 2
+	local height = side * rows + QUICK_ROW_GAP * (rows - 1)
 	holder.Size = UDim2.fromOffset(width, height)
 	holder.AnchorPoint = Vector2.new(0.5, 0)
 	holder.Position = UDim2.fromOffset(
@@ -273,23 +403,18 @@ local function layoutQuickButtons()
 	for _, ch in ipairs(holder:GetChildren()) do
 		if ch:IsA("TextButton") then
 			ch.Size = UDim2.fromOffset(side, side)
-			ch.TextSize = math.clamp(math.floor(side * 0.55), 14, 22)
+			local isPov = ch.Name == "PovToggle"
+			ch.TextSize = math.clamp(math.floor(side * (if isPov then 0.34 else 0.42)), 10, 18)
 		end
 	end
-end
-
-local function nudgeYaw(dir: number): boolean
-	local fn = yawHandler
-	if not fn then
-		return false
-	end
-	-- dir -1 = ‹ (left), +1 = › (right). Match look-drag: right decreases orbitAngle.
-	fn(dir * YAW_STEP_RAD)
-	steerUntil = os.clock() + STEER_HOLD_SEC
-	return true
+	syncBottomRow()
+	refreshToggleChrome()
 end
 
 local function nudgeZoom(zoomOut: boolean): boolean
+	if povOn then
+		return false
+	end
 	local before = distScale
 	if zoomOut then
 		distScale = math.clamp(distScale + ZOOM_STEP, DIST_SCALE_MIN, DIST_SCALE_MAX)
@@ -330,16 +455,92 @@ local function ensureQuickPad(): Frame?
 	grid.Parent = holder
 	quickGrid = grid
 
-	local yawLeft = makeRoundQuick(holder, "YawLeft", "‹", 1, 36)
-	local yawRight = makeRoundQuick(holder, "YawRight", "›", 2, 36)
+	local pov = makeRoundQuick(holder, "PovToggle", "POV", 1, 36)
+	local pause = makeRoundQuick(holder, "PauseToggle", "", 2, 36)
 	local zoomOut = makeRoundQuick(holder, "ZoomOut", "-", 3, 36)
 	local zoomIn = makeRoundQuick(holder, "ZoomIn", "+", 4, 36)
+	local slow = makeRoundQuick(holder, "PovSlow", "", 5, 36)
+	local fast = makeRoundQuick(holder, "PovFast", "", 6, 36)
+	povBtn = pov
+	pauseBtn = pause
+	zoomOutBtn = zoomOut
+	zoomInBtn = zoomIn
+	povSlowBtn = slow
+	povFastBtn = fast
 
-	yawLeft.Activated:Connect(function()
-		flashQuickButton(yawLeft, nudgeYaw(-1))
+	local function addPadIcon(btn: TextButton, imageId: string)
+		local img = Instance.new("ImageLabel")
+		img.Name = "Icon"
+		img.BackgroundTransparency = 1
+		img.AnchorPoint = Vector2.new(0.5, 0.5)
+		img.Position = UDim2.fromScale(0.5, 0.5)
+		img.Size = UDim2.fromScale(0.62, 0.62)
+		img.Image = imageId
+		img.ScaleType = Enum.ScaleType.Fit
+		img.ZIndex = 51
+		img.Parent = btn
+	end
+	addPadIcon(slow, POV_SLOW_ICON)
+	addPadIcon(fast, POV_FAST_ICON)
+	slow.Visible = false
+	fast.Visible = false
+
+	-- Classic pause bars (same idea as wave-speed pause affordance; font glyphs often blank).
+	local bars = Instance.new("Frame")
+	bars.Name = "PauseBars"
+	bars.BackgroundTransparency = 1
+	bars.AnchorPoint = Vector2.new(0.5, 0.5)
+	bars.Position = UDim2.fromScale(0.5, 0.5)
+	bars.Size = UDim2.fromScale(0.42, 0.48)
+	bars.ZIndex = 51
+	bars.Parent = pause
+	local barL = Instance.new("Frame")
+	barL.Name = "L"
+	barL.BackgroundColor3 = Color3.new(1, 1, 1)
+	barL.BorderSizePixel = 0
+	barL.Size = UDim2.new(0.32, 0, 1, 0)
+	barL.Position = UDim2.fromScale(0, 0)
+	barL.ZIndex = 52
+	barL.Parent = bars
+	local barR = Instance.new("Frame")
+	barR.Name = "R"
+	barR.BackgroundColor3 = Color3.new(1, 1, 1)
+	barR.BorderSizePixel = 0
+	barR.Size = UDim2.new(0.32, 0, 1, 0)
+	barR.Position = UDim2.fromScale(0.68, 0)
+	barR.ZIndex = 52
+	barR.Parent = bars
+	pauseIcon = bars
+
+	local playLbl = Instance.new("TextLabel")
+	playLbl.Name = "PlayGlyph"
+	playLbl.BackgroundTransparency = 1
+	playLbl.Size = UDim2.fromScale(1, 1)
+	playLbl.Font = UiTheme.Font
+	playLbl.Text = "▶"
+	playLbl.TextColor3 = Color3.new(1, 1, 1)
+	playLbl.TextScaled = true
+	playLbl.ZIndex = 51
+	playLbl.Visible = false
+	playLbl.Parent = pause
+	local playPad = Instance.new("UIPadding")
+	playPad.PaddingLeft = UDim.new(0.18, 0)
+	playPad.PaddingRight = UDim.new(0.12, 0)
+	playPad.PaddingTop = UDim.new(0.12, 0)
+	playPad.PaddingBottom = UDim.new(0.12, 0)
+	playPad.Parent = playLbl
+	pausePlayLbl = playLbl
+
+	pov.Activated:Connect(function()
+		FishCamTune.setPovOn(not povOn)
 	end)
-	yawRight.Activated:Connect(function()
-		flashQuickButton(yawRight, nudgeYaw(1))
+	pause.Activated:Connect(function()
+		if not povOn then
+			flashQuickButton(pause, false)
+			refreshToggleChrome()
+			return
+		end
+		FishCamTune.setPaused(not paused)
 	end)
 	zoomOut.Activated:Connect(function()
 		flashQuickButton(zoomOut, nudgeZoom(true))
@@ -347,8 +548,16 @@ local function ensureQuickPad(): Frame?
 	zoomIn.Activated:Connect(function()
 		flashQuickButton(zoomIn, nudgeZoom(false))
 	end)
+	slow.Activated:Connect(function()
+		flashQuickButton(slow, nudgePovSpeed(-1))
+	end)
+	fast.Activated:Connect(function()
+		flashQuickButton(fast, nudgePovSpeed(1))
+	end)
 
 	quickHolder = holder
+	syncBottomRow()
+	refreshToggleChrome()
 	layoutQuickButtons()
 	return holder
 end
@@ -382,13 +591,18 @@ local function hudBlocksQuick(): boolean
 end
 
 local function syncQuickVisibility()
+	local camMode = playerGui:GetAttribute(FreeCamConfig.ATTR_MODE)
+	if camMode ~= nil and camMode ~= "fishcam" then
+		setQuickVisible(false)
+		return
+	end
 	setQuickVisible(visible and carouselCollapsedReady() and not hudBlocksQuick())
 end
 
 function FishCamTune.setVisible(on: boolean)
 	visible = on == true
 	syncQuickVisibility()
-	setDebugVisible(visible)
+	setDebugVisible(false)
 end
 
 function FishCamTune.isVisible(): boolean
@@ -401,6 +615,7 @@ function FishCamTune.resetZoom()
 end
 
 playerGui:GetAttributeChangedSignal(FreeCamConfig.ATTR_CAROUSEL_COLLAPSED):Connect(syncQuickVisibility)
+playerGui:GetAttributeChangedSignal(FreeCamConfig.ATTR_MODE):Connect(syncQuickVisibility)
 playerGui:GetAttributeChangedSignal("OceanTD_StoreOpen"):Connect(syncQuickVisibility)
 playerGui:GetAttributeChangedSignal("OceanTD_SkillsBubblesOpen"):Connect(syncQuickVisibility)
 playerGui:GetAttributeChangedSignal("OceanTD_ReefReportOpen"):Connect(syncQuickVisibility)

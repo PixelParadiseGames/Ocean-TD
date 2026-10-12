@@ -2,11 +2,12 @@
 --[[
 	Slot5 Start / Stop waves — always visible quickbar control.
 	Shortcuts: R (keyboard) / ButtonX (gamepad). Help badge green; hidden on touch.
-	Wave HUD layouts (WAVE_HUD_LAYOUT): "right" (saved Slot5 stack) | "bottomRight" (active).
+	Wave HUD layouts (WAVE_HUD_LAYOUT): "right" (saved Slot5 stack) | "bottomRight" (active = bottom-centered wave).
 ]]
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
+local SoundService = game:GetService("SoundService")
 local UserInputService = game:GetService("UserInputService")
 local GuiService = game:GetService("GuiService")
 local TweenService = game:GetService("TweenService")
@@ -25,8 +26,47 @@ local InventoryState = require(script.Parent:WaitForChild("InventoryState"))
 local WaveSim = require(script.Parent:WaitForChild("WaveSim"))
 local WaveSimConsts = require(script.Parent:WaitForChild("WaveSimConsts"))
 local WaveSlotSummary = require(script.Parent:WaitForChild("WaveSlotSummary"))
+local WaveFeedPayout = require(script.Parent:WaitForChild("WaveFeedPayout"))
+local WaveEntityPool = require(script.Parent:WaitForChild("WaveEntityPool"))
 
 local WaveSlot = {}
+
+local nextWaveUnlockSound = Instance.new("Sound")
+nextWaveUnlockSound.Name = "OceanTD_NextWaveUnlock"
+nextWaveUnlockSound.SoundId = WaveSimConsts.NEXT_WAVE_UNLOCK_SOUND_ID or "rbxassetid://1836085504"
+nextWaveUnlockSound.Volume = WaveSimConsts.NEXT_WAVE_UNLOCK_VOLUME or 1
+nextWaveUnlockSound.Parent = SoundService
+
+local nextWaveUnlockCheer = Instance.new("Sound")
+nextWaveUnlockCheer.Name = "OceanTD_NextWaveUnlockCheer"
+nextWaveUnlockCheer.SoundId = WaveSimConsts.NEXT_WAVE_UNLOCK_CHEER_SOUND_ID or "rbxassetid://79020702281821"
+nextWaveUnlockCheer.Volume = WaveSimConsts.NEXT_WAVE_UNLOCK_CHEER_VOLUME or 2.4
+nextWaveUnlockCheer.Parent = SoundService
+
+local function playNextWaveUnlockSound()
+	nextWaveUnlockSound.SoundId = WaveSimConsts.NEXT_WAVE_UNLOCK_SOUND_ID or "rbxassetid://1836085504"
+	local vol = WaveSimConsts.NEXT_WAVE_UNLOCK_VOLUME or 1
+	WaveEntityPool.playSound("nextWaveUnlock", nextWaveUnlockSound, 1, vol, true)
+
+	-- Yay/cheers on unlock: 1–4 pitched hits spread across ~1s (not stacked).
+	-- Advance sting (117570…) only on NEXT WAVE button → WaveArrowPreview.playWaveAdvanceSound.
+	local cheerId = WaveSimConsts.NEXT_WAVE_UNLOCK_CHEER_SOUND_ID or "rbxassetid://79020702281821"
+	nextWaveUnlockCheer.SoundId = cheerId
+	local cheerVol = WaveSimConsts.NEXT_WAVE_UNLOCK_CHEER_VOLUME or 2.4
+	local nMin = WaveSimConsts.NEXT_WAVE_UNLOCK_CHEER_MIN or 1
+	local nMax = WaveSimConsts.NEXT_WAVE_UNLOCK_CHEER_MAX or 4
+	local gap = WaveSimConsts.NEXT_WAVE_UNLOCK_CHEER_GAP_SEC or 0.5
+	local pitch0 = WaveSimConsts.NEXT_WAVE_UNLOCK_CHEER_PITCH_MIN or 0.88
+	local pitchStep = WaveSimConsts.NEXT_WAVE_UNLOCK_CHEER_PITCH_STEP or 0.1
+	local count = math.clamp(math.random(nMin, nMax), 1, 8)
+	for i = 1, count do
+		local pitch = pitch0 + (i - 1) * pitchStep
+		local delaySec = (i - 1) * gap
+		task.delay(delaySec, function()
+			WaveEntityPool.playSound("nextWaveUnlockCheer_" .. tostring(i), nextWaveUnlockCheer, pitch, cheerVol)
+		end)
+	end
+end
 
 local START_ICON = "rbxassetid://74802566438233"
 local STOP_ICON = "rbxassetid://96580667427806"
@@ -113,8 +153,11 @@ local FLASH_GREEN = Color3.fromRGB(40, 180, 80) -- Next Wave outer stroke (not n
 local FLASH_DARK = Color3.fromRGB(0, 110, 35)
 local LINE_H = 28
 local BAR_H = 26
-local WAVE_NEXT_HEIGHT_MULT = 1.4 -- Next Wave bar height vs normal
-local WAVE_NEXT_OVERSHOOT_MULT = 1.58 -- grow past target, then settle
+local WAVE_NEXT_HEIGHT_MULT = 1.4 -- Next Wave bar resting height vs normal
+local WAVE_NEXT_OVERSHOOT_MULT = 1.58 -- legacy grow (non-unlock paths)
+local WAVE_NEXT_UNLOCK_PEAK_MULT = 5 -- 500% height pop when NEXT WAVE unlocks
+local WAVE_NEXT_UNLOCK_SETTLE_SEC = 1.5 -- peak → resting height
+local WAVE_NEXT_UNLOCK_POP_SEC = 0.18 -- snap up to peak
 local waveBarAnimH = BAR_H
 local waveBarAnimToken = 0
 local REEF_PLUS_SIZE = 26
@@ -437,20 +480,30 @@ local function waveBarHeight(): number
 	return math.max(BAR_H, math.floor(waveBarAnimH + 0.5))
 end
 
+local function setWaveLabelTextSize(size: number)
+	if hudWaveLabel then
+		hudWaveLabel.TextSize = math.max(1, math.floor(size + 0.5))
+	end
+end
+
 local function animateWaveBarHeight(targetH: number, withOvershoot: boolean)
 	waveBarAnimToken += 1
 	local my = waveBarAnimToken
 	task.spawn(function()
-		local function tweenTo(dest: number, dur: number)
+		local function tweenTo(dest: number, dur: number, destText: number?)
 			local t0 = os.clock()
 			local from = waveBarAnimH
+			local fromText = if hudWaveLabel then hudWaveLabel.TextSize else LABEL_TEXT_SIZE
+			local textGoal = if typeof(destText) == "number" then destText else fromText
 			while my == waveBarAnimToken do
 				local u = math.clamp((os.clock() - t0) / math.max(dur, 1e-3), 0, 1)
 				-- Smoothstep
 				local e = u * u * (3 - 2 * u)
 				waveBarAnimH = from + (dest - from) * e
+				setWaveLabelTextSize(fromText + (textGoal - fromText) * e)
 				if u >= 1 then
 					waveBarAnimH = dest
+					setWaveLabelTextSize(textGoal)
 					break
 				end
 				RunService.Heartbeat:Wait()
@@ -463,8 +516,44 @@ local function animateWaveBarHeight(targetH: number, withOvershoot: boolean)
 			end
 			tweenTo(targetH, 0.28)
 		else
-			tweenTo(targetH, 0.22)
+			tweenTo(targetH, 0.22, LABEL_TEXT_SIZE)
 		end
+	end)
+end
+
+-- NEXT WAVE unlock: bar + label pop to 500% height, then ease down over 1.5s.
+local function animateNextWaveUnlockPop()
+	waveBarAnimToken += 1
+	local my = waveBarAnimToken
+	local peakH = BAR_H * WAVE_NEXT_UNLOCK_PEAK_MULT
+	local settleH = BAR_H * WAVE_NEXT_HEIGHT_MULT
+	local peakText = LABEL_TEXT_SIZE * WAVE_NEXT_UNLOCK_PEAK_MULT
+	local settleText = LABEL_TEXT_SIZE * math.min(WAVE_NEXT_HEIGHT_MULT, 1.75)
+	task.spawn(function()
+		local function tweenPair(destH: number, destText: number, dur: number, easeOut: boolean)
+			local t0 = os.clock()
+			local fromH = waveBarAnimH
+			local fromText = if hudWaveLabel then hudWaveLabel.TextSize else LABEL_TEXT_SIZE
+			while my == waveBarAnimToken do
+				local u = math.clamp((os.clock() - t0) / math.max(dur, 1e-3), 0, 1)
+				local e = if easeOut
+					then (1 - (1 - u) * (1 - u) * (1 - u)) -- ease-out cubic
+					else (u * u * (3 - 2 * u))
+				waveBarAnimH = fromH + (destH - fromH) * e
+				setWaveLabelTextSize(fromText + (destText - fromText) * e)
+				if u >= 1 then
+					waveBarAnimH = destH
+					setWaveLabelTextSize(destText)
+					break
+				end
+				RunService.Heartbeat:Wait()
+			end
+		end
+		tweenPair(peakH, peakText, WAVE_NEXT_UNLOCK_POP_SEC, false)
+		if my ~= waveBarAnimToken then
+			return
+		end
+		tweenPair(settleH, settleText, WAVE_NEXT_UNLOCK_SETTLE_SEC, true)
 	end)
 end
 
@@ -679,8 +768,7 @@ function WaveSlot.tryFinishFromShortcut(): boolean
 	if not WaveSlot.isFinishReady() then
 		return false
 	end
-	local emojis = WaveSim.getFinishEmojis()
-	playFinishFirework(emojis)
+	-- Happy emoji burst already fired when NEXT WAVE unlocked.
 	WaveSim.finishWaveEarly()
 	return true
 end
@@ -1475,7 +1563,7 @@ local function applyWaveHudBarsLayoutRight()
 	end
 end
 
--- Active layout: reef + wave side-by-side, right-aligned at the bottom.
+-- Active layout: reef left of wave; wave is what we center on-screen (see layoutHudBottomRight).
 -- Bars bottom-aligned so reef stays put while Next Wave height animates upward.
 local function applyWaveHudBarsLayoutBottomRight()
 	if not hudReefBar or not hudWaveBar then
@@ -1486,6 +1574,7 @@ local function applyWaveHudBarsLayoutBottomRight()
 	local gap = WAVE_HUD_SIDE_GAP
 	local total = reefW + gap + waveW
 	local wh = waveBarHeight()
+	-- Reef stays left-aligned to the wave HUD (immediate left neighbor).
 	hudReefBar.Size = UDim2.new(reefW / total, 0, 0, BAR_H)
 	hudReefBar.AnchorPoint = Vector2.new(0, 1)
 	hudReefBar.Position = UDim2.new(0, 0, 1, 0)
@@ -1560,15 +1649,21 @@ local function layoutHudBottomRight()
 		return
 	end
 	local scale = applyWaveHudScale(hudFrame)
-	local designW = WAVE_HUD_BOTTOM_BAR_W + WAVE_HUD_SIDE_GAP + WAVE_HUD_BOTTOM_WAVE_BAR_W
+	local reefW = WAVE_HUD_BOTTOM_BAR_W
+	local waveW = WAVE_HUD_BOTTOM_WAVE_BAR_W
+	local gap = WAVE_HUD_SIDE_GAP
+	local total = reefW + gap + waveW
+	local designW = total
 	if scale > 1 then
 		designW = math.floor(designW * WAVE_HUD_WIDTH_MULT + 0.5)
 	end
 	local designH = waveBarHeight() + 4 + LINE_H
 	local w = math.floor(designW / scale + 0.5)
-	hudFrame.AnchorPoint = Vector2.new(1, 1)
+	-- Same widths as before; pin the wave bar's center to screen center (reef stays on its left).
+	local waveCenterFrac = (reefW + gap + waveW * 0.5) / total
+	hudFrame.AnchorPoint = Vector2.new(waveCenterFrac, 1)
 	hudFrame.Size = UDim2.fromOffset(w, designH)
-	hudFrame.Position = UDim2.new(1, -WAVE_HUD_RIGHT_PAD, 1, -WAVE_HUD_BOTTOM_PAD)
+	hudFrame.Position = UDim2.new(0.5, 0, 1, -WAVE_HUD_BOTTOM_PAD)
 end
 
 local layoutTempW100Button: () -> ()
@@ -1708,6 +1803,7 @@ local function setHudVisible(on: boolean)
 		hungerDangerUi = false
 		waveBarAnimToken += 1
 		waveBarAnimH = BAR_H
+		setWaveLabelTextSize(LABEL_TEXT_SIZE)
 		lastHungryMissToken = -1
 		fillHurtToken += 1
 		if reefHealOpen then
@@ -1817,12 +1913,17 @@ local function updateHud(snap: WaveSim.HudSnapshot)
 		if complete then
 			hungerDangerUi = false
 			stopDangerFlash()
+			-- Happy emojis + $D stream + unlock sting when NEXT WAVE unlocks (not on button press).
+			playNextWaveUnlockSound()
+			local unlockEmojis = WaveSim.getFinishEmojis()
+			playFinishFirework(unlockEmojis)
+			WaveFeedPayout.playWaveClearStream()
 			if hudWaveHit then
 				hudWaveHit.Visible = true
 				hudWaveHit.Active = true
 			end
 			startFinishFlash()
-			animateWaveBarHeight(BAR_H * WAVE_NEXT_HEIGHT_MULT, true)
+			animateNextWaveUnlockPop()
 		else
 			if hudWaveHit then
 				hudWaveHit.Visible = false

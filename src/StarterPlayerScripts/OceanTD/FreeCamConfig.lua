@@ -36,12 +36,43 @@ FreeCamConfig.FISH_ORBIT_SEC = 120
 FreeCamConfig.FISH_DIST_BREATHE_SEC = 60
 FreeCamConfig.FISH_DIST_BREATHE_MAX = 2.5
 FreeCamConfig.FISH_ORBIT_SLOW_MAX = 3
+-- Orbit (POV off) during waves: softer lead-swap so it matches POV smoothness.
+FreeCamConfig.FISH_ORBIT_SWITCH_SEC = 0.9
+FreeCamConfig.FISH_ORBIT_DAMP_MULT = 0.55
+FreeCamConfig.FISH_ORBIT_LOOK_MULT = 0.5
+FreeCamConfig.FISH_ORBIT_CAM_MULT = 0.55
+FreeCamConfig.FISH_ORBIT_FOCUS_MAX_SPEED = 54 -- studs/sec cap while chasing a new lead
+-- Fish Cam POV: idle coaster on WaveRoute; during waves sit behind hungry school for feeding.
+FreeCamConfig.FISH_POV_EYE_HEIGHT = 6 -- idle coaster height above the green path line
+FreeCamConfig.FISH_POV_LOOK_AHEAD = 18
+FreeCamConfig.FISH_POV_LOOP_SEC = 52 -- full ride W1 → heart (idle / no-wave)
+FreeCamConfig.FISH_POV_POS_SMOOTH = 4.5 -- body catch-up (half prior = 2× lerp / less bump)
+FreeCamConfig.FISH_POV_LOOK_SMOOTH = 2.75 -- forward tangent lerp
+FreeCamConfig.FISH_POV_CF_SMOOTH = 3 -- CFrame orientation lerp
+FreeCamConfig.FISH_POV_RECENTER_SMOOTH = 0.14 -- look-release recenter (3× slower than 0.42)
+FreeCamConfig.FISH_POV_FOV = 88 -- wider than default ~70 while riding POV
+FreeCamConfig.FISH_POV_FOV_TWEEN = TweenInfo.new(0.45, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+-- Wave POV: ahead of the lead hungry fish, looking back at the pack to feed.
+FreeCamConfig.FISH_POV_SCHOOL_DIST = 26 -- studs ahead of lead along the ribbon
+FreeCamConfig.FISH_POV_SCHOOL_HEIGHT = 9
+FreeCamConfig.FISH_POV_SCHOOL_LOOK_INTO = 8 -- how far past lead into the pack the look point sits
+-- Soft path-dist follow (low rates + speed caps = less gas/brake on lead switch).
+FreeCamConfig.FISH_POV_PATH_DIST_FWD = 3.8
+FreeCamConfig.FISH_POV_PATH_DIST_BACK = 1.35
+FreeCamConfig.FISH_POV_PATH_DIST_MAX_SPEED_FWD = 22 -- studs/sec along ribbon
+FreeCamConfig.FISH_POV_PATH_DIST_MAX_SPEED_BACK = 12
+FreeCamConfig.FISH_POV_SCHOOL_CAM_RATE = 2.8 -- body catch-up toward ahead-of-pack slot
+FreeCamConfig.FISH_POV_SCHOOL_LOOK_RATE = 3.4 -- look-at ease into the pack
+FreeCamConfig.FISH_POV_SCHOOL_CF_SMOOTH = 2.2 -- orientation blend (slower = less whip)
+FreeCamConfig.FISH_POV_SCHOOL_SWITCH_SEC = 0.9 -- focus blend when lead hungry fish changes
 FreeCamConfig.LOOK_SENS_MOUSE = 0.006
 FreeCamConfig.LOOK_SENS_STICK = 2.4
 FreeCamConfig.LOOK_SENS_TOUCH = 0.008
 FreeCamConfig.LOOK_SENS_KEYS = 1.8
 FreeCamConfig.ATTR_MODE = "OceanTD_CamCycleMode"
 FreeCamConfig.ATTR_CINEMATIC_RESUME_MODE = "OceanTD_CinematicResumeMode"
+-- WavePathLines fades ribbon segments while Fish Cam POV (pad toggle) is on.
+FreeCamConfig.ATTR_FISH_CAM_POV = "OceanTD_FishCamPov"
 
 -- PlotCam cycle: 1 = legacy SkyCam free-fly (Plot Cam 1), 2 = locked RTS god-cam (Plot Cam 2).
 FreeCamConfig.PLOT_CAM_VARIANT = 2

@@ -134,17 +134,32 @@ local C = {
 	HAPPY_FLASH_OFF = 3,
 	FILL_GREEN = Color3.fromRGB(40, 255, 90),
 	DANGER_RED = Color3.fromRGB(255, 45, 55),
+	-- Coral food hit when an orb reaches a fish (pitched).
 	FEED_SOUND_ID = "rbxassetid://139487580236703",
 	FEED_PITCH_MIN = 0.82,
 	FEED_PITCH_MAX = 1.28,
 	FEED_PITCH_STEP = 0.06,
+	-- $D HUD stream: one pitched coin per dollar when it lands on the counter.
+	SAND_DOLLAR_COIN_SOUND_ID = "rbxassetid://136124980150792",
 	ARROW_SPEED_MULT = 4, -- GreenArrows travel this × fish speed
 	ARROW_LEAD_SEC = 1, -- fish spawn this long after arrows start
 	ARROW_SOUND_ID = "rbxassetid://1845466760",
 	-- Round start (Start Waves 2nd+) + wave 2+ advance: loud (assets are quiet at 1).
 	ARROW_ROUND_START_VOLUME = 2,
-	WAVE_ADVANCE_SOUND_ID = "rbxassetid://78266353371882",
-	WAVE_ADVANCE_VOLUME = 2,
+	-- NEXT WAVE button / wave 2+ advance (distinct from coin + feed).
+	WAVE_ADVANCE_SOUND_ID = "rbxassetid://117570443671176",
+	WAVE_ADVANCE_VOLUME = 1.6, -- 20% quieter than prior 2
+	-- Plays when NEXT WAVE unlocks (feed complete), before the button is pressed.
+	NEXT_WAVE_UNLOCK_SOUND_ID = "rbxassetid://1836085504",
+	NEXT_WAVE_UNLOCK_VOLUME = 1,
+	-- Yay/cheer bursts on NEXT WAVE unlock (1–4 hits, pitched, spread over ~1s).
+	NEXT_WAVE_UNLOCK_CHEER_SOUND_ID = "rbxassetid://79020702281821",
+	NEXT_WAVE_UNLOCK_CHEER_VOLUME = 2.4,
+	NEXT_WAVE_UNLOCK_CHEER_MIN = 1,
+	NEXT_WAVE_UNLOCK_CHEER_MAX = 4,
+	NEXT_WAVE_UNLOCK_CHEER_GAP_SEC = 0.5, -- delay between each yay/cheer
+	NEXT_WAVE_UNLOCK_CHEER_PITCH_MIN = 0.88,
+	NEXT_WAVE_UNLOCK_CHEER_PITCH_STEP = 0.1,
 	ARROW_PATH_SPACING = 16, -- studs along path between arrow sets in the train
 	ARROW_TRAIN_COUNT = 12, -- green fish train length (emerge from path start)
 	ARROW_LABEL_EVERY = 4, -- "Wave N" on every Nth arrow set

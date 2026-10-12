@@ -3,12 +3,14 @@
 	Batches "hunger bar filled" events from WaveSim → server ReportFishFed.
 	Server decides $D (EarnMore stage). Client only reports fish count.
 	Juice: green "$D" (FredokaOne, thin white stroke) flies fish → $DCount.
+	Also: end-of-wave stream from Wave HUD bar → $DCount (1 badge per $D earned).
 ]]
 
 local Players = game:GetService("Players")
 local GuiService = game:GetService("GuiService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
+local SoundService = game:GetService("SoundService")
 local TweenService = game:GetService("TweenService")
 local Workspace = game:GetService("Workspace")
 
@@ -16,22 +18,99 @@ local oceanRoot = ReplicatedStorage:WaitForChild("OceanTD")
 local Remotes = require(oceanRoot:WaitForChild("Remotes"))
 local Constants = require(oceanRoot:WaitForChild("Shared"):WaitForChild("Constants"))
 local LeftHudLayout = require(oceanRoot:WaitForChild("Shared"):WaitForChild("LeftHudLayout"))
+local SkillStages = require(oceanRoot:WaitForChild("Shared"):WaitForChild("SkillStages"))
 local UiPopupScale = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiPopupScale"))
 local UiTheme = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiTheme"))
+local WaveSimConsts = require(script.Parent:WaitForChild("WaveSimConsts"))
 
 local WaveFeedPayout = {}
 
 local FLY_SEC = 0.55
-local STROKE_GREEN = Color3.fromRGB(0, 170, 0) -- #00aa00
+local FLY_TEXT = Color3.fromRGB(70, 255, 110) -- bright green fill
+local FLY_STROKE = Color3.fromRGB(0, 90, 20) -- dark green outer stroke
+local FLY_TEXT_SIZE = math.floor(26 * 1.5 + 0.5) -- 50% bigger than prior 26
+local FLY_LABEL_W = math.floor(56 * 1.5 + 0.5)
+local FLY_LABEL_H = math.floor(32 * 1.5 + 0.5)
 local COUNT_NAME = Constants.SAND_DOLLARS_COUNT_NAME
+-- Wave-clear burst: clustered multi-flies (not single-file), short max when many.
+local STREAM_MIN_SEC = 0.55
+local STREAM_MAX_SEC = 3.2
+local STREAM_PER_D_SEC = 0.045
+local STREAM_FLY_SEC = 1.24 -- half prior speed (was 0.62)
+local STREAM_FLY_RATE_MIN = 0.82 -- per-$D duration mult (higher = slower)
+local STREAM_FLY_RATE_MAX = 1.18
+local STREAM_BATCH = 5 -- how many launch nearly together
+local STREAM_CLUSTER_PX = 22 -- spawn spread around HUD bar center
+local STREAM_ARC_SPREAD = 0.55 -- vary arc side/strength so paths don't stack
+-- Audible gap between coin pitches (visuals stay clustered; audio is one-per-$D).
+local STREAM_COIN_PITCH_MIN = 0.78
+local STREAM_COIN_PITCH_MAX = 1.45
+local STREAM_COIN_PITCH_STEP = 0.1
+-- Cap overlap so pitched hits stay distinct (coin asset is short; don't cut too early).
+local STREAM_COIN_PLINK_SEC = 0.28
+-- Per-fish $D fly (world → counter). Off: only wave-HUD stream shows flies.
+local SHOW_FISH_FLY = false
 
 local pending = 0
 local flushQueued = false
 local remote: RemoteEvent? = nil
 local overlay: ScreenGui? = nil
 local cachedCount: GuiObject? = nil
+local waveDollarsEarned = 0
+local streamPlayedThisWave = false
+local streamToken = 0
+local streamPitchCursor = STREAM_COIN_PITCH_MIN
+
+local coinSound = Instance.new("Sound")
+coinSound.Name = "OceanTD_SandDollarCoin"
+-- Coin only — never FEED_SOUND_ID or WAVE_ADVANCE_SOUND_ID.
+coinSound.SoundId = WaveSimConsts.SAND_DOLLAR_COIN_SOUND_ID
+coinSound.Volume = 0.95
+coinSound.Parent = SoundService
+
+task.defer(function()
+	pcall(function()
+		game:GetService("ContentProvider"):PreloadAsync({ coinSound })
+	end)
+end)
 
 local player = Players.LocalPlayer
+
+local function playStreamCoinSound()
+	local pitch = streamPitchCursor
+	streamPitchCursor += STREAM_COIN_PITCH_STEP
+	if streamPitchCursor > STREAM_COIN_PITCH_MAX then
+		streamPitchCursor = STREAM_COIN_PITCH_MIN
+	end
+	-- Force coin asset every hit (never feed / never next-wave).
+	coinSound.SoundId = WaveSimConsts.SAND_DOLLAR_COIN_SOUND_ID
+	local snd = coinSound:Clone()
+	snd.Name = "OceanTD_SandDollarCoinHit"
+	snd.SoundId = WaveSimConsts.SAND_DOLLAR_COIN_SOUND_ID
+	snd.PlaybackSpeed = pitch
+	snd.Volume = 0.95
+	snd.Parent = SoundService
+	snd:Play()
+	local len = if snd.TimeLength > 0.05 then snd.TimeLength else STREAM_COIN_PLINK_SEC
+	local ttl = math.min(STREAM_COIN_PLINK_SEC, len) / math.max(0.2, pitch) + 0.05
+	task.delay(ttl, function()
+		pcall(function()
+			snd:Stop()
+			snd:Destroy()
+		end)
+	end)
+end
+
+local function dollarsPerFish(): number
+	local stage = 1
+	local ok, SkillPowerUpUI = pcall(function()
+		return require(script.Parent:WaitForChild("SkillPowerUpUI"))
+	end)
+	if ok and SkillPowerUpUI and typeof(SkillPowerUpUI.getStage) == "function" then
+		stage = SkillPowerUpUI.getStage("EarnMore")
+	end
+	return math.max(1, SkillStages.earnMorePerFish(stage))
+end
 
 local function getRemote(): RemoteEvent
 	if remote then
@@ -148,10 +227,12 @@ local function punchCount()
 	TweenService:Create(scale, TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { Scale = 1 }):Play()
 end
 
-local function flyDollar(worldPos: Vector3)
-	local start = worldToScreen(worldPos)
+local function flyDollarFromScreen(start: Vector2, flySec: number?, onLand: (() -> ())?, arcBias: number?, playCoin: boolean?)
 	local dest0 = countScreenCenter()
-	if not start or not dest0 then
+	if not dest0 then
+		if onLand then
+			onLand()
+		end
 		return
 	end
 
@@ -159,17 +240,24 @@ local function flyDollar(worldPos: Vector3)
 	local mid = (start + dest) * 0.5
 	local delta = dest - start
 	-- Mild upward arc; endpoint stays locked to $DCount center.
+	-- arcBias (-1..1) fans control points so clustered flies don't share one path.
+	local bias = if typeof(arcBias) == "number" then math.clamp(arcBias, -1, 1) else 0
 	local len = math.max(40, delta.Magnitude)
 	local arc = Vector2.new(-delta.Y, delta.X)
 	if arc.Magnitude > 1e-3 then
-		arc = arc.Unit * math.clamp(len * 0.18, 20, 70)
+		arc = arc.Unit * math.clamp(len * (0.18 + 0.12 * math.abs(bias)), 20, 100)
+		-- Blend side-shift so neighbors peel apart without scattering wide.
+		local along = delta.Unit
+		arc = arc + along * (bias * len * 0.08) + Vector2.new(-along.Y, along.X) * (bias * 18)
 	else
-		arc = Vector2.new(0, -36)
+		arc = Vector2.new(bias * 28, -36)
 	end
 	if arc.Y > 0 then
-		arc = -arc
+		arc = Vector2.new(arc.X, -math.abs(arc.Y))
 	end
 	local ctrl = mid + arc
+	local dur = if typeof(flySec) == "number" then math.max(0.25, flySec) else FLY_SEC
+	local wantCoin = playCoin == true
 
 	local sg = getOverlay()
 	local lbl = Instance.new("TextLabel")
@@ -177,22 +265,22 @@ local function flyDollar(worldPos: Vector3)
 	lbl.BackgroundTransparency = 1
 	lbl.AnchorPoint = Vector2.new(0.5, 0.5)
 	lbl.Position = UDim2.fromOffset(start.X, start.Y)
-	lbl.Size = UDim2.fromOffset(56, 32)
+	lbl.Size = UDim2.fromOffset(FLY_LABEL_W, FLY_LABEL_H)
 	lbl.Font = UiTheme.Font
 	lbl.Text = "$D"
-	lbl.TextSize = 26
-	lbl.TextColor3 = Color3.new(1, 1, 1)
-	lbl.TextStrokeColor3 = STROKE_GREEN
+	lbl.TextSize = FLY_TEXT_SIZE
+	lbl.TextColor3 = FLY_TEXT
 	lbl.TextStrokeTransparency = 1
 	lbl.ZIndex = 5
 	lbl.Parent = sg
 	local stroke = Instance.new("UIStroke")
-	stroke.Color = STROKE_GREEN
-	stroke.Thickness = 1.4
+	stroke.Color = FLY_STROKE
+	stroke.Thickness = 2.2
 	stroke.LineJoinMode = Enum.LineJoinMode.Round
 	stroke.Parent = lbl
 
 	local t0 = os.clock()
+	local shrink = math.floor(FLY_TEXT_SIZE * 0.23 + 0.5)
 	local conn: RBXScriptConnection? = nil
 	conn = RunService.RenderStepped:Connect(function()
 		if not lbl.Parent then
@@ -210,21 +298,23 @@ local function flyDollar(worldPos: Vector3)
 			len = math.max(40, delta.Magnitude)
 			arc = Vector2.new(-delta.Y, delta.X)
 			if arc.Magnitude > 1e-3 then
-				arc = arc.Unit * math.clamp(len * 0.18, 20, 70)
+				arc = arc.Unit * math.clamp(len * (0.18 + 0.12 * math.abs(bias)), 20, 100)
+				local along = delta.Unit
+				arc = arc + along * (bias * len * 0.08) + Vector2.new(-along.Y, along.X) * (bias * 18)
 			else
-				arc = Vector2.new(0, -36)
+				arc = Vector2.new(bias * 28, -36)
 			end
 			if arc.Y > 0 then
-				arc = -arc
+				arc = Vector2.new(arc.X, -math.abs(arc.Y))
 			end
 			ctrl = mid + arc
 		end
-		local u = math.clamp((os.clock() - t0) / FLY_SEC, 0, 1)
+		local u = math.clamp((os.clock() - t0) / dur, 0, 1)
 		local e = u * u * (3 - 2 * u) -- smoothstep
 		local omt = 1 - e
 		local p = omt * omt * start + 2 * omt * e * ctrl + e * e * dest
 		lbl.Position = UDim2.fromOffset(p.X, p.Y)
-		lbl.TextSize = 26 - 6 * e
+		lbl.TextSize = FLY_TEXT_SIZE - shrink * e
 		if u >= 1 then
 			if conn then
 				conn:Disconnect()
@@ -235,8 +325,125 @@ local function flyDollar(worldPos: Vector3)
 				lbl.Position = UDim2.fromOffset(final.X, final.Y)
 			end
 			punchCount()
+			-- Coin plink when this $D reaches the counter (not on launch, not food-hit).
+			if wantCoin then
+				playStreamCoinSound()
+			end
 			lbl:Destroy()
+			if onLand then
+				onLand()
+			end
 		end
+	end)
+end
+
+local function flyDollar(worldPos: Vector3)
+	local start = worldToScreen(worldPos)
+	if not start then
+		return
+	end
+	flyDollarFromScreen(start, FLY_SEC, nil)
+end
+
+local function waveBarScreenCenter(): Vector2?
+	local pg = player:FindFirstChild("PlayerGui")
+	if not pg then
+		return nil
+	end
+	local hud = pg:FindFirstChild("OceanTD_WaveHud", true)
+	local bar = if hud then hud:FindFirstChild("WaveProgress", true) else nil
+	if not (bar and bar:IsA("GuiObject")) then
+		return nil
+	end
+	local pos = bar.AbsolutePosition + bar.AbsoluteSize * 0.5
+	local sg = bar:FindFirstAncestorOfClass("ScreenGui")
+	if sg and sg.IgnoreGuiInset ~= true then
+		local inset = GuiService:GetGuiInset()
+		pos = Vector2.new(pos.X + inset.X, pos.Y + inset.Y)
+	end
+	return pos
+end
+
+function WaveFeedPayout.onWaveBegin()
+	waveDollarsEarned = 0
+	streamPlayedThisWave = false
+	-- Do not bump streamToken here — that was cancelling in-flight HUD coin SFX / flies
+	-- when the player tapped NEXT WAVE mid-stream.
+end
+
+function WaveFeedPayout.getWaveDollarsEarned(): number
+	return waveDollarsEarned
+end
+
+-- Streams one "$D" per sand dollar earned this wave from the wave HUD bar → counter.
+-- Safe to call multiple times; only plays once per wave until onWaveBegin.
+function WaveFeedPayout.playWaveClearStreamAndWait(): boolean
+	if streamPlayedThisWave then
+		return false
+	end
+	local n = math.floor(waveDollarsEarned)
+	if n <= 0 then
+		streamPlayedThisWave = true
+		return false
+	end
+	streamPlayedThisWave = true
+	waveDollarsEarned = 0
+	streamPitchCursor = STREAM_COIN_PITCH_MIN
+	-- Only cancel a previous stream when starting a new one (not on wave begin).
+	streamToken += 1
+	local my = streamToken
+	local start = waveBarScreenCenter()
+	if not start then
+		-- Fallback: still punch counter so the beat isn't silent.
+		punchCount()
+		return false
+	end
+	-- Clustered visual batches; coin plink fires when each $D lands on the counter.
+	local duration = math.clamp(n * STREAM_PER_D_SEC, STREAM_MIN_SEC, STREAM_MAX_SEC)
+	local batches = math.max(1, math.ceil(n / STREAM_BATCH))
+	local batchGap = if batches > 1 then duration / (batches - 1) else 0
+	local remaining = n
+	local launched = 0
+	local slowestFly = STREAM_FLY_SEC * STREAM_FLY_RATE_MAX
+	for b = 1, batches do
+		local batchStart = (b - 1) * batchGap
+		local inBatch = math.min(STREAM_BATCH, n - launched)
+		for j = 1, inBatch do
+			launched += 1
+			local i = launched
+			local slot = j - 1
+			-- Stagger enough that clipped plinks read as separate pitches.
+			local intra = slot * 0.075
+			-- Slight per-$D speed variance so they don't lock-step.
+			local rate = STREAM_FLY_RATE_MIN
+				+ (STREAM_FLY_RATE_MAX - STREAM_FLY_RATE_MIN)
+					* (0.5 + 0.5 * math.sin(i * 2.17 + slot * 0.91))
+			local flySec = STREAM_FLY_SEC * rate
+			task.delay(batchStart + intra, function()
+				if my ~= streamToken then
+					remaining = 0
+					return
+				end
+				local ang = (slot / math.max(1, inBatch - 1) - 0.5) * math.pi * 0.85
+				local ring = STREAM_CLUSTER_PX * (0.55 + 0.45 * ((i % 3) / 2))
+				local jitter = Vector2.new(math.cos(ang) * ring, math.sin(ang) * ring * 0.55)
+				local bias = ((slot / math.max(1, inBatch - 1)) * 2 - 1) * STREAM_ARC_SPREAD
+				flyDollarFromScreen(start + jitter, flySec, function()
+					remaining -= 1
+				end, bias, true)
+			end)
+		end
+	end
+	local deadline = os.clock() + duration + slowestFly + 1.25
+	while remaining > 0 and my == streamToken and os.clock() < deadline do
+		task.wait()
+	end
+	return true
+end
+
+function WaveFeedPayout.playWaveClearStream()
+	task.spawn(function()
+		WaveFeedPayout.playWaveClearStreamAndWait()
 	end)
 end
 
@@ -249,7 +456,9 @@ function WaveFeedPayout.noteFilled(worldPos: Vector3?)
 		return
 	end
 	pending += 1
-	if typeof(worldPos) == "Vector3" then
+	waveDollarsEarned += dollarsPerFish()
+	-- Disabled: flies only from wave HUD stream (next-wave unlock). Keep call for easy restore.
+	if SHOW_FISH_FLY and typeof(worldPos) == "Vector3" then
 		flyDollar(worldPos)
 	end
 	if flushQueued then

@@ -646,18 +646,29 @@ local function syncBlockFlashForAim(worldPos: Vector3?)
 end
 
 local function resolvePlaceAnchor(rawPos: Vector3): Vector3
-	if armedItemId == "BrainCoral" then
-		local diam = ghostPlaceDiameter
+	local planted = confirmPlantedPart
+	local isBrain = armedItemId == "BrainCoral"
+		or (planted ~= nil and BrainStack.isBrainId(planted:GetAttribute("OceanTD_SpeciesId")))
+	if not isBrain then
+		BrainSnapPreview.setVisible(false)
+		return rawPos
+	end
+	local diam: number
+	local ignore: BasePart? = nil
+	if planted and planted.Parent then
+		-- Soft-plant / relocate bridge: ignore self or nest snaps onto our own ball and jitters.
+		ignore = planted
+		diam = BrainStack.diameterOfPart(planted)
+	else
+		diam = ghostPlaceDiameter
 		if typeof(diam) ~= "number" then
 			diam = CoralVisual.randomBrainDiameter()
 			ghostPlaceDiameter = diam
 		end
-		BrainSnapPreview.setVisible(true)
-		local screen = PlaceRaycast.getPlaceAimScreenPos(placeAimOpts())
-		return PlaceRaycast.resolveBrainStackPos(rawPos, diam :: number, nil, screen)
 	end
-	BrainSnapPreview.setVisible(false)
-	return rawPos
+	BrainSnapPreview.setVisible(true)
+	local screen = PlaceRaycast.getPlaceAimScreenPos(placeAimOpts())
+	return PlaceRaycast.resolveBrainStackPos(rawPos, diam, ignore, screen)
 end
 
 local function ensureWarnBillboard(parent: BasePart)
@@ -984,16 +995,21 @@ local function updateGhostAt(anchorPos: Vector3)
 			end)
 		end
 	else
-		if CoralVisual.hasYawRotateChrome(speciesId) then
-			-- Keep player-adjusted yaw; seed 0 only when unset.
+		if BrainStack.isBrainId(speciesId) then
+			-- Brain snap / aim pos is ball CENTER — don't plant-foot align.
 			if typeof(ghostPlaceFacingYaw) ~= "number" then
 				ghostPlaceFacingYaw = 0
 			end
+			local yawCf = CFrame.Angles(0, ghostPlaceFacingYaw, 0)
 			local mir = ClientPlot.get()
-			CoralVisual.alignMeshToSurface(ghost, anchorPos, ghostPlaceFacingYaw, nil, if mir then mir.cframe else nil)
-		elseif CoralVisual.needsFacingYaw(speciesId) then
+			if mir then
+				yawCf = (mir.cframe - mir.cframe.Position) * yawCf
+			end
+			ghost.CFrame = CFrame.new(anchorPos) * yawCf
+			ghost:SetAttribute("OceanTD_FacingYaw", ghostPlaceFacingYaw)
+		elseif CoralVisual.hasYawRotateChrome(speciesId) or CoralVisual.needsFacingYaw(speciesId) then
 			if typeof(ghostPlaceFacingYaw) ~= "number" then
-				ghostPlaceFacingYaw = CoralVisual.randomFacingYaw()
+				ghostPlaceFacingYaw = if CoralVisual.hasYawRotateChrome(speciesId) then 0 else CoralVisual.randomFacingYaw()
 			end
 			local mir = ClientPlot.get()
 			CoralVisual.alignMeshToSurface(ghost, anchorPos, ghostPlaceFacingYaw, nil, if mir then mir.cframe else nil)
@@ -1065,7 +1081,10 @@ local function syncConfirmButtonsImpl()
 	-- Hidden during Aim so discs don't steal the terrain park click.
 	local showRot = mode == MODE_CONFIRM and (not hideForSoftDrag) and (
 		CoralVisual.hasYawRotateChrome(armedSid)
-		or (armedItemId == "BrainCoral" and BrainSnapPreview.isSnapped())
+		or (armedItemId == "BrainCoral" and (
+			BrainSnapPreview.isSnapped()
+			or (confirmPlantedPart ~= nil and BrainStack.readParentPlaceId(confirmPlantedPart) ~= nil)
+		))
 	)
 	if moveHintBillboard and moveHintImage then
 		PlaceConfirmChrome.layoutOnMoveBillboard(
@@ -1136,20 +1155,62 @@ local function rotateSeaFanGhost(dir: number)
 	if confirmPlantedPart and target == confirmPlantedPart then
 		foot = CoralVisual.readGridAnchor(target) or target.Position
 	end
-	CoralVisual.alignMeshToSurface(target, foot, yaw, nil, if mir then mir.cframe else nil)
+	if BrainStack.isBrainId(sid) then
+		-- Ball center = foot; plant-foot align would lift Size.Y/2 and jitter.
+		local yawCf = CFrame.Angles(0, yaw, 0)
+		if mir then
+			yawCf = (mir.cframe - mir.cframe.Position) * yawCf
+		end
+		target.CFrame = CFrame.new(foot) * yawCf
+		target:SetAttribute("OceanTD_FacingYaw", yaw)
+	else
+		CoralVisual.alignMeshToSurface(target, foot, yaw, nil, if mir then mir.cframe else nil)
+	end
 	UiHaptics.pulseShort()
 end
 
+local function placementBrainShouldOrbit(): boolean
+	if armedItemId ~= "BrainCoral" then
+		return false
+	end
+	if BrainSnapPreview.isSnapped() then
+		return true
+	end
+	local planted = confirmPlantedPart
+	return planted ~= nil and planted.Parent ~= nil and BrainStack.readParentPlaceId(planted) ~= nil
+end
+
 local function rotateBrainSnapOrbit(dir: number)
-	if armedItemId ~= "BrainCoral" or not ghost then
+	if armedItemId ~= "BrainCoral" then
 		return
 	end
-	local diam = BrainStack.diameterOfPart(ghost)
-	if BrainSnapPreview.nudgeOrbit(dir, diam, nil) then
+	local target = if ghost and ghost.Parent then ghost else confirmPlantedPart
+	if not target or not target.Parent then
+		return
+	end
+	if BrainStack.readParentPlaceId(target) then
+		BrainSnapPreview.ensureOrbitForChild(target)
+	end
+	local diam = BrainStack.diameterOfPart(target)
+	local ignore = if target == confirmPlantedPart then target else nil
+	if BrainSnapPreview.nudgeOrbit(dir, diam, ignore) then
 		local snap = BrainSnapPreview.getActive()
-		if snap and ghost.Parent then
-			ghost.CFrame = CFrame.new(snap.worldPos)
+		if snap then
+			local yaw = ghostPlaceFacingYaw
+			if typeof(yaw) ~= "number" then
+				yaw = CoralVisual.readFacingYaw(target)
+				ghostPlaceFacingYaw = yaw
+			end
+			local yawCf = CFrame.Angles(0, yaw :: number, 0)
+			local mir = ClientPlot.get()
+			if mir then
+				yawCf = (mir.cframe - mir.cframe.Position) * yawCf
+			end
+			target.CFrame = CFrame.new(snap.worldPos) * yawCf
 			placeAnchor = snap.worldPos
+			target:SetAttribute("OceanTD_GridAnchorX", snap.worldPos.X)
+			target:SetAttribute("OceanTD_GridAnchorY", snap.worldPos.Y)
+			target:SetAttribute("OceanTD_GridAnchorZ", snap.worldPos.Z)
 		end
 		UiHaptics.pulseShort()
 		syncConfirmButtons()
@@ -1307,7 +1368,7 @@ local function makeConfirmUiImpl()
 			local dir = if target == "rotLeft" then 1 else -1
 			local btn = if target == "rotLeft" then rotLeftBtn else rotRightBtn
 			PlaceConfirmChrome.beginRotateHold(btn, function()
-				if BrainSnapPreview.isSnapped() then
+				if placementBrainShouldOrbit() then
 					rotateBrainSnapOrbit(dir)
 				else
 					rotateSeaFanGhost(dir)
@@ -2723,7 +2784,7 @@ table.insert(inputConns, UserInputService.InputBegan:Connect(function(input, _pr
 					local dir = if target == "rotLeft" then 1 else -1
 					local btn = if target == "rotLeft" then rotLeftBtn else rotRightBtn
 					PlaceConfirmChrome.beginRotateHold(btn, function()
-						if BrainSnapPreview.isSnapped() then
+						if placementBrainShouldOrbit() then
 							rotateBrainSnapOrbit(dir)
 						else
 							rotateSeaFanGhost(dir)
@@ -2855,7 +2916,7 @@ table.insert(inputConns, UserInputService.InputBegan:Connect(function(input, _pr
 				local dir = if chromeTarget == "rotLeft" then 1 else -1
 				local btn = if chromeTarget == "rotLeft" then rotLeftBtn else rotRightBtn
 				PlaceConfirmChrome.beginRotateHold(btn, function()
-					if BrainSnapPreview.isSnapped() then
+					if placementBrainShouldOrbit() then
 						rotateBrainSnapOrbit(dir)
 					else
 						rotateSeaFanGhost(dir)

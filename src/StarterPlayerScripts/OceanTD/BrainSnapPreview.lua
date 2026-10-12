@@ -1,7 +1,8 @@
 --!strict
 --[[
-	Client brain-stack snap: center dots on hosts with free slots.
-	Snap when finger/cursor hits a dot; nest on a Y-fixed horizontal orbit facing approach.
+	Client brain-stack snap — Option A discrete seats.
+	Each host shows free seat dots on its upper sphere (1/2/3 by S/M/L).
+	Aim a seat to snap; rot cycles free seats on that host.
 ]]
 
 local Players = game:GetService("Players")
@@ -19,12 +20,10 @@ local BrainSnapPreview = {}
 local COLOR_IDLE = Color3.fromRGB(255, 255, 255)
 local COLOR_SNAPPED = Color3.fromRGB(80, 220, 110)
 local DOT_PX = 16
--- Beyond this distance from aim, dots shrink (20% at FAR_START → 40% at show range).
 local DOT_FAR_START_STUDS = 50
 local DOT_SCALE_NEAR = 1
-local DOT_SCALE_FAR_MIN = 0.8 -- 20% smaller at 50 studs
-local DOT_SCALE_FAR_MAX = 0.6 -- 40% smaller at SNAP_DOT_SHOW_STUDS
--- Refresh free-slot host list at most this often (drag was calling O(n²) work every frame).
+local DOT_SCALE_FAR_MIN = 0.8
+local DOT_SCALE_FAR_MAX = 0.6
 local HOST_CACHE_SEC = 0.12
 local HOST_CACHE_MOVE_STUDS = 4
 
@@ -38,14 +37,21 @@ export type ActiveSnap = {
 	worldPos: Vector3,
 	sideBranch: boolean,
 	valid: boolean,
+	seatIndex: number,
+	seatCount: number,
 }
 
-local markers: { [BasePart]: BillboardGui } = {}
+type SeatMarker = {
+	bb: BillboardGui,
+	seatIndex: number,
+}
+
+local markers: { [BasePart]: { [number]: SeatMarker } } = {}
 local active: ActiveSnap? = nil
 local lastHost: BasePart? = nil
-local lastAngle: number? = nil
+local lastSeatIndex: number? = nil
 local visible = false
-local lastMarkerActiveHost: BasePart? = nil
+local lastActiveKey: string? = nil
 
 local cachedHosts: { BasePart } = {}
 local cacheAim = Vector3.zero
@@ -61,19 +67,18 @@ local function playerGui(): PlayerGui?
 	return plr:FindFirstChildOfClass("PlayerGui") :: PlayerGui?
 end
 
-local function makeMarker(host: BasePart): BillboardGui?
+local function makeMarker(): BillboardGui?
 	local gui = playerGui()
 	if not gui then
 		return nil
 	end
 	local bb = Instance.new("BillboardGui")
-	bb.Name = "OceanTD_BrainSnapDot"
+	bb.Name = "OceanTD_BrainSeatDot"
 	bb.AlwaysOnTop = true
 	bb.LightInfluence = 0
 	bb.Size = UDim2.fromOffset(DOT_PX, DOT_PX)
 	bb.StudsOffset = Vector3.zero
 	bb.MaxDistance = 400
-	bb.Adornee = host
 	bb.Parent = gui
 	local disc = Instance.new("Frame")
 	disc.Name = "Disc"
@@ -111,10 +116,6 @@ local function setMarkerSize(bb: BillboardGui, scale: number)
 	end
 end
 
-local function dotWorldPos(host: BasePart): Vector3
-	return host.Position
-end
-
 local function invalidateHostCache()
 	table.clear(cachedHosts)
 	cacheAt = -1e9
@@ -123,20 +124,22 @@ local function invalidateHostCache()
 end
 
 function BrainSnapPreview.clearMarkers()
-	for host, m in pairs(markers) do
-		if m.Parent then
-			m:Destroy()
+	for host, bySeat in pairs(markers) do
+		for _, sm in pairs(bySeat) do
+			if sm.bb.Parent then
+				sm.bb:Destroy()
+			end
 		end
 		markers[host] = nil
 	end
-	lastMarkerActiveHost = nil
+	lastActiveKey = nil
 end
 
 function BrainSnapPreview.hide()
 	visible = false
 	active = nil
 	lastHost = nil
-	lastAngle = nil
+	lastSeatIndex = nil
 	invalidateHostCache()
 	BrainSnapPreview.clearMarkers()
 end
@@ -158,24 +161,13 @@ local function findRootPos(host: BasePart, ignore: BasePart?): Vector3
 	return root.Position
 end
 
-local function hostWantsSideBranch(plotId: string, host: BasePart): boolean
-	return PlacedCoralIndex.brainHasChild(plotId, host)
-end
-
-local function computeSnapWorld(
-	host: BasePart,
-	hostDiam: number,
-	newDiam: number,
-	angle: number,
-	frac: number,
-	sideBranch: boolean
-): (Vector3, number, number)
-	if sideBranch then
-		local world = BrainStack.sideBranchCenter(host.Position, hostDiam, newDiam, angle, frac)
-		return world, world.X - host.Position.X, world.Z - host.Position.Z
+local function findPartByPlaceId(plotId: string, placeId: string): BasePart?
+	for _, p in ipairs(PlacedCoralIndex.getParts(plotId)) do
+		if p.Parent and BrainStack.readPlaceId(p) == placeId then
+			return p
+		end
 	end
-	local world = BrainStack.orbitNestCenter(host.Position, hostDiam, newDiam, angle, frac)
-	return world, world.X - host.Position.X, world.Z - host.Position.Z
+	return nil
 end
 
 local function clampToRootDrift(world: Vector3, rootPos: Vector3): Vector3
@@ -200,8 +192,7 @@ local function getCachedHosts(plotId: string, aimPos: Vector3, ignore: BasePart?
 		and cacheIgnore == ignore
 		and (now - cacheAt) < HOST_CACHE_SEC
 		and moved < HOST_CACHE_MOVE_STUDS
-	if same and #cachedHosts >= 0 then
-		-- Drop destroyed hosts without a full rebuild.
+	if same then
 		local alive = true
 		for _, h in ipairs(cachedHosts) do
 			if not h.Parent then
@@ -226,53 +217,97 @@ local function getCachedHosts(plotId: string, aimPos: Vector3, ignore: BasePart?
 	return cachedHosts
 end
 
-local function syncMarkers(hosts: { BasePart }, activeHost: BasePart?, aimPos: Vector3)
-	if not visible then
-		return
-	end
-	local keep: { [BasePart]: boolean } = {}
-	for _, host in ipairs(hosts) do
-		keep[host] = true
-		local m = markers[host]
-		if not m or not m.Parent or m.Adornee ~= host then
-			if m and m.Parent then
-				m:Destroy()
-			end
-			m = makeMarker(host)
-			if m then
-				markers[host] = m
-			end
-		end
-		-- While snapped, freeze sizes — aim/ray noise was resizing every white dot.
-		if m and not activeHost then
-			local dist = (host.Position - aimPos).Magnitude
-			setMarkerSize(m, dotScaleForDist(dist))
-		end
-	end
-	for host, m in pairs(markers) do
-		if not keep[host] then
-			if m.Parent then
-				m:Destroy()
-			end
-			markers[host] = nil
-		end
-	end
-	-- Recolor only when the snapped host changes (was every frame before).
-	if activeHost ~= lastMarkerActiveHost then
-		for host, m in pairs(markers) do
-			setMarkerColor(m, if host == activeHost then COLOR_SNAPPED else COLOR_IDLE)
-		end
-		lastMarkerActiveHost = activeHost
-	end
+local function hostSeatInfo(host: BasePart, newDiam: number): (number, number, number)
+	local seatCount = BrainStack.seatCountForPart(host)
+	local baseYaw = BrainStack.seatBaseYaw(BrainStack.readPlaceId(host))
+	local hostDiam = BrainStack.diameterOfPart(host)
+	return seatCount, baseYaw, hostDiam
 end
 
--- Larger release radius so snap doesn't flicker on/off at the hit edge (dots + ghost).
-local function pointerHitsDotRelaxed(screenPos: Vector2?, aimPos: Vector3, hostPos: Vector3): boolean
-	local hitPx = BrainStack.SNAP_DOT_HIT_PX * 1.65
-	local hitStuds = BrainStack.SNAP_DOT_HIT_STUDS * 1.85
+-- Seats already claimed by existing children (greedy nearest). ignore's seat stays free.
+local function occupiedSeats(
+	plotId: string,
+	host: BasePart,
+	newDiam: number,
+	ignore: BasePart?
+): { [number]: boolean }
+	local seatCount, baseYaw, hostDiam = hostSeatInfo(host, newDiam)
+	local taken: { [number]: boolean } = {}
+	local kids = PlacedCoralIndex.getBrainChildren(plotId, host, ignore)
+	-- Farthest-from-host first so inner kids don't steal outer seats incorrectly — use nearest greedy in order of placement.
+	table.sort(kids, function(a, b)
+		return (a.Position - host.Position).Magnitude < (b.Position - host.Position).Magnitude
+	end)
+	for _, kid in ipairs(kids) do
+		local idx = BrainStack.nearestSeatIndex(host.Position, hostDiam, newDiam, seatCount, baseYaw, kid.Position)
+		-- If already taken, find next free (shouldn't happen often).
+		if taken[idx] then
+			for i = 1, seatCount do
+				local j = ((idx + i - 2) % seatCount) + 1
+				if not taken[j] then
+					idx = j
+					break
+				end
+			end
+		end
+		taken[idx] = true
+	end
+	return taken
+end
+
+local function freeSeatList(
+	plotId: string,
+	host: BasePart,
+	newDiam: number,
+	ignore: BasePart?
+): { number }
+	local seatCount = BrainStack.seatCountForPart(host)
+	local taken = occupiedSeats(plotId, host, newDiam, ignore)
+	local free: { number } = {}
+	for i = 1, seatCount do
+		if not taken[i] then
+			table.insert(free, i)
+		end
+	end
+	return free
+end
+
+local function applySeat(
+	host: BasePart,
+	newDiam: number,
+	seatIndex: number,
+	ignore: BasePart?
+): ActiveSnap?
+	local seatCount, baseYaw, hostDiam = hostSeatInfo(host, newDiam)
+	local world, angle, frac = BrainStack.seatWorldPos(host.Position, hostDiam, newDiam, seatIndex, seatCount, baseYaw)
+	world = clampToRootDrift(world, findRootPos(host, ignore))
+	local ox = world.X - host.Position.X
+	local oz = world.Z - host.Position.Z
+	return {
+		host = host,
+		hostPlaceId = BrainStack.readPlaceId(host),
+		offsetX = ox,
+		offsetZ = oz,
+		angle = angle,
+		frac = frac,
+		worldPos = world,
+		sideBranch = false,
+		valid = true,
+		seatIndex = ((math.floor(seatIndex) - 1) % math.max(1, seatCount)) + 1,
+		seatCount = seatCount,
+	}
+end
+
+local function pointerHitsSeat(screenPos: Vector2?, aimPos: Vector3, seatWorld: Vector3): boolean
+	return BrainStack.pointerHitsDot(screenPos, aimPos, seatWorld)
+end
+
+local function pointerHitsSeatRelaxed(screenPos: Vector2?, aimPos: Vector3, seatWorld: Vector3): boolean
+	local hitPx = BrainStack.SNAP_DOT_HIT_PX * 1.75
+	local hitStuds = BrainStack.SNAP_DOT_HIT_STUDS * 2.0
 	local cam = Workspace.CurrentCamera
 	if screenPos and cam then
-		local sp, onScreen = cam:WorldToViewportPoint(hostPos)
+		local sp, onScreen = cam:WorldToViewportPoint(seatWorld)
 		if onScreen and sp.Z > 0 then
 			local px = (Vector2.new(sp.X, sp.Y) - screenPos).Magnitude
 			if px <= hitPx then
@@ -280,10 +315,159 @@ local function pointerHitsDotRelaxed(screenPos: Vector2?, aimPos: Vector3, hostP
 			end
 		end
 	end
-	return BrainStack.horizontalDist(aimPos, hostPos) <= hitStuds
+	return BrainStack.horizontalDist(aimPos, seatWorld) <= hitStuds
+		or (aimPos - seatWorld).Magnitude <= hitStuds * 1.15
+end
+
+local function seatScore(screenPos: Vector2?, aimPos: Vector3, seatWorld: Vector3): number
+	local cam = Workspace.CurrentCamera
+	if screenPos and cam then
+		local sp, onScreen = cam:WorldToViewportPoint(seatWorld)
+		if onScreen and sp.Z > 0 then
+			return (Vector2.new(sp.X, sp.Y) - screenPos).Magnitude
+		end
+	end
+	return (aimPos - seatWorld).Magnitude
+end
+
+local function syncSeatMarkers(
+	plotId: string,
+	hosts: { BasePart },
+	newDiam: number,
+	aimPos: Vector3,
+	ignore: BasePart?,
+	activeHost: BasePart?,
+	activeSeat: number?
+)
+	if not visible then
+		return
+	end
+	local keepHosts: { [BasePart]: boolean } = {}
+	local activeKey = if activeHost and activeSeat then `{BrainStack.readPlaceId(activeHost) or ""}:{activeSeat}` else nil
+
+	for _, host in ipairs(hosts) do
+		keepHosts[host] = true
+		local seatCount, baseYaw, hostDiam = hostSeatInfo(host, newDiam)
+		local free = freeSeatList(plotId, host, newDiam, ignore)
+		local freeSet: { [number]: boolean } = {}
+		for _, idx in ipairs(free) do
+			freeSet[idx] = true
+		end
+		local bySeat = markers[host]
+		if not bySeat then
+			bySeat = {}
+			markers[host] = bySeat
+		end
+		local keepSeats: { [number]: boolean } = {}
+		for i = 1, seatCount do
+			if freeSet[i] then
+				keepSeats[i] = true
+				local world = BrainStack.seatWorldPos(host.Position, hostDiam, newDiam, i, seatCount, baseYaw)
+				local sm = bySeat[i]
+				if not sm or not sm.bb.Parent then
+					local bb = makeMarker()
+					if bb then
+						sm = { bb = bb, seatIndex = i }
+						bySeat[i] = sm
+					end
+				end
+				if sm then
+					sm.bb.Adornee = host
+					sm.bb.StudsOffset = host.CFrame:PointToObjectSpace(world)
+					if not activeHost then
+						setMarkerSize(sm.bb, dotScaleForDist((world - aimPos).Magnitude))
+					end
+					local isActive = activeHost == host and activeSeat == i
+					setMarkerColor(sm.bb, if isActive then COLOR_SNAPPED else COLOR_IDLE)
+				end
+			end
+		end
+		for idx, sm in pairs(bySeat) do
+			if not keepSeats[idx] then
+				if sm.bb.Parent then
+					sm.bb:Destroy()
+				end
+				bySeat[idx] = nil
+			end
+		end
+	end
+
+	for host, bySeat in pairs(markers) do
+		if not keepHosts[host] then
+			for _, sm in pairs(bySeat) do
+				if sm.bb.Parent then
+					sm.bb:Destroy()
+				end
+			end
+			markers[host] = nil
+		end
+	end
+	lastActiveKey = activeKey
+end
+
+local function bindChildToSeat(host: BasePart, child: BasePart, parentId: string, newDiam: number?): boolean
+	local plot = ClientPlot.get()
+	if not plot then
+		return false
+	end
+	local diam = if typeof(newDiam) == "number" then newDiam else BrainStack.diameterOfPart(child)
+	local seatCount, baseYaw, hostDiam = hostSeatInfo(host, diam)
+	local free = freeSeatList(plot.plotId, host, diam, child)
+	local prefer = BrainStack.nearestSeatIndex(host.Position, hostDiam, diam, seatCount, baseYaw, child.Position)
+	local seatIndex = prefer
+	local freeSet: { [number]: boolean } = {}
+	for _, idx in ipairs(free) do
+		freeSet[idx] = true
+	end
+	-- Child keeps its nearest seat even if occupancy map marks it taken (it is the occupant).
+	if not freeSet[prefer] then
+		table.insert(free, prefer)
+		table.sort(free)
+		freeSet[prefer] = true
+	end
+	if not freeSet[seatIndex] and #free > 0 then
+		seatIndex = free[1]
+	end
+	local snap = applySeat(host, diam, seatIndex, child)
+	if not snap then
+		return false
+	end
+	snap.hostPlaceId = parentId
+	active = snap
+	lastHost = host
+	lastSeatIndex = seatIndex
+	return true
+end
+
+-- Adopt seat snap for a parented child — rot cycles free seats.
+function BrainSnapPreview.ensureOrbitForChild(child: BasePart): boolean
+	if not child.Parent or not BrainStack.isBrainId(child:GetAttribute("OceanTD_SpeciesId")) then
+		return false
+	end
+	local parentId = BrainStack.readParentPlaceId(child)
+	if not parentId then
+		return BrainSnapPreview.isSnapped()
+	end
+	local plot = ClientPlot.get()
+	if not plot then
+		return false
+	end
+	if active and active.valid and active.host.Parent and BrainStack.readPlaceId(active.host) == parentId then
+		if typeof(active.seatIndex) == "number" then
+			return true
+		end
+	end
+	local host = findPartByPlaceId(plot.plotId, parentId)
+	if not host or not host.Parent then
+		return false
+	end
+	return bindChildToSeat(host, child, parentId, nil)
 end
 
 function BrainSnapPreview.nudgeOrbit(dir: number, newDiam: number, ignore: BasePart?): boolean
+	if ignore then
+		BrainSnapPreview.ensureOrbitForChild(ignore)
+	end
 	if not active or not active.valid then
 		return false
 	end
@@ -295,20 +479,49 @@ function BrainSnapPreview.nudgeOrbit(dir: number, newDiam: number, ignore: BaseP
 	if not plot then
 		return false
 	end
-	local d0 = BrainStack.diameterOfPart(host)
-	local sideBranch = hostWantsSideBranch(plot.plotId, host)
-	active.angle += dir * BrainStack.ORBIT_ROT_STEP
-	local world, ox, oz = computeSnapWorld(host, d0, newDiam, active.angle, active.frac, sideBranch)
-	local rootPos = findRootPos(host, ignore)
-	world = clampToRootDrift(world, rootPos)
-	ox = world.X - host.Position.X
-	oz = world.Z - host.Position.Z
-	active.worldPos = world
-	active.offsetX = ox
-	active.offsetZ = oz
-	active.sideBranch = sideBranch
+	-- First rot on a parented child: seat onto the nearest slot if still offset, then later presses cycle.
+	if ignore and (ignore.Position - active.worldPos).Magnitude > 0.4 then
+		local snap = applySeat(host, newDiam, active.seatIndex, ignore)
+		if snap then
+			active = snap
+			lastHost = host
+			lastSeatIndex = active.seatIndex
+			return true
+		end
+	end
+	local free = freeSeatList(plot.plotId, host, newDiam, ignore)
+	if ignore then
+		local has = false
+		for _, idx in ipairs(free) do
+			if idx == active.seatIndex then
+				has = true
+				break
+			end
+		end
+		if not has then
+			table.insert(free, active.seatIndex)
+			table.sort(free)
+		end
+	end
+	if #free == 0 then
+		return false
+	end
+	local cur = 1
+	for i, idx in ipairs(free) do
+		if idx == active.seatIndex then
+			cur = i
+			break
+		end
+	end
+	local nextI = ((cur - 1 + (if dir >= 0 then 1 else -1)) % #free) + 1
+	local seatIndex = free[nextI]
+	local snap = applySeat(host, newDiam, seatIndex, ignore)
+	if not snap then
+		return false
+	end
+	active = snap
 	lastHost = host
-	lastAngle = active.angle
+	lastSeatIndex = seatIndex
 	return true
 end
 
@@ -326,116 +539,73 @@ function BrainSnapPreview.resolve(
 
 	local hosts = getCachedHosts(plot.plotId, aimPos, ignore)
 
-	local best: BasePart? = nil
+	local bestHost: BasePart? = nil
+	local bestSeat: number? = nil
 	local bestScore = math.huge
+
 	for _, host in ipairs(hosts) do
-		local tip = dotWorldPos(host)
-		if BrainStack.pointerHitsDot(screenPos, aimPos, tip) then
-			local score: number
-			if screenPos then
-				local cam = Workspace.CurrentCamera
-				local sp, onScreen = if cam then cam:WorldToViewportPoint(tip) else Vector3.zero, false
-				if onScreen and sp.Z > 0 then
-					score = (Vector2.new(sp.X, sp.Y) - screenPos).Magnitude
-				else
-					score = (aimPos - tip).Magnitude
+		local seatCount, baseYaw, hostDiam = hostSeatInfo(host, newDiam)
+		local free = freeSeatList(plot.plotId, host, newDiam, ignore)
+		for _, seatIndex in ipairs(free) do
+			local seatWorld = BrainStack.seatWorldPos(host.Position, hostDiam, newDiam, seatIndex, seatCount, baseYaw)
+			if pointerHitsSeat(screenPos, aimPos, seatWorld) then
+				local score = seatScore(screenPos, aimPos, seatWorld)
+				if score < bestScore then
+					bestScore = score
+					bestHost = host
+					bestSeat = seatIndex
 				end
-			else
-				score = (aimPos - tip).Magnitude
-			end
-			if score < bestScore then
-				bestScore = score
-				best = host
 			end
 		end
 	end
-	-- Sticky: stay on the current host until aim clearly leaves (stops edge flicker).
-	if not best and active and active.valid and active.host.Parent then
-		local tip = dotWorldPos(active.host)
-		if pointerHitsDotRelaxed(screenPos, aimPos, tip) then
-			best = active.host
+
+	-- Sticky: stay on current seat until aim clearly leaves it.
+	if not bestHost and active and active.valid and active.host.Parent then
+		local seatCount, baseYaw, hostDiam = hostSeatInfo(active.host, newDiam)
+		local seatWorld = BrainStack.seatWorldPos(
+			active.host.Position,
+			hostDiam,
+			newDiam,
+			active.seatIndex,
+			seatCount,
+			baseYaw
+		)
+		if pointerHitsSeatRelaxed(screenPos, aimPos, seatWorld) then
+			-- Seat still free (or owned by ignore)?
+			local free = freeSeatList(plot.plotId, active.host, newDiam, ignore)
+			local ok = false
+			for _, idx in ipairs(free) do
+				if idx == active.seatIndex then
+					ok = true
+					break
+				end
+			end
+			if ok then
+				bestHost = active.host
+				bestSeat = active.seatIndex
+			end
 		end
 	end
 
-	syncMarkers(hosts, if best then best else nil, aimPos)
+	syncSeatMarkers(plot.plotId, hosts, newDiam, aimPos, ignore, bestHost, bestSeat)
 
-	if not best then
+	if not bestHost or not bestSeat then
 		if active then
 			lastHost = active.host
-			lastAngle = active.angle
+			lastSeatIndex = active.seatIndex
 		end
 		active = nil
 		return aimPos, nil
 	end
 
-	local d0 = BrainStack.diameterOfPart(best)
-	-- Don't recount children every frame while staying on the same host.
-	local sideBranch = if active and active.host == best
-		then active.sideBranch
-		else hostWantsSideBranch(plot.plotId, best)
-	local needNew = active == nil or active.host ~= best or active.sideBranch ~= sideBranch
-	if needNew then
-		local hostR = d0 * 0.5
-		local dx = aimPos.X - best.Position.X
-		local dz = aimPos.Z - best.Position.Z
-		local aimHoriz = math.sqrt(dx * dx + dz * dz)
-		local picked = BrainStack.pickSnapOffset(d0, lastAngle)
-		local angle: number
-		local frac: number
-		-- Aim clearly off-center → lean that way; on-dot → random overhang (not a snowman).
-		if aimHoriz > hostR * 0.35 then
-			angle = BrainStack.approachAngle(aimPos, best.Position)
-			if lastHost == best and typeof(lastAngle) == "number" then
-				local delta = math.abs(angle - lastAngle)
-				delta = math.min(delta, math.pi * 2 - delta)
-				if delta < BrainStack.MIN_REROLL_ANGLE then
-					angle = lastAngle + BrainStack.MIN_REROLL_ANGLE
-				end
-			end
-			frac = BrainStack.OFFSET_MIN_FRAC
-				+ (BrainStack.OFFSET_MAX_FRAC - BrainStack.OFFSET_MIN_FRAC) * 0.75
-		else
-			angle = picked.angle
-			frac = picked.frac
-		end
-		-- Nesting on a tip that is already stacked: push outward so towers lean.
-		if not sideBranch and BrainStack.readParentPlaceId(best) then
-			frac = math.max(frac, BrainStack.OFFSET_MIN_FRAC * 0.35 + BrainStack.OFFSET_MAX_FRAC * 0.65)
-		end
-		local world, ox, oz = computeSnapWorld(best, d0, newDiam, angle, frac, sideBranch)
-		local rootPos = findRootPos(best, ignore)
-		world = clampToRootDrift(world, rootPos)
-		ox = world.X - best.Position.X
-		oz = world.Z - best.Position.Z
-		active = {
-			host = best,
-			hostPlaceId = BrainStack.readPlaceId(best),
-			offsetX = ox,
-			offsetZ = oz,
-			angle = angle,
-			frac = frac,
-			worldPos = world,
-			sideBranch = sideBranch,
-			valid = true,
-		}
-		lastHost = best
-		lastAngle = angle
-	elseif active then
-		local world, ox, oz = computeSnapWorld(best, d0, newDiam, active.angle, active.frac, sideBranch)
-		local rootPos = findRootPos(best, ignore)
-		world = clampToRootDrift(world, rootPos)
-		ox = world.X - best.Position.X
-		oz = world.Z - best.Position.Z
-		active.worldPos = world
-		active.offsetX = ox
-		active.offsetZ = oz
-		active.sideBranch = sideBranch
-		active.valid = true
-	end
-
-	if not active then
+	local snap = applySeat(bestHost, newDiam, bestSeat, ignore)
+	if not snap then
+		active = nil
 		return aimPos, nil
 	end
+	active = snap
+	lastHost = bestHost
+	lastSeatIndex = bestSeat
 	return active.worldPos, active
 end
 
@@ -449,10 +619,10 @@ end
 function BrainSnapPreview.breakSnap()
 	if active then
 		lastHost = active.host
-		lastAngle = active.angle
+		lastSeatIndex = active.seatIndex
 	end
 	active = nil
-	lastMarkerActiveHost = nil
+	lastActiveKey = nil
 end
 
 return BrainSnapPreview

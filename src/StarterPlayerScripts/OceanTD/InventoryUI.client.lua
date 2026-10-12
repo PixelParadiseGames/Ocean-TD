@@ -107,8 +107,8 @@ local function setLeftUiHiddenForBackpack(hide: boolean)
 		local dPad = left:FindFirstChild("dPad")
 		if dPad then
 			for _, ch in ipairs(dPad:GetChildren()) do
-				-- FreeCam syncs dPadIcon from InventoryState.isOpen().
-				-- Keep cart + HideUI eye visible in build mode.
+				-- FreeCam syncs dPadIcon + cam mode icons from InventoryState.isOpen().
+				-- Keep cart, HideUI, active cam button, and Plot/Fish cam quick pads in build mode.
 				if ch:IsA("GuiObject")
 					and ch.Name ~= "dPadIcon"
 					and ch.Name ~= "HideUI"
@@ -116,6 +116,12 @@ local function setLeftUiHiddenForBackpack(hide: boolean)
 					and ch.Name ~= "Cart"
 					and ch.Name ~= "CartBTN"
 					and ch.Name ~= "CartBtn"
+					and ch.Name ~= "PlotCam"
+					and ch.Name ~= "FishCam"
+					and ch.Name ~= "FreeCam"
+					and ch.Name ~= "OffCam"
+					and ch.Name ~= "OceanTD_PlotCam2Quick"
+					and ch.Name ~= "OceanTD_FishCamQuick"
 					and not LeftHudLayout.isSandDollarChrome(ch)
 				then
 					rememberHideLeftForBackpack(ch)
@@ -958,6 +964,9 @@ local gamepadFocusIndex = 1
 local GRID_COLS = 2 -- must match UIGridLayout.FillDirectionMaxCells
 local FOCUS_STROKE_BASE = 3
 local FOCUS_STROKE_PEAK = FOCUS_STROKE_BASE * 3 -- pulse grows to 3x thickness
+-- Armed coral green ring: 2× prior thickness, pulse thickness (not just alpha).
+local SELECT_STROKE_BASE = 3 -- was 1.5
+local SELECT_STROKE_PEAK = 6 -- was 3
 local MOVE_ICON_IMAGE = "rbxassetid://345081302"
 local GAMEPAD_INTRO_SCROLL_SEC = 1
 local GAMEPAD_INTRO_HOLD_SEC = 1
@@ -1018,7 +1027,7 @@ local function startPulse(stroke: UIStroke)
 			return
 		end
 		local wave = (math.sin((os.clock() - t0) * 6) + 1) * 0.5
-		stroke.Thickness = 1.5 + wave * 1.5
+		stroke.Thickness = SELECT_STROKE_BASE + (SELECT_STROKE_PEAK - SELECT_STROKE_BASE) * wave
 		stroke.Transparency = 0.05 + wave * 0.3
 		if pulsedLabel then
 			-- Flash name green ↔ white with the armed ring.
@@ -1835,7 +1844,7 @@ local function makeItemButton(def, layoutOrder: number, instanceSuffix: string?,
 	icon:GetPropertyChangedSignal("AbsoluteSize"):Connect(placeLabelUnderIcon)
 	task.defer(placeLabelUnderIcon)
 
-	local stroke = ensureStroke(icon, "_SelectPulse", GREEN, 2)
+	local stroke = ensureStroke(icon, "_SelectPulse", GREEN, SELECT_STROKE_BASE)
 	stroke.Enabled = false
 
 	-- Tap = arm placement; vertical drag = scroll list; drag out = placement pull.

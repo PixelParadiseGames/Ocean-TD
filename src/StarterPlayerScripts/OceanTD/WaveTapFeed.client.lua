@@ -58,6 +58,14 @@ local function isFullAuto(): boolean
 	return SkillStages.reloadSpeedIsFullAuto(reloadSpeedStage())
 end
 
+local function isSemiOrFullAuto(): boolean
+	-- Stage 7+ (semi-instant + full-auto).
+	return SkillStages.reloadSpeedIsSemiInstant(reloadSpeedStage())
+end
+
+-- Semi / full-auto: hide reload arc (stages 1–6 still show it). Flip true to bring it back.
+local SHOW_RELOAD_RING_IN_SEMI_OR_FULL_AUTO = false
+
 local function playTapFailSound()
 	-- Full auto can spam miss/reload fails while held — cap to once per second.
 	if isFullAuto() then
@@ -525,32 +533,51 @@ local function ensureAimReloadRing(): ReloadRing?
 	if not root then
 		return nil
 	end
+	-- Drop sibling-of-ScreenGui ring from the AbsolutePosition experiment (offset + wasted work).
+	if aimReloadRing and aimReloadRing.Parent ~= root then
+		aimReloadRing:Destroy()
+		aimReloadRing = nil
+	end
 	if aimReloadRing and aimReloadRing.Parent == root then
 		local existing = readReloadRing(aimReloadRing)
 		if existing then
+			existing.root.AnchorPoint = Vector2.new(0.5, 0.5)
+			existing.root.Position = UDim2.fromScale(0.5, 0.5)
 			return existing
 		end
 		aimReloadRing = nil
 	end
 	local built = makeReloadRing(root, "ReloadRing")
+	built.root.AnchorPoint = Vector2.new(0.5, 0.5)
 	built.root.Position = UDim2.fromScale(0.5, 0.5)
+	built.root.ZIndex = 9 -- under Graphic (11) so the cross sits visually centered in the arc
 	aimReloadRing = built.root
 	return built
 end
 
-local function ensureFloatReloadRing(): ReloadRing?
-	local layer = ensureJuiceLayer()
-	if not layer then
+local function ensureFloatReloadRing(parent: Instance?): ReloadRing?
+	local host = parent
+	if not host then
+		host = ensureJuiceLayer()
+	end
+	if not host then
 		return nil
 	end
-	if floatReloadRing and floatReloadRing.Parent == layer then
+	if floatReloadRing and floatReloadRing.Parent == host then
 		local existing = readReloadRing(floatReloadRing)
 		if existing then
+			existing.root.AnchorPoint = Vector2.new(0.5, 0.5)
+			existing.root.Position = UDim2.fromScale(0.5, 0.5)
 			return existing
 		end
 		floatReloadRing = nil
+	elseif floatReloadRing then
+		floatReloadRing:Destroy()
+		floatReloadRing = nil
 	end
-	local built = makeReloadRing(layer, "ReloadRingFloat")
+	local built = makeReloadRing(host, "ReloadRingFloat")
+	built.root.AnchorPoint = Vector2.new(0.5, 0.5)
+	built.root.Position = UDim2.fromScale(0.5, 0.5)
 	built.root.ZIndex = 21
 	floatReloadRing = built.root
 	return built
@@ -822,26 +849,6 @@ local function canShowAimCrosshair(): boolean
 	return true
 end
 
-local function resolveRingScreenPos(): Vector2?
-	local aimOn = crossRoot ~= nil and crossRoot.Visible == true and canShowAimCrosshair()
-	if aimOn then
-		return nil -- parented to aim crosshair
-	end
-	local pos = lastReloadRingPos
-	if stickyCross and stickyCross.Visible then
-		pos = Vector2.new(
-			stickyCross.AbsolutePosition.X + stickyCross.AbsoluteSize.X * 0.5,
-			stickyCross.AbsolutePosition.Y + stickyCross.AbsoluteSize.Y * 0.5
-		)
-	elseif pointerHeld then
-		pos = pointerScreenPos
-	end
-	if pos.X < 1 and pos.Y < 1 then
-		return nil
-	end
-	return pos
-end
-
 local function showRingAt(frac: number, denyFlash: boolean, hitFlash: boolean)
 	local aimOn = crossRoot ~= nil and crossRoot.Visible == true and canShowAimCrosshair()
 	if aimOn then
@@ -854,8 +861,22 @@ local function showRingAt(frac: number, denyFlash: boolean, hitFlash: boolean)
 		end
 		return
 	end
-	local pos = resolveRingScreenPos()
-	if not pos then
+	-- Touch / mouse: parent arc under sticky reticle (centered) — avoids AbsolutePosition drift.
+	if stickyCross and stickyCross.Visible then
+		local ring = ensureFloatReloadRing(stickyCross)
+		if ring then
+			paintReloadRing(ring, frac, denyFlash, hitFlash)
+		end
+		if aimReloadRing then
+			aimReloadRing.Visible = false
+		end
+		return
+	end
+	local pos = lastReloadRingPos
+	if pointerHeld then
+		pos = pointerScreenPos
+	end
+	if pos.X < 1 and pos.Y < 1 then
 		if aimReloadRing then
 			aimReloadRing.Visible = false
 		end
@@ -864,8 +885,9 @@ local function showRingAt(frac: number, denyFlash: boolean, hitFlash: boolean)
 		end
 		return
 	end
-	local ring = ensureFloatReloadRing()
+	local ring = ensureFloatReloadRing(nil)
 	if ring then
+		ring.root.AnchorPoint = Vector2.new(0.5, 0.5)
 		ring.root.Position = UDim2.fromOffset(pos.X, pos.Y)
 		paintReloadRing(ring, frac, denyFlash, hitFlash)
 	end
@@ -875,6 +897,15 @@ local function showRingAt(frac: number, denyFlash: boolean, hitFlash: boolean)
 end
 
 local function updateReloadRings()
+	if isSemiOrFullAuto() and not SHOW_RELOAD_RING_IN_SEMI_OR_FULL_AUTO then
+		if aimReloadRing then
+			aimReloadRing.Visible = false
+		end
+		if floatReloadRing then
+			floatReloadRing.Visible = false
+		end
+		return
+	end
 	local rem, total = WaveSim.getTapFeedCooldown()
 	local now = os.clock()
 	-- +1 Food: brief full green arc, then red reload arc takes over.
