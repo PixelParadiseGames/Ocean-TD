@@ -512,6 +512,7 @@ local function sanitizeProfile(raw: any): PlayerProfile
 	-- Hide UI is free / unlocked for everyone (legacy locked profiles migrate on load).
 	profile.hideUiUnlocked = true
 	profile.hasSeenJoinIntro = raw.hasSeenJoinIntro == true
+	profile.hasLostWaveRound = raw.hasLostWaveRound == true
 	profile.version = math.max(profile.version, Constants.PROFILE_VERSION)
 	return profile
 end
@@ -583,11 +584,13 @@ function PersistenceService.reportHighestWave(player: Player, wave: number): boo
 end
 
 -- Best-of updates for wave / fish fed / duration from one run summary.
+-- When defeated is true, unlocks plot outline color (persisted).
 function PersistenceService.reportWaveRecords(
 	player: Player,
 	wave: number,
 	fishFed: number,
-	elapsedSec: number
+	elapsedSec: number,
+	defeated: boolean?
 ): { wave: boolean, fishFed: boolean, duration: boolean }
 	local changed = { wave = false, fishFed = false, duration = false }
 	local profile = profiles[player]
@@ -612,6 +615,9 @@ function PersistenceService.reportWaveRecords(
 		player:SetAttribute(Constants.LONGEST_WAVE_SEC_ATTR, sec)
 		changed.duration = true
 	end
+	if defeated == true then
+		PersistenceService.markLostWaveRound(player)
+	end
 	return changed
 end
 
@@ -631,6 +637,30 @@ function PersistenceService.syncWaveRecordAttributes(player: Player)
 	player:SetAttribute(Constants.LONGEST_WAVE_SEC_ATTR, sec)
 end
 
+function PersistenceService.hasLostWaveRound(player: Player): boolean
+	local profile = profiles[player]
+	if not profile then
+		return false
+	end
+	return profile.hasLostWaveRound == true
+end
+
+function PersistenceService.markLostWaveRound(player: Player)
+	local profile = profiles[player]
+	if not profile then
+		return
+	end
+	if profile.hasLostWaveRound then
+		player:SetAttribute(Constants.PLOT_OUTLINE_COLOR_UNLOCKED_ATTR, true)
+		return
+	end
+	profile.hasLostWaveRound = true
+	player:SetAttribute(Constants.PLOT_OUTLINE_COLOR_UNLOCKED_ATTR, true)
+	task.spawn(function()
+		PersistenceService.save(player)
+	end)
+end
+
 function PersistenceService.getPlotOutlineColorIndex(player: Player): number
 	local profile = profiles[player]
 	if not profile then
@@ -641,6 +671,10 @@ end
 
 function PersistenceService.setPlotOutlineColorIndex(player: Player, index: number): number
 	local profile = profiles[player]
+	local current = PersistenceService.getPlotOutlineColorIndex(player)
+	if not PersistenceService.hasLostWaveRound(player) then
+		return current
+	end
 	local clamped = PlotOutlineColors.clampIndex(index)
 	if not profile then
 		player:SetAttribute(Constants.PLOT_OUTLINE_COLOR_ATTR, clamped)
@@ -657,6 +691,10 @@ function PersistenceService.syncPlotOutlineColorAttribute(player: Player)
 		then PlotOutlineColors.clampIndex(profile.plotOutlineColorIndex)
 		else PlotOutlineColors.DEFAULT_INDEX
 	player:SetAttribute(Constants.PLOT_OUTLINE_COLOR_ATTR, idx)
+	player:SetAttribute(
+		Constants.PLOT_OUTLINE_COLOR_UNLOCKED_ATTR,
+		if profile then profile.hasLostWaveRound == true else false
+	)
 end
 
 function PersistenceService.getSandDollars(player: Player): number
@@ -1846,6 +1884,7 @@ function PersistenceService.save(player: Player, layoutOverride: { LayoutObject 
 		discoveredCorals = profile.discoveredCorals or {},
 		hideUiUnlocked = profile.hideUiUnlocked == true,
 		hasSeenJoinIntro = profile.hasSeenJoinIntro == true,
+		hasLostWaveRound = profile.hasLostWaveRound == true,
 	}
 
 	local saved = false

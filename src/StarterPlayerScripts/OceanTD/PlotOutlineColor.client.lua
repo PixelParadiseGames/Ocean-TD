@@ -26,6 +26,7 @@ local InventoryState = require(script.Parent:WaitForChild("InventoryState"))
 local PlacementController = require(script.Parent:WaitForChild("PlacementController"))
 local RelocateController = require(script.Parent:WaitForChild("RelocateController"))
 local HideUiState = require(script.Parent:WaitForChild("HideUiState"))
+local WaveSim = require(script.Parent:WaitForChild("WaveSim"))
 
 local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
@@ -39,6 +40,7 @@ local CLOSE_COOLDOWN_SEC = 4.0
 local HINT_POLL_HZ = 12
 local FOV_DELTA = 8
 local ATTR = Constants.PLOT_OUTLINE_COLOR_ATTR
+local UNLOCK_ATTR = Constants.PLOT_OUTLINE_COLOR_UNLOCKED_ATTR
 local SESSION_HIDE_ATTR = "OceanTD_HidePlotOutline"
 
 local setColorRf = Remotes.getFunction("RequestSetPlotOutlineColor")
@@ -125,7 +127,57 @@ local function inMinigameMatch(): boolean
 	return a == true
 end
 
+local function colorUnlocked(): boolean
+	return player:GetAttribute(UNLOCK_ATTR) == true
+end
+
+-- Join intro + finger training + brief post-Skip Training suppress.
+local function inIntroOrTraining(): boolean
+	if playerGui:GetAttribute("OceanTD_JoinIntroBusy") == true then
+		return true
+	end
+	if playerGui:GetAttribute("OceanTD_FingerTutorialLock") == true then
+		return true
+	end
+	local rollHint = playerGui:GetAttribute("OceanTD_RollFingerHint")
+	if rollHint ~= nil and rollHint ~= false and rollHint ~= "" then
+		return true
+	end
+	if playerGui:GetAttribute("OceanTD_TutorialGateWaves") == true then
+		return true
+	end
+	if playerGui:GetAttribute("OceanTD_TutorialGateBackpack") == true then
+		return true
+	end
+	if playerGui:GetAttribute("OceanTD_TutorialGateLeftHud") == true then
+		return true
+	end
+	if playerGui:GetAttribute("OceanTD_TutorialGateCam") == true then
+		return true
+	end
+	if playerGui:GetAttribute("OceanTD_TutorialGateShop") == true then
+		return true
+	end
+	local suppressUntil = playerGui:GetAttribute("OceanTD_SuppressPlotOutlineHintUntil")
+	if typeof(suppressUntil) == "number" and os.clock() < suppressUntil then
+		return true
+	end
+	if WaveSim.isJoinIntroDemo() then
+		return true
+	end
+	return false
+end
+
 local function interactionBlocked(): boolean
+	if not colorUnlocked() then
+		return true
+	end
+	if inIntroOrTraining() then
+		return true
+	end
+	if WaveSim.isRunning() then
+		return true
+	end
 	if InventoryState.isOpen() then
 		return true
 	end
@@ -267,6 +319,12 @@ local function ensureHint(): (ScreenGui, TextButton)
 	bar.AnchorPoint = Vector2.new(0.5, 1)
 	bar.Position = UDim2.new(0.5, 0, 1, -28)
 	bar.Size = UDim2.fromOffset(320, 44)
+	-- Invisible but Active=true was eating PLANT/Confirm clicks in this rect.
+	bar.Active = false
+	pcall(function()
+		local b: any = bar
+		b.Interactable = false
+	end)
 	bar.Parent = sg
 	local corner = Instance.new("UICorner")
 	corner.CornerRadius = UDim.new(0, 12)
@@ -284,12 +342,21 @@ local function ensureHint(): (ScreenGui, TextButton)
 	return sg, bar
 end
 
+local function setHintBarHitTest(bar: TextButton, on: boolean)
+	bar.Active = on
+	pcall(function()
+		local b: any = bar
+		b.Interactable = on
+	end)
+end
+
 local function hideHintImmediate()
 	stopHintTween()
 	hintShowing = false
 	local _, bar = ensureHint()
 	bar.BackgroundTransparency = 1
 	bar.TextTransparency = 1
+	setHintBarHitTest(bar, false)
 	local stroke = bar:FindFirstChild("Stroke")
 	if stroke and stroke:IsA("UIStroke") then
 		stroke.Transparency = 1
@@ -306,6 +373,7 @@ local function fadeHintOut(thenMustLeave: boolean)
 	hintShowing = false
 	stopHintTween()
 	local _, bar = ensureHint()
+	setHintBarHitTest(bar, false)
 	local stroke = bar:FindFirstChild("Stroke")
 	hintTween = TweenService:Create(bar, TweenInfo.new(0.35, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
 		BackgroundTransparency = 1,
@@ -334,6 +402,7 @@ local function showHint()
 	bar.BackgroundColor3 = hintTintColor()
 	bar.BackgroundTransparency = 0.2
 	bar.TextTransparency = 0
+	setHintBarHitTest(bar, true)
 	local stroke = bar:FindFirstChild("Stroke")
 	if stroke and stroke:IsA("UIStroke") then
 		stroke.Transparency = 0.35
@@ -684,6 +753,14 @@ ClientPlot.onChanged(function(_plot)
 end)
 
 player:GetAttributeChangedSignal(ATTR):Connect(syncFromAttribute)
+player:GetAttributeChangedSignal(UNLOCK_ATTR):Connect(function()
+	if not colorUnlocked() then
+		hideHintImmediate()
+		if pickerOpen then
+			closePicker(false)
+		end
+	end
+end)
 player:GetAttributeChangedSignal(SESSION_HIDE_ATTR):Connect(function()
 	rebuildOutline()
 	if outlineHidden() then
@@ -744,6 +821,9 @@ RunService.Heartbeat:Connect(function()
 	lastHintPoll = now
 
 	if pickerOpen then
+		if interactionBlocked() then
+			closePicker(false)
+		end
 		return
 	end
 

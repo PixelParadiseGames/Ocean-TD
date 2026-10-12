@@ -541,11 +541,11 @@ reportHighestWave.OnServerEvent:Connect(function(player: Player, wave: any)
 end)
 
 local reportWaveRecords = Remotes.get("ReportWaveRecords")
-reportWaveRecords.OnServerEvent:Connect(function(player: Player, wave: any, fishFed: any, elapsedSec: any)
+reportWaveRecords.OnServerEvent:Connect(function(player: Player, wave: any, fishFed: any, elapsedSec: any, defeated: any)
 	if typeof(wave) ~= "number" or typeof(fishFed) ~= "number" or typeof(elapsedSec) ~= "number" then
 		return
 	end
-	PersistenceService.reportWaveRecords(player, wave, fishFed, elapsedSec)
+	PersistenceService.reportWaveRecords(player, wave, fishFed, elapsedSec, defeated == true)
 end)
 
 local requestSetPlotOutlineColor = Remotes.getFunction("RequestSetPlotOutlineColor")

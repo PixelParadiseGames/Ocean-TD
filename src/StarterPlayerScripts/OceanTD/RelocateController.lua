@@ -50,6 +50,8 @@ local C = RelocateConsts
 local cinematicHold = false
 local inspectModal = false
 local inspectPanelVisible = false
+-- Placement owns PLANT / rot chrome; relocate only drives CoralInspectPanel (powerup).
+local placeConfirmBridge = false
 local activeChanged = Instance.new("BindableEvent")
 local r1WhileActive: (() -> boolean)? = nil
 local aWhileIdle: (() -> boolean)? = nil
@@ -914,7 +916,8 @@ local function attachMoveIcon(adornee: BasePart)
 	bb.Size = UDim2.fromOffset(C.MOVE_ICON_SIZE, C.MOVE_ICON_SIZE)
 	bb.MaxDistance = 2000
 	bb.Adornee = anchorPart
-	bb.Parent = playerGui
+	-- Parent under Relocate ScreenGui (DisplayOrder 12010) so Confirm sits above PlaceMore HUD.
+	bb.Parent = if gui and gui.Parent then gui else playerGui
 	local img = Instance.new("ImageLabel")
 	img.BackgroundTransparency = 1
 	img.Size = UDim2.fromScale(1, 1)
@@ -1108,6 +1111,11 @@ local function startHoverLoop()
 	RelocatePickHover.startLoop()
 end
 
+local function setRelocateChromeAttr(on: boolean)
+	-- Billboard cannot stack above PlaceMore ScreenGui — HUD hides while this is true.
+	playerGui:SetAttribute("OceanTD_RelocateChromeUp", on == true)
+end
+
 local function syncChrome()
 	if recycleFlying or confirmOutroPlaying then
 		return
@@ -1145,25 +1153,45 @@ local function syncChrome()
 		end
 	end
 
-	-- Idle close (exit tool): keyboard/mouse instantly; gamepad after 3s.
-	-- After rotate: keep selection; show Confirm to finish (cancel becomes confirm).
-	-- Move still auto-commits on drag release. Recycle confirm as before.
+	-- Placement confirm bridge: hide world chrome — PlacementController owns PLANT / rot.
+	if placeConfirmBridge then
+		setRelocateChromeAttr(false)
+		cancelBtn.Visible = false
+		checkBtn.Visible = false
+		if rotLeftBtn then
+			rotLeftBtn.Visible = false
+		end
+		if rotRightBtn then
+			rotRightBtn.Visible = false
+		end
+		if recycleBtn then
+			recycleBtn.Visible = false
+		end
+		if moveIcon then
+			moveIcon.Visible = false
+		end
+		return
+	end
+
+	-- Same chrome as new-coral place confirm: Confirm + rot under the move icon (no Close).
+	-- While dragging: move icon only. Move still auto-commits on drag release.
 	-- Inspect header owns recycle confirm (cancel slides beside Recycle → Confirm).
 	local inspectOwnsRecycleConfirm = inspectPanelVisible and recyclePending
-	local idleCloseReady = (not gamepadRelocate) or ((os.clock() - relocateShownAt) >= C.IDLE_CLOSE_DELAY_SEC)
-	local showIdleClose = (not hasMoved) and (not hasRotated) and (not recyclePending) and idleCloseReady
-	local showRotateConfirm = hasRotated and (not recyclePending) and (not inspectOwnsRecycleConfirm)
-	local showCancel = (hasMoved and not showRotateConfirm)
-		or (recyclePending and not inspectOwnsRecycleConfirm)
-		or showIdleClose
+	local hideForDrag = (dragging or fingerDown) and not chromeBtnDown and not recyclePending
+	-- Hide PlaceMore HUD whenever relocate world chrome can occupy the bottom center.
+	setRelocateChromeAttr(not hideForDrag)
+	-- Close removed — Confirm deselects when idle / commits when rotated. Cancel only for recycle abort.
+	local showCancel = recyclePending and not inspectOwnsRecycleConfirm
 	cancelBtn.Visible = showCancel
 	local tipLetter = if gamepadRelocate then "B" else "X"
 	local showWord = (math.floor((os.clock() - gamepadChromeT0) / C.HOVER_HINT_PERIOD) % 2) == 1
-	checkBtn.Visible = (recyclePending and not inspectOwnsRecycleConfirm) or showRotateConfirm
+	local showCheck = (not hideForDrag)
+		and ((not recyclePending) or (recyclePending and not inspectOwnsRecycleConfirm))
+	checkBtn.Visible = showCheck
 
 	-- Keep button size fixed — shrinking on rotate made the whole chrome jump.
 	layoutWaistChrome(C.BTN_SIZE, checkBtn.Visible)
-	if recyclePending then
+	if recyclePending or hideForDrag then
 		if rotLeftBtn then
 			rotLeftBtn.Visible = false
 		end
@@ -1171,33 +1199,43 @@ local function syncChrome()
 			rotRightBtn.Visible = false
 		end
 	end
+	if hideForDrag then
+		checkBtn.Visible = false
+		cancelBtn.Visible = false
+	end
 	-- While dragging coral, disable chrome so slide-over doesn't fire cancel/rot.
 	local chromeOn = not dragging and not fingerDown
 	for _, btn in ipairs({ checkBtn, cancelBtn, rotLeftBtn, rotRightBtn, recycleBtn }) do
 		if btn then
 			btn.Active = chromeOn and btn.Visible
 			pcall(function()
-				(btn :: any).Interactable = chromeOn and btn.Visible
+				local b: any = btn
+				b.Interactable = chromeOn and btn.Visible
 			end)
 		end
 	end
-	cancelBtn.Text = if showWord then (if hasMoved or hasRotated or recyclePending then "CANCEL" else "CLOSE") else tipLetter
-	cancelBtn.TextStrokeColor3 = if showWord then Color3.fromRGB(60, 15, 18) else Color3.new(1, 1, 1)
-	cancelBtn.TextStrokeTransparency = 0
+	if showCancel then
+		cancelBtn.Text = if showWord then "CANCEL" else tipLetter
+		cancelBtn.TextStrokeColor3 = if showWord then Color3.fromRGB(60, 15, 18) else Color3.new(1, 1, 1)
+		cancelBtn.TextStrokeTransparency = 0
+	end
 
 	if checkBtn.Visible then
 		checkBtn.Active = chromeOn
 		checkBtn.BackgroundTransparency = 0
 		checkBtn.TextColor3 = Color3.new(1, 1, 1)
-		PlaceConfirmChrome.syncConfirmFace(checkBtn, showWord, isUsingGamepad())
-		-- Flash dark green ↔ bright green (same as place confirm).
+		local confirmPx = PlaceConfirmChrome.placeConfirmBtnSize(C.BTN_SIZE)
+		checkBtn.Size = UDim2.fromOffset(confirmPx, confirmPx)
+		checkBtn.ZIndex = 20
+		-- Match new-coral place confirm face (PLANT ↔ check pulse).
+		PlaceConfirmChrome.syncConfirmFace(checkBtn, showWord, isUsingGamepad(), "PLANT")
 		local phase = (math.sin(os.clock() * 6) + 1) * 0.5
-		checkBtn.BackgroundColor3 = Color3.fromRGB(90, 255, 120):Lerp(Color3.fromRGB(35, 85, 45), phase)
+		PlaceConfirmChrome.applyConfirmPulse(checkBtn, phase)
 	end
 
 	if recycleBtn then
-		-- Hide recycle while dragging a move / rotating; show again after confirm, or during recycle confirm.
-		local showRecycle = (not hasMoved and not hasRotated) or recyclePending
+		-- Hide recycle while dragging; show again when parked, or during recycle confirm.
+		local showRecycle = ((not hasMoved and not hasRotated) or recyclePending) and not hideForDrag
 		-- Coral inspect UI owns recycle (idle + confirm); hide the avatar/world recycle chrome.
 		if inspectPanelVisible then
 			showRecycle = false
@@ -1389,6 +1427,8 @@ end
 
 local function updateRelocateFlash()
 	if not part or not part.Parent or not baseColor then
+		-- Mesh swap mid-upgrade: drop ring so BillboardGui isn't left on a destroyed Adornee.
+		SelectRing.destroy(selectRing)
 		return
 	end
 	if showPaintSolid and validSpot then
@@ -1557,6 +1597,8 @@ local function clearState()
 	active = false
 	busy = false
 	introAnimating = false
+	placeConfirmBridge = false
+	setRelocateChromeAttr(false)
 	gamepadRelocate = false
 	gamepadCursor = nil
 	part = nil
@@ -1771,7 +1813,14 @@ function RelocateController.refreshSizedPart(newPart: BasePart, oldPart: BasePar
 		baseMaterial = restMat
 		baseColor = restColor
 		SelectRing.ensure(selectRing, newPart, playerGui)
-		attachMoveIcon(newPart)
+		if placeConfirmBridge then
+			-- Placement owns move/PLANT/rot chrome — rebind its billboard to the new mesh.
+			pcall(function()
+				PlacementController.rebindSoftPlantedPart(newPart)
+			end)
+		else
+			attachMoveIcon(newPart)
+		end
 		ensureWarnBillboard(newPart)
 		syncWarnLabel()
 		hasMoved = false
@@ -1844,7 +1893,13 @@ function RelocateController.restoreSelectionByPlaceIds(ids: { string })
 	RelocateMultiSelect.resyncFromParts(newPrimary, found)
 	showPaintSolid = RelocateMultiSelect.isPaintSolid(newPrimary)
 	SelectRing.ensure(selectRing, newPrimary, playerGui)
-	attachMoveIcon(newPrimary)
+	if placeConfirmBridge then
+		pcall(function()
+			PlacementController.rebindSoftPlantedPart(newPrimary)
+		end)
+	else
+		attachMoveIcon(newPrimary)
+	end
 	ensureWarnBillboard(newPrimary)
 	syncWarnLabel()
 	syncChrome()
@@ -1920,7 +1975,13 @@ function RelocateController.swapSelectedPart(target: BasePart)
 	originPos = gridAnchorPos
 	moveGridAnchor = gridAnchorPos
 	SelectRing.ensure(selectRing, target, playerGui)
-	attachMoveIcon(target)
+	if placeConfirmBridge then
+		pcall(function()
+			PlacementController.rebindSoftPlantedPart(target)
+		end)
+	else
+		attachMoveIcon(target)
+	end
 	ensureWarnBillboard(target)
 	syncWarnLabel()
 	syncChrome()
@@ -1987,6 +2048,7 @@ end
 -- instant=true snaps home (used when arming a new backpack coral).
 function RelocateController.cancel(instant: boolean?)
 	if not active then
+		placeConfirmBridge = false
 		return
 	end
 	if busy and not instant then
@@ -2003,10 +2065,21 @@ function RelocateController.cancel(instant: boolean?)
 	local moved = hasMoved
 	local rotated = hasRotated
 	local color = baseColor
+	local wasBridge = placeConfirmBridge
+	-- Keep bridge true until destroyUi so syncChrome never flashes relocate rot/move.
 
 	if not moved and not rotated and not recyclePending then
 		RelocateMultiSelect.pushUndo()
 	end
+	-- Bridge: placement owns cancel — just drop inspect selection without snap fights.
+	if wasBridge and instant then
+		if p and p.Parent then
+			CoralVisual.applyRestLook(p)
+		end
+		clearState() -- clears placeConfirmBridge
+		return
+	end
+	placeConfirmBridge = false
 
 	local function snapHome()
 		if p and p.Parent then
@@ -2381,7 +2454,12 @@ function RelocateController.commit()
 		commitRecycle()
 		return
 	end
-	if (not hasMoved and not hasRotated) or not validSpot then
+	-- Idle Confirm (replaces Close): deselect without reverting.
+	if not hasMoved and not hasRotated then
+		RelocateController.cancel(true)
+		return
+	end
+	if not validSpot then
 		return
 	end
 	if not part or not originPos or not itemId then
@@ -2490,7 +2568,29 @@ local function promotePrimary(nextPart: BasePart)
 	activeChanged:Fire(true, nextPart)
 end
 
-function RelocateController.begin(target: BasePart)
+function RelocateController.setPlaceConfirmBridge(on: boolean)
+	placeConfirmBridge = on == true
+	if active then
+		syncChrome()
+	end
+end
+
+function RelocateController.isPlaceConfirmBridge(): boolean
+	return placeConfirmBridge
+end
+
+-- Soft-plant Confirm owns PLANT/rot chrome; Placement forwards move-handle drags here
+-- so the real coral previews like a normal relocate (ignore self / brain snap / align).
+function RelocateController.bridgePreviewAt(worldPos: Vector3): (boolean, string?)
+	if not placeConfirmBridge or not active or busy or recyclePending then
+		return false, nil
+	end
+	updateAt(worldPos)
+	return validSpot == true, rejectReason
+end
+
+function RelocateController.begin(target: BasePart, opts: { placeConfirmBridge: boolean? }?)
+	local bridge = opts ~= nil and opts.placeConfirmBridge == true
 	-- Recover from stuck recycle-fly / intro so mid-wave picks always get chrome.
 	if recycleFlying or introAnimating then
 		recycleFlying = false
@@ -2504,7 +2604,8 @@ function RelocateController.begin(target: BasePart)
 		return
 	end
 	-- Armed placement owns the pointer — don't steal into move/recycle.
-	if PlacementController.isActive() then
+	-- Exception: place-confirm bridge opens inspect/powerup while PLANT chrome stays up.
+	if PlacementController.isActive() and not bridge then
 		return
 	end
 	if InventoryState.isBuildModalBlocking() then
@@ -2512,6 +2613,8 @@ function RelocateController.begin(target: BasePart)
 	end
 	if active then
 		if part == target then
+			placeConfirmBridge = bridge
+			syncChrome()
 			return
 		end
 		RelocateController.cancel(true)
@@ -2534,6 +2637,7 @@ function RelocateController.begin(target: BasePart)
 	local restMat, restColor = CoralVisual.readRestLook(target)
 	CoralVisual.applyRestLook(target)
 
+	placeConfirmBridge = bridge
 	active = true
 	gamepadRelocate = isUsingGamepad()
 	gamepadChromeT0 = os.clock()
@@ -2592,16 +2696,26 @@ function RelocateController.begin(target: BasePart)
 	if cancelBtn then
 		cancelBtn.Text = if gamepadRelocate then "B" else "X"
 	end
-	attachMoveIcon(target)
+	if not placeConfirmBridge then
+		attachMoveIcon(target)
+		-- Fresh Confirm + rot slide (same as new-coral place chrome).
+		PlaceConfirmChrome.resetRotReveal()
+	end
 	ensureWarnBillboard(target)
 	syncWarnLabel()
-	playIntro(screen)
+	if placeConfirmBridge then
+		-- Skip intro chrome anim — placement already shows PLANT / rot.
+		introAnimating = false
+		syncChrome()
+	else
+		playIntro(screen)
+	end
 	startLoop()
 	-- Ensure chrome appears even if intro early-outs (missing move icon).
 	if not introAnimating then
 		syncChrome()
 	end
-	log("Begin", itemId, if gamepadRelocate then "gamepad" else "pointer")
+	log("Begin", itemId, if gamepadRelocate then "gamepad" else "pointer", if placeConfirmBridge then "placeBridge" else nil)
 	activeChanged:Fire(true, target)
 end
 
@@ -2640,6 +2754,10 @@ table.insert(inputConns, UserInputService.InputBegan:Connect(function(input, _pr
 	local isTouch = input.UserInputType == Enum.UserInputType.Touch
 
 	if active then
+		-- Placement confirm owns PLANT / Esc / world aim; inspect UI still receives Gui input.
+		if placeConfirmBridge then
+			return
+		end
 		if inspectModal then
 			return
 		end
@@ -2708,6 +2826,17 @@ table.insert(inputConns, UserInputService.InputBegan:Connect(function(input, _pr
 			end
 		end
 		if InventoryState.isPointerOverBackpack(screenPos) then
+			return
+		end
+		-- PlotCam/FishCam zoom pads: don't steal as Cancel/Rotate via AbsolutePosition fallback.
+		if PlaceConfirmHitTest.isOverForeignButton(
+			screenPos,
+			playerGui,
+			checkBtn,
+			cancelBtn,
+			rotLeftBtn,
+			rotRightBtn
+		) then
 			return
 		end
 		if recyclePending then
@@ -2815,7 +2944,7 @@ table.insert(inputConns, UserInputService.InputBegan:Connect(function(input, _pr
 end))
 
 table.insert(inputConns, UserInputService.InputChanged:Connect(function(input, _processed)
-	if not active or busy or chromeBtnDown then
+	if not active or busy or chromeBtnDown or placeConfirmBridge then
 		return
 	end
 	if input.UserInputType ~= Enum.UserInputType.MouseMovement and input.UserInputType ~= Enum.UserInputType.Touch then
@@ -2873,6 +3002,9 @@ end
 
 table.insert(inputConns, UserInputService.InputEnded:Connect(function(input, _processed)
 	if input.UserInputType ~= Enum.UserInputType.MouseButton1 and input.UserInputType ~= Enum.UserInputType.Touch then
+		return
+	end
+	if placeConfirmBridge then
 		return
 	end
 	local screenPos = PlaceConfirmHitTest.pointerScreenPos(input)

@@ -64,6 +64,52 @@ local wheelConn: RBXScriptConnection? = nil
 local liveDist = DEFAULT_DIST_FRONT -- smoothed effective distance
 -- Until the player opens BUILD once this session, keep the pulled-back start zoom.
 local awaitingBuildZoom = true
+-- TouchPinch: distance at gesture Begin (BaseCamera-style scale apply).
+local pinchBeginDist: number? = nil
+local PINCH_DELTA_TO_DISTOFF = 8
+-- Place-mode zoom: stash pre-place view, tween into baked close-up, restore on PLANT/cancel.
+-- Seats baked from Plot Cam 2 tune readout (small / medium).
+local PLACE_ZOOM_TWEEN_SEC = 0.55
+type PlaceZoomSeat = { pitchDeg: number, distOffset: number, focusHeight: number }
+local PLACE_ZOOM_SEATS: { [number]: PlaceZoomSeat } = {
+	[1] = { pitchDeg = 15, distOffset = -76.23, focusHeight = 12 }, -- small
+	[2] = { pitchDeg = 15, distOffset = -69.47, focusHeight = 17 }, -- medium
+	[3] = { pitchDeg = 15, distOffset = -41.37, focusHeight = 22 }, -- large
+}
+
+local function placeZoomSeatForClass(sizeClass: number?): PlaceZoomSeat
+	local c = math.clamp(math.floor(tonumber(sizeClass) or 1), 1, 3)
+	return PLACE_ZOOM_SEATS[c] or PLACE_ZOOM_SEATS[1]
+end
+type PlaceZoomStash = {
+	focus: Vector3,
+	distOffset: number,
+	pitchDeg: number,
+	focusHeight: number,
+	liveDist: number,
+}
+type PlaceZoomTween = {
+	t0: number,
+	dur: number,
+	fromPitch: number,
+	toPitch: number,
+	fromDist: number,
+	toDist: number,
+	fromFocusH: number,
+	toFocusH: number,
+	fromFocus: Vector3,
+	toFocus: Vector3,
+	restore: boolean,
+}
+local placeZoomStash: PlaceZoomStash? = nil
+local placeZoomTween: PlaceZoomTween? = nil
+local placeZoomFocusGoal: Vector3? = nil
+-- Follow coral plant height while settled in close-up (slopes / 0.5s ground refresh).
+local placeZoomFocusYLive: number? = nil
+local placeZoomFocusYTarget: number? = nil
+local PLACE_ZOOM_Y_SOFT = 1.2 -- studs: small rises/drops — gentle nudge only
+local PLACE_ZOOM_Y_SOFT_RATE = 2.5
+local PLACE_ZOOM_Y_CATCH_RATE = 5.5 -- larger gaps — smooth lerp into view
 
 -- Live tune (also mirrored per plotId while debugging).
 local tune: Tune = {
@@ -288,20 +334,83 @@ local function snapLiveDist()
 	end
 end
 
+local function zoomBlockedByBackpack(): boolean
+	if InventoryState.isOpen() then
+		local mouse = UserInputService:GetMouseLocation()
+		if InventoryState.isPointerOverBackpack(mouse) then
+			return true
+		end
+	end
+	return false
+end
+
 -- Same as DistOff +/- quick buttons: scroll up zooms in (-DistOff), down zooms out.
 local function applyWheelZoom(wheelZ: number): boolean
 	if not active or wheelZ == 0 or wheelZ ~= wheelZ then
 		return false
 	end
-	if InventoryState.isOpen() then
-		local mouse = UserInputService:GetMouseLocation()
-		if InventoryState.isPointerOverBackpack(mouse) then
-			return false
-		end
+	if zoomBlockedByBackpack() then
+		return false
 	end
 	-- Multi-notch wheels: |Z| can be >1. Scroll up (+Z) -> zoom in -> lower DistOff.
 	local delta = -wheelZ * WHEEL_ZOOM_STEP
 	return PlotCam2.nudge("distOffset", delta)
+end
+
+-- Roblox BaseCamera pinch: newDist = beginDist / clamp(scale). Spread → zoom in.
+function PlotCam2.applyPinchGesture(phase: string, scale: number): boolean
+	if not active then
+		return false
+	end
+	if zoomBlockedByBackpack() then
+		return false
+	end
+	if phase == "begin" then
+		local plotCf, plotSize = getPlot()
+		if not plotCf or not plotSize then
+			pinchBeginDist = nil
+			return false
+		end
+		pinchBeginDist = targetDist(plotCf, plotSize)
+		return true
+	end
+	if phase ~= "change" and phase ~= "end" then
+		return false
+	end
+	local beginDist = pinchBeginDist
+	if not beginDist or typeof(scale) ~= "number" or scale ~= scale or scale <= 0 then
+		if phase == "end" then
+			pinchBeginDist = nil
+		end
+		return false
+	end
+	local plotCf, plotSize = getPlot()
+	if not plotCf or not plotSize then
+		if phase == "end" then
+			pinchBeginDist = nil
+		end
+		return false
+	end
+	local clampedScale = math.clamp(scale, 0.1, 10)
+	local wantDist = math.clamp(beginDist / clampedScale, DIST_MIN, DIST_MAX)
+	local base = baselineDist(plotCf, plotSize)
+	tune.distOffset = math.clamp(wantDist - base, DIST_OFFSET_MIN, DIST_OFFSET_MAX)
+	snapLiveDist()
+	if phase == "end" then
+		pinchBeginDist = nil
+	end
+	return true
+end
+
+-- PointerAction pinch delta: positive → zoom in (lower DistOff).
+function PlotCam2.applyPinchDelta(pinchDelta: number): boolean
+	if not active or typeof(pinchDelta) ~= "number" or pinchDelta ~= pinchDelta or pinchDelta == 0 then
+		return false
+	end
+	if zoomBlockedByBackpack() then
+		return false
+	end
+	return PlotCam2.nudge("distOffset", -pinchDelta * PINCH_DELTA_TO_DISTOFF)
 end
 
 local function bindWheel()
@@ -490,6 +599,239 @@ function PlotCam2.notifyBuildOpened()
 	-- liveDist keeps easing via DIST_TWEEN_RATE in tick().
 end
 
+local function easeOutCubic(t: number): number
+	local u = 1 - math.clamp(t, 0, 1)
+	return 1 - u * u * u
+end
+
+-- Focus under a destination seat so clamp/Y match that pitch / DistOff / height.
+local function placeZoomFocusAt(worldPos: Vector3, pitchDeg: number, focusH: number, distOff: number): Vector3
+	local plotCf, plotSize = getPlot()
+	if not plotCf or not plotSize then
+		return worldPos
+	end
+	local prevPitch = tune.pitchDeg
+	local prevH = tune.focusHeight
+	local prevOff = tune.distOffset
+	local prevLive = liveDist
+	tune.pitchDeg = pitchDeg
+	tune.focusHeight = focusH
+	tune.distOffset = distOff
+	liveDist = targetDist(plotCf, plotSize)
+	local result = clampFocus(worldPos, plotCf, plotSize)
+	tune.pitchDeg = prevPitch
+	tune.focusHeight = prevH
+	tune.distOffset = prevOff
+	liveDist = prevLive
+	return result
+end
+
+local function startPlaceZoomTween(
+	toPitch: number,
+	toDist: number,
+	toFocusH: number,
+	toFocus: Vector3,
+	restore: boolean
+)
+	placeZoomTween = {
+		t0 = os.clock(),
+		dur = PLACE_ZOOM_TWEEN_SEC,
+		fromPitch = tune.pitchDeg,
+		toPitch = toPitch,
+		fromDist = tune.distOffset,
+		toDist = toDist,
+		fromFocusH = tune.focusHeight,
+		toFocusH = toFocusH,
+		fromFocus = focus,
+		toFocus = toFocus,
+		restore = restore,
+	}
+end
+
+local function stepPlaceZoomTween()
+	local tw = placeZoomTween
+	if not tw then
+		return
+	end
+	local a = math.clamp((os.clock() - tw.t0) / math.max(tw.dur, 1e-3), 0, 1)
+	local e = easeOutCubic(a)
+	tune.pitchDeg = tw.fromPitch + (tw.toPitch - tw.fromPitch) * e
+	tune.distOffset = tw.fromDist + (tw.toDist - tw.fromDist) * e
+	tune.focusHeight = tw.fromFocusH + (tw.toFocusH - tw.fromFocusH) * e
+	local lerped = tw.fromFocus:Lerp(tw.toFocus, e)
+	local plotCf, plotSize = getPlot()
+	if plotCf and plotSize then
+		focus = Vector3.new(lerped.X, groundY(plotCf, plotSize), lerped.Z)
+		-- Distance follows the lerped seat every frame — no lag-then-catch-up second motion.
+		liveDist = targetDist(plotCf, plotSize)
+	else
+		focus = lerped
+	end
+	if a < 1 then
+		return
+	end
+	tune.pitchDeg = tw.toPitch
+	tune.distOffset = tw.toDist
+	tune.focusHeight = tw.toFocusH
+	if plotCf and plotSize then
+		focus = Vector3.new(tw.toFocus.X, groundY(plotCf, plotSize), tw.toFocus.Z)
+		liveDist = targetDist(plotCf, plotSize)
+	else
+		focus = tw.toFocus
+	end
+	placeZoomTween = nil
+	if tw.restore then
+		placeZoomStash = nil
+		placeZoomFocusGoal = nil
+		placeZoomFocusYLive = nil
+		placeZoomFocusYTarget = nil
+		persistTune()
+	else
+		-- Seat arrived — start height tracking from this look-at Y.
+		placeZoomFocusYLive = focus.Y
+		placeZoomFocusYTarget = focus.Y
+	end
+end
+
+local function clearPlaceZoomHeightTrack()
+	placeZoomFocusYLive = nil
+	placeZoomFocusYTarget = nil
+end
+
+local function stepPlaceZoomHeightFollow(dt: number)
+	local live = placeZoomFocusYLive
+	local target = placeZoomFocusYTarget
+	if live == nil or target == nil then
+		return
+	end
+	local dy = target - live
+	local ady = math.abs(dy)
+	if ady < 1e-3 then
+		placeZoomFocusYLive = target
+		focus = Vector3.new(focus.X, target, focus.Z)
+		return
+	end
+	local rate = if ady <= PLACE_ZOOM_Y_SOFT then PLACE_ZOOM_Y_SOFT_RATE else PLACE_ZOOM_Y_CATCH_RATE
+	live += dy * math.clamp(rate * dt, 0, 1)
+	placeZoomFocusYLive = live
+	focus = Vector3.new(focus.X, live, focus.Z)
+end
+
+function PlotCam2.isPlaceZoomActive(): boolean
+	return placeZoomStash ~= nil
+end
+
+local function startSeatTween(seat: PlaceZoomSeat, worldPos: Vector3?, restore: boolean)
+	local toPitch = math.clamp(seat.pitchDeg, PITCH_MIN, PITCH_MAX)
+	local toDist = math.clamp(seat.distOffset, DIST_OFFSET_MIN, DIST_OFFSET_MAX)
+	local toFocusH = seat.focusHeight
+	local toFocus = focus
+	if typeof(worldPos) == "Vector3" then
+		toFocus = placeZoomFocusAt(worldPos, toPitch, toFocusH, toDist)
+	elseif not restore then
+		toFocus = placeZoomFocusAt(focus, toPitch, toFocusH, toDist)
+	end
+	placeZoomFocusGoal = toFocus
+	-- Seat ease owns Y until it finishes (then height-follow re-arms).
+	clearPlaceZoomHeightTrack()
+	startPlaceZoomTween(toPitch, toDist, toFocusH, toFocus, restore)
+end
+
+-- Capture current view once, then tween into the baked coral close-up (small by default).
+function PlotCam2.beginPlaceZoom(worldPos: Vector3?, sizeClass: number?): boolean
+	if not active then
+		return false
+	end
+	if not placeZoomStash then
+		placeZoomStash = {
+			focus = focus,
+			distOffset = tune.distOffset,
+			pitchDeg = tune.pitchDeg,
+			focusHeight = tune.focusHeight,
+			liveDist = liveDist,
+		}
+		startSeatTween(placeZoomSeatForClass(sizeClass or 1), worldPos, false)
+	elseif not placeZoomTween then
+		if typeof(worldPos) == "Vector3" then
+			local seat = placeZoomSeatForClass(sizeClass or 1)
+			focus = placeZoomFocusAt(
+				worldPos,
+				math.clamp(seat.pitchDeg, PITCH_MIN, PITCH_MAX),
+				seat.focusHeight,
+				math.clamp(seat.distOffset, DIST_OFFSET_MIN, DIST_OFFSET_MAX)
+			)
+			placeZoomFocusGoal = focus
+		end
+	end
+	return true
+end
+
+-- Soft-plant size upgrade: re-tween from the current close-up into the medium/large seat.
+function PlotCam2.retargetPlaceZoom(worldPos: Vector3?, sizeClass: number?): boolean
+	if not active then
+		return false
+	end
+	if not placeZoomStash then
+		return PlotCam2.beginPlaceZoom(worldPos, sizeClass)
+	end
+	-- Keep original pre-place stash; just ease into the new size seat.
+	startSeatTween(placeZoomSeatForClass(sizeClass or 1), worldPos, false)
+	return true
+end
+
+function PlotCam2.updatePlaceZoom(worldPos: Vector3?)
+	if not active or not placeZoomStash then
+		return
+	end
+	-- Seat tween owns framing; only follow the coral after we've settled.
+	if placeZoomTween then
+		return
+	end
+	local plotCf, plotSize = getPlot()
+	if not plotCf or not plotSize then
+		return
+	end
+	if typeof(worldPos) == "Vector3" then
+		local goal = clampFocus(worldPos, plotCf, plotSize)
+		placeZoomFocusGoal = goal
+		-- XZ follow plant; Y tracks plant height so slopes don't push it off-screen.
+		-- Seat framing kept plant ≈ focusHeight above look plane on flat ground.
+		local desiredY = worldPos.Y + tune.focusHeight
+		placeZoomFocusYTarget = desiredY
+		if placeZoomFocusYLive == nil then
+			placeZoomFocusYLive = goal.Y
+		end
+		focus = Vector3.new(goal.X, placeZoomFocusYLive, goal.Z)
+	end
+end
+
+function PlotCam2.endPlaceZoom()
+	local stash = placeZoomStash
+	if not stash then
+		placeZoomTween = nil
+		placeZoomFocusGoal = nil
+		clearPlaceZoomHeightTrack()
+		return
+	end
+	-- finishConfirm + exitPlacement both call this — only one restore tween.
+	if placeZoomTween and placeZoomTween.restore then
+		return
+	end
+	if not active then
+		placeZoomStash = nil
+		placeZoomTween = nil
+		placeZoomFocusGoal = nil
+		clearPlaceZoomHeightTrack()
+		return
+	end
+	clearPlaceZoomHeightTrack()
+	local toPitch = math.clamp(stash.pitchDeg, PITCH_MIN, PITCH_MAX)
+	local toDist = math.clamp(stash.distOffset, DIST_OFFSET_MIN, DIST_OFFSET_MAX)
+	local toFocus = placeZoomFocusAt(stash.focus, toPitch, stash.focusHeight, toDist)
+	-- Tween back to the pre-place seat (debug ± during close-up is discarded).
+	startPlaceZoomTween(toPitch, toDist, stash.focusHeight, toFocus, true)
+end
+
 function PlotCam2.begin(resumeCf: CFrame?): boolean
 	local plotCf, plotSize, plotId = getPlot()
 	if not plotCf or not plotSize or not plotId then
@@ -553,28 +895,50 @@ function PlotCam2.tick(dt: number, input: TickInput): CFrame?
 		focus = clampFocus(plotCf.Position, plotCf, plotSize)
 	end
 
-	syncDistOffsetAchievable(plotCf, plotSize)
+	-- Place-zoom tween owns pitch/DistOff/focus/liveDist — don't fight it with sync/pan.
+	if not placeZoomTween then
+		syncDistOffsetAchievable(plotCf, plotSize)
+	end
 
 	local wish = input.wish
 	-- E/Q keyboard zoom (wheel applies DistOff immediately via nudge).
 	local zoom = -wish.Y * input.panSpeed * dt * 0.85
-	if math.abs(zoom) > 1e-4 then
+	if math.abs(zoom) > 1e-4 and not placeZoomTween then
 		tune.distOffset = math.clamp(tune.distOffset + zoom, DIST_OFFSET_MIN, DIST_OFFSET_MAX)
 		syncDistOffsetAchievable(plotCf, plotSize)
 		persistTune()
 	end
 
-	local pan = Vector3.new(wish.X, 0, wish.Z)
-	if pan.Magnitude > 1e-4 then
-		local scale = math.clamp(effectiveDist() / PAN_AT_REF_DIST, 0.55, 2.4)
-		focus = clampFocus(focus + pan.Unit * (input.panSpeed * scale * dt), plotCf, plotSize)
-	else
-		focus = Vector3.new(focus.X, groundY(plotCf, plotSize), focus.Z)
+	if not placeZoomTween then
+		local pan = Vector3.new(wish.X, 0, wish.Z)
+		if pan.Magnitude > 1e-4 then
+			local scale = math.clamp(effectiveDist() / PAN_AT_REF_DIST, 0.55, 2.4)
+			local keepY = focus.Y
+			focus = clampFocus(focus + pan.Unit * (input.panSpeed * scale * dt), plotCf, plotSize)
+			-- Place-zoom height follow owns Y — don't let clamp/pan snap it to seat groundY.
+			if placeZoomStash and placeZoomFocusYLive ~= nil then
+				focus = Vector3.new(focus.X, keepY, focus.Z)
+			end
+		elseif not (placeZoomStash and placeZoomFocusYLive ~= nil) then
+			focus = Vector3.new(focus.X, groundY(plotCf, plotSize), focus.Z)
+		end
 	end
 
-	local want = targetDist(plotCf, plotSize)
-	local alpha = math.clamp(DIST_TWEEN_RATE * dt, 0, 1)
-	liveDist += (want - liveDist) * alpha
+	stepPlaceZoomTween()
+	if placeZoomStash and not placeZoomTween then
+		stepPlaceZoomHeightFollow(dt)
+	end
+
+	if not placeZoomTween then
+		local want = targetDist(plotCf, plotSize)
+		if placeZoomStash then
+			-- Settled close-up: keep distance glued (no second ease after inbound tween).
+			liveDist = want
+		else
+			local alpha = math.clamp(DIST_TWEEN_RATE * dt, 0, 1)
+			liveDist += (want - liveDist) * alpha
+		end
+	end
 
 	return cameraCFrame(plotCf)
 end

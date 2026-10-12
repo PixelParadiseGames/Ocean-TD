@@ -183,7 +183,7 @@ function WaveSummaryUi.reportAndReadRecords(summary: WaveSim.Summary): Records
 	Players.LocalPlayer:SetAttribute(Constants.HIGHEST_FISH_FED_ATTR, bestFed)
 	Players.LocalPlayer:SetAttribute(Constants.LONGEST_WAVE_SEC_ATTR, bestSec)
 	pcall(function()
-		reportWaveRecordsRemote:FireServer(wave, fed, sec)
+		reportWaveRecordsRemote:FireServer(wave, fed, sec, summary.defeated == true)
 	end)
 	return { wave = bestWave, fishFed = bestFed, elapsedSec = bestSec }
 end

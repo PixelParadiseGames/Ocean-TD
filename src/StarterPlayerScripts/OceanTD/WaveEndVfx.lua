@@ -1396,6 +1396,11 @@ finishInkHeartVisible = function(plotId: string)
 		return
 	end
 
+	-- Pull glass orb + authored materials onto the package (Skip used to leave heart-only).
+	local src = findPlotEndHeartRoot(plotId)
+	ensureOrbInPackage(clone, src)
+	syncNonHeartAppearanceFromSource(clone, src)
+
 	local native = getFullNative(plotId)
 	heartNativeScaleByPlot[plotId] = native
 	clone:SetAttribute(FULL_NATIVE_ATTR, native)
@@ -1414,6 +1419,8 @@ finishInkHeartVisible = function(plotId: string)
 				d.Transparency = 0
 				d.Color = END_HEART_RED
 				heartPart = d
+			else
+				restoreAuthoredAppearance(d)
 			end
 		end
 	end
@@ -1423,14 +1430,18 @@ finishInkHeartVisible = function(plotId: string)
 			clone.Transparency = 0
 			clone.Color = END_HEART_RED
 			heartPart = clone
+		else
+			restoreAuthoredAppearance(clone)
 		end
 	end
 	if clone:IsA("Model") and clone.PrimaryPart then
 		local pp = clone.PrimaryPart
 		pp.LocalTransparencyModifier = 0
-		pp.Transparency = 0
-		pp.Color = END_HEART_RED
-		heartPart = pp
+		if nameLooksLikeHeart(pp.Name) then
+			pp.Transparency = 0
+			pp.Color = END_HEART_RED
+			heartPart = pp
+		end
 	end
 	if not heartPart then
 		heartPart = findHeartIn(clone)
@@ -1444,7 +1455,6 @@ finishInkHeartVisible = function(plotId: string)
 	end
 
 	-- Authored source stays hidden (clone is what you see at the route end).
-	local src = findPlotEndHeartRoot(plotId)
 	if src and src.Parent then
 		setTreeLocalHidden(src, true)
 		for _, sib in ipairs(collectOrbSiblings(src)) do
@@ -1470,20 +1480,77 @@ function WaveEndVfx.restoreHeartAfterInkCancel(plotId: string?)
 end
 
 --[[
-	Skip Intro: same finish as watching the ink heart pop.
-	Keeps the live package (heart + glass orb). Never destroy/rebuild.
+	Skip Intro: one light refresh to full heart + glass orb (same as ink pop end).
+	At most two delayed retries if PlotHearts/route end aren't ready yet — no hot loops.
 ]]
 function WaveEndVfx.settleHeartAfterIntroSkip(plotId: string?): boolean
 	heartInkScaleToken += 1
 	local plot = ClientPlot.get()
 	local id = plotId or (if plot then plot.plotId else "Plot1")
 	heartSkipSettled = true
-	finishInkHeartVisible(id)
-	-- Hold off plot teardown long enough for JoinIntro busy-clear / HUD restore.
-	task.delay(0.6, function()
+	heartIntroHoldHidden = false
+	heartScaleMulByPlot[id] = nil
+	heartPopBusy = false
+
+	local function packageOk(): boolean
+		local clone = routeHeartCloneByPlot[id]
+		if not clone or not clone.Parent then
+			return false
+		end
+		local heart = findHeartIn(clone)
+		if not heart or not heart.Parent then
+			return false
+		end
+		local scaleOk = (not clone:IsA("Model")) or clone:GetScale() >= 0.85
+		return scaleOk and heart.LocalTransparencyModifier < 0.5 and packageHasOrb(clone)
+	end
+
+	local function refreshOnce(forceRebuild: boolean)
+		if heartIntroHoldHidden then
+			return false
+		end
+		local clone = routeHeartCloneByPlot[id]
+		local broken = forceRebuild
+			or not clone
+			or not clone.Parent
+			or not findHeartIn(clone)
+			or (clone:IsA("Model") and clone:GetScale() < 0.2)
+		if broken then
+			destroyRouteHeartClone(id)
+			heartByPlotId[id] = nil
+			if endHeartPlotId == id then
+				endHeartPart = nil
+				endHeartPlotId = nil
+			end
+		end
+		if not routeHeartDriveLocked then
+			WaveEndVfx.syncToPlotSizeStage(nil, id)
+		end
+		finishInkHeartVisible(id)
+		forceHeartFullyVisible(id)
+		return packageOk()
+	end
+
+	local ok = refreshOnce(false)
+	if not ok then
+		-- One rebuild pass, then a single late retry (route/PlotHearts can stream in).
+		task.delay(0.4, function()
+			if heartIntroHoldHidden then
+				return
+			end
+			refreshOnce(true)
+		end)
+	end
+	task.delay(1.0, function()
 		heartSkipSettled = false
+		if heartIntroHoldHidden then
+			return
+		end
+		if not packageOk() then
+			refreshOnce(true)
+		end
 	end)
-	return routeHeartCloneByPlot[id] ~= nil
+	return ok
 end
 
 function WaveEndVfx.getEndHeartPart(): BasePart?

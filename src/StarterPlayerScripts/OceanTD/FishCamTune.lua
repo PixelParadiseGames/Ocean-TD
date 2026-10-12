@@ -22,6 +22,7 @@ local ZOOM_STEP = 0.12
 local DIST_SCALE_MIN = 0.2 -- twice as close as prior 0.4 floor
 local DIST_SCALE_MAX = 2.5
 local QUICK_NAME = "OceanTD_FishCamQuick"
+local DEBUG_GUI_NAME = "OceanTD_FishCamDebug"
 local QUICK_SCALE = 0.52
 local QUICK_GAP = 6
 local QUICK_ROW_GAP = 6
@@ -42,6 +43,14 @@ do
 	if oldQuick then
 		oldQuick:Destroy()
 	end
+	local oldDebug = playerGui:FindFirstChild(DEBUG_GUI_NAME)
+	if oldDebug then
+		oldDebug:Destroy()
+	end
+	local oldFocus = workspace:FindFirstChild("OceanTD_FishCamFocusDebug")
+	if oldFocus then
+		oldFocus:Destroy()
+	end
 end
 
 local quickHolder: Frame? = nil
@@ -53,6 +62,8 @@ local distScale = 1
 local steerUntil = 0
 local yawHandler: ((number) -> ())? = nil
 local flashToken: { [TextButton]: number } = {}
+local debugGui: ScreenGui? = nil
+local zoomLabel: TextLabel? = nil
 
 function FishCamTune.bind(handlers: { onYaw: (number) -> () })
 	yawHandler = handlers.onYaw
@@ -66,8 +77,97 @@ function FishCamTune.isSteeringOrbit(): boolean
 	return os.clock() < steerUntil
 end
 
-function FishCamTune.resetZoom()
-	distScale = 1
+local function destroyZoomDebug()
+	if debugGui then
+		debugGui:Destroy()
+		debugGui = nil
+	end
+	zoomLabel = nil
+end
+
+local function ensureZoomDebug(): TextLabel?
+	if zoomLabel and zoomLabel.Parent and debugGui and debugGui.Parent then
+		return zoomLabel
+	end
+	destroyZoomDebug()
+	local sg = Instance.new("ScreenGui")
+	sg.Name = DEBUG_GUI_NAME
+	sg.ResetOnSpawn = false
+	sg.IgnoreGuiInset = true
+	sg.DisplayOrder = 9200
+	sg.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+	sg.Parent = playerGui
+
+	local lbl = Instance.new("TextLabel")
+	lbl.Name = "ZoomLevel"
+	lbl.AnchorPoint = Vector2.new(1, 0.5)
+	lbl.Position = UDim2.new(1, -18, 0.5, 0)
+	lbl.Size = UDim2.fromOffset(120, 36)
+	lbl.BackgroundColor3 = Color3.fromRGB(12, 18, 28)
+	lbl.BackgroundTransparency = 0.25
+	lbl.BorderSizePixel = 0
+	lbl.Font = UiTheme.Font
+	lbl.TextSize = 18
+	lbl.TextColor3 = Color3.fromRGB(220, 245, 255)
+	lbl.TextXAlignment = Enum.TextXAlignment.Center
+	lbl.Text = "Zoom 1.00"
+	lbl.Parent = sg
+	local corner = Instance.new("UICorner")
+	corner.CornerRadius = UDim.new(0, 8)
+	corner.Parent = lbl
+	local stroke = Instance.new("UIStroke")
+	stroke.Color = Color3.fromRGB(80, 160, 200)
+	stroke.Thickness = 1.5
+	stroke.Transparency = 0.35
+	stroke.Parent = lbl
+
+	debugGui = sg
+	zoomLabel = lbl
+	return lbl
+end
+
+local function refreshZoomLabel()
+	local lbl = zoomLabel
+	if not lbl or not lbl.Parent then
+		return
+	end
+	lbl.Text = string.format("Zoom %.2f", distScale)
+end
+
+-- BaseCamera-style pinch: beginDistScale / clamp(touchScale).
+function FishCamTune.applyPinchScale(beginDistScale: number, touchScale: number): boolean
+	if typeof(beginDistScale) ~= "number" or typeof(touchScale) ~= "number" then
+		return false
+	end
+	if beginDistScale ~= beginDistScale or touchScale ~= touchScale or touchScale <= 0 then
+		return false
+	end
+	local clamped = math.clamp(touchScale, 0.1, 10)
+	local nextScale = math.clamp(beginDistScale / clamped, DIST_SCALE_MIN, DIST_SCALE_MAX)
+	if nextScale == distScale then
+		return false
+	end
+	distScale = nextScale
+	refreshZoomLabel()
+	return true
+end
+
+-- PointerAction pinch delta: positive → zoom in (closer).
+function FishCamTune.nudgeZoomByDelta(delta: number): boolean
+	if typeof(delta) ~= "number" or delta ~= delta or delta == 0 then
+		return false
+	end
+	local before = distScale
+	distScale = math.clamp(distScale - delta * ZOOM_STEP * 2.5, DIST_SCALE_MIN, DIST_SCALE_MAX)
+	if before ~= distScale then
+		refreshZoomLabel()
+	end
+	return before ~= distScale
+end
+
+local function setDebugVisible(_on: boolean)
+	-- Zoom readout debug stays off in shipping builds.
+	destroyZoomDebug()
 end
 
 local function resolveFishCamButton(): GuiObject?
@@ -196,6 +296,9 @@ local function nudgeZoom(zoomOut: boolean): boolean
 	else
 		distScale = math.clamp(distScale - ZOOM_STEP, DIST_SCALE_MIN, DIST_SCALE_MAX)
 	end
+	if before ~= distScale then
+		refreshZoomLabel()
+	end
 	return before ~= distScale
 end
 
@@ -285,10 +388,16 @@ end
 function FishCamTune.setVisible(on: boolean)
 	visible = on == true
 	syncQuickVisibility()
+	setDebugVisible(visible)
 end
 
 function FishCamTune.isVisible(): boolean
 	return visible
+end
+
+function FishCamTune.resetZoom()
+	distScale = 1
+	refreshZoomLabel()
 end
 
 playerGui:GetAttributeChangedSignal(FreeCamConfig.ATTR_CAROUSEL_COLLAPSED):Connect(syncQuickVisibility)

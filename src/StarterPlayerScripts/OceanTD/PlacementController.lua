@@ -9,7 +9,6 @@
 local Players = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
 local RunService = game:GetService("RunService")
-local TweenService = game:GetService("TweenService")
 local ContextActionService = game:GetService("ContextActionService")
 local GuiService = game:GetService("GuiService")
 local Workspace = game:GetService("Workspace")
@@ -39,6 +38,7 @@ local PlaceAimScreen = require(script.Parent:WaitForChild("PlaceAimScreen"))
 local PlaceBlockFlash = require(script.Parent:WaitForChild("PlaceBlockFlash"))
 local PlaceRaycast = require(script.Parent:WaitForChild("PlaceRaycast"))
 local PlaceArmDisarmAnim = require(script.Parent:WaitForChild("PlaceArmDisarmAnim"))
+local PlaceSoftPlant = require(script.Parent:WaitForChild("PlaceSoftPlant"))
 local BrainSnapPreview = require(script.Parent:WaitForChild("BrainSnapPreview"))
 local CoralRangeRings = require(script.Parent:WaitForChild("CoralRangeRings"))
 local CoralSize = require(oceanRoot:WaitForChild("Shared"):WaitForChild("CoralSize"))
@@ -113,8 +113,6 @@ local MOVE_HINT_SCALE_IN_SEC = 0.35
 local MOVE_HINT_PULSE_AMP = 0.2
 local GHOST_INVALID_COLOR = Color3.fromRGB(220, 70, 70)
 local GHOST_PULSE_SPEED = 5
-local CHECK_BRIGHT_GREEN = Color3.fromRGB(90, 255, 120)
-local CHECK_HUNTER_GREEN = Color3.fromRGB(35, 85, 45)
 local POST_PLACE_GHOST_DELAY = 1
 local GHOST_SCALE_IN_SEC = 0.5
 
@@ -136,6 +134,12 @@ local chromeBtnPointerDown = false
 local chromePressTarget: string? = nil -- "check" | "cancel"
 local placeCommitBusy = false
 local placeCommitLockUntil = 0
+-- Soft-plant during Confirm so CoralInspectPanel (powerup) can open before PLANT.
+local confirmPlantedPart: BasePart? = nil
+local confirmPlantedId: string? = nil
+local softPlantOriginPos: Vector3? = nil -- RequestMove from-pos after move-handle drag
+local confirmPowerupOpen = false
+local confirmPlantToken = 0
 
 -- Forward decls so confirm UI can wire before bodies are assigned.
 local onCheck: () -> ()
@@ -149,17 +153,13 @@ local attachMoveHintToGhost: () -> ()
 local releaseHandPin: () -> ()
 local startAimLoop: () -> ()
 local beginAim: (string, boolean?, boolean?) -> ()
-local noteOutOfPlotAim: (boolean) -> ()
+local chromeAdornee: () -> BasePart?
 
 local savedWalkSpeed = 16
 local savedJumpPower = 75
 local savedJumpHeight = 10.8
 local savedCameraType: Enum.CameraType? = nil
 local savedCameraCFrame: CFrame? = nil
-local plotNudgeActive = false
-local plotNudgeToken = 0
-local outOfPlotSince: number? = nil
-local plotNudgeCooldownUntil = 0
 local aimConn: RBXScriptConnection? = nil
 local inputConns: { RBXScriptConnection } = {}
 local frozen = false
@@ -172,13 +172,14 @@ local DEFAULT_JUMP_POWER = 75
 local DEFAULT_JUMP_HEIGHT = 10.8 -- StarterPlayer default 7.2 × 1.5
 local CONFIRM_DRAG_PX = 28 -- ignore tiny finger jitter before moving parked ghost
 local BTN_SIZE = PlaceConfirmChrome.BASE_BTN_PX -- viewport-scaled via PlaceConfirmChrome.chromeBtnSize
-local OUT_OF_PLOT_NUDGE_WAIT = 1
-local OUT_OF_PLOT_NUDGE_HOLD = 1
-local OUT_OF_PLOT_NUDGE_TWEEN = TweenInfo.new(0.45, Enum.EasingStyle.Quad, Enum.EasingDirection.InOut)
-local OUT_OF_PLOT_NUDGE_COOLDOWN = 4
 
 local function log(...: any)
 	print("[PLACE]", ...)
+end
+
+-- BillboardGui cannot draw above PlaceMore ScreenGui — HUD hides while this is true.
+local function setPlaceConfirmChromeAttr(on: boolean)
+	playerGui:SetAttribute("OceanTD_PlaceConfirmChromeUp", on == true)
 end
 
 local function getPlayerControls(): any
@@ -525,6 +526,8 @@ local function destroyConfirmUi()
 	moveHintScale = nil
 	chromePressTarget = nil
 	chromeBtnPointerDown = false
+	PlaceConfirmChrome.stopRotateHold()
+	PlaceConfirmChrome.resetRotReveal()
 end
 
 local function rayExclude(): PlaceRaycast.ExcludeRefs
@@ -595,7 +598,7 @@ local function setCheckLabel(text: string)
 	if glyph then
 		glyph:Destroy()
 	end
-	local isWord = text == "CONFIRM" or text == "Enter" or text == "A" or text == "OK"
+	local isWord = text == "PLANT" or text == "CONFIRM" or text == "Enter" or text == "A" or text == "OK"
 	local strokeColor = if isWord
 		then Color3.fromRGB(12, 55, 25)
 		else Color3.new(1, 1, 1)
@@ -605,9 +608,8 @@ local function setCheckLabel(text: string)
 	checkBtn.TextStrokeColor3 = strokeColor
 	checkBtn.TextStrokeTransparency = 0
 	checkBtn.ZIndex = 20
-	-- CONFIRM needs fixed size; TextScaled crushes long words in the circle.
-	-- Mobile chrome is ~30% smaller — keep text small enough for one line.
-	if text == "CONFIRM" then
+	-- PLANT / CONFIRM need fixed size; TextScaled crushes long words in the circle.
+	if text == "PLANT" or text == "CONFIRM" then
 		checkBtn.TextScaled = false
 		checkBtn.TextSize = PlaceConfirmChrome.confirmLabelTextSize()
 	else
@@ -694,13 +696,74 @@ detachMoveHintToScreen = function()
 	end
 end
 
--- Billboard on the ghost (same as relocate) so the move icon stays on the coral.
+-- Stable world anchor for the move/PLANT Billboard. Never Adornee the coral mesh —
+-- size upgrades destroy/replace that part and the chrome spins/vanishes until rebind.
+local function ensurePlaceChromeAdornee(followPos: Vector3): BasePart
+	local part = chromeAdorneePart
+	if not part or not part.Parent then
+		part = Instance.new("Part")
+		part.Name = "OceanTD_PlaceChromeAdornee"
+		part.Anchored = true
+		part.CanCollide = false
+		part.CanQuery = false
+		part.CanTouch = false
+		part.CastShadow = false
+		part.Massless = true
+		part.Transparency = 1
+		part.Size = Vector3.new(0.25, 0.25, 0.25)
+		part.Parent = Workspace
+		chromeAdorneePart = part
+	end
+	part.CFrame = CFrame.new(followPos)
+	return part
+end
+
+chromeAdornee = function(): BasePart?
+	-- Soft-plant / Confirm: freeze world anchor. Never Adornee/follow the coral mesh —
+	-- upgrades destroy/replace it and chasing Size/align makes chrome spin then pop back.
+	if mode == MODE_CONFIRM then
+		local existing = chromeAdorneePart
+		if existing and existing.Parent then
+			-- Track XZ if the plant point moved (confirm drag); keep Y frozen at first height.
+			local pin = placeAnchor or confirmPos
+			if pin then
+				local p = existing.Position
+				if math.abs(p.X - pin.X) > 0.05 or math.abs(p.Z - pin.Z) > 0.05 then
+					existing.CFrame = CFrame.new(pin.X, p.Y, pin.Z)
+				end
+			end
+			return existing
+		end
+		local seed: Vector3? = nil
+		if confirmPlantedPart and confirmPlantedPart.Parent then
+			seed = confirmPlantedPart.Position
+		elseif ghost and ghost.Parent then
+			seed = ghost.Position
+		else
+			seed = placeAnchor or confirmPos
+		end
+		if seed then
+			return ensurePlaceChromeAdornee(seed)
+		end
+		return nil
+	end
+	if ghost and ghost.Parent then
+		return ensurePlaceChromeAdornee(ghost.Position)
+	end
+	if chromeAdorneePart and chromeAdorneePart.Parent then
+		return chromeAdorneePart
+	end
+	return nil
+end
+
+-- Billboard on the ghost / soft-planted coral so the move icon stays on it.
 -- Cancel/rot read this icon's AbsolutePosition — same pixel space, no GuiInset math.
 attachMoveHintToGhost = function()
-	if not moveHintImage or not ghost or not ghost.Parent then
+	local adornee = chromeAdornee()
+	if not moveHintImage or not adornee then
 		return
 	end
-	if moveHintBillboard and moveHintBillboard.Parent and moveHintBillboard.Adornee == ghost then
+	if moveHintBillboard and moveHintBillboard.Parent and moveHintBillboard.Adornee == adornee then
 		moveHintImage.Visible = true
 		tryReparentGui(moveHintImage, moveHintBillboard)
 		-- Size/Position owned by layoutOnMoveBillboard when chrome is up.
@@ -720,11 +783,14 @@ attachMoveHintToGhost = function()
 	bb.StudsOffset = Vector3.zero
 	bb.ClipsDescendants = false
 	bb.MaxDistance = 2000
-	bb.Adornee = ghost
-	bb.Parent = playerGui
+	bb.Adornee = adornee
+	-- Parent under PlaceConfirm ScreenGui (DisplayOrder 12000) so PLANT sits above PlaceMore HUD.
+	bb.Parent = if confirmGui and confirmGui.Parent then confirmGui else playerGui
 	moveHintImage.AnchorPoint = Vector2.new(0.5, 0.5)
 	moveHintImage.Position = UDim2.new(0.5, 0, 0.5, 0)
 	moveHintImage.Size = UDim2.fromOffset(MOVE_ICON_SIZE, MOVE_ICON_SIZE)
+	moveHintImage.ZIndex = 25
+	moveHintImage.Active = true
 	moveHintImage.Visible = true
 	tryReparentGui(moveHintImage, bb)
 	moveHintBillboard = bb
@@ -735,7 +801,8 @@ local function setPlaceChromeHungry(on: boolean)
 		if btn then
 			btn.Active = on
 			pcall(function()
-				(btn :: any).Interactable = on
+				local b: any = btn
+				b.Interactable = on
 			end)
 		end
 	end
@@ -804,79 +871,39 @@ local function readGhostBaseColor(part: BasePart): Color3
 end
 
 local function updateGhostPulse()
-	if not ghost then
-		return
-	end
-	local baseMat = ghostBaseMaterial or Enum.Material.Pebble
 	local phase = (math.sin(os.clock() * GHOST_PULSE_SPEED) + 1) * 0.5
-	ghost.Material = if phase >= 0.5 then Enum.Material.Neon else baseMat
-	ghost.Transparency = 0.4
-	CoralVisual.setGhostValidColors(ghost, validSpot, ghostBaseColor, GHOST_INVALID_COLOR)
-	-- Match ✓ background to the ghost neon flash (bright ↔ hunter green).
+	if ghost and ghost.Parent then
+		local baseMat = ghostBaseMaterial or Enum.Material.Pebble
+		ghost.Material = if phase >= 0.5 then Enum.Material.Neon else baseMat
+		ghost.Transparency = 0.4
+		CoralVisual.setGhostValidColors(ghost, validSpot, ghostBaseColor, GHOST_INVALID_COLOR)
+		SelectRing.ensure(placeSelectRing, ghost, playerGui)
+		SelectRing.pulse(placeSelectRing)
+	elseif confirmPlantedPart and confirmPlantedPart.Parent then
+		SelectRing.ensure(placeSelectRing, confirmPlantedPart, playerGui)
+		SelectRing.pulse(placeSelectRing)
+	else
+		-- Mesh gone mid-upgrade: park ring on chrome anchor (or tear down) — never a dead Adornee.
+		local anchor = chromeAdorneePart
+		if anchor and anchor.Parent then
+			SelectRing.ensure(placeSelectRing, anchor, playerGui)
+			SelectRing.pulse(placeSelectRing)
+		else
+			SelectRing.destroy(placeSelectRing)
+		end
+	end
+	-- Match ✓ background to the ghost neon flash (bright gradient ↔ hunter green).
 	if checkBtn and checkBtn.Visible then
-		checkBtn.BackgroundColor3 = CHECK_BRIGHT_GREEN:Lerp(CHECK_HUNTER_GREEN, phase)
-	end
-	SelectRing.ensure(placeSelectRing, ghost, playerGui)
-	SelectRing.pulse(placeSelectRing)
-end
-
-local function startOutOfPlotCamNudge()
-	if plotNudgeActive or not camera or not savedCameraCFrame then
-		return
-	end
-	local plot = ClientPlot.get()
-	if not plot then
-		return
-	end
-	local from = savedCameraCFrame
-	local focus = plot.cframe.Position
-	if (focus - from.Position).Magnitude < 0.5 then
-		return
-	end
-	local to = CFrame.lookAt(from.Position, focus)
-	plotNudgeActive = true
-	plotNudgeToken += 1
-	local my = plotNudgeToken
-	local twIn = TweenService:Create(camera, OUT_OF_PLOT_NUDGE_TWEEN, { CFrame = to })
-	twIn:Play()
-	task.spawn(function()
-		twIn.Completed:Wait()
-		if my ~= plotNudgeToken then
-			return
-		end
-		task.wait(OUT_OF_PLOT_NUDGE_HOLD)
-		if my ~= plotNudgeToken then
-			return
-		end
-		local twOut = TweenService:Create(camera, OUT_OF_PLOT_NUDGE_TWEEN, { CFrame = from })
-		twOut:Play()
-		twOut.Completed:Wait()
-		if my ~= plotNudgeToken then
-			return
-		end
-		plotNudgeActive = false
-		plotNudgeCooldownUntil = os.clock() + OUT_OF_PLOT_NUDGE_COOLDOWN
-		outOfPlotSince = nil
-	end)
-end
-
-noteOutOfPlotAim = function(isOut: boolean)
-	if not isOut then
-		outOfPlotSince = nil
-		return
-	end
-	if plotNudgeActive or os.clock() < plotNudgeCooldownUntil then
-		return
-	end
-	if not outOfPlotSince then
-		outOfPlotSince = os.clock()
-	end
-	if (os.clock() - outOfPlotSince) >= OUT_OF_PLOT_NUDGE_WAIT then
-		startOutOfPlotCamNudge()
+		PlaceConfirmChrome.applyConfirmPulse(checkBtn, phase)
 	end
 end
 
 local function updateGhostAt(anchorPos: Vector3)
+	-- Soft-planted: drag the real coral (move handle), not a new ghost.
+	if confirmPlantedId then
+		PlaceSoftPlant.updateAt(anchorPos)
+		return
+	end
 	local speciesId = armedItemId and getSpeciesIdForItem(armedItemId)
 	if not speciesId then
 		return
@@ -985,7 +1012,7 @@ local function updateGhostAt(anchorPos: Vector3)
 	updateGhostPulse()
 	syncBlockFlashForAim(anchorPos)
 	ClientPlot.setOutOfPlotFlash(not aimPinnedToHand and rejectReason == "Out Of Plot")
-	noteOutOfPlotAim(not aimPinnedToHand and rejectReason == "Out Of Plot")
+	PlaceSoftPlant.noteOutOfPlotAim(not aimPinnedToHand and rejectReason == "Out Of Plot")
 	if warnLabel then
 		if validSpot then
 			warnLabel.Text = ""
@@ -1005,7 +1032,8 @@ end
 
 local function syncConfirmButtonsImpl()
 	-- Arm intro also uses this (move+chrome on the ghost Billboard together).
-	if not confirmGui or not checkBtn or not cancelBtn or not ghost then
+	local adornee = chromeAdornee()
+	if not confirmGui or not checkBtn or not cancelBtn or not adornee then
 		return
 	end
 
@@ -1014,7 +1042,8 @@ local function syncConfirmButtonsImpl()
 	local rotAlive = rotLeftBtn ~= nil and rotLeftBtn.Parent ~= nil and rotRightBtn ~= nil and rotRightBtn.Parent ~= nil
 	if not chromeAlive or not rotAlive then
 		makeConfirmUi()
-		if not confirmGui or not checkBtn or not cancelBtn or not ghost then
+		adornee = chromeAdornee()
+		if not confirmGui or not checkBtn or not cancelBtn or not adornee then
 			return
 		end
 		if checkBtn.Parent == nil or cancelBtn.Parent == nil then
@@ -1031,14 +1060,19 @@ local function syncConfirmButtonsImpl()
 	local draggingCoral = confirmDragging or aimFingerDown or backpackDrag
 	setPlaceChromeHungry(not draggingCoral)
 
-	checkBtn.Visible = validSpot and (mode == MODE_CONFIRM or gamepadPlacement)
-	cancelBtn.Visible = true
+	-- Soft-plant move-handle drag: move icon only (same as relocate-while-dragging).
+	local hideForSoftDrag = confirmPlantedId ~= nil and confirmDragging
+	checkBtn.Visible = (not hideForSoftDrag) and validSpot and (mode == MODE_CONFIRM or gamepadPlacement)
+	-- Placement: Confirm only (Close hidden for now). Esc / X / B still cancel.
+	cancelBtn.Visible = false
 	local armedSid = if armedItemId then getSpeciesIdForItem(armedItemId) else nil
-	local showRot = CoralVisual.hasYawRotateChrome(armedSid)
+	local showRot = (not hideForSoftDrag) and (
+		CoralVisual.hasYawRotateChrome(armedSid)
 		or (armedItemId == "BrainCoral" and BrainSnapPreview.isSnapped())
+	)
 	if moveHintBillboard and moveHintImage then
 		PlaceConfirmChrome.layoutOnMoveBillboard(
-			ghost,
+			adornee,
 			MOVE_ICON_SIZE,
 			BTN_SIZE,
 			playerGui,
@@ -1052,11 +1086,21 @@ local function syncConfirmButtonsImpl()
 			moveHintImage
 		)
 	end
-	chromeScreenPos = PlaceConfirmChrome.guiPosFromWorld(ghost.Position)
+	if hideForSoftDrag then
+		if rotLeftBtn then
+			rotLeftBtn.Visible = false
+		end
+		if rotRightBtn then
+			rotRightBtn.Visible = false
+		end
+	end
+	-- Move disc ZIndex 25 used to sit above PLANT and steal clicks after upgrade re-layout
+	-- (rot sits to the sides so it still worked). Idle: PLANT on top. Dragging: move on top.
+	if moveHintImage then
+		moveHintImage.ZIndex = if hideForSoftDrag or confirmDragging then 30 else 12
+	end
+	chromeScreenPos = PlaceConfirmChrome.guiPosFromWorld(adornee.Position)
 	local showWord = (math.floor(os.clock()) % 2) == 1
-	cancelBtn.Text = if showWord then "Close" else "X"
-	cancelBtn.TextStrokeColor3 = if showWord then Color3.fromRGB(60, 15, 18) else Color3.new(1, 1, 1)
-	cancelBtn.TextStrokeTransparency = 0
 	if checkBtn.Visible then
 		local last = UserInputService:GetLastInputType()
 		local gamepad = last == Enum.UserInputType.Gamepad1
@@ -1067,8 +1111,8 @@ local function syncConfirmButtonsImpl()
 		local confirmPx = PlaceConfirmChrome.placeConfirmBtnSize(BTN_SIZE)
 		checkBtn.Size = UDim2.fromOffset(confirmPx, confirmPx)
 		checkBtn.TextColor3 = Color3.new(1, 1, 1)
-		checkBtn.ZIndex = 20
-		PlaceConfirmChrome.syncConfirmFace(checkBtn, showWord, gamepad)
+		checkBtn.ZIndex = 25
+		PlaceConfirmChrome.syncConfirmFace(checkBtn, showWord, gamepad, "PLANT")
 	end
 end
 syncConfirmButtons = syncConfirmButtonsImpl
@@ -1076,7 +1120,8 @@ syncConfirmButtons = syncConfirmButtonsImpl
 local SEA_FAN_ROT_STEP = math.rad(15) -- was 10°; match relocate yaw step
 
 local function rotateSeaFanGhost(dir: number)
-	if not ghost or not placeAnchor then
+	local target = if ghost and ghost.Parent then ghost else confirmPlantedPart
+	if not target or not placeAnchor then
 		return
 	end
 	local sid = armedItemId and getSpeciesIdForItem(armedItemId)
@@ -1085,12 +1130,16 @@ local function rotateSeaFanGhost(dir: number)
 	end
 	local yaw = ghostPlaceFacingYaw
 	if typeof(yaw) ~= "number" then
-		yaw = CoralVisual.readFacingYaw(ghost)
+		yaw = CoralVisual.readFacingYaw(target)
 	end
 	yaw += dir * SEA_FAN_ROT_STEP
 	ghostPlaceFacingYaw = yaw
 	local mir = ClientPlot.get()
-	CoralVisual.alignMeshToSurface(ghost, placeAnchor, yaw, nil, if mir then mir.cframe else nil)
+	local foot = placeAnchor
+	if confirmPlantedPart and target == confirmPlantedPart then
+		foot = CoralVisual.readGridAnchor(target) or target.Position
+	end
+	CoralVisual.alignMeshToSurface(target, foot, yaw, nil, if mir then mir.cframe else nil)
 	UiHaptics.pulseShort()
 end
 
@@ -1137,9 +1186,41 @@ local function makeConfirmUiImpl()
 	move.Image = MOVE_ICON_IMAGE
 	move.ScaleType = Enum.ScaleType.Fit
 	move.Visible = false
-	move.ZIndex = 2
+	-- Above PLANT/rot (ZIndex 20): same Billboard AbsolutePosition glitches were letting
+	-- Confirm steal presses on the move disc during soft-plant.
+	move.ZIndex = 25
+	move.Active = true
 	move.Parent = gui
 	moveHintImage = move
+	move.InputBegan:Connect(function(input)
+		if mode ~= MODE_CONFIRM then
+			return
+		end
+		if input.UserInputType ~= Enum.UserInputType.MouseButton1 and input.UserInputType ~= Enum.UserInputType.Touch then
+			return
+		end
+		-- Never steal PLANT / rot presses (move ZIndex used to win after upgrade overlap).
+		if chromeBtnPointerDown then
+			return
+		end
+		local screenPos = PlaceConfirmHitTest.pointerScreenPos(input)
+		if PlaceConfirmHitTest.isOverDisc(screenPos, checkBtn)
+			or PlaceConfirmHitTest.isOverDisc(screenPos, rotLeftBtn)
+			or PlaceConfirmHitTest.isOverDisc(screenPos, rotRightBtn)
+			or PlaceConfirmHitTest.isOverDisc(screenPos, cancelBtn)
+		then
+			return
+		end
+		confirmPressOrigin = screenPos
+		confirmDragging = true
+		PlaceSoftPlant.beginZoomDrag(placeAnchor or confirmPos, screenPos, function(worldPos: Vector3)
+			confirmPos = worldPos
+			updateGhostAt(worldPos)
+		end)
+		chromeBtnPointerDown = false
+		chromePressTarget = nil
+		PlaceConfirmChrome.stopRotateHold()
+	end)
 
 	local function roundBtn(text: string, color: Color3): TextButton
 		local btnPx = PlaceConfirmChrome.placeChromeBtnSize(BTN_SIZE)
@@ -1191,22 +1272,20 @@ local function makeConfirmUiImpl()
 		end
 		local screenPos = PlaceConfirmHitTest.pointerScreenPos(input)
 		local resolved = PlaceConfirmHitTest.resolveTarget(screenPos, checkBtn, cancelBtn, playerGui, rotLeftBtn, rotRightBtn)
-		-- Gui buttons are square; only accept ✓/X inside the round disc (near Cancel must allow drag).
+		-- Gui buttons are square; AbsolutePosition disc tests often fail after upgrade
+		-- mesh/chrome rebind — trust the button's own MouseButton1Down/InputBegan
+		-- for check/cancel/rot (same path). Disc still used for resolved fallbacks.
 		local target: string?
-		if claimed == "check" or claimed == "cancel" then
-			local btn = if claimed == "check" then checkBtn else cancelBtn
+		if claimed == "rotLeft" or claimed == "rotRight" or claimed == "check" or claimed == "cancel" then
+			target = claimed
+		elseif resolved == "check" or resolved == "cancel" then
+			local btn = if resolved == "check" then checkBtn else cancelBtn
 			if not PlaceConfirmHitTest.isOverDisc(screenPos, btn) then
 				return
 			end
-			target = claimed
-		elseif resolved == "check" or resolved == "cancel" then
 			target = resolved
 		elseif resolved == "rotLeft" or resolved == "rotRight" then
 			target = resolved
-		elseif claimed == "rotLeft" and PlaceConfirmHitTest.isOverDisc(screenPos, rotLeftBtn) then
-			target = "rotLeft"
-		elseif claimed == "rotRight" and PlaceConfirmHitTest.isOverDisc(screenPos, rotRightBtn) then
-			target = "rotRight"
 		elseif resolved then
 			target = resolved
 		else
@@ -1275,19 +1354,24 @@ local function makeConfirmUiImpl()
 			markChromePointerDown("rotRight", input)
 		end
 	end)
-	-- Native button click — primary commit path (InputEnded is backup).
-	checkBtn.Activated:Connect(function()
+	local function commitCheckFromGui()
 		if mode ~= MODE_CONFIRM and not gamepadPlacement then
 			return
 		end
-		if confirmDragging or aimFingerDown or backpackDrag then
-			return
-		end
+		-- Clear drag flags that move-icon steal can leave stuck after upgrade.
+		confirmDragging = false
+		aimFingerDown = false
+		backpackDrag = false
+		placePointerHeld = false
+		confirmPressOrigin = nil
 		chromeBtnPointerDown = false
 		chromePressTarget = nil
 		PlaceConfirmChrome.stopRotateHold()
 		onCheck()
-	end)
+	end
+	-- Native button click — primary commit path (InputEnded is backup).
+	checkBtn.Activated:Connect(commitCheckFromGui)
+	checkBtn.MouseButton1Click:Connect(commitCheckFromGui)
 	cancelBtn.Activated:Connect(function()
 		if mode == MODE_OFF then
 			return
@@ -1311,7 +1395,7 @@ local function stopAimLoop()
 end
 
 local function keepCameraFrozen()
-	if plotNudgeActive then
+	if PlaceSoftPlant.isPlotNudgeActive() then
 		return
 	end
 	if playerGui:GetAttribute("OceanTD_SharkCamBusy") == true
@@ -1552,6 +1636,7 @@ beginAim = function(itemId: string, scaleIn: boolean?, keepChromePinned: boolean
 	PlaceArmDisarmAnim.stopArmIntro()
 	armedItemId = itemId
 	mode = MODE_AIM
+	setPlaceConfirmChromeAttr(false)
 	confirmPos = nil
 	backpackDrag = false
 	aimFingerDown = false
@@ -1621,6 +1706,7 @@ local function beginAimFromDrag(itemId: string)
 	PlaceArmDisarmAnim.stopArmIntro()
 	armedItemId = itemId
 	mode = MODE_AIM
+	setPlaceConfirmChromeAttr(false)
 	confirmPos = nil
 	aimFingerDown = false
 	confirmDragging = false
@@ -1651,9 +1737,11 @@ local function beginAimFromDrag(itemId: string)
 end
 
 local function exitPlacement(clearArmed: boolean)
-	plotNudgeToken += 1
-	plotNudgeActive = false
-	outOfPlotSince = nil
+	PlaceSoftPlant.resetOutOfPlotNudge()
+	PlaceSoftPlant.endZoomDrag()
+	-- Cancel / backpack-close / forceExit: put PlotCam back where it was before place.
+	-- finishConfirm already restored; endCamZoom is idempotent.
+	PlaceSoftPlant.endCamZoom()
 	placeResumeToken += 1
 	postPlaceWaiting = false
 	placeCommitBusy = false
@@ -1664,7 +1752,9 @@ local function exitPlacement(clearArmed: boolean)
 	PlaceArmDisarmAnim.stopArmIntro()
 	stopMoveHintAttract()
 	chromeBtnPointerDown = false
+	-- Drop mode + chrome BEFORE recycle yields, so backpack-close never runs a disarm flyback.
 	mode = MODE_OFF
+	setPlaceConfirmChromeAttr(false)
 	backpackDrag = false
 	aimFingerDown = false
 	placePointerHeld = false
@@ -1678,6 +1768,9 @@ local function exitPlacement(clearArmed: boolean)
 	stopAimLoop()
 	clearGhost()
 	destroyConfirmUi()
+	-- Abandoned Confirm (backpack close / Esc / forceExit): recycle soft-plant so seeds/hues return.
+	-- PLANT calls PlaceSoftPlant.clearState(false) first so this is a no-op after a real confirm.
+	PlaceSoftPlant.clearState(true)
 	unfreeze()
 	confirmPos = nil
 	armedItemId = nil
@@ -1701,7 +1794,8 @@ local function isShiftKeepPlacing(): boolean
 		or UserInputService:IsKeyDown(Enum.KeyCode.RightShift)
 end
 
-local function commitPlace()
+local function commitPlace(opts: { stayInConfirm: boolean? }?)
+	local optsStayInConfirm = opts ~= nil and opts.stayInConfirm == true
 	if placeCommitBusy then
 		return
 	end
@@ -1709,6 +1803,10 @@ local function commitPlace()
 		return
 	end
 	if not armedItemId or not confirmPos or not validSpot then
+		return
+	end
+	-- Already soft-planted for Confirm+powerup — PLANT only finishes/closes.
+	if confirmPlantedId and not optsStayInConfirm then
 		return
 	end
 	if postPlaceWaiting or PlaceArmDisarmAnim.isDisarmAnimating() or PlaceArmDisarmAnim.isArmIntroAnimating() then
@@ -1818,6 +1916,58 @@ local function commitPlace()
 		UiHaptics.rampOpen(1)
 		local vfxPos = (typeof(result.worldPos) == "Vector3" and result.worldPos) or placePos
 		PlaceVfx.playVisuals(vfxPos, vfxColor)
+		-- Soft-plant for Confirm+powerup: keep PLANT chrome; open inspect via relocate bridge.
+		if optsStayInConfirm and typeof(placedId) == "string" and placedId ~= "" then
+			-- Closed backpack / cancelled during RequestPlace yield — never leave an orphan plant.
+			if mode ~= MODE_CONFIRM then
+				placeCommitBusy = false
+				PlaceSoftPlant.recycleOrphan(placedId, placePos)
+				return
+			end
+			confirmPlantedId = placedId
+			clearGhost()
+			placeResumeToken += 1
+			postPlaceWaiting = false
+			stopAimLoop()
+			placeCommitBusy = false
+			task.spawn(function()
+				local RelocatePickHover = require(script.Parent:WaitForChild("RelocatePickHover"))
+				local RelocateController = require(script.Parent:WaitForChild("RelocateController"))
+				local myTok = confirmPlantToken
+				local part: BasePart? = nil
+				for _ = 1, 90 do
+					if myTok ~= confirmPlantToken or mode ~= MODE_CONFIRM then
+						-- exitPlacement already recycles when confirmPlantedId is set.
+						return
+					end
+					part = RelocatePickHover.findByPlaceId(placedId)
+					if part and part.Parent then
+						break
+					end
+					task.wait()
+				end
+				if myTok ~= confirmPlantToken or mode ~= MODE_CONFIRM then
+					return
+				end
+				if not part or not part.Parent then
+					-- Never found the replica — recycle so the seed isn't stuck on the plot.
+					if confirmPlantedId == placedId then
+						confirmPlantedId = nil
+						PlaceSoftPlant.recycleOrphan(placedId, placePos)
+					end
+					return
+				end
+				confirmPlantedPart = part
+				placeAnchor = CoralVisual.readGridAnchor(part) or part.Position
+				confirmPos = placeAnchor
+				softPlantOriginPos = placeAnchor
+				attachMoveHintToGhost()
+				syncConfirmButtons()
+				RelocateController.begin(part, { placeConfirmBridge = true })
+				confirmPowerupOpen = RelocateController.isActive()
+			end)
+			return
+		end
 		clearGhost()
 		destroyConfirmUi()
 		confirmPos = nil
@@ -1916,8 +2066,12 @@ onCheck = function()
 	if not placeAnchor or not validSpot then
 		return
 	end
-	-- Place immediately (no park/confirm step) from aim or legacy confirm.
 	if mode == MODE_OFF then
+		return
+	end
+	-- Soft-plant already done + powerup open: PLANT finishes and closes inspect.
+	if confirmPlantedId then
+		PlaceSoftPlant.finishConfirm()
 		return
 	end
 	confirmPos = placeAnchor
@@ -1930,6 +2084,20 @@ onCancel = function()
 	end
 	if PlaceArmDisarmAnim.isArmIntroAnimating() then
 		PlaceArmDisarmAnim.stopArmIntro()
+	end
+	-- Soft-plant recycle happens in exitPlacement (clearSoftPlantState(true)).
+	-- No ghost left after soft-plant — skip the 1s flyback so PLANT/rot vanish now.
+	if confirmPlantedId or (mode == MODE_CONFIRM and not ghost) then
+		if gamepadPlacement then
+			gamepadPlacement = false
+			gamepadCursor = nil
+			exitPlacement(false)
+			InventoryState.clearSelection()
+			fireGamepadReturnToList()
+		else
+			exitPlacement(true)
+		end
+		return
 	end
 	if gamepadPlacement then
 		-- Deactivate coral, keep backpack open, restore D-pad list select.
@@ -1959,6 +2127,7 @@ local function enterConfirm(worldPos: Vector3)
 		ghost.Transparency = 0.4
 	end
 	mode = MODE_CONFIRM
+	setPlaceConfirmChromeAttr(true)
 	backpackDrag = false
 	confirmDragging = false
 	confirmPressOrigin = nil
@@ -1968,8 +2137,15 @@ local function enterConfirm(worldPos: Vector3)
 	aimPinnedToCenter = false
 	confirmPos = worldPos
 	placeAnchor = worldPos
+	confirmPlantedPart = nil
+	confirmPlantedId = nil
+	softPlantOriginPos = nil
+	confirmPowerupOpen = false
+	confirmPlantToken += 1
 	-- Chrome tracks the ghost each frame (below move icon); no feet freeze.
 	chromeScreenPos = nil
+	-- Zoom PlotCam down onto the parked seed; restore when they hit PLANT / cancel.
+	PlaceSoftPlant.beginCamZoom(worldPos)
 	PlaceVfx.playParkSound(worldPos)
 	makeConfirmUi()
 	updateGhostAt(worldPos)
@@ -1985,10 +2161,13 @@ local function enterConfirm(worldPos: Vector3)
 	end)
 	syncConfirmButtons()
 	log("Confirm mode", if validSpot then "valid" else (rejectReason or "invalid"))
+	-- Soft-plant immediately so coral powerup UI can open beside PLANT.
+	if validSpot and armedItemId then
+		commitPlace({ stayInConfirm = true })
+	end
 end
 
--- Park / place on pointer-up. Rotate-chrome species stay in Confirm so ✓/Close/rot work;
--- others plant immediately. Invalid spots stay in aim.
+-- Park → Confirm (PLANT + powerup). Invalid spots stay in aim.
 local function parkOrQuickPlace(worldPos: Vector3)
 	confirmPos = worldPos
 	placeAnchor = worldPos
@@ -1996,15 +2175,7 @@ local function parkOrQuickPlace(worldPos: Vector3)
 	if not (validSpot and armedItemId) then
 		return
 	end
-	local sid = getSpeciesIdForItem(armedItemId)
-	if CoralVisual.hasYawRotateChrome(sid) then
-		-- SeaFan: release parks with rotate + Confirm (quick-place skipped ✓/rot).
-		enterConfirm(worldPos)
-		return
-	end
-	-- Before InvokeServer yields so mouse-up can't re-enter place mid-request.
-	suppressAimParkOnce = true
-	commitPlace()
+	enterConfirm(worldPos)
 end
 
 -- World press (or drag off the backpack): keep aiming under the finger; place on release.
@@ -2051,6 +2222,10 @@ function PlacementController.isActive(): boolean
 	return mode ~= MODE_OFF
 end
 
+function PlacementController.isConfirmMode(): boolean
+	return mode == MODE_CONFIRM
+end
+
 function PlacementController.isGamepadPlacement(): boolean
 	return gamepadPlacement
 end
@@ -2082,6 +2257,17 @@ function PlacementController.beginForItem(itemId: string)
 		pendingDisarmSlotScreen = nil
 		pendingArmSlotScreen = nil
 		queuedSwitchItemId = nil
+		return
+	end
+	-- At place-cap: never arm a ghost / Max Placed warn — InventoryUI flashes Increase Max Planted.
+	if PlaceRaycast.isAtPlaceCap() then
+		pendingDisarmSlotScreen = nil
+		pendingArmSlotScreen = nil
+		queuedSwitchItemId = nil
+		playerGui:SetAttribute("OceanTD_FlashIncreaseMaxPlanted", os.clock())
+		if InventoryState.getSelectedId() == itemId then
+			InventoryState.setSelected(nil)
+		end
 		return
 	end
 	if not ClientPlot.isReady() then
@@ -2148,17 +2334,181 @@ end
 
 -- Instant exit (no disarm outro) — used when picking a placed coral to relocate.
 function PlacementController.forceExit()
-	if mode == MODE_OFF and not PlaceArmDisarmAnim.isDisarmAnimating() then
+	if mode == MODE_OFF and not PlaceArmDisarmAnim.isDisarmAnimating() and not confirmPlantedId then
 		return
 	end
 	PlaceArmDisarmAnim.stopDisarmAnim()
 	PlaceArmDisarmAnim.stopOutgoingFlyback()
 	PlaceArmDisarmAnim.stopArmIntro()
+	-- Hide chrome this frame (destroyConfirmUi also runs in exitPlacement).
+	if checkBtn then
+		checkBtn.Visible = false
+	end
+	if rotLeftBtn then
+		rotLeftBtn.Visible = false
+	end
+	if rotRightBtn then
+		rotRightBtn.Visible = false
+	end
+	if moveHintImage then
+		moveHintImage.Visible = false
+	end
+	if cancelBtn then
+		cancelBtn.Visible = false
+	end
 	exitPlacement(true)
+end
+
+PlaceSoftPlant.bind({
+	getConfirmPlantedPart = function()
+		return confirmPlantedPart
+	end,
+	getConfirmPlantedId = function()
+		return confirmPlantedId
+	end,
+	setConfirmPlantedPart = function(v)
+		confirmPlantedPart = v
+	end,
+	setConfirmPlantedId = function(v)
+		confirmPlantedId = v
+	end,
+	getSoftPlantOriginPos = function()
+		return softPlantOriginPos
+	end,
+	setSoftPlantOriginPos = function(v)
+		softPlantOriginPos = v
+	end,
+	getPlaceAnchor = function()
+		return placeAnchor
+	end,
+	setPlaceAnchor = function(v)
+		placeAnchor = v
+	end,
+	getConfirmPos = function()
+		return confirmPos
+	end,
+	setConfirmPos = function(v)
+		confirmPos = v
+	end,
+	getValidSpot = function()
+		return validSpot
+	end,
+	setValidSpot = function(v)
+		validSpot = v
+	end,
+	getRejectReason = function()
+		return rejectReason
+	end,
+	setRejectReason = function(v)
+		rejectReason = v
+	end,
+	getGhostPlaceFacingYaw = function()
+		return ghostPlaceFacingYaw
+	end,
+	getChromeAdorneePart = function()
+		return chromeAdorneePart
+	end,
+	getWarnLabel = function()
+		return warnLabel
+	end,
+	getConfirmPowerupOpen = function()
+		return confirmPowerupOpen
+	end,
+	setConfirmPowerupOpen = function(v)
+		confirmPowerupOpen = v
+	end,
+	bumpConfirmPlantToken = function()
+		confirmPlantToken += 1
+	end,
+	resolvePlaceAnchor = resolvePlaceAnchor,
+	evaluatePos = evaluatePos,
+	getCamera = function()
+		return camera
+	end,
+	getSavedCameraCFrame = function()
+		return savedCameraCFrame
+	end,
+	log = log,
+	setSuppressAimParkOnce = function(v)
+		suppressAimParkOnce = v
+	end,
+	forceExit = function()
+		PlacementController.forceExit()
+	end,
+})
+
+-- Size upgrade mesh-swap: keep PLANT / rot billboard on the new part.
+function PlacementController.rebindSoftPlantedPart(newPart: BasePart)
+	if mode ~= MODE_CONFIRM or not confirmPlantedId then
+		return
+	end
+	local pid = newPart:GetAttribute("OceanTD_PlaceId")
+	if pid ~= confirmPlantedId or not newPart.Parent then
+		return
+	end
+	confirmPlantedPart = newPart
+	placeAnchor = CoralVisual.readGridAnchor(newPart) or newPart.Position
+	confirmPos = placeAnchor
+	if not softPlantOriginPos then
+		softPlantOriginPos = placeAnchor
+	end
+	-- Snap rot out of any cancelled slide; re-arm PLANT + rot after mesh swap.
+	PlaceConfirmChrome.finishRotReveal()
+	-- Upgrade cinematic / drag flags can stick and block checkBtn.Activated.
+	confirmDragging = false
+	aimFingerDown = false
+	backpackDrag = false
+	placePointerHeld = false
+	confirmPressOrigin = nil
+	chromeBtnPointerDown = false
+	chromePressTarget = nil
+	if checkBtn then
+		checkBtn.Active = true
+		checkBtn.ZIndex = 25
+		pcall(function()
+			local b: any = checkBtn
+			b.Interactable = true
+		end)
+	end
+	if moveHintImage then
+		-- Idle: below PLANT so upgrade overlap can't steal the plant press.
+		moveHintImage.ZIndex = 12
+	end
+	if rotLeftBtn then
+		rotLeftBtn.Active = true
+		pcall(function()
+			local b: any = rotLeftBtn
+			b.Interactable = true
+		end)
+	end
+	if rotRightBtn then
+		rotRightBtn.Active = true
+		pcall(function()
+			local b: any = rotRightBtn
+			b.Interactable = true
+		end)
+	end
+	-- Keep frozen chrome Adornee; only nudge XZ if plant point moved. Never re-Adornee the mesh.
+	if chromeAdorneePart and chromeAdorneePart.Parent and placeAnchor then
+		local p = chromeAdorneePart.Position
+		chromeAdorneePart.CFrame = CFrame.new(placeAnchor.X, p.Y, placeAnchor.Z)
+	end
+	attachMoveHintToGhost()
+	syncConfirmButtons()
+	-- Medium/large close-up seat after size upgrade (keeps original pre-place restore stash).
+	local _, sizeClass = CoralSize.readFromPart(newPart)
+	PlaceSoftPlant.retargetCamZoom(placeAnchor, sizeClass)
 end
 
 -- Drag-out from backpack (mobile) / click-drop (PC)
 function PlacementController.notifyPointerDownFromBackpack(itemId: string, _screenPos: Vector2, fromTouch: boolean?)
+	if PlaceRaycast.isAtPlaceCap() then
+		playerGui:SetAttribute("OceanTD_FlashIncreaseMaxPlanted", os.clock())
+		if InventoryState.getSelectedId() == itemId then
+			InventoryState.setSelected(nil)
+		end
+		return
+	end
 	PlacementController.setGamepadPlacement(false)
 	aimRaiseForTouch = fromTouch == true
 	local function startDrag()
@@ -2202,6 +2552,10 @@ function PlacementController.notifyPointerMove(_screenPos: Vector2)
 	if mode ~= MODE_AIM and mode ~= MODE_CONFIRM then
 		return
 	end
+	if mode == MODE_CONFIRM and PlaceSoftPlant.isZoomDragActive() then
+		PlaceSoftPlant.noteZoomDragScreen(_screenPos)
+		return
+	end
 	local pos = raycastForPlace()
 	if pos then
 		if mode == MODE_CONFIRM then
@@ -2217,6 +2571,7 @@ function PlacementController.notifyPointerUp(_screenPos: Vector2)
 		aimFingerDown = false
 		placePointerHeld = false
 		confirmDragging = false
+		PlaceSoftPlant.endZoomDrag()
 		if suppressAimParkOnce then
 			suppressAimParkOnce = false
 			return
@@ -2230,6 +2585,11 @@ function PlacementController.notifyPointerUp(_screenPos: Vector2)
 	end
 	if mode == MODE_CONFIRM then
 		confirmDragging = false
+		PlaceSoftPlant.endZoomDrag()
+		-- Soft-plant + powerup already running — wait for PLANT (don't re-place on release).
+		if confirmPlantedId then
+			return
+		end
 		-- Rotate-chrome parks in Confirm on release — wait for ✓ (don't auto-plant).
 		local sid = if armedItemId then getSpeciesIdForItem(armedItemId) else nil
 		if CoralVisual.hasYawRotateChrome(sid) then
@@ -2268,6 +2628,11 @@ InventoryState.onOpenChanged(function(isOpen)
 			return
 		end
 		if mode ~= MODE_OFF then
+			-- Soft-plant Confirm has no ghost flyback — recycle + drop PLANT/rot immediately.
+			if confirmPlantedId or mode == MODE_CONFIRM then
+				PlacementController.forceExit()
+				return
+			end
 			PlaceArmDisarmAnim.playDisarmOutro(animEnv, function()
 				exitPlacement(true)
 			end)
@@ -2318,6 +2683,9 @@ table.insert(inputConns, UserInputService.InputBegan:Connect(function(input, _pr
 						end
 					end)
 				end
+			elseif PlaceConfirmHitTest.isOverForeignButton(screenPos, playerGui, checkBtn, cancelBtn, rotLeftBtn, rotRightBtn) then
+				-- PlotCam zoom/yaw etc. — don't park under the pad.
+				return
 			else
 				-- Remember the press even if it starts on the backpack (drag-off parks).
 				placePointerHeld = true
@@ -2370,6 +2738,40 @@ table.insert(inputConns, UserInputService.InputBegan:Connect(function(input, _pr
 
 	local screenPos = PlaceConfirmHitTest.pointerScreenPos(input)
 
+	-- Soft-plant / Confirm: grab move handle BEFORE chrome resolve. Billboard AbsolutePosition
+	-- often maps PLANT over the disc, so resolveTarget stole the press and drag never started.
+	if mode == MODE_CONFIRM then
+		if PlaceConfirmHitTest.isOverMoveHandle(
+			screenPos,
+			playerGui,
+			moveHintImage,
+			moveHintBillboard,
+			checkBtn,
+			cancelBtn,
+			rotLeftBtn,
+			rotRightBtn
+		) then
+			confirmPressOrigin = screenPos
+			confirmDragging = true
+			chromeBtnPointerDown = false
+			chromePressTarget = nil
+			PlaceConfirmChrome.stopRotateHold()
+			return
+		end
+		-- Soft-planted coral body (Relocate primary) — same as reselect relocate grab.
+		if confirmPlantedId and confirmPlantedPart and confirmPlantedPart.Parent then
+			local RelocatePickHover = require(script.Parent:WaitForChild("RelocatePickHover"))
+			if RelocatePickHover.pointerHitsSelected(screenPos) then
+				confirmPressOrigin = screenPos
+				confirmDragging = true
+				chromeBtnPointerDown = false
+				chromePressTarget = nil
+				PlaceConfirmChrome.stopRotateHold()
+				return
+			end
+		end
+	end
+
 	-- ✓ / X own the press: never start a ghost drag.
 	-- BillboardGui often skips MouseButton1Click — commit happens on InputEnded.
 	-- AbsolutePosition hit-tests on billboard chrome can mis-resolve Confirm as Cancel;
@@ -2405,6 +2807,14 @@ table.insert(inputConns, UserInputService.InputBegan:Connect(function(input, _pr
 	if chromeBtnPointerDown then
 		return
 	end
+	-- PlotCam/FishCam zoom/yaw pads (and other HUD buttons): placement ignores gameProcessed,
+	-- so without this, AbsolutePosition chrome fallback was rotating / canceling the ghost.
+	if PlaceConfirmHitTest.isOverForeignButton(screenPos, playerGui, checkBtn, cancelBtn, rotLeftBtn, rotRightBtn) then
+		confirmPressOrigin = nil
+		confirmDragging = false
+		aimFingerDown = false
+		return
+	end
 	-- Touches on the open backpack list must not aim/park the ghost under the panel.
 	if InventoryState.isPointerOverBackpack(screenPos) then
 		confirmPressOrigin = nil
@@ -2417,12 +2827,6 @@ table.insert(inputConns, UserInputService.InputBegan:Connect(function(input, _pr
 	-- even when the press is meant for the plot, which left ghosts stuck without ✓.
 
 	if mode == MODE_CONFIRM then
-		-- Move icon is a grab handle: drag from it (don't wait for a second plot click).
-		if PlaceConfirmHitTest.isOverGui(screenPos, moveHintImage) then
-			confirmPressOrigin = screenPos
-			confirmDragging = true
-			return
-		end
 		-- Do not re-park on a bare click. That ray often goes through Confirm at the feet
 		-- when hit-test misses, then ✓ places the wrong cell and the orb snaps back.
 		-- Reposition via the move handle (or touch-drag below).
@@ -2478,6 +2882,14 @@ table.insert(inputConns, UserInputService.InputChanged:Connect(function(input, _
 				return
 			end
 			confirmDragging = true
+			PlaceSoftPlant.beginZoomDrag(placeAnchor or confirmPos, confirmPressOrigin, function(worldPos: Vector3)
+				confirmPos = worldPos
+				updateGhostAt(worldPos)
+			end)
+		end
+		if PlaceSoftPlant.isZoomDragActive() then
+			PlaceSoftPlant.noteZoomDragScreen(now)
+			return
 		end
 		local pos = raycastForPlace()
 		if pos then
@@ -2548,6 +2960,7 @@ table.insert(inputConns, UserInputService.InputEnded:Connect(function(input, _pr
 	end
 	confirmDragging = false
 	confirmPressOrigin = nil
+	PlaceSoftPlant.endZoomDrag()
 end))
 
 player.CharacterAdded:Connect(function()

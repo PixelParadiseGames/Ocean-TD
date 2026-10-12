@@ -167,8 +167,9 @@ local camButtonClicked = false
 local wavesHudWasRunning = false
 local JOIN_INTRO_BUSY_ATTR = "OceanTD_JoinIntroBusy"
 local SKIP_TUTORIAL_GUI = "OceanTD_FingerTutorialSkip"
-local SKIP_GREEN = Color3.fromRGB(55, 200, 90)
-local SKIP_STROKE_BRIGHT = Color3.fromRGB(90, 255, 110)
+local SKIP_BLUE = Color3.fromRGB(55, 160, 230) -- gradient top
+local SKIP_BLUE_DARK = Color3.fromRGB(16, 48, 96) -- gradient bottom
+local SKIP_STROKE_BRIGHT = Color3.fromRGB(110, 200, 255)
 local SKIP_BTN_SIZE = Vector2.new(132, 28)
 
 local function playPlantFirstCoralSoundOnce()
@@ -800,6 +801,8 @@ local function skipEntireFingerTutorial()
 	playerGui:SetAttribute("OceanTD_TutorialSummaryFinished", nil)
 	playerGui:SetAttribute("OceanTD_TutorialRollThenSkills", nil)
 	playerGui:SetAttribute("OceanTD_FingerTutorialLock", false)
+	-- Gates clear while the player is often still on the plot edge — suppress outline tip briefly.
+	playerGui:SetAttribute("OceanTD_SuppressPlotOutlineHintUntil", os.clock() + 6)
 	destroySkipTutorialBtn()
 	-- Drop any leftover tutorial lock overlays on the cart, then refresh info/cart chrome.
 	-- (Lock helpers are defined later; destroy by name here so skip works immediately.)
@@ -867,11 +870,10 @@ local function ensureSkipTutorialBtn()
 	btn.AnchorPoint = Vector2.new(0, 1)
 	btn.Position = UDim2.new(0, 28, 1, -28)
 	btn.Size = UDim2.fromOffset(SKIP_BTN_SIZE.X, SKIP_BTN_SIZE.Y)
-	btn.BackgroundColor3 = SKIP_GREEN
-	btn.Font = UiTheme.Font
-	btn.Text = "Skip Training"
-	btn.TextColor3 = Color3.new(1, 1, 1)
-	btn.TextScaled = true
+	-- White base so UIGradient blues read true (top bright → bottom dark).
+	btn.BackgroundColor3 = Color3.new(1, 1, 1)
+	btn.BorderSizePixel = 0
+	btn.Text = ""
 	btn.AutoButtonColor = true
 	btn.Selectable = true
 	btn.Active = true
@@ -880,6 +882,14 @@ local function ensureSkipTutorialBtn()
 	local corner = Instance.new("UICorner")
 	corner.CornerRadius = UDim.new(0, 8)
 	corner.Parent = btn
+	local grad = Instance.new("UIGradient")
+	grad.Name = "_OceanTD_SkipGrad"
+	grad.Color = ColorSequence.new({
+		ColorSequenceKeypoint.new(0, SKIP_BLUE),
+		ColorSequenceKeypoint.new(1, SKIP_BLUE_DARK),
+	})
+	grad.Rotation = 90
+	grad.Parent = btn
 	local stroke = Instance.new("UIStroke")
 	stroke.Name = "_OceanTD_SkipStroke"
 	stroke.Color = SKIP_STROKE_BRIGHT
@@ -892,6 +902,17 @@ local function ensureSkipTutorialBtn()
 	pad.PaddingLeft = UDim.new(0.1, 0)
 	pad.PaddingRight = UDim.new(0.1, 0)
 	pad.Parent = btn
+	local lbl = Instance.new("TextLabel")
+	lbl.Name = "Label"
+	lbl.BackgroundTransparency = 1
+	lbl.Size = UDim2.fromScale(1, 1)
+	lbl.Font = UiTheme.Font
+	lbl.Text = "Skip Training"
+	lbl.TextColor3 = Color3.new(1, 1, 1)
+	lbl.TextScaled = true
+	lbl.ZIndex = 4
+	lbl.Active = false
+	lbl.Parent = btn
 
 	local skipping = false
 	local function flashThenSkip()

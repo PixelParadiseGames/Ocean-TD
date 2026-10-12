@@ -103,6 +103,8 @@ export type PlayerProfile = {
 	hideUiUnlocked: boolean,
 	-- Player has finished (or skipped after first) the join Wave-100 showcase intro.
 	hasSeenJoinIntro: boolean,
+	-- Unlocks plot outline color picker after first wave-round defeat.
+	hasLostWaveRound: boolean,
 }
 
 local Constants = require(script.Parent.Constants)
@@ -152,6 +154,7 @@ function PlotTypes.defaultProfile(): PlayerProfile
 		discoveredCorals = {},
 		hideUiUnlocked = true, -- free for all players from the start
 		hasSeenJoinIntro = false,
+		hasLostWaveRound = false,
 	}
 end
 

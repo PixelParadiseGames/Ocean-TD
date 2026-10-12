@@ -23,9 +23,13 @@ local InventoryState = require(script.Parent:WaitForChild("InventoryState"))
 local PlotCam2Tune = {}
 
 local STEP = 5
+-- DistOff quick +/- : ~10% of zoom span per click (DistOff -110..160).
+local DIST_QUICK_STEP = 27
 local YAW_STEP = 10
 local GUI_NAME = "OceanTD_PlotCam2Tune"
 local SHOW_DEBUG_PANEL = false
+-- Forced on while place-zoom close-up is active (coral park → PLANT).
+local placeZoomDebug = false
 local QUICK_NAME = "OceanTD_PlotCam2Quick"
 local PANEL_W = 320
 local PANEL_H = 250
@@ -429,8 +433,8 @@ local function ensureQuickPad(): Frame?
 	wireQuick(yawLeft, "yawDeg", -YAW_STEP)
 	wireQuick(yawRight, "yawDeg", YAW_STEP)
 	-- "-" zooms out (raise DistOff); "+" zooms in (lower DistOff).
-	wireQuick(offMinus, "distOffset", STEP)
-	wireQuick(offPlus, "distOffset", -STEP)
+	wireQuick(offMinus, "distOffset", DIST_QUICK_STEP)
+	wireQuick(offPlus, "distOffset", -DIST_QUICK_STEP)
 
 	quickHolder = holder
 	layoutQuickButtons()
@@ -472,17 +476,32 @@ local function syncQuickVisibility()
 	setQuickVisible(visible and carouselCollapsedReady() and not hudBlocksQuick())
 end
 
+local function syncDebugPanel()
+	local wantPanel = placeZoomDebug or (SHOW_DEBUG_PANEL and visible)
+	if not wantPanel then
+		if gui then
+			gui.Enabled = false
+		end
+		return
+	end
+	-- Place-zoom debug stays up even if left-HUD overlays would hide the quick pad.
+	local sg = ensureGui()
+	local blocked = (not placeZoomDebug) and hudBlocksQuick()
+	sg.Enabled = wantPanel and not blocked
+	if sg.Enabled then
+		refreshReadout()
+	end
+end
+
+-- Right-side ± / readout panel while coral place-zoom close-up is active.
+function PlotCam2Tune.setPlaceZoomDebug(on: boolean)
+	placeZoomDebug = on == true
+	syncDebugPanel()
+end
+
 function PlotCam2Tune.setVisible(on: boolean)
 	visible = on == true
-	if SHOW_DEBUG_PANEL then
-		local sg = ensureGui()
-		sg.Enabled = visible and not hudBlocksQuick()
-		if visible then
-			refreshReadout()
-		end
-	elseif gui then
-		gui.Enabled = false
-	end
+	syncDebugPanel()
 	syncQuickVisibility()
 end
 
@@ -503,7 +522,7 @@ function PlotCam2Tune.isVisible(): boolean
 end
 
 function PlotCam2Tune.refresh()
-	if visible then
+	if visible or placeZoomDebug then
 		refreshReadout()
 		layoutQuickButtons()
 	end
@@ -512,7 +531,7 @@ end
 -- Keep readout fresh while open (wheel zoom / pan don't change angles, but dist can).
 task.spawn(function()
 	while true do
-		if visible and PlotCam2.isActive() then
+		if (visible or placeZoomDebug) and PlotCam2.isActive() then
 			refreshReadout()
 		end
 		task.wait(0.2)
@@ -521,7 +540,7 @@ end)
 
 -- Convenience: press ; while plotcam tune is up to print readout to output.
 UserInputService.InputBegan:Connect(function(input, gp)
-	if gp or not visible then
+	if gp or not (visible or placeZoomDebug) then
 		return
 	end
 	if input.KeyCode == Enum.KeyCode.Semicolon then

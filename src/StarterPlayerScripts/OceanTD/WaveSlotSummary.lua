@@ -422,7 +422,8 @@ function WaveSlotSummary.hide()
 	if not closeSummaryPanelUi() then
 		return
 	end
-	-- Finish / dismiss: restore follow cam, do not re-enter FishCam.
+	-- Defeat Finish: drop cinematic stash (follow / player cam). Voluntary Finish: restore
+	-- the cam the player had before Start Waves (usually Plot Cam, not Fish Cam).
 	releaseDefeatCam(false)
 	local h = host
 	if h then
@@ -433,6 +434,14 @@ function WaveSlotSummary.hide()
 	-- Join-intro: post-summary finger (roll-then-skills on defeat, or skills on win).
 	local pg = Players.LocalPlayer:FindFirstChild("PlayerGui")
 	if pg and pg:IsA("PlayerGui") then
+		if not wasDefeat then
+			local resume = pg:GetAttribute("OceanTD_WaveResumeCamMode")
+			if resume == "off" or resume == "plotcam" or resume == "fishcam" or resume == "dronecam" then
+				pg:SetAttribute("OceanTD_ForceCamMode", resume)
+				pg:SetAttribute("OceanTD_ForceCamStamp", os.clock())
+			end
+		end
+		pg:SetAttribute("OceanTD_WaveResumeCamMode", "")
 		pg:SetAttribute("OceanTD_TutorialSummaryWasDefeat", wasDefeat)
 		pg:SetAttribute("OceanTD_TutorialSummaryFinished", os.clock())
 	end
@@ -507,10 +516,10 @@ local function continueFromSummary()
 	end
 	local retrySame = summaryIsDefeat
 	closeSummaryPanelUi()
+	-- Drop defeat hold first (clears busy). Resume after wave restart so TangCam can't win.
 	ReefDefeatCam.releaseHeldPose()
 	h.clearWaveCameraOffset()
 	if WaveSim.continueWithHearts(CONTINUE_HEARTS, retrySame) then
-		-- Re-enter FishCam/PlotCam after the wave is running again.
 		h.playerGui:SetAttribute("OceanTD_ResumeDefeatCam", os.clock())
 		h.applyIcon(true)
 		h.setHudVisible(true)

@@ -1710,7 +1710,12 @@ function PlacementService.recycle(player: Player, placeId: string, worldPos: Vec
 
 	log("Recycled", creditedId, "for", player.Name, "seeds=", seedCount)
 	-- Persist seed credit immediately (paid hues must not wait on autosave).
-	PersistenceService.save(player, PlacementService.snapshotLayout(plotId))
+	-- Recycling the last coral is an intentional empty plot — don't anti-wipe-block it.
+	local layout = PlacementService.snapshotLayout(plotId)
+	if #layout == 0 then
+		PersistenceService.allowIntentionalClear(player.UserId)
+	end
+	PersistenceService.save(player, layout)
 	return {
 		ok = true,
 		itemId = creditedId,

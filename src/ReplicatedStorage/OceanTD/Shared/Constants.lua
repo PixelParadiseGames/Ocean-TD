@@ -27,7 +27,7 @@ local Constants = {
 	DATASTORE_NAME = "OceanTD_Player_v2",
 	-- OrderedDataStore: key = userId string, value = Reef Report score (int).
 	REEF_SCORE_ORDERED_STORE = "OceanTD_ReefScore_v2",
-	PROFILE_VERSION = 10,
+	PROFILE_VERSION = 11,
 
 	AUTOSAVE_INTERVAL_SEC = 60,
 
@@ -39,6 +39,8 @@ local Constants = {
 	PLOT_ID_ATTR = "OceanTD_PlotId",
 	-- Replicated on Player: plot outline palette index 1–15 (see PlotOutlineColors).
 	PLOT_OUTLINE_COLOR_ATTR = "PlotOutlineColorIndex",
+	-- Replicated on Player: true after first completed wave round that ended in defeat.
+	PLOT_OUTLINE_COLOR_UNLOCKED_ATTR = "OceanTD_PlotOutlineColorUnlocked",
 	-- Replicated on Player: authoritative $D (sand dollars). Client never writes this.
 	SAND_DOLLARS_ATTR = "OceanTD_SandDollars",
 	-- Hard cap so wallet math stays a safe integer (below 2^53).

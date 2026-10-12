@@ -18,14 +18,18 @@ FreeCamConfig.TOUCH_STICK_RADIUS = 90
 FreeCamConfig.SINK_ACTION = "OceanTD_FreeCamSink"
 FreeCamConfig.DPAD_ACTION = "OceanTD_FreeCamDPad"
 FreeCamConfig.MARGIN = 0.75
--- Focus / body follow. Small errors track tightly; large waypoint jerks ease in.
-FreeCamConfig.FISH_DAMP_RATE = 1.35 -- snappy when already on the fish
-FreeCamConfig.FISH_DAMP_RATE_SOFT = 0.4 -- when focus error is large (corner / lateral whip)
-FreeCamConfig.FISH_DAMP_SOFT_STUDS = 3.25 -- start blending toward soft rate above this error
-FreeCamConfig.FISH_CAM_RATE = 1.25
-FreeCamConfig.FISH_LOOK_RATE = 0.7 -- look-at lags focus so corner jerks don't whip yaw/pitch
-FreeCamConfig.FISH_FOCUS_MAX_SPEED = 24 -- studs/sec cap (above fish ~18 so chase isn't starved)
-FreeCamConfig.FISH_SWITCH_SEC = 3.5
+-- Focus / body follow. Stay glued to the lead fish; catch up harder when far behind.
+FreeCamConfig.FISH_DAMP_RATE = 7.5 -- keep focus on the lead hungry fish
+FreeCamConfig.FISH_DAMP_RATE_CATCHUP = 14 -- when focus error is large
+FreeCamConfig.FISH_DAMP_CATCHUP_STUDS = 2.5 -- start catch-up boost above this error
+FreeCamConfig.FISH_CAM_RATE = 6.5 -- orbit body keeps pace with focus
+FreeCamConfig.FISH_LOOK_RATE = 12 -- look-at stays on the fish (focus circle / framing)
+FreeCamConfig.FISH_FOCUS_MAX_SPEED = 120 -- well above fish speed so chase never starves
+FreeCamConfig.FISH_SWITCH_SEC = 0.45 -- brief blend only when lead fish identity changes
+FreeCamConfig.FISH_WAVE_START_SEC = 0.55 -- boosted chase toward W1 at each new wave
+FreeCamConfig.FISH_WAVE_START_DAMP_RATE = 16
+FreeCamConfig.FISH_WAVE_START_LOOK_RATE = 20
+FreeCamConfig.FISH_WAVE_START_CAM_RATE = 14
 FreeCamConfig.FISH_CHASE_DIST = 31.2
 FreeCamConfig.FISH_CHASE_HEIGHT = 12
 FreeCamConfig.FISH_ORBIT_SEC = 120

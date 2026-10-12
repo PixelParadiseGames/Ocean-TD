@@ -43,8 +43,19 @@ local SkipWaveSlot = require(script.Parent:WaitForChild("SkipWaveSlot"))
 local WaveSpeedSlot = require(script.Parent:WaitForChild("WaveSpeedSlot"))
 local WaveSign = require(script.Parent:WaitForChild("WaveSign"))
 local SeedWheelRevealApi = require(script.Parent:WaitForChild("SeedWheelRevealApi"))
+local PlaceRaycast = require(script.Parent:WaitForChild("PlaceRaycast"))
 
 local TWEEN_OPEN = TweenInfo.new(0.28, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
+local FLASH_INCREASE_ATTR = "OceanTD_FlashIncreaseMaxPlanted"
+
+-- At place-cap: don't equip a seed — nudge the Increase Max Planted CTA instead.
+local function denySelectAtPlaceCap(): boolean
+	if not PlaceRaycast.isAtPlaceCap() then
+		return false
+	end
+	playerGui:SetAttribute(FLASH_INCREASE_ATTR, os.clock())
+	return true
+end
 local TWEEN_CLOSE = TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
 local RED = Color3.fromRGB(220, 50, 55)
 local DARK_RED = Color3.fromRGB(120, 10, 20)
@@ -1655,6 +1666,9 @@ local function activateGamepadFocusedItem()
 	if not InventoryState.hasDiscoveredSpecies(itemId) then
 		return
 	end
+	if denySelectAtPlaceCap() then
+		return
+	end
 	local icon = btn:FindFirstChild("Circle")
 	local stroke = icon and icon:FindFirstChild("_SelectPulse")
 	disableGamepadSelect()
@@ -1865,6 +1879,10 @@ local function makeItemButton(def, layoutOrder: number, instanceSuffix: string?,
 				if math.abs(delta.Y) >= DRAG and math.abs(delta.Y) >= math.abs(delta.X) then
 					gesture = "scroll"
 				elseif math.abs(delta.X) >= DRAG or not insideScroll(now) then
+					if denySelectAtPlaceCap() then
+						gesture = "blocked"
+						return
+					end
 					gesture = "pull"
 					clearAllPulses()
 					startPulse(stroke)
@@ -1895,7 +1913,7 @@ local function makeItemButton(def, layoutOrder: number, instanceSuffix: string?,
 				PlacementController.notifyPointerUp(endPos)
 				return
 			end
-			if gesture == "scroll" then
+			if gesture == "scroll" or gesture == "blocked" then
 				return
 			end
 			-- Tap: select / toggle pulse + start placement aim
@@ -1906,6 +1924,9 @@ local function makeItemButton(def, layoutOrder: number, instanceSuffix: string?,
 			if cur == def.id and pulsedStroke == stroke then
 				clearAllPulses()
 				PlacementController.cancel()
+				return
+			end
+			if denySelectAtPlaceCap() then
 				return
 			end
 

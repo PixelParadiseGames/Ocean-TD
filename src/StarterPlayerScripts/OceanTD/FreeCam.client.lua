@@ -43,6 +43,7 @@ local FreeCamModeLabel = require(script.Parent:WaitForChild("FreeCamModeLabel"))
 local PlotCam2 = require(script.Parent:WaitForChild("PlotCam2"))
 local PlotCam2Tune = require(script.Parent:WaitForChild("PlotCam2Tune"))
 local FishCamTune = require(script.Parent:WaitForChild("FishCamTune"))
+local CamPinchZoom = require(script.Parent:WaitForChild("CamPinchZoom"))
 
 playerGui:SetAttribute(FC.ATTR_CAROUSEL_COLLAPSED, false)
 
@@ -109,7 +110,7 @@ local fishSt = {
 	targetId = nil :: number?,
 	focusPos = Vector3.zero,
 	dampPos = Vector3.zero,
-	lookPos = Vector3.zero, -- lagging look-at (softer than focus / body)
+	lookPos = Vector3.zero, -- look-at (tracks lead fish tightly)
 	switchFrom = Vector3.zero,
 	switchTo = Vector3.zero,
 	switchT0 = 0,
@@ -117,6 +118,8 @@ local fishSt = {
 	orbitT0 = 0,
 	orbitAngle = 0,
 	orbitElev = 0,
+	waveStartBoostUntil = 0,
+	lastWaveIndex = 0,
 }
 local route = {
 	waypoints = {} :: { Vector3 },
@@ -1210,13 +1213,47 @@ local function tickFishFollow(dt: number)
 	keepCharacterStill()
 	tickLookInput(dt)
 
+	local now = os.clock()
+	local running = WaveSim.isRunning()
+	local waveIdx = if running then WaveSim.getWaveIndex() else 0
+	-- New wave: rush to W1 (or the lead fish if already out), then keep pace.
+	if waveIdx > 0 and waveIdx ~= fishSt.lastWaveIndex then
+		fishSt.lastWaveIndex = waveIdx
+		local spawnFocus = resolveFishSpawnFocus()
+		local lead = WaveSim.getFurthestUnfedFish()
+		if lead then
+			seedFishFocus(lead.position)
+			fishSt.targetId = lead.id
+			fishSt.switching = false
+			fishSt.waveStartBoostUntil = now + FC.FISH_WAVE_START_SEC
+			camPos = camPos:Lerp(lead.position + fishChaseOffset(0), 0.9)
+		elseif spawnFocus then
+			seedFishFocus(spawnFocus)
+			fishSt.targetId = nil
+			fishSt.switching = false
+			fishSt.waveStartBoostUntil = now + FC.FISH_WAVE_START_SEC
+			camPos = camPos:Lerp(spawnFocus + fishChaseOffset(0), 0.9)
+		end
+	elseif not running then
+		fishSt.lastWaveIndex = 0
+		fishSt.waveStartBoostUntil = 0
+	end
+
+	local waveStartBoost = now < fishSt.waveStartBoostUntil
 	local fish = WaveSim.getFurthestUnfedFish()
 	local goal: Vector3
 	if fish then
 		goal = fish.position
 		if fishSt.targetId ~= fish.id then
+			local firstOfWave = fishSt.targetId == nil or waveStartBoost
 			fishSt.targetId = fish.id
-			beginFishSwitch(goal)
+			if firstOfWave then
+				-- Lock onto the lead fish immediately after W1 settle / first spawn.
+				seedFishFocus(goal)
+				fishSt.switching = false
+			else
+				beginFishSwitch(goal)
+			end
 		elseif fishSt.switching then
 			fishSt.switchTo = goal
 		end
@@ -1227,7 +1264,7 @@ local function tickFishFollow(dt: number)
 			if fishSt.switching then
 				fishSt.switchTo = goal
 			end
-		elseif not WaveSim.isRunning() then
+		elseif not running then
 			-- Idle: keep orbiting while focus slowly patrols W1â†’Wnâ†’W1â€¦
 			fishSt.targetId = nil
 			fishSt.switching = false
@@ -1237,23 +1274,31 @@ local function tickFishFollow(dt: number)
 			fishSt.targetId = nil
 			local spawnFocus = resolveFishSpawnFocus()
 			goal = spawnFocus or fishSt.focusPos
-			if spawnFocus and not fishSt.switching and (fishSt.focusPos - spawnFocus).Magnitude > 2 then
-				beginFishSwitch(spawnFocus)
+			if spawnFocus and (fishSt.focusPos - spawnFocus).Magnitude > 1.5 then
+				if waveStartBoost then
+					seedFishFocus(spawnFocus)
+					fishSt.switching = false
+				elseif not fishSt.switching then
+					beginFishSwitch(spawnFocus)
+				else
+					fishSt.switchTo = spawnFocus
+				end
 			end
 		end
 	end
 
-	-- Soft-follow: tight when close, ease + speed-cap when a waypoint whips the fish sideways.
+	-- Tight follow; when far behind, catch up harder (never ease off).
 	local focusErr = (goal - fishSt.dampPos).Magnitude
-	local dampRate = FC.FISH_DAMP_RATE
-	if focusErr > FC.FISH_DAMP_SOFT_STUDS then
-		local softT = math.clamp((focusErr - FC.FISH_DAMP_SOFT_STUDS) / 10, 0, 1)
-		dampRate = FC.FISH_DAMP_RATE + (FC.FISH_DAMP_RATE_SOFT - FC.FISH_DAMP_RATE) * softT
+	local dampRate = if waveStartBoost then FC.FISH_WAVE_START_DAMP_RATE else FC.FISH_DAMP_RATE
+	if not waveStartBoost and focusErr > FC.FISH_DAMP_CATCHUP_STUDS then
+		local catchT = math.clamp((focusErr - FC.FISH_DAMP_CATCHUP_STUDS) / 10, 0, 1)
+		dampRate = FC.FISH_DAMP_RATE + (FC.FISH_DAMP_RATE_CATCHUP - FC.FISH_DAMP_RATE) * catchT
 	end
-	fishSt.dampPos = dampToward(fishSt.dampPos, goal, dampRate, dt, FC.FISH_FOCUS_MAX_SPEED)
+	local maxFocusSpeed = if waveStartBoost then nil else FC.FISH_FOCUS_MAX_SPEED
+	fishSt.dampPos = dampToward(fishSt.dampPos, goal, dampRate, dt, maxFocusSpeed)
 
 	if fishSt.switching then
-		local u = math.clamp((os.clock() - fishSt.switchT0) / FC.FISH_SWITCH_SEC, 0, 1)
+		local u = math.clamp((now - fishSt.switchT0) / FC.FISH_SWITCH_SEC, 0, 1)
 		local e = u * u * (3 - 2 * u)
 		fishSt.switchTo = fishSt.dampPos
 		fishSt.focusPos = fishSt.switchFrom:Lerp(fishSt.switchTo, e)
@@ -1265,12 +1310,13 @@ local function tickFishFollow(dt: number)
 		fishSt.focusPos = fishSt.dampPos
 	end
 
-	-- Look-at lags focus so yaw/pitch don't whip while dampPos catches a corner.
-	fishSt.lookPos = dampToward(fishSt.lookPos, fishSt.focusPos, FC.FISH_LOOK_RATE, dt, FC.FISH_FOCUS_MAX_SPEED)
+	-- Look-at tracks the live fish goal (not a second lag behind focus).
+	local lookRate = if waveStartBoost then FC.FISH_WAVE_START_LOOK_RATE else FC.FISH_LOOK_RATE
+	fishSt.lookPos = dampToward(fishSt.lookPos, goal, lookRate, dt, maxFocusSpeed)
 
-	-- Orbit around the lagged look point; body damper keeps framing stable.
 	local desired = fishSt.lookPos + fishChaseOffset(dt)
-	camPos = dampToward(camPos, desired, FC.FISH_CAM_RATE, dt, nil)
+	local camRate = if waveStartBoost then FC.FISH_WAVE_START_CAM_RATE else FC.FISH_CAM_RATE
+	camPos = dampToward(camPos, desired, camRate, dt, nil)
 	cam.CameraType = Enum.CameraType.Scriptable
 	cam.CFrame = lookAtFocus(fishSt.lookPos)
 	syncLookFromCFrame(cam.CFrame)
@@ -1362,7 +1408,7 @@ setMode = function(nextMode: CamMode)
 		if not forceModeOverride and playerGui:GetAttribute("OceanTD_TangCamBusy") == true then
 			return
 		end
-		if playerGui:GetAttribute("OceanTD_ReefDefeatCamBusy") == true then
+		if not forceModeOverride and playerGui:GetAttribute("OceanTD_ReefDefeatCamBusy") == true then
 			return
 		end
 		if not forceModeOverride and playerGui:GetAttribute("OceanTD_JoinIntroBusy") == true then
@@ -2019,6 +2065,54 @@ FishCamTune.bind({
 })
 FishCamTune.setVisible(mode == "fishcam")
 
+-- Pinch / pointer zoom for Plot + Fish cams (Player Cam = PlayerModule; Free Cam = none).
+do
+	local pinchBeginFishScale = 1
+
+	local function pinchBlocked(): boolean
+		if mode ~= "plotcam" and mode ~= "fishcam" then
+			return true
+		end
+		if playerGui:GetAttribute("OceanTD_JoinIntroBusy") == true
+			or playerGui:GetAttribute("OceanTD_ReefDefeatCamBusy") == true
+			or playerGui:GetAttribute("OceanTD_TangCamBusy") == true
+			or playerGui:GetAttribute("OceanTD_SharkCamBusy") == true
+			or playerGui:GetAttribute("OceanTD_UrchinCamBusy") == true
+			or playerGui:GetAttribute("OceanTD_PlotSizeCinematicBusy") == true
+		then
+			return true
+		end
+		return false
+	end
+
+	CamPinchZoom.bind({
+		onPinch = function(phase, scale)
+			if pinchBlocked() then
+				return
+			end
+			if mode == "plotcam" then
+				PlotCam2.applyPinchGesture(phase, scale)
+			elseif mode == "fishcam" then
+				if phase == "begin" then
+					pinchBeginFishScale = FishCamTune.getDistScale()
+				elseif phase == "change" or phase == "end" then
+					FishCamTune.applyPinchScale(pinchBeginFishScale, scale)
+				end
+			end
+		end,
+		onDelta = function(pinchDelta)
+			if pinchBlocked() then
+				return
+			end
+			if mode == "plotcam" then
+				PlotCam2.applyPinchDelta(pinchDelta)
+			elseif mode == "fishcam" then
+				FishCamTune.nudgeZoomByDelta(pinchDelta)
+			end
+		end,
+	})
+end
+
 local leftHudListenersBound = false
 local boundLeftUi: Instance? = nil
 
@@ -2112,15 +2206,17 @@ local function bindMobileLeftUi(left: Instance)
 				return
 			end
 			-- Plot Cam is the default RTS seat — stay on it through place/build.
-			-- Cinematics still stash + close.
+			-- Cinematics still stash + close (never overwrite a prior stash with "off").
 			if playerGui:GetAttribute("OceanTD_ReefDefeatCamBusy") == true
 				or playerGui:GetAttribute("OceanTD_TangCamBusy") == true
 				or playerGui:GetAttribute("OceanTD_SharkCamBusy") == true
 				or playerGui:GetAttribute("OceanTD_UrchinCamBusy") == true
 				or playerGui:GetAttribute("OceanTD_PlotSizeCinematicBusy") == true
 			then
-				cinematicResumeMode = mode
-				playerGui:SetAttribute(FC.ATTR_CINEMATIC_RESUME_MODE, mode)
+				if mode ~= "off" then
+					cinematicResumeMode = mode
+					playerGui:SetAttribute(FC.ATTR_CINEMATIC_RESUME_MODE, mode)
+				end
 			elseif mode == "plotcam" then
 				return
 			else
@@ -2235,22 +2331,36 @@ local function bindMobileLeftUi(left: Instance)
 
 		local function onResumeCinematicCam()
 			local resume = cinematicResumeMode
-			cinematicResumeMode = nil
-			playerGui:SetAttribute(FC.ATTR_CINEMATIC_RESUME_MODE, "")
+			if not resume or resume == "off" then
+				local attr = playerGui:GetAttribute(FC.ATTR_CINEMATIC_RESUME_MODE)
+				if attr == "plotcam" or attr == "fishcam" or attr == "dronecam" then
+					resume = attr :: CamMode
+				end
+			end
 			if resume and resume ~= "off" then
+				-- Force past TangCam/defeat busy races so Retry restores the pre-defeat cam.
 				task.defer(function()
-					if mode == "off" and not PlacementController.isActive() and not RelocateController.isActive() then
-						resumePreserveView = true
-						setMode(resume)
-						resumePreserveView = false
+					if PlacementController.isActive() or RelocateController.isActive() then
+						return
+					end
+					resumePreserveView = true
+					forceModeOverride = true
+					setMode(resume)
+					forceModeOverride = false
+					resumePreserveView = false
+					if mode == resume then
+						cinematicResumeMode = nil
+						playerGui:SetAttribute(FC.ATTR_CINEMATIC_RESUME_MODE, "")
 						local cam = getCamera()
-						if cam and mode ~= "off" then
+						if cam then
 							camPos = cam.CFrame.Position
 							syncLookFromCFrame(cam.CFrame)
 						end
 					end
 				end)
 			elseif mode == "off" then
+				cinematicResumeMode = nil
+				playerGui:SetAttribute(FC.ATTR_CINEMATIC_RESUME_MODE, "")
 				-- No stash: still ensure we aren't stuck Scriptable on the cinematic pose.
 				local cam = getCamera()
 				if cam and cam.CameraType == Enum.CameraType.Scriptable then

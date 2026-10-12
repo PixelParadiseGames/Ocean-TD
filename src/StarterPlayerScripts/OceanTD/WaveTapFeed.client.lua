@@ -80,6 +80,14 @@ local CROSS_SIZE = 44
 local CROSS_IMAGE_OK = "rbxassetid://106909951351068" -- green: shot fired
 local CROSS_IMAGE_RELOAD = "rbxassetid://75102643555969" -- red: reloading / no shot
 local CROSS_COLOR = Color3.fromRGB(255, 255, 255)
+local RELOAD_RING_SIZE = CROSS_SIZE + 16
+local RELOAD_RING_THICK = 4
+local RELOAD_RING_WAIT = Color3.fromRGB(255, 0, 0)
+local RELOAD_RING_FLASH = Color3.fromRGB(255, 255, 255)
+local RELOAD_RING_REST_FLASH = Color3.fromRGB(0, 0, 0)
+local RELOAD_RING_HIT = Color3.fromRGB(40, 220, 90)
+local RELOAD_DENY_FLASH_SEC = 0.08
+local HIT_GREEN_FLASH_SEC = 0.21 -- 50% longer than prior 0.14
 local A_TIP_IDLE = Color3.fromRGB(40, 130, 220)
 local A_TIP_HIT = Color3.fromRGB(40, 180, 80)
 local A_TIP_FAIL = Color3.fromRGB(200, 45, 55)
@@ -103,6 +111,12 @@ local pointerHeld = false
 local pointerScreenPos = Vector2.zero
 local fullAutoConn: RBXScriptConnection? = nil
 local stickyCross: ImageLabel? = nil
+local reloadRingConn: RBXScriptConnection? = nil
+local floatReloadRing: Frame? = nil
+local aimReloadRing: Frame? = nil
+local reloadDenyFlashUntil = 0
+local hitGreenFlashUntil = 0
+local lastReloadRingPos = Vector2.zero
 local locoLocked = false
 local savedWalkSpeed = 16
 local savedJumpPower = 50
@@ -311,6 +325,18 @@ local function flashATip(kind: "hit" | "fail", statusText: string?)
 	status.Size = UDim2.fromOffset(A_STATUS_BASE.X, A_STATUS_BASE.Y)
 	scale.Scale = 1
 	status.Visible = true
+	-- Reloading: above the crosshair / black deny arc (default Status sits under A tip).
+	if statusText == "Reloading" and crossRoot then
+		status.Parent = crossRoot
+		status.AnchorPoint = Vector2.new(0.5, 1)
+		status.Position = UDim2.new(0.5, 0, 0.5, -(RELOAD_RING_SIZE * 0.5 + 10))
+		status.ZIndex = 30
+	else
+		status.Parent = tip
+		status.AnchorPoint = Vector2.new(0.5, 0)
+		status.Position = UDim2.new(0.5, 0, 1, 2)
+		status.ZIndex = 13
+	end
 
 	-- White → accent mid-pop; scale grows then settles before hide.
 	task.delay(A_STATUS_POP_SEC * 0.35, function()
@@ -347,6 +373,13 @@ local function flashATip(kind: "hit" | "fail", statusText: string?)
 		status.Visible = false
 		status.Text = ""
 		scale.Scale = 1
+		-- Restore default under-tip seat after a Reloading flash.
+		if tip.Parent then
+			status.Parent = tip
+			status.AnchorPoint = Vector2.new(0.5, 0)
+			status.Position = UDim2.new(0.5, 0, 1, 2)
+			status.ZIndex = 13
+		end
 	end)
 end
 
@@ -391,13 +424,173 @@ local function setStickyCrosshair(on: boolean, screenPos: Vector2?, kind: ("ok" 
 	end
 	if screenPos then
 		img.Position = UDim2.fromOffset(screenPos.X, screenPos.Y)
+		lastReloadRingPos = screenPos
 	end
 	img.Image = if kind == "reload" then CROSS_IMAGE_RELOAD else CROSS_IMAGE_OK
 	img.ImageTransparency = 0
 	img.Visible = true
 end
 
+type ReloadRing = {
+	root: Frame,
+	rest: UIStroke, -- full circle; only shown during deny flash (bright red)
+	arc: UIStroke,
+	grad: UIGradient,
+}
+
+local function makeReloadRing(parent: Instance, name: string): ReloadRing
+	local root = Instance.new("Frame")
+	root.Name = name
+	root.BackgroundTransparency = 1
+	root.AnchorPoint = Vector2.new(0.5, 0.5)
+	root.Position = UDim2.fromScale(0.5, 0.5)
+	root.Size = UDim2.fromOffset(RELOAD_RING_SIZE, RELOAD_RING_SIZE)
+	root.Active = false
+	root.Visible = false
+	root.ZIndex = 17
+	pcall(function()
+		(root :: any).Interactable = false
+	end)
+	root.Parent = parent
+	local corner = Instance.new("UICorner")
+	corner.CornerRadius = UDim.new(1, 0)
+	corner.Parent = root
+
+	-- Full bright-red ring behind the white flash (hidden during normal reload).
+	local rest = Instance.new("UIStroke")
+	rest.Name = "Rest"
+	rest.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+	rest.Thickness = RELOAD_RING_THICK
+	rest.Color = RELOAD_RING_WAIT
+	rest.Transparency = 1
+	rest.Enabled = false
+	rest.Parent = root
+
+	-- Remaining-time arc (bright red; flashes white on deny).
+	local arc = Instance.new("UIStroke")
+	arc.Name = "Arc"
+	arc.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+	arc.Thickness = RELOAD_RING_THICK
+	arc.Color = RELOAD_RING_WAIT
+	arc.Transparency = 0
+	arc.Parent = root
+
+	local grad = Instance.new("UIGradient")
+	grad.Name = "ArcMask"
+	grad.Rotation = -90 -- start at top; empties as reload finishes
+	grad.Color = ColorSequence.new(Color3.new(1, 1, 1)) -- don't tint the stroke
+	grad.Transparency = NumberSequence.new(1)
+	grad.Parent = arc
+
+	return { root = root, rest = rest, arc = arc, grad = grad }
+end
+
+local function setArcFilled(grad: UIGradient, filled01: number)
+	local t = math.clamp(filled01, 0, 1)
+	if t <= 0.001 then
+		grad.Transparency = NumberSequence.new(1)
+		return
+	end
+	if t >= 0.999 then
+		grad.Transparency = NumberSequence.new(0)
+		return
+	end
+	local cut = math.clamp(t, 0.001, 0.999)
+	grad.Transparency = NumberSequence.new({
+		NumberSequenceKeypoint.new(0, 0),
+		NumberSequenceKeypoint.new(cut, 0),
+		NumberSequenceKeypoint.new(math.min(1, cut + 0.015), 1),
+		NumberSequenceKeypoint.new(1, 1),
+	})
+end
+
+local function readReloadRing(root: Frame): ReloadRing?
+	-- Drop legacy layouts so we rebuild with Rest + Arc.
+	if root:FindFirstChild("Track") or root:FindFirstChild("ArcHost") or not root:FindFirstChild("Rest") then
+		root:Destroy()
+		return nil
+	end
+	local rest = root:FindFirstChild("Rest")
+	local arc = root:FindFirstChild("Arc")
+	local grad = arc and arc:FindFirstChild("ArcMask")
+	if rest and rest:IsA("UIStroke") and arc and arc:IsA("UIStroke") and grad and grad:IsA("UIGradient") then
+		return { root = root, rest = rest, arc = arc, grad = grad }
+	end
+	root:Destroy()
+	return nil
+end
+
+local function ensureAimReloadRing(): ReloadRing?
+	local root = crossRoot
+	if not root then
+		return nil
+	end
+	if aimReloadRing and aimReloadRing.Parent == root then
+		local existing = readReloadRing(aimReloadRing)
+		if existing then
+			return existing
+		end
+		aimReloadRing = nil
+	end
+	local built = makeReloadRing(root, "ReloadRing")
+	built.root.Position = UDim2.fromScale(0.5, 0.5)
+	aimReloadRing = built.root
+	return built
+end
+
+local function ensureFloatReloadRing(): ReloadRing?
+	local layer = ensureJuiceLayer()
+	if not layer then
+		return nil
+	end
+	if floatReloadRing and floatReloadRing.Parent == layer then
+		local existing = readReloadRing(floatReloadRing)
+		if existing then
+			return existing
+		end
+		floatReloadRing = nil
+	end
+	local built = makeReloadRing(layer, "ReloadRingFloat")
+	built.root.ZIndex = 21
+	floatReloadRing = built.root
+	return built
+end
+
+local function paintReloadRing(ring: ReloadRing, remaining01: number, denyFlash: boolean, hitFlash: boolean?)
+	ring.root.Visible = true
+	ring.arc.Transparency = 0
+	if hitFlash then
+		ring.rest.Enabled = false
+		ring.rest.Transparency = 1
+		ring.arc.Color = RELOAD_RING_HIT
+		setArcFilled(ring.grad, 1)
+		return
+	end
+	if denyFlash then
+		-- Remaining segment flashes white; depleted segment pops in black behind it.
+		ring.rest.Enabled = true
+		ring.rest.Transparency = 0
+		ring.rest.Color = RELOAD_RING_REST_FLASH
+		ring.arc.Color = RELOAD_RING_FLASH
+	else
+		ring.rest.Enabled = false
+		ring.rest.Transparency = 1
+		ring.arc.Color = RELOAD_RING_WAIT
+	end
+	setArcFilled(ring.grad, remaining01)
+end
+
+local function flashReloadRingWhite()
+	reloadDenyFlashUntil = os.clock() + RELOAD_DENY_FLASH_SEC
+end
+
+local function flashHitGreenArc(screenPos: Vector2)
+	lastReloadRingPos = screenPos
+	hitGreenFlashUntil = os.clock() + HIT_GREEN_FLASH_SEC
+end
+
 local function flashTapCrosshair(screenPos: Vector2, kind: "ok" | "reload")
+	lastReloadRingPos = screenPos
 	-- Full-auto hold uses a sticky reticle that follows the finger — don't spawn fade copies.
 	if pointerHeld and isFullAuto() then
 		setStickyCrosshair(true, screenPos, kind)
@@ -442,12 +635,14 @@ local function flashScreenStatus(screenPos: Vector2, kind: "hit" | "fail", statu
 		return
 	end
 	local accent = if kind == "hit" then A_TIP_HIT else A_TIP_FAIL
+	local isReload = statusText == "Reloading"
+	-- Reloading sits above the deny-flash black arc so it never gets covered.
+	local yLift = if isReload then (RELOAD_RING_SIZE * 0.5 + 18) else 14
 	local status = Instance.new("TextLabel")
 	status.Name = "TapStatus"
 	status.BackgroundTransparency = 1
-	-- Sit just above the finger / pointer (was below).
 	status.AnchorPoint = Vector2.new(0.5, 1)
-	status.Position = UDim2.fromOffset(screenPos.X, screenPos.Y - 14)
+	status.Position = UDim2.fromOffset(screenPos.X, screenPos.Y - yLift)
 	status.Size = UDim2.fromOffset(A_STATUS_BASE.X, A_STATUS_BASE.Y)
 	status.Font = UiTheme.Font
 	status.Text = statusText
@@ -455,7 +650,7 @@ local function flashScreenStatus(screenPos: Vector2, kind: "hit" | "fail", statu
 	status.TextScaled = true
 	status.TextStrokeTransparency = 0.35
 	status.TextStrokeColor3 = Color3.new(0, 0, 0)
-	status.ZIndex = 20
+	status.ZIndex = if isReload then 30 else 20
 	status.Active = false
 	pcall(function()
 		(status :: any).Interactable = false
@@ -533,6 +728,8 @@ local function tryFeedAtScreen(screenPos: Vector2, flashTip: boolean?, heldRepea
 		end
 	end
 	if result == "hit" then
+		lastReloadRingPos = screenPos
+		flashHitGreenArc(screenPos)
 		playTapJuice(screenPos)
 		if not quietFail then
 			showResult("hit", "+1 Food")
@@ -544,6 +741,10 @@ local function tryFeedAtScreen(screenPos: Vector2, flashTip: boolean?, heldRepea
 		return true
 	end
 	if result == "cooldown" then
+		lastReloadRingPos = screenPos
+		if not quietFail then
+			flashReloadRingWhite()
+		end
 		playTapFailSound()
 		showResult("fail", "Reloading")
 	elseif result == "full" then
@@ -619,6 +820,101 @@ local function canShowAimCrosshair(): boolean
 		return false
 	end
 	return true
+end
+
+local function resolveRingScreenPos(): Vector2?
+	local aimOn = crossRoot ~= nil and crossRoot.Visible == true and canShowAimCrosshair()
+	if aimOn then
+		return nil -- parented to aim crosshair
+	end
+	local pos = lastReloadRingPos
+	if stickyCross and stickyCross.Visible then
+		pos = Vector2.new(
+			stickyCross.AbsolutePosition.X + stickyCross.AbsoluteSize.X * 0.5,
+			stickyCross.AbsolutePosition.Y + stickyCross.AbsoluteSize.Y * 0.5
+		)
+	elseif pointerHeld then
+		pos = pointerScreenPos
+	end
+	if pos.X < 1 and pos.Y < 1 then
+		return nil
+	end
+	return pos
+end
+
+local function showRingAt(frac: number, denyFlash: boolean, hitFlash: boolean)
+	local aimOn = crossRoot ~= nil and crossRoot.Visible == true and canShowAimCrosshair()
+	if aimOn then
+		local ring = ensureAimReloadRing()
+		if ring then
+			paintReloadRing(ring, frac, denyFlash, hitFlash)
+		end
+		if floatReloadRing then
+			floatReloadRing.Visible = false
+		end
+		return
+	end
+	local pos = resolveRingScreenPos()
+	if not pos then
+		if aimReloadRing then
+			aimReloadRing.Visible = false
+		end
+		if floatReloadRing then
+			floatReloadRing.Visible = false
+		end
+		return
+	end
+	local ring = ensureFloatReloadRing()
+	if ring then
+		ring.root.Position = UDim2.fromOffset(pos.X, pos.Y)
+		paintReloadRing(ring, frac, denyFlash, hitFlash)
+	end
+	if aimReloadRing then
+		aimReloadRing.Visible = false
+	end
+end
+
+local function updateReloadRings()
+	local rem, total = WaveSim.getTapFeedCooldown()
+	local now = os.clock()
+	-- +1 Food: brief full green arc, then red reload arc takes over.
+	if now < hitGreenFlashUntil then
+		showRingAt(1, false, true)
+		return
+	end
+	local reloading = total > 1e-4 and rem > 1e-3
+	if not reloading then
+		if aimReloadRing then
+			aimReloadRing.Visible = false
+		end
+		if floatReloadRing then
+			floatReloadRing.Visible = false
+		end
+		return
+	end
+	showRingAt(rem / total, now < reloadDenyFlashUntil, false)
+end
+
+local function bindReloadRingLoop(on: boolean)
+	if on then
+		if reloadRingConn then
+			return
+		end
+		reloadRingConn = RunService.RenderStepped:Connect(updateReloadRings)
+		return
+	end
+	if reloadRingConn then
+		reloadRingConn:Disconnect()
+		reloadRingConn = nil
+	end
+	reloadDenyFlashUntil = 0
+	hitGreenFlashUntil = 0
+	if aimReloadRing then
+		aimReloadRing.Visible = false
+	end
+	if floatReloadRing then
+		floatReloadRing.Visible = false
+	end
 end
 
 local function getPlayerControls(): any?
@@ -1025,6 +1321,7 @@ InventoryState.onOpenChanged(refreshAimMode)
 WaveSim.onHud(function()
 	refreshAimMode()
 	refreshFullAutoLoop()
+	bindReloadRingLoop(WaveSim.isRunning())
 end)
 WaveSim.onStopped(function()
 	refreshAimMode()
@@ -1032,10 +1329,12 @@ WaveSim.onStopped(function()
 	pointerHeld = false
 	setStickyCrosshair(false)
 	refreshFullAutoLoop()
+	bindReloadRingLoop(false)
 end)
 task.defer(function()
 	refreshAimMode()
 	refreshFullAutoLoop()
+	bindReloadRingLoop(WaveSim.isRunning())
 end)
 
 -- Debug radii are attached by WaveSim when TAP_FEED_DEBUG is true.

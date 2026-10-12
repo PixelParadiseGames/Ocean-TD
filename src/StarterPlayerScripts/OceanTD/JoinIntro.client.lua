@@ -30,7 +30,8 @@ local FREEZE_ACTION = "OceanTD_JoinIntroFreeze"
 local SKIP_ACTION = "OceanTD_JoinIntroSkip"
 
 local WHITE = Color3.new(1, 1, 1)
-local SKIP_GREEN = Color3.fromRGB(55, 200, 90)
+local SKIP_GREEN = Color3.fromRGB(55, 200, 90) -- gradient top
+local SKIP_GREEN_DARK = Color3.fromRGB(16, 64, 28) -- gradient bottom
 local SKIP_STROKE_BRIGHT = Color3.fromRGB(90, 255, 110)
 local SKIP_BTN_SIZE = Vector2.new(118, 28)
 local LOAD_BAR_BG = Color3.fromRGB(28, 36, 48)
@@ -924,11 +925,10 @@ local function makeUi(): (ScreenGui, TextButton)
 	btn.AnchorPoint = Vector2.new(0, 1)
 	btn.Position = UDim2.new(0, 28, 1, -28)
 	btn.Size = UDim2.fromOffset(SKIP_BTN_SIZE.X, SKIP_BTN_SIZE.Y)
-	btn.BackgroundColor3 = SKIP_GREEN
-	btn.Font = UiTheme.Font
-	btn.Text = "Skip Intro"
-	btn.TextColor3 = Color3.new(1, 1, 1)
-	btn.TextScaled = true
+	-- White base so UIGradient greens read true (top bright → bottom dark).
+	btn.BackgroundColor3 = Color3.new(1, 1, 1)
+	btn.BorderSizePixel = 0
+	btn.Text = ""
 	btn.AutoButtonColor = true
 	btn.Selectable = true
 	btn.Active = true
@@ -937,6 +937,14 @@ local function makeUi(): (ScreenGui, TextButton)
 	local corner = Instance.new("UICorner")
 	corner.CornerRadius = UDim.new(0, 8)
 	corner.Parent = btn
+	local grad = Instance.new("UIGradient")
+	grad.Name = "_OceanTD_SkipGrad"
+	grad.Color = ColorSequence.new({
+		ColorSequenceKeypoint.new(0, SKIP_GREEN),
+		ColorSequenceKeypoint.new(1, SKIP_GREEN_DARK),
+	})
+	grad.Rotation = 90
+	grad.Parent = btn
 	local stroke = Instance.new("UIStroke")
 	stroke.Name = "_OceanTD_SkipStroke"
 	stroke.Color = SKIP_STROKE_BRIGHT
@@ -949,6 +957,18 @@ local function makeUi(): (ScreenGui, TextButton)
 	pad.PaddingLeft = UDim.new(0.1, 0)
 	pad.PaddingRight = UDim.new(0.1, 0)
 	pad.Parent = btn
+	-- Label child so the gradient does not tint the text.
+	local lbl = Instance.new("TextLabel")
+	lbl.Name = "Label"
+	lbl.BackgroundTransparency = 1
+	lbl.Size = UDim2.fromScale(1, 1)
+	lbl.Font = UiTheme.Font
+	lbl.Text = "Skip Intro"
+	lbl.TextColor3 = Color3.new(1, 1, 1)
+	lbl.TextScaled = true
+	lbl.ZIndex = 4
+	lbl.Active = false
+	lbl.Parent = btn
 
 	return sg, btn
 end
@@ -958,7 +978,6 @@ local function flashSkipButton(btn: TextButton)
 	local stroke = btn:FindFirstChild("_OceanTD_SkipStroke")
 	skipFlashToken += 1
 	local token = skipFlashToken
-	local restoreBg = SKIP_GREEN
 	btn.BackgroundColor3 = SKIP_STROKE_BRIGHT
 	if stroke and stroke:IsA("UIStroke") then
 		stroke.Color = Color3.new(1, 1, 1)
@@ -967,8 +986,9 @@ local function flashSkipButton(btn: TextButton)
 		if token ~= skipFlashToken or not btn.Parent then
 			return
 		end
+		-- Restore white base so the green→dark gradient shows correctly.
 		TweenService:Create(btn, TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
-			BackgroundColor3 = restoreBg,
+			BackgroundColor3 = Color3.new(1, 1, 1),
 		}):Play()
 		if stroke and stroke:IsA("UIStroke") and stroke.Parent then
 			TweenService:Create(stroke, TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {

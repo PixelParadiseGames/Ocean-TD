@@ -57,9 +57,13 @@ function PlaceRaycast.resolveBrainStackPos(
 	return world
 end
 
-function PlaceRaycast.evaluatePos(worldPos: Vector3, itemId: string?): (boolean, string?)
+function PlaceRaycast.isAtPlaceCap(): boolean
 	local placeMax = SkillStages.placeMoreMaxAtStage(SkillPowerUpUI.getStage("PlaceMore"))
-	if PlacedCoralIndex.countLocal() >= placeMax then
+	return PlacedCoralIndex.countLocal() >= placeMax
+end
+
+function PlaceRaycast.evaluatePos(worldPos: Vector3, itemId: string?): (boolean, string?)
+	if PlaceRaycast.isAtPlaceCap() then
 		return false, "Max Placed"
 	end
 	if not ClientPlot.isInside(worldPos) then

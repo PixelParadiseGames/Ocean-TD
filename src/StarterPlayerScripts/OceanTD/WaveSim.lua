@@ -259,6 +259,8 @@ local demoCoralParts: { BasePart }? = nil
 local hasStartedWavesThisSession = false
 -- Counts real Start Waves presses; round-start SFX skips the first (explainer VO).
 local wavesStartCount = 0
+-- Retry/Continue: don't ForceFishCam / TangCam — restore the player's prior cam instead.
+local suppressWaveStartCamForce = false
 local planningArrows = false
 local planningArrowConn: RBXScriptConnection? = nil
 
@@ -2716,7 +2718,8 @@ local function beginWave(wave: number)
 		end
 	end
 	-- Wave 1: enter Fish Cam first so UI/lock/crosshair match; L.TangCam then drives a short overview.
-	if wave == C.TANG_FIRST_WAVE and not joinIntroDemo then
+	-- Skip on Retry/Continue — FreeCam restores the cam the player had before defeat.
+	if wave == C.TANG_FIRST_WAVE and not joinIntroDemo and not suppressWaveStartCamForce then
 		local pg = Players.LocalPlayer and Players.LocalPlayer:FindFirstChildOfClass("PlayerGui")
 		local function forceFishCam()
 			if not pg then
@@ -4153,6 +4156,17 @@ end
 
 export type TapFeedResult = "hit" | "cooldown" | "miss" | "full" | "blocked"
 
+-- remainingSec, totalSec (both 0 when ready / no timed reload).
+function WaveSim.getTapFeedCooldown(): (number, number)
+	local reloadStage = L.SkillPowerUpUI.getStage("ReloadSpeed")
+	local cd = L.SkillStages.reloadSpeedCooldownSec(reloadStage)
+	if cd <= 1e-4 then
+		return 0, 0
+	end
+	local rem = math.max(0, cd - (os.clock() - lastPlayerTapAt))
+	return rem, cd
+end
+
 -- Click/tap help-feed: screen-space pick vs fish root (matches WorldToViewportPoint /
 -- GetMouseLocation — same space as the debug ball). Avoids GuiInset ray offsets.
 function WaveSim.tryTapFeedAtScreen(screenPos: Vector2): TapFeedResult
@@ -4812,7 +4826,9 @@ function WaveSim.continueWithHearts(hearts: number, retrySameWave: boolean?): bo
 	ensureFolder()
 	L.WaveEndVfx.refreshLocalEndHeart()
 	local w = math.max(1, waveIndex)
+	suppressWaveStartCamForce = true
 	beginWave(if retrySameWave then w else w + 1)
+	suppressWaveStartCamForce = false
 	notifyHud()
 	flushHud()
 	attachSimLoop(myToken)
@@ -4932,6 +4948,14 @@ function WaveSim.start(): boolean
 	if not WaveEntityPool.hasFishKind(WaveEntityPool.FISH_TANG) then
 		warn("[WAVE] L.ReplicatedStorage.HungryFish missing")
 		return false
+	end
+	-- Remember cam before Wave-1 FishCam force — restore on Finish (not Retry/Continue).
+	local pg = Players.LocalPlayer and Players.LocalPlayer:FindFirstChildOfClass("PlayerGui")
+	if pg then
+		local cur = pg:GetAttribute("OceanTD_CamCycleMode")
+		if cur == "off" or cur == "plotcam" or cur == "fishcam" or cur == "dronecam" then
+			pg:SetAttribute("OceanTD_WaveResumeCamMode", cur)
+		end
 	end
 	token += 1
 	local myToken = token

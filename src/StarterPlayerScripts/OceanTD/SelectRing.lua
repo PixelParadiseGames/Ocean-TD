@@ -6,7 +6,9 @@
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
-local UiCircles = require(ReplicatedStorage:WaitForChild("OceanTD"):WaitForChild("Shared"):WaitForChild("UiCircles"))
+local oceanShared = ReplicatedStorage:WaitForChild("OceanTD"):WaitForChild("Shared")
+local CoralVisual = require(oceanShared:WaitForChild("CoralVisual"))
+local UiCircles = require(oceanShared:WaitForChild("UiCircles"))
 
 local SelectRing = {}
 
@@ -18,6 +20,20 @@ export type Handle = {
 	stroke: UIStroke?,
 	adornee: BasePart?,
 }
+
+-- Same plant-point as the green pick disc (terrain contact), not mesh mid-body.
+local function plantWorld(adornee: BasePart): Vector3
+	return CoralVisual.readGridAnchor(adornee) or adornee.Position
+end
+
+local function applyLayout(bb: BillboardGui, adornee: BasePart)
+	-- Footprint only — height would grow the ring and float it with tall med/large meshes.
+	local diam = math.max(adornee.Size.X, adornee.Size.Z)
+	local studs = math.clamp(diam * 1.55, 2.2, 10)
+	bb.Size = UDim2.new(studs, 0, studs, 0)
+	bb.StudsOffset = Vector3.zero
+	bb.StudsOffsetWorldSpace = plantWorld(adornee) - adornee.Position
+end
 
 function SelectRing.new(): Handle
 	return {
@@ -43,10 +59,13 @@ function SelectRing.getAdornee(h: Handle): BasePart?
 end
 
 function SelectRing.ensure(h: Handle, adornee: BasePart, parentGui: Instance?)
-	local diam = math.max(adornee.Size.X, adornee.Size.Y, adornee.Size.Z)
-	local studs = math.clamp(diam * 1.55, 2.2, 10)
-	if h.bb and h.bb.Parent and h.adornee == adornee then
-		h.bb.Size = UDim2.new(studs, 0, studs, 0)
+	-- Never keep a Billboard on a destroyed mesh — that is the classic upgrade spin/vanish.
+	if not adornee.Parent then
+		SelectRing.destroy(h)
+		return
+	end
+	if h.bb and h.bb.Parent and h.adornee == adornee and h.adornee.Parent then
+		applyLayout(h.bb, adornee)
 		return
 	end
 	SelectRing.destroy(h)
@@ -55,10 +74,9 @@ function SelectRing.ensure(h: Handle, adornee: BasePart, parentGui: Instance?)
 	bb.AlwaysOnTop = true
 	bb.Active = false
 	bb.LightInfluence = 0
-	bb.Size = UDim2.new(studs, 0, studs, 0)
-	bb.StudsOffset = Vector3.zero
 	bb.MaxDistance = 2000
 	bb.Adornee = adornee
+	applyLayout(bb, adornee)
 	local guiParent = parentGui
 	if not guiParent then
 		local pg = Players.LocalPlayer:FindFirstChildOfClass("PlayerGui")
@@ -90,8 +108,16 @@ function SelectRing.ensure(h: Handle, adornee: BasePart, parentGui: Instance?)
 end
 
 function SelectRing.pulse(h: Handle)
-	if not h.frame or not h.stroke or not h.adornee or not h.adornee.Parent then
+	if not h.adornee or not h.adornee.Parent then
+		SelectRing.destroy(h)
 		return
+	end
+	if not h.frame or not h.stroke then
+		return
+	end
+	-- Keep glued to plant point while mesh center drifts on size swaps.
+	if h.bb then
+		applyLayout(h.bb, h.adornee)
 	end
 	local wave = (math.sin(os.clock() * RING_HZ) + 1) * 0.5
 	local scale = 0.78 + wave * 0.42

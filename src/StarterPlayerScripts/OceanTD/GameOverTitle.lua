@@ -56,7 +56,7 @@ local function playGameOverSound(my: number)
 	local snd = Instance.new("Sound")
 	snd.Name = "OceanTD_GameOverTitle"
 	snd.SoundId = SOUND_ID
-	snd.Volume = 1.5
+	snd.Volume = 1.35 -- 10% quieter than prior 1.5
 	AudioSettings.markNoSoundGroup(snd)
 	snd.Parent = SoundService
 	task.defer(function()

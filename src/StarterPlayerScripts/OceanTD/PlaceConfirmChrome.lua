@@ -29,8 +29,8 @@ local BTN_FALLBACK_BOTTOM_PAD = 28
 local FEET_LIFT = 0.45
 -- Base chrome diameter before viewport scale (PlacementController default).
 local BASE_BTN_PX = 52
--- Confirm is 20% larger than Close / rot.
-local CONFIRM_BTN_SCALE = 1.2
+-- Confirm vs Close/rot. Placement hides Close for now — confirm sits in that slot at this scale.
+local CONFIRM_BTN_SCALE = 1.44 -- 20% bigger than prior 1.2 confirm
 -- Placement / relocate chrome under the move icon (slightly under original feet size).
 local PLACE_BELOW_MOVE_SCALE = 0.9
 -- ≤720p class (mobile): 30% smaller. 720p+: 20% larger.
@@ -102,16 +102,23 @@ function PlaceConfirmChrome.layoutBelowMoveIcon(
 	)
 end
 
--- Fixed px for the word "CONFIRM" inside the circle (TextScaled wraps it on mobile).
+-- Fixed px for PLANT / CONFIRM inside the circle (TextScaled wraps it on mobile).
 function PlaceConfirmChrome.confirmLabelTextSize(): number
-	return if UiViewportTags.is720p() then 12 else 9
+	return if UiViewportTags.is720p() then 14 else 11
 end
 
 local CONFIRM_CHECK_IMAGE = "rbxassetid://114269375380072"
+local CHECK_ICON_SCALE = 0.82 -- larger glyph; circle size unchanged
+local CHECK_BRIGHT = Color3.fromRGB(90, 255, 120)
+local CHECK_BRIGHT_TOP = Color3.fromRGB(170, 255, 190) -- gradient top when bright
+local CHECK_HUNTER = Color3.fromRGB(35, 85, 45)
+local CONFIRM_GRAD_NAME = "_OceanTD_ConfirmGrad"
+local CONFIRM_WORD_LABEL = "ConfirmWord"
 
 function PlaceConfirmChrome.ensureConfirmCheckIcon(btn: GuiObject): ImageLabel
 	local existing = btn:FindFirstChild("ConfirmCheckIcon")
 	if existing and existing:IsA("ImageLabel") then
+		existing.Size = UDim2.fromScale(CHECK_ICON_SCALE, CHECK_ICON_SCALE)
 		return existing
 	end
 	if existing then
@@ -122,7 +129,7 @@ function PlaceConfirmChrome.ensureConfirmCheckIcon(btn: GuiObject): ImageLabel
 	icon.BackgroundTransparency = 1
 	icon.AnchorPoint = Vector2.new(0.5, 0.5)
 	icon.Position = UDim2.fromScale(0.5, 0.5)
-	icon.Size = UDim2.fromScale(0.58, 0.58)
+	icon.Size = UDim2.fromScale(CHECK_ICON_SCALE, CHECK_ICON_SCALE)
 	icon.Image = CONFIRM_CHECK_IMAGE
 	icon.ScaleType = Enum.ScaleType.Fit
 	icon.Active = false
@@ -132,11 +139,81 @@ function PlaceConfirmChrome.ensureConfirmCheckIcon(btn: GuiObject): ImageLabel
 	return icon
 end
 
--- Alternate CONFIRM text ↔ check graphic (same 1s cadence as Close/X). Gamepad stays on "A".
-function PlaceConfirmChrome.syncConfirmFace(btn: TextButton, showWord: boolean, gamepadLetter: boolean?)
+local function ensureConfirmWordLabel(btn: TextButton): TextLabel
+	local existing = btn:FindFirstChild(CONFIRM_WORD_LABEL)
+	if existing and existing:IsA("TextLabel") then
+		return existing
+	end
+	if existing then
+		existing:Destroy()
+	end
+	local lbl = Instance.new("TextLabel")
+	lbl.Name = CONFIRM_WORD_LABEL
+	lbl.BackgroundTransparency = 1
+	lbl.Size = UDim2.fromScale(1, 1)
+	lbl.Font = btn.Font
+	lbl.TextColor3 = Color3.new(1, 1, 1)
+	lbl.TextStrokeColor3 = Color3.fromRGB(12, 55, 25)
+	lbl.TextStrokeTransparency = 0
+	lbl.TextScaled = false
+	lbl.TextSize = PlaceConfirmChrome.confirmLabelTextSize()
+	lbl.ZIndex = btn.ZIndex + 1
+	lbl.Active = false
+	lbl.Visible = false
+	lbl.Parent = btn
+	return lbl
+end
+
+function PlaceConfirmChrome.ensureConfirmGradient(btn: GuiObject): UIGradient
+	local existing = btn:FindFirstChild(CONFIRM_GRAD_NAME)
+	if existing and existing:IsA("UIGradient") then
+		return existing
+	end
+	if existing then
+		existing:Destroy()
+	end
+	local grad = Instance.new("UIGradient")
+	grad.Name = CONFIRM_GRAD_NAME
+	grad.Rotation = 90
+	grad.Enabled = false
+	grad.Parent = btn
+	return grad
+end
+
+-- phase 0 = bright green (gradient: light top, solid green bottom half), 1 = hunter solid.
+function PlaceConfirmChrome.applyConfirmPulse(btn: GuiObject, phase: number)
+	local p = math.clamp(phase, 0, 1)
+	local grad = PlaceConfirmChrome.ensureConfirmGradient(btn)
+	if p < 0.5 then
+		-- Bright side: white base + vertical gradient (bottom half flat green).
+		btn.BackgroundColor3 = Color3.new(1, 1, 1)
+		grad.Enabled = true
+		local top = CHECK_BRIGHT_TOP:Lerp(CHECK_BRIGHT, p * 2)
+		grad.Color = ColorSequence.new({
+			ColorSequenceKeypoint.new(0, top),
+			ColorSequenceKeypoint.new(0.5, CHECK_BRIGHT),
+			ColorSequenceKeypoint.new(1, CHECK_BRIGHT),
+		})
+	else
+		grad.Enabled = false
+		btn.BackgroundColor3 = CHECK_BRIGHT:Lerp(CHECK_HUNTER, (p - 0.5) * 2)
+	end
+end
+
+-- Alternate word ↔ check graphic (same 1s cadence as Close/X). Gamepad stays on "A".
+-- wordText: placement uses "PLANT"; relocate / recycle default "CONFIRM".
+function PlaceConfirmChrome.syncConfirmFace(
+	btn: TextButton,
+	showWord: boolean,
+	gamepadLetter: boolean?,
+	wordText: string?
+)
 	local icon = PlaceConfirmChrome.ensureConfirmCheckIcon(btn)
+	local wordLbl = ensureConfirmWordLabel(btn)
+	local word = if typeof(wordText) == "string" and wordText ~= "" then wordText else "CONFIRM"
 	if gamepadLetter then
 		icon.Visible = false
+		wordLbl.Visible = false
 		btn.Text = "A"
 		btn.TextTransparency = 0
 		btn.TextScaled = true
@@ -146,13 +223,15 @@ function PlaceConfirmChrome.syncConfirmFace(btn: TextButton, showWord: boolean, 
 	end
 	if showWord then
 		icon.Visible = false
-		btn.Text = "CONFIRM"
-		btn.TextTransparency = 0
-		btn.TextScaled = false
-		btn.TextSize = PlaceConfirmChrome.confirmLabelTextSize()
-		btn.TextStrokeColor3 = Color3.fromRGB(12, 55, 25)
-		btn.TextStrokeTransparency = 0
+		-- Label child so bright-green UIGradient does not tint the word.
+		btn.Text = ""
+		btn.TextTransparency = 1
+		wordLbl.Text = word
+		wordLbl.TextSize = PlaceConfirmChrome.confirmLabelTextSize()
+		wordLbl.Font = btn.Font
+		wordLbl.Visible = true
 	else
+		wordLbl.Visible = false
 		btn.Text = ""
 		btn.TextTransparency = 1
 		icon.Visible = true
@@ -160,6 +239,8 @@ function PlaceConfirmChrome.syncConfirmFace(btn: TextButton, showWord: boolean, 
 end
 
 PlaceConfirmChrome.CONFIRM_CHECK_IMAGE = CONFIRM_CHECK_IMAGE
+PlaceConfirmChrome.CHECK_BRIGHT = CHECK_BRIGHT
+PlaceConfirmChrome.CHECK_HUNTER = CHECK_HUNTER
 
 -- Centered on the character (root XZ), Y at average foot height.
 local function feetOffsetFromRoot(char: Model, root: BasePart): CFrame
@@ -401,6 +482,41 @@ local ROT_HOLD_INTERVAL = 0.5
 local rotHoldConn: RBXScriptConnection? = nil
 local rotHoldToken = 0
 
+-- Placement: rot slides out from behind Confirm once (not every layout tick).
+local ROT_SLIDE_INFO = TweenInfo.new(0.32, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
+local rotRevealShown = false
+local rotSlideBusy = false
+local rotSlideToken = 0
+local rotSlideTweens: { Tween } = {}
+
+local function stopRotSlideTweens()
+	for _, tw in ipairs(rotSlideTweens) do
+		pcall(function()
+			tw:Cancel()
+		end)
+	end
+	table.clear(rotSlideTweens)
+end
+
+local function resetRotReveal()
+	rotSlideToken += 1
+	stopRotSlideTweens()
+	rotRevealShown = false
+	rotSlideBusy = false
+end
+
+function PlaceConfirmChrome.resetRotReveal()
+	resetRotReveal()
+end
+
+-- Cancel in-flight slide and mark rot as fully revealed (Active on). Used after mesh rebind.
+function PlaceConfirmChrome.finishRotReveal()
+	rotSlideToken += 1
+	stopRotSlideTweens()
+	rotSlideBusy = false
+	rotRevealShown = true
+end
+
 function PlaceConfirmChrome.stopRotateHold()
 	rotHoldToken += 1
 	if rotHoldConn then
@@ -450,18 +566,22 @@ local function placeChrome(
 	topYOverride: number?
 )
 	--[[
-		Close + rot on the top row (placement: under move icon). Confirm parks below Close.
-		Confirm is larger than Close — space centers so discs don't overlap.
+		Placement (Close hidden): Confirm sits in the old Close slot (top center), larger.
+		Rot stays hidden until Confirm shows, then slides out from behind it.
+		Relocate (Close visible): Close + rot on top row; Confirm parks below Close.
 	]]
 	local checkS = math.max(math.floor(s * CONFIRM_BTN_SCALE + 0.5), s)
+	local showCancel = cancelBtn ~= nil and cancelBtn.Visible == true
+	local function posAt(x: number, y: number): UDim2
+		if useScale then
+			return UDim2.new(0.5, x, 0.5, y)
+		end
+		return UDim2.fromOffset(origin.X + x, origin.Y + y)
+	end
 	local function setPos(btn: GuiObject, x: number, y: number, sizePx: number, visible: boolean?)
 		btn.AnchorPoint = Vector2.new(0.5, 0.5)
 		btn.Size = UDim2.fromOffset(sizePx, sizePx)
-		if useScale then
-			btn.Position = UDim2.new(0.5, x, 0.5, y)
-		else
-			btn.Position = UDim2.fromOffset(origin.X + x, origin.Y + y)
-		end
+		btn.Position = posAt(x, y)
 		if visible ~= nil then
 			btn.Visible = visible
 		else
@@ -469,19 +589,116 @@ local function placeChrome(
 		end
 	end
 
-	if not showRot then
+	local function hideRotPair()
+		resetRotReveal()
 		if rotLeftBtn then
 			rotLeftBtn.Visible = false
+			rotLeftBtn.Active = true
 		end
 		if rotRightBtn then
 			rotRightBtn.Visible = false
+			rotRightBtn.Active = true
 		end
+	end
+
+	-- Placement: rot only with Confirm; slide out from behind Confirm once.
+	local function layoutPlacementRot(topY: number, sideGap: number)
+		local wantRot = showRot and showCheck and rotLeftBtn ~= nil and rotRightBtn ~= nil
+		if not wantRot then
+			hideRotPair()
+			return
+		end
+		local left = rotLeftBtn :: GuiObject
+		local right = rotRightBtn :: GuiObject
+		local function snapFinal(activeOn: boolean)
+			setPos(left, -sideGap, topY, s, true)
+			setPos(right, sideGap, topY, s, true)
+			left.ZIndex = 5
+			right.ZIndex = 5
+			left.Active = activeOn
+			right.Active = activeOn
+			pcall(function()
+				local l: any = left
+				local r: any = right
+				l.Interactable = activeOn
+				r.Interactable = activeOn
+			end)
+		end
+		-- Mid-slide re-layout (upgrade rebind): snap finished.
+		if rotSlideBusy then
+			rotSlideToken += 1
+			stopRotSlideTweens()
+			rotSlideBusy = false
+			rotRevealShown = true
+			snapFinal(true)
+			return
+		end
+		if rotRevealShown then
+			snapFinal(true)
+			return
+		end
+		rotRevealShown = true
+		rotSlideBusy = true
+		rotSlideToken += 1
+		local my = rotSlideToken
+		stopRotSlideTweens()
+		-- Start stacked under Confirm, then ease left / right.
+		-- Keep Active=true for the whole slide — disabling it race-locks rot after upgrade rebind
+		-- (Confirm still works via Activated; rot only had MouseButton1Down).
+		setPos(left, 0, topY, s, true)
+		setPos(right, 0, topY, s, true)
+		left.ZIndex = 5
+		right.ZIndex = 5
+		left.Active = true
+		right.Active = true
+		pcall(function()
+			local l: any = left
+			local r: any = right
+			l.Interactable = true
+			r.Interactable = true
+		end)
+		local twL = TweenService:Create(left, ROT_SLIDE_INFO, { Position = posAt(-sideGap, topY) })
+		local twR = TweenService:Create(right, ROT_SLIDE_INFO, { Position = posAt(sideGap, topY) })
+		table.insert(rotSlideTweens, twL)
+		table.insert(rotSlideTweens, twR)
+		twL:Play()
+		twR:Play()
+		twR.Completed:Connect(function()
+			if my ~= rotSlideToken then
+				return
+			end
+			rotSlideBusy = false
+			if left.Parent and right.Parent then
+				snapFinal(true)
+			end
+		end)
+	end
+
+	if not showRot then
+		hideRotPair()
 	end
 
 	local rowGap = math.max(math.floor(s * 0.35 + 0.5), 10)
 	local topY = if typeof(topYOverride) == "number" then topYOverride else 0
+	-- Gap rot from the larger confirm when Close is hidden.
+	local sideGap = if showCancel then (s + gap) else (checkS * 0.5 + s * 0.5 + gap)
 	local confirmY = topY + checkS * 0.5 + s * 0.5 + rowGap
 
+	if not showCancel then
+		if cancelBtn then
+			cancelBtn.Visible = false
+		end
+		if checkBtn then
+			-- Confirm above rot so the slide reads as coming from behind.
+			checkBtn.ZIndex = math.max(checkBtn.ZIndex, 20)
+			setPos(checkBtn, 0, topY, checkS, showCheck)
+		end
+		layoutPlacementRot(topY, sideGap)
+		return
+	end
+
+	-- Relocate: reset placement slide state; show rot with Close immediately.
+	resetRotReveal()
 	if showRot and cancelBtn and rotLeftBtn and rotRightBtn then
 		setPos(rotLeftBtn, -(s + gap), topY, s)
 		setPos(cancelBtn, 0, topY, s)
@@ -565,13 +782,22 @@ function PlaceConfirmChrome.layoutOnMoveBillboard(
 	local gap = 6
 	local gapUnder = math.max(math.floor(s * 0.45 + 0.5), 14)
 	local showCheck = checkBtn ~= nil and checkBtn.Visible
+	local showCancel = cancelBtn ~= nil and cancelBtn.Visible == true
 	local doRot = showRot == true and rotLeftBtn ~= nil and rotRightBtn ~= nil
 	local checkS = math.max(math.floor(s * CONFIRM_BTN_SCALE + 0.5), s)
 	local rowGap = math.max(math.floor(s * 0.35 + 0.5), 10)
-	local belowH = gapUnder + s + (if showCheck then rowGap + checkS else 0)
+	-- Placement: Confirm only in Close's slot (one row). Relocate: Close row + Confirm below.
+	local chromeH: number
+	if showCancel then
+		chromeH = s + (if showCheck then rowGap + checkS else 0)
+	else
+		chromeH = if showCheck then checkS else s
+	end
+	local belowH = gapUnder + chromeH
 	-- Keep move disc centered on adornee; extend BB downward for chrome.
 	local heightPx = math.max(math.floor(moveIconSize + belowH * 2 + 0.5), moveIconSize)
-	local widthPx = math.max(moveIconSize, math.floor((s + gap) * 2 + s + 24))
+	local sideSpan = if showCancel then (s + gap) * 2 + s else (checkS * 0.5 + s * 0.5 + gap) * 2 + checkS
+	local widthPx = math.max(moveIconSize, math.floor(sideSpan + 24))
 
 	bb.Adornee = adornee
 	bb.StudsOffset = Vector3.zero
@@ -585,6 +811,7 @@ function PlaceConfirmChrome.layoutOnMoveBillboard(
 		moveIcon.AnchorPoint = Vector2.new(0.5, 0.5)
 		moveIcon.Position = UDim2.new(0.5, 0, 0.5, 0)
 		moveIcon.Size = UDim2.fromOffset(moveIconSize, moveIconSize)
+		-- Caller owns ZIndex vs PLANT (idle: move below PLANT; drag: move above).
 		moveIcon.Visible = true
 		if moveIcon.Parent ~= bb then
 			moveIcon.Parent = bb
@@ -603,7 +830,8 @@ function PlaceConfirmChrome.layoutOnMoveBillboard(
 	parentToBb(rotLeftBtn)
 	parentToBb(rotRightBtn)
 
-	local topY = moveIconSize * 0.5 + gapUnder + s * 0.5
+	local topBtn = if showCancel then s else checkS
+	local topY = moveIconSize * 0.5 + gapUnder + topBtn * 0.5
 	placeChrome(Vector2.zero, s, gap, showCheck, doRot, checkBtn, rotLeftBtn, cancelBtn, rotRightBtn, true, topY)
 	return chromeBillboard
 end

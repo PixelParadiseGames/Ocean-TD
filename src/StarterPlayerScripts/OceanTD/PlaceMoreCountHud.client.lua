@@ -2,8 +2,9 @@
 --[[
 	Bottom-center build-mode HUD:
 	• First-roll plot finger (0 corals, RollFingerHint == "plot"): "Plant Coral In Plot" (no +).
-	• After ≥4 corals placed: "N Of N Max" + green + → Place More skill.
-	Only the + button captures clicks; the count / plant text passes through to corals.
+	• When ≤3 slots remain: "N Of N Max" + green + → Place More skill.
+	• When at max (0 remaining): red "Increase Max Planted" → Place More skill.
+	Count text passes through to corals; only + / Increase capture clicks.
 ]]
 
 local Players = game:GetService("Players")
@@ -26,11 +27,25 @@ local WaveSlot = require(script.Parent:WaitForChild("WaveSlot"))
 
 local SKILLS_OPEN_ATTR = "OceanTD_SkillsBubblesOpen"
 local HINT_ATTR = "OceanTD_RollFingerHint"
+-- BillboardGui cannot stack above ScreenGui — hide this HUD while coral PLANT/Confirm chrome is up.
+local PLACE_CHROME_ATTR = "OceanTD_PlaceConfirmChromeUp"
+local RELOCATE_CHROME_ATTR = "OceanTD_RelocateChromeUp"
+-- InventoryUI bumps this (os.clock) when player taps a seed at place-cap.
+local FLASH_INCREASE_ATTR = "OceanTD_FlashIncreaseMaxPlanted"
 local PLANT_HINT_TEXT = "Plant Coral In Plot"
+local INCREASE_TEXT = "Increase Max Planted"
+local REMAINING_SHOW_AT = 3 -- show N Of N Max + when this many slots (or fewer) left, but not 0
 local ROW_H = 44
 local PLUS_CIRCLE = math.floor(ROW_H * 0.6 + 0.5) -- 40% smaller green circle
 local PLUS_TEXT_SIZE = 30 -- keep glyph size when circle shrinks
 local GREEN = Color3.fromRGB(45, 190, 75)
+local INCREASE_RED = Color3.fromRGB(230, 70, 70) -- gradient top
+local INCREASE_RED_DARK = Color3.fromRGB(96, 20, 24) -- gradient bottom
+local INCREASE_STROKE = Color3.fromRGB(255, 140, 140)
+local INCREASE_STROKE_FLASH = Color3.fromRGB(255, 40, 40) -- bright red during bounce
+local INCREASE_BTN_SIZE = Vector2.new(220, 44)
+local INCREASE_HOLD_SCALE = 1.25
+local INCREASE_HOLD_SEC = 5
 local PLANT_PULSE_SCALE = 1.12
 local PLANT_PULSE_SEC = 0.55
 local plantPulseToken = 0
@@ -97,7 +112,7 @@ local function startPlantPulse()
 	end)
 end
 
--- + button alone — only clickable surface.
+-- + button alone — only clickable surface for near-max count.
 local btnSg = Instance.new("ScreenGui")
 btnSg.Name = "OceanTD_PlaceMoreCountHud"
 btnSg.ResetOnSpawn = false
@@ -117,6 +132,7 @@ plusBtn.Text = ""
 plusBtn.AutoButtonColor = true
 plusBtn.Active = true
 plusBtn.Interactable = true
+plusBtn.Visible = false
 plusBtn.Parent = btnSg
 local plusCorner = Instance.new("UICorner")
 plusCorner.CornerRadius = UDim.new(1, 0)
@@ -142,8 +158,153 @@ plusGlyph.Active = false
 plusGlyph.Interactable = false
 plusGlyph.Parent = plusBtn
 
+-- Maxed: red gradient CTA (same style as Skip Intro / Skip Training).
+local increaseBtn = Instance.new("TextButton")
+increaseBtn.Name = "IncreaseMaxPlanted"
+increaseBtn.AnchorPoint = Vector2.new(0.5, 1)
+increaseBtn.Position = UDim2.new(0.5, 0, 1, -28)
+increaseBtn.Size = UDim2.fromOffset(INCREASE_BTN_SIZE.X, INCREASE_BTN_SIZE.Y)
+increaseBtn.BackgroundColor3 = Color3.new(1, 1, 1)
+increaseBtn.BorderSizePixel = 0
+increaseBtn.Text = ""
+increaseBtn.AutoButtonColor = true
+increaseBtn.Active = true
+increaseBtn.Interactable = true
+increaseBtn.Visible = false
+increaseBtn.Parent = btnSg
+local incCorner = Instance.new("UICorner")
+incCorner.CornerRadius = UDim.new(0, 8)
+incCorner.Parent = increaseBtn
+local incGrad = Instance.new("UIGradient")
+incGrad.Name = "_OceanTD_IncreaseGrad"
+incGrad.Color = ColorSequence.new({
+	ColorSequenceKeypoint.new(0, INCREASE_RED),
+	ColorSequenceKeypoint.new(1, INCREASE_RED_DARK),
+})
+incGrad.Rotation = 90
+incGrad.Parent = increaseBtn
+local incStroke = Instance.new("UIStroke")
+incStroke.Thickness = 2.5
+incStroke.Color = INCREASE_STROKE
+incStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+incStroke.Parent = increaseBtn
+local incPad = Instance.new("UIPadding")
+incPad.PaddingTop = UDim.new(0.08, 0)
+incPad.PaddingBottom = UDim.new(0.08, 0)
+incPad.PaddingLeft = UDim.new(0.08, 0)
+incPad.PaddingRight = UDim.new(0.08, 0)
+incPad.Parent = increaseBtn
+local incLbl = Instance.new("TextLabel")
+incLbl.Name = "Label"
+incLbl.BackgroundTransparency = 1
+incLbl.Size = UDim2.fromScale(1, 1)
+incLbl.Font = UiTheme.Font
+incLbl.Text = INCREASE_TEXT
+incLbl.TextColor3 = Color3.new(1, 1, 1)
+incLbl.TextScaled = true
+incLbl.ZIndex = 2
+incLbl.Active = false
+incLbl.Interactable = false
+incLbl.Parent = increaseBtn
+local increaseScale = Instance.new("UIScale")
+increaseScale.Scale = 1
+increaseScale.Parent = increaseBtn
+local increaseFlashToken = 0
+
 local function placeMax(): number
 	return SkillStages.placeMoreMaxAtStage(SkillPowerUpUI.getStage("PlaceMore"))
+end
+
+local function flashIncreaseMaxPlanted()
+	-- Force the red CTA on even if chrome/count layout would hide it this frame.
+	textSg.Enabled = false
+	btnSg.Enabled = true
+	plusBtn.Visible = false
+	plusBtn.Active = false
+	increaseBtn.Visible = true
+	increaseBtn.Active = true
+	pcall(function()
+		local p: any = plusBtn
+		local i: any = increaseBtn
+		p.Interactable = false
+		i.Interactable = true
+	end)
+	increaseFlashToken += 1
+	local my = increaseFlashToken
+	increaseScale.Scale = 1
+	incStroke.Color = INCREASE_STROKE
+	incStroke.Thickness = 2.5
+	UiHaptics.pulseShort()
+	task.spawn(function()
+		for _ = 1, 3 do
+			if my ~= increaseFlashToken or not increaseScale.Parent then
+				return
+			end
+			incStroke.Color = INCREASE_STROKE_FLASH
+			incStroke.Thickness = 4
+			local up = TweenService:Create(
+				increaseScale,
+				TweenInfo.new(0.12, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+				{ Scale = 1.14 }
+			)
+			local strokeUp = TweenService:Create(
+				incStroke,
+				TweenInfo.new(0.12, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+				{ Color = INCREASE_STROKE_FLASH, Thickness = 4.5 }
+			)
+			up:Play()
+			strokeUp:Play()
+			up.Completed:Wait()
+			if my ~= increaseFlashToken then
+				return
+			end
+			local down = TweenService:Create(
+				increaseScale,
+				TweenInfo.new(0.14, Enum.EasingStyle.Quad, Enum.EasingDirection.In),
+				{ Scale = 1 }
+			)
+			local strokeDown = TweenService:Create(
+				incStroke,
+				TweenInfo.new(0.14, Enum.EasingStyle.Quad, Enum.EasingDirection.In),
+				{ Color = INCREASE_STROKE, Thickness = 2.5 }
+			)
+			down:Play()
+			strokeDown:Play()
+			down.Completed:Wait()
+		end
+		if my ~= increaseFlashToken then
+			return
+		end
+		incStroke.Color = INCREASE_STROKE
+		incStroke.Thickness = 2.5
+		-- Hold +25% so the CTA stays noticeable, then ease back.
+		local holdUp = TweenService:Create(
+			increaseScale,
+			TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+			{ Scale = INCREASE_HOLD_SCALE }
+		)
+		holdUp:Play()
+		holdUp.Completed:Wait()
+		if my ~= increaseFlashToken then
+			return
+		end
+		task.wait(INCREASE_HOLD_SEC)
+		if my ~= increaseFlashToken or not increaseScale.Parent then
+			return
+		end
+		local holdDown = TweenService:Create(
+			increaseScale,
+			TweenInfo.new(0.22, Enum.EasingStyle.Quad, Enum.EasingDirection.In),
+			{ Scale = 1 }
+		)
+		holdDown:Play()
+		holdDown.Completed:Wait()
+		if my == increaseFlashToken then
+			increaseScale.Scale = 1
+			incStroke.Color = INCREASE_STROKE
+			incStroke.Thickness = 2.5
+		end
+	end)
 end
 
 local function chromeBlocked(): boolean
@@ -151,6 +312,13 @@ local function chromeBlocked(): boolean
 		return true
 	end
 	if WaveSlot.isSummaryOpen() then
+		return true
+	end
+	-- World coral chrome (Billboard) loses to this ScreenGui — step aside while PLANT/Confirm is up.
+	if playerGui:GetAttribute(PLACE_CHROME_ATTR) == true then
+		return true
+	end
+	if playerGui:GetAttribute(RELOCATE_CHROME_ATTR) == true then
 		return true
 	end
 	return false
@@ -167,18 +335,10 @@ local function shouldShowPlantHint(): boolean
 	return playerGui:GetAttribute(HINT_ATTR) == "plot"
 end
 
-local function shouldShowPlaceMore(): boolean
-	if not InventoryState.isOpen() then
-		return false
-	end
-	if chromeBlocked() then
-		return false
-	end
-	-- Don't push Place More until the player has a small reef going.
-	if PlacedCoralIndex.countLocal() < 4 then
-		return false
-	end
-	return true
+local function openPlaceMoreSkill()
+	UiHaptics.pulseShort()
+	playerGui:SetAttribute("OceanTD_ForceOpenSkillId", "PlaceMore")
+	playerGui:SetAttribute("OceanTD_ForceOpenSkills", os.clock())
 end
 
 local function applyCountLabelLayout(plantHint: boolean)
@@ -204,6 +364,8 @@ local function refreshVisible()
 		applyCountLabelLayout(true)
 		textSg.Enabled = true
 		btnSg.Enabled = false
+		plusBtn.Visible = false
+		increaseBtn.Visible = false
 		if not plantPulseActive then
 			plantPulseActive = true
 			startPlantPulse()
@@ -214,19 +376,77 @@ local function refreshVisible()
 		plantPulseActive = false
 		stopPlantPulse()
 	end
-	local show = shouldShowPlaceMore()
-	if show then
-		applyCountLabelLayout(false)
+
+	if not InventoryState.isOpen() or chromeBlocked() then
+		textSg.Enabled = false
+		btnSg.Enabled = false
+		plusBtn.Visible = false
+		increaseBtn.Visible = false
+		plusBtn.Active = false
+		increaseBtn.Active = false
+		pcall(function()
+			local p: any = plusBtn
+			local i: any = increaseBtn
+			p.Interactable = false
+			i.Interactable = false
+		end)
+		return
 	end
-	textSg.Enabled = show
-	btnSg.Enabled = show
+
+	local n = PlacedCoralIndex.countLocal()
+	local maxN = placeMax()
+	local remaining = maxN - n
+
+	if remaining <= 0 then
+		-- At / over max (also when place aim shows "Max Placed"): red CTA only.
+		textSg.Enabled = false
+		btnSg.Enabled = true
+		plusBtn.Visible = false
+		plusBtn.Active = false
+		increaseBtn.Visible = true
+		increaseBtn.Active = true
+		pcall(function()
+			local p: any = plusBtn
+			local i: any = increaseBtn
+			p.Interactable = false
+			i.Interactable = true
+		end)
+		return
+	end
+
+	if remaining <= REMAINING_SHOW_AT then
+		applyCountLabelLayout(false)
+		textSg.Enabled = true
+		btnSg.Enabled = true
+		plusBtn.Visible = true
+		plusBtn.Active = true
+		increaseBtn.Visible = false
+		increaseBtn.Active = false
+		pcall(function()
+			local p: any = plusBtn
+			local i: any = increaseBtn
+			p.Interactable = true
+			i.Interactable = false
+		end)
+		return
+	end
+
+	textSg.Enabled = false
+	btnSg.Enabled = false
+	plusBtn.Visible = false
+	increaseBtn.Visible = false
+	plusBtn.Active = false
+	increaseBtn.Active = false
+	pcall(function()
+		local p: any = plusBtn
+		local i: any = increaseBtn
+		p.Interactable = false
+		i.Interactable = false
+	end)
 end
 
-plusBtn.Activated:Connect(function()
-	UiHaptics.pulseShort()
-	playerGui:SetAttribute("OceanTD_ForceOpenSkillId", "PlaceMore")
-	playerGui:SetAttribute("OceanTD_ForceOpenSkills", os.clock())
-end)
+plusBtn.Activated:Connect(openPlaceMoreSkill)
+increaseBtn.Activated:Connect(openPlaceMoreSkill)
 
 PlacedCoralIndex.ensure()
 PlacedCoralIndex.onChanged(function()
@@ -244,11 +464,22 @@ end)
 playerGui:GetAttributeChangedSignal(HINT_ATTR):Connect(function()
 	refreshVisible()
 end)
+playerGui:GetAttributeChangedSignal(PLACE_CHROME_ATTR):Connect(function()
+	refreshVisible()
+end)
+playerGui:GetAttributeChangedSignal(RELOCATE_CHROME_ATTR):Connect(function()
+	refreshVisible()
+end)
+playerGui:GetAttributeChangedSignal(FLASH_INCREASE_ATTR):Connect(function()
+	if typeof(playerGui:GetAttribute(FLASH_INCREASE_ATTR)) == "number" then
+		flashIncreaseMaxPlanted()
+	end
+end)
 
 task.spawn(function()
 	while true do
 		task.wait(0.5)
-		if InventoryState.isOpen() or shouldShowPlantHint() or textSg.Enabled then
+		if InventoryState.isOpen() or shouldShowPlantHint() or textSg.Enabled or btnSg.Enabled then
 			refreshVisible()
 		end
 	end
