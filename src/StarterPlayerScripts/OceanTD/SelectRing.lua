@@ -3,6 +3,7 @@
 	White grow/shrink ring around a coral / ghost so players can see the interact target.
 ]]
 
+local GuiService = game:GetService("GuiService")
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
@@ -13,6 +14,8 @@ local UiCircles = require(oceanShared:WaitForChild("UiCircles"))
 local SelectRing = {}
 
 local RING_HZ = 3.2
+-- Slightly generous so the pulsing ring is easy to grab for drag.
+local HIT_SLOP = 1.08
 
 export type Handle = {
 	bb: BillboardGui?,
@@ -124,6 +127,36 @@ function SelectRing.pulse(h: Handle)
 	h.frame.Size = UDim2.fromScale(scale, scale)
 	h.stroke.Thickness = 2.2 + wave * 2.8
 	h.stroke.Transparency = 0.02 + wave * 0.28
+end
+
+-- White pick ring is Active=false (no GUI swallow) — screen disc test for drag grab.
+function SelectRing.isOver(h: Handle, screenPos: Vector2): boolean
+	local bb = h.bb
+	local frame = h.frame
+	if not bb or not bb.Parent or not frame or not frame.Visible then
+		return false
+	end
+	local function inside(x: number, y: number): boolean
+		local p = frame.AbsolutePosition
+		local s = frame.AbsoluteSize
+		if s.X < 2 or s.Y < 2 then
+			return false
+		end
+		local cx = p.X + s.X * 0.5
+		local cy = p.Y + s.Y * 0.5
+		local r = math.min(s.X, s.Y) * 0.5 * HIT_SLOP
+		local dx = x - cx
+		local dy = y - cy
+		return dx * dx + dy * dy <= r * r
+	end
+	if inside(screenPos.X, screenPos.Y) then
+		return true
+	end
+	local inset = GuiService:GetGuiInset()
+	if inset.X ~= 0 or inset.Y ~= 0 then
+		return inside(screenPos.X - inset.X, screenPos.Y - inset.Y)
+	end
+	return false
 end
 
 return SelectRing

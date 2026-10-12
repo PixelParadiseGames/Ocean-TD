@@ -2769,10 +2769,14 @@ local function tryBeginFromPick(screenPos: Vector2): boolean
 end
 
 local function isOverMoveIcon(screenPos: Vector2): boolean
-	return RelocateHitTest.isOverMoveIcon(chromeRefs(), screenPos)
+	if RelocateHitTest.isOverMoveIcon(chromeRefs(), screenPos) then
+		return true
+	end
+	-- White pick ring (Active=false) — same grab target as the green move icon.
+	return SelectRing.isOver(selectRing, screenPos)
 end
 
--- Green move disc under the selected coral (not the mesh body / white ring).
+-- Green move disc OR white pick ring under the selected coral (not mesh body alone).
 function RelocateController.isOverMoveHandle(screenPos: Vector2?): boolean
 	if not active then
 		return false
@@ -2914,26 +2918,34 @@ table.insert(inputConns, UserInputService.InputBegan:Connect(function(input, _pr
 			end
 			return
 		end
-		-- Drag only if press STARTS on this coral (mesh / white ring / green disc).
-		-- Empty-ground pan that later slides over a coral must not steal into a drag.
-		local onSelected = grabHandle or pointerHitsSelectedCoral(pickPos)
-		if onSelected then
+		-- Drag ONLY from the green pick disc. Mesh outside the disc (med/large) must
+		-- not steal plot pan — FreeCam owns those presses.
+		if grabHandle then
 			fingerDown = true
 			pressOrigin = pickPos
-			dragging = grabHandle -- disc: drag immediately; mesh: after DRAG_PX
-			grabFromMoveIcon = grabHandle
+			dragging = true
+			grabFromMoveIcon = true
 			pendingCoralSwitch = nil
 			pendingCoralSwitchScreen = nil
 			return
 		end
 		local other = pickPlacedCoral(pickPos)
-		if other and other ~= part then
-			pendingCoralSwitch = other
-			pendingCoralSwitchScreen = pickPos
+		if other and other ~= part and not pointerHitsSelectedCoral(pickPos) then
+			-- Press-drag another coral: switch + Drag B follow in one gesture.
+			RelocateController.begin(other)
+			fingerDown = true
+			pressOrigin = pickPos
+			dragging = true
+			grabFromMoveIcon = true
+			pendingCoralSwitch = nil
+			pendingCoralSwitchScreen = nil
 			return
 		end
-		-- Empty ground: clear multi-select on release (Windows Explorer). No coral drag.
-		RelocateMultiSelect.setPendingClear(true)
+		if not other and not pointerHitsSelectedCoral(pickPos) then
+			-- Empty ground: clear multi-select on release (Windows Explorer).
+			RelocateMultiSelect.setPendingClear(true)
+		end
+		-- Press on selected mesh (outside green disc): ignore for relocate — allow cam pan.
 		return
 	end
 
@@ -2974,13 +2986,11 @@ table.insert(inputConns, UserInputService.InputBegan:Connect(function(input, _pr
 		pendingPick = hit
 		pendingPickScreen = screenPos
 		RelocateController.begin(hit)
-		-- Same press can continue into drag (hover ring → click-drag without a second click).
-		if active and part == hit then
-			fingerDown = true
-			pressOrigin = screenPos
-			dragging = false
-			grabFromMoveIcon = false
-		end
+		-- Drag B: same press can hold-drag — coral follows cursor/finger (no second click).
+		fingerDown = true
+		pressOrigin = screenPos
+		dragging = true
+		grabFromMoveIcon = true
 	else
 		pendingPick = nil
 		pendingPickScreen = nil
@@ -3012,8 +3022,8 @@ table.insert(inputConns, UserInputService.InputChanged:Connect(function(input, _
 	if not dragging and not fingerDown then
 		return
 	end
-	-- Grabbing the on-coral handle: keep icon under the pointer on mouse;
-	-- on touch always raise so the coral sits above the thumb.
+	-- Drag B (pick-circle follow): coral tracks cursor / raised finger ray.
+	-- (Drag A = soft-plant place-zoom virtual stick in PlaceSoftPlant.)
 	if grabFromMoveIcon and pressOrigin and (now - pressOrigin).Magnitude < 2 then
 		return
 	end

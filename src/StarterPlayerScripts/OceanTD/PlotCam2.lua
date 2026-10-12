@@ -67,19 +67,53 @@ local awaitingBuildZoom = true
 -- TouchPinch: distance at gesture Begin (BaseCamera-style scale apply).
 local pinchBeginDist: number? = nil
 local PINCH_DELTA_TO_DISTOFF = 8
--- Place-mode zoom: stash pre-place view, tween into baked close-up, restore on PLANT/cancel.
--- Seats baked from Plot Cam 2 tune readout (small / medium).
+-- Place-mode zoom: stash pre-place view, tween into close-up, restore on PLANT/cancel.
+-- Option 2 (viewport-anchor): pitch + DistOff from size class × coral height; focus Y is
+-- solved so the plant point sits at a fixed normalized viewport target (all screens).
+-- Tall meshes (sponge / tree / seagrass) pull back more at M/L; short balanced/fast stay closer.
 local PLACE_ZOOM_TWEEN_SEC = 0.55
-type PlaceZoomSeat = { pitchDeg: number, distOffset: number, focusHeight: number }
-local PLACE_ZOOM_SEATS: { [number]: PlaceZoomSeat } = {
-	[1] = { pitchDeg = 15, distOffset = -76.23, focusHeight = 12 }, -- small
-	[2] = { pitchDeg = 15, distOffset = -69.47, focusHeight = 17 }, -- medium
-	[3] = { pitchDeg = 15, distOffset = -41.37, focusHeight = 22 }, -- large
+-- Plant X is centered by locking look-at XZ to the plant; Y is solved to this fraction.
+local PLACE_ANCHOR_Y = 0.70 -- normalized viewport Y (0 top → 1 bottom)
+local PLACE_ANCHOR_SOLVE_ITERS = 16
+type PlaceZoomSeat = { pitchDeg: number, distOffset: number }
+local PLACE_ZOOM_PITCH = 15
+-- Fallback height when caller doesn't pass mesh bounds (studs).
+local PLACE_ZOOM_DEFAULT_H: { [number]: number } = {
+	[1] = 4,
+	[2] = 10,
+	[3] = 22,
 }
 
-local function placeZoomSeatForClass(sizeClass: number?): PlaceZoomSeat
+local function placeZoomSeatForClass(sizeClass: number?, heightStuds: number?, speciesId: string?): PlaceZoomSeat
 	local c = math.clamp(math.floor(tonumber(sizeClass) or 1), 1, 3)
-	return PLACE_ZOOM_SEATS[c] or PLACE_ZOOM_SEATS[1]
+	local hFallback = PLACE_ZOOM_DEFAULT_H[c] or 4
+	local h = math.clamp(tonumber(heightStuds) or hFallback, 1.5, 50)
+	-- 0 = short pad coral, 1 = tall column (sponge / tree large).
+	local tall = math.clamp((h - 3) / 22, 0, 1)
+	local dist: number
+	if c <= 1 then
+		dist = -78
+	elseif c == 2 then
+		-- Clear step out from small for every species; tall pulls further.
+		dist = -78 + (12 + 14 * tall) -- short ≈ -66, tall ≈ -52
+	else
+		local med = -78 + (12 + 14 * tall)
+		-- Short large: modest extra pullback; tall large: sponge/tree seat (~-41).
+		dist = med + (8 + 22 * tall) -- short ≈ -58, tall ≈ -42
+		dist = math.clamp(dist, -80, -41)
+	end
+	-- Species tweaks: SeaGrass Small was too tight; Large is extra tall; SeaFan M/L too pulled-back.
+	if speciesId == "SeaGrass" and c <= 1 then
+		dist = math.clamp(dist + 14, DIST_OFFSET_MIN, DIST_OFFSET_MAX) -- -78 → ~-64
+	elseif speciesId == "SeaGrass" and c >= 3 then
+		dist = math.clamp(dist + 10, DIST_OFFSET_MIN, -28)
+	elseif speciesId == "SeaFan" and c >= 2 then
+		dist = math.clamp(dist - 14, DIST_OFFSET_MIN, DIST_OFFSET_MAX)
+	end
+	return {
+		pitchDeg = PLACE_ZOOM_PITCH,
+		distOffset = math.clamp(dist, DIST_OFFSET_MIN, DIST_OFFSET_MAX),
+	}
 end
 type PlaceZoomStash = {
 	focus: Vector3,
@@ -104,6 +138,8 @@ type PlaceZoomTween = {
 local placeZoomStash: PlaceZoomStash? = nil
 local placeZoomTween: PlaceZoomTween? = nil
 local placeZoomFocusGoal: Vector3? = nil
+-- focus.Y - plant.Y after last viewport solve (kept while dragging so ± seats stay stable).
+local placeZoomFocusOffsetY: number? = nil
 -- Follow coral plant height while settled in close-up (slopes / 0.5s ground refresh).
 local placeZoomFocusYLive: number? = nil
 local placeZoomFocusYTarget: number? = nil
@@ -508,6 +544,54 @@ function PlotCam2.getLiveDist(): number
 	return effectiveDist()
 end
 
+function PlotCam2.getFocus(): Vector3
+	return focus
+end
+
+export type ViewSnapshot = {
+	focus: Vector3,
+	pitchDeg: number,
+	distOffset: number,
+	focusHeight: number,
+	yawDeg: number,
+	yawBiasDeg: number,
+	liveDist: number,
+}
+
+function PlotCam2.captureView(): ViewSnapshot?
+	if not active then
+		return nil
+	end
+	return {
+		focus = focus,
+		pitchDeg = tune.pitchDeg,
+		distOffset = tune.distOffset,
+		focusHeight = tune.focusHeight,
+		yawDeg = tune.yawDeg,
+		yawBiasDeg = tune.yawBiasDeg,
+		liveDist = liveDist,
+	}
+end
+
+function PlotCam2.applyViewSnapshot(snap: ViewSnapshot): boolean
+	if not active then
+		return false
+	end
+	local plotCf, plotSize = getPlot()
+	if not plotCf or not plotSize then
+		return false
+	end
+	tune.pitchDeg = math.clamp(snap.pitchDeg, PITCH_MIN, PITCH_MAX)
+	tune.distOffset = math.clamp(snap.distOffset, DIST_OFFSET_MIN, DIST_OFFSET_MAX)
+	tune.focusHeight = snap.focusHeight
+	tune.yawDeg = snap.yawDeg
+	tune.yawBiasDeg = snap.yawBiasDeg
+	focus = clampFocus(snap.focus, plotCf, plotSize)
+	liveDist = math.clamp(snap.liveDist, DIST_MIN, DIST_MAX)
+	syncDistOffsetAchievable(plotCf, plotSize)
+	return true
+end
+
 function PlotCam2.formatTune(): string
 	local base = PlotCam2.getBaseYawDeg()
 	return string.format(
@@ -604,6 +688,14 @@ local function easeOutCubic(t: number): number
 	return 1 - u * u * u
 end
 
+local function plotFloorY(plotCf: CFrame, plotSize: Vector3): number
+	return plotCf.Position.Y - plotSize.Y * 0.5
+end
+
+local function focusHeightForLookY(lookY: number, plotCf: CFrame, plotSize: Vector3): number
+	return lookY - plotFloorY(plotCf, plotSize)
+end
+
 -- Focus under a destination seat so clamp/Y match that pitch / DistOff / height.
 local function placeZoomFocusAt(worldPos: Vector3, pitchDeg: number, focusH: number, distOff: number): Vector3
 	local plotCf, plotSize = getPlot()
@@ -626,6 +718,84 @@ local function placeZoomFocusAt(worldPos: Vector3, pitchDeg: number, focusH: num
 	return result
 end
 
+local function placeZoomCamAt(focusPos: Vector3, pitchDeg: number, dist: number, plotCf: CFrame): CFrame
+	local pitch = math.rad(pitchDeg)
+	local yaw = composedYawRad(plotCf)
+	local horiz = math.cos(pitch) * dist
+	local up = math.sin(pitch) * dist
+	local flat = Vector3.new(math.sin(yaw) * horiz, 0, math.cos(yaw) * horiz)
+	local camPos = focusPos + flat + Vector3.new(0, up, 0)
+	return CFrame.lookAt(camPos, focusPos)
+end
+
+-- Normalized screen Y (0 = top, 1 = bottom) for plant under a candidate look-at.
+local function plantScreenYNorm(plantPos: Vector3, camCf: CFrame, fovDeg: number, vp: Vector2): number?
+	local rel = camCf:PointToObjectSpace(plantPos)
+	local depth = -rel.Z
+	if depth <= 1e-3 then
+		return nil
+	end
+	local tanHalf = math.tan(math.rad(fovDeg) * 0.5)
+	if tanHalf < 1e-6 then
+		return nil
+	end
+	local ndcY = (rel.Y / depth) / tanHalf
+	return (1 - ndcY) * 0.5
+end
+
+-- Binary-search look-at Y so plant lands on PLACE_ANCHOR (seat pitch/dist fixed).
+local function solveViewportAnchorFocus(plantPos: Vector3, pitchDeg: number, distOff: number): (Vector3, number)
+	local plotCf, plotSize = getPlot()
+	if not plotCf or not plotSize then
+		return plantPos, tune.focusHeight
+	end
+	local cam = Workspace.CurrentCamera
+	local vp = if cam then cam.ViewportSize else Vector2.new(1280, 720)
+	local fovDeg = if cam then cam.FieldOfView else 70
+
+	local prevPitch = tune.pitchDeg
+	local prevH = tune.focusHeight
+	local prevOff = tune.distOffset
+	local prevLive = liveDist
+	local prevFocus = focus
+
+	tune.pitchDeg = pitchDeg
+	tune.distOffset = distOff
+	tune.focusHeight = math.max(plantPos.Y - plotFloorY(plotCf, plotSize), 1)
+	focus = clampFocus(plantPos, plotCf, plotSize)
+	liveDist = targetDist(plotCf, plotSize)
+	local dist = liveDist
+	local baseX, baseZ = focus.X, focus.Z
+
+	local lo = plantPos.Y - 12
+	local hi = plantPos.Y + 120
+	local bestY = focus.Y
+	for _ = 1, PLACE_ANCHOR_SOLVE_ITERS do
+		local mid = (lo + hi) * 0.5
+		local fpos = Vector3.new(baseX, mid, baseZ)
+		local sy = plantScreenYNorm(plantPos, placeZoomCamAt(fpos, pitchDeg, dist, plotCf), fovDeg, vp)
+		if sy == nil then
+			-- Plant behind / degenerate — pull look-at toward plant.
+			hi = mid
+		elseif sy < PLACE_ANCHOR_Y then
+			-- Plant too high on screen → raise look-at so it drops.
+			lo = mid
+		else
+			hi = mid
+		end
+		bestY = mid
+	end
+
+	tune.pitchDeg = prevPitch
+	tune.focusHeight = prevH
+	tune.distOffset = prevOff
+	liveDist = prevLive
+	focus = prevFocus
+
+	local look = Vector3.new(baseX, bestY, baseZ)
+	return look, focusHeightForLookY(bestY, plotCf, plotSize)
+end
+
 local function startPlaceZoomTween(
 	toPitch: number,
 	toDist: number,
@@ -633,6 +803,13 @@ local function startPlaceZoomTween(
 	toFocus: Vector3,
 	restore: boolean
 )
+	local plotCf, plotSize = getPlot()
+	-- Sync fromFocusH to the live look-at Y so the first tween frame doesn't snap.
+	local fromFocusH = tune.focusHeight
+	if plotCf and plotSize then
+		fromFocusH = focusHeightForLookY(focus.Y, plotCf, plotSize)
+		tune.focusHeight = fromFocusH
+	end
 	placeZoomTween = {
 		t0 = os.clock(),
 		dur = PLACE_ZOOM_TWEEN_SEC,
@@ -640,7 +817,7 @@ local function startPlaceZoomTween(
 		toPitch = toPitch,
 		fromDist = tune.distOffset,
 		toDist = toDist,
-		fromFocusH = tune.focusHeight,
+		fromFocusH = fromFocusH,
 		toFocusH = toFocusH,
 		fromFocus = focus,
 		toFocus = toFocus,
@@ -683,6 +860,7 @@ local function stepPlaceZoomTween()
 	if tw.restore then
 		placeZoomStash = nil
 		placeZoomFocusGoal = nil
+		placeZoomFocusOffsetY = nil
 		placeZoomFocusYLive = nil
 		placeZoomFocusYTarget = nil
 		persistTune()
@@ -724,21 +902,17 @@ end
 local function startSeatTween(seat: PlaceZoomSeat, worldPos: Vector3?, restore: boolean)
 	local toPitch = math.clamp(seat.pitchDeg, PITCH_MIN, PITCH_MAX)
 	local toDist = math.clamp(seat.distOffset, DIST_OFFSET_MIN, DIST_OFFSET_MAX)
-	local toFocusH = seat.focusHeight
-	local toFocus = focus
-	if typeof(worldPos) == "Vector3" then
-		toFocus = placeZoomFocusAt(worldPos, toPitch, toFocusH, toDist)
-	elseif not restore then
-		toFocus = placeZoomFocusAt(focus, toPitch, toFocusH, toDist)
-	end
+	local plant = if typeof(worldPos) == "Vector3" then worldPos else focus
+	local toFocus, toFocusH = solveViewportAnchorFocus(plant, toPitch, toDist)
+	placeZoomFocusOffsetY = toFocus.Y - plant.Y
 	placeZoomFocusGoal = toFocus
 	-- Seat ease owns Y until it finishes (then height-follow re-arms).
 	clearPlaceZoomHeightTrack()
 	startPlaceZoomTween(toPitch, toDist, toFocusH, toFocus, restore)
 end
 
--- Capture current view once, then tween into the baked coral close-up (small by default).
-function PlotCam2.beginPlaceZoom(worldPos: Vector3?, sizeClass: number?): boolean
+-- Capture current view once, then tween into the coral close-up (small by default).
+function PlotCam2.beginPlaceZoom(worldPos: Vector3?, sizeClass: number?, heightStuds: number?, speciesId: string?): boolean
 	if not active then
 		return false
 	end
@@ -750,32 +924,36 @@ function PlotCam2.beginPlaceZoom(worldPos: Vector3?, sizeClass: number?): boolea
 			focusHeight = tune.focusHeight,
 			liveDist = liveDist,
 		}
-		startSeatTween(placeZoomSeatForClass(sizeClass or 1), worldPos, false)
+		startSeatTween(placeZoomSeatForClass(sizeClass or 1, heightStuds, speciesId), worldPos, false)
 	elseif not placeZoomTween then
 		if typeof(worldPos) == "Vector3" then
-			local seat = placeZoomSeatForClass(sizeClass or 1)
-			focus = placeZoomFocusAt(
-				worldPos,
-				math.clamp(seat.pitchDeg, PITCH_MIN, PITCH_MAX),
-				seat.focusHeight,
-				math.clamp(seat.distOffset, DIST_OFFSET_MIN, DIST_OFFSET_MAX)
-			)
+			local seat = placeZoomSeatForClass(sizeClass or 1, heightStuds, speciesId)
+			local toPitch = math.clamp(seat.pitchDeg, PITCH_MIN, PITCH_MAX)
+			local toDist = math.clamp(seat.distOffset, DIST_OFFSET_MIN, DIST_OFFSET_MAX)
+			local toFocus, toFocusH = solveViewportAnchorFocus(worldPos, toPitch, toDist)
+			tune.pitchDeg = toPitch
+			tune.distOffset = toDist
+			tune.focusHeight = toFocusH
+			focus = toFocus
+			placeZoomFocusOffsetY = toFocus.Y - worldPos.Y
 			placeZoomFocusGoal = focus
+			placeZoomFocusYLive = focus.Y
+			placeZoomFocusYTarget = focus.Y
 		end
 	end
 	return true
 end
 
 -- Soft-plant size upgrade: re-tween from the current close-up into the medium/large seat.
-function PlotCam2.retargetPlaceZoom(worldPos: Vector3?, sizeClass: number?): boolean
+function PlotCam2.retargetPlaceZoom(worldPos: Vector3?, sizeClass: number?, heightStuds: number?, speciesId: string?): boolean
 	if not active then
 		return false
 	end
 	if not placeZoomStash then
-		return PlotCam2.beginPlaceZoom(worldPos, sizeClass)
+		return PlotCam2.beginPlaceZoom(worldPos, sizeClass, heightStuds, speciesId)
 	end
-	-- Keep original pre-place stash; just ease into the new size seat.
-	startSeatTween(placeZoomSeatForClass(sizeClass or 1), worldPos, false)
+	-- Keep original pre-place stash; ease into new pitch/DistOff + same viewport anchor.
+	startSeatTween(placeZoomSeatForClass(sizeClass or 1, heightStuds, speciesId), worldPos, false)
 	return true
 end
 
@@ -794,14 +972,19 @@ function PlotCam2.updatePlaceZoom(worldPos: Vector3?)
 	if typeof(worldPos) == "Vector3" then
 		local goal = clampFocus(worldPos, plotCf, plotSize)
 		placeZoomFocusGoal = goal
-		-- XZ follow plant; Y tracks plant height so slopes don't push it off-screen.
-		-- Seat framing kept plant ≈ focusHeight above look plane on flat ground.
-		local desiredY = worldPos.Y + tune.focusHeight
+		-- XZ follow plant; Y keeps the solved plant→look-at offset (viewport anchor).
+		local off = placeZoomFocusOffsetY
+		if off == nil then
+			off = focus.Y - worldPos.Y
+			placeZoomFocusOffsetY = off
+		end
+		local desiredY = worldPos.Y + off
 		placeZoomFocusYTarget = desiredY
 		if placeZoomFocusYLive == nil then
 			placeZoomFocusYLive = goal.Y
 		end
 		focus = Vector3.new(goal.X, placeZoomFocusYLive, goal.Z)
+		tune.focusHeight = focusHeightForLookY(placeZoomFocusYLive or desiredY, plotCf, plotSize)
 	end
 end
 
@@ -810,6 +993,7 @@ function PlotCam2.endPlaceZoom()
 	if not stash then
 		placeZoomTween = nil
 		placeZoomFocusGoal = nil
+		placeZoomFocusOffsetY = nil
 		clearPlaceZoomHeightTrack()
 		return
 	end
@@ -821,10 +1005,12 @@ function PlotCam2.endPlaceZoom()
 		placeZoomStash = nil
 		placeZoomTween = nil
 		placeZoomFocusGoal = nil
+		placeZoomFocusOffsetY = nil
 		clearPlaceZoomHeightTrack()
 		return
 	end
 	clearPlaceZoomHeightTrack()
+	placeZoomFocusOffsetY = nil
 	local toPitch = math.clamp(stash.pitchDeg, PITCH_MIN, PITCH_MAX)
 	local toDist = math.clamp(stash.distOffset, DIST_OFFSET_MIN, DIST_OFFSET_MAX)
 	local toFocus = placeZoomFocusAt(stash.focus, toPitch, stash.focusHeight, toDist)

@@ -988,10 +988,112 @@ local function ensureChrome(host: GuiObject)
 end
 
 local HOLD_SEC = 0.45
+local UNLOCK_TEASER_NAME = "_OceanTD_UnlockAutoRollTeaser"
+local UNLOCK_TEASER_HOLD_SEC = 5
+local UNLOCK_TEASER_SLIDE_PX = 52
+local unlockTeaserGen = 0
+local unlockTeaserBtn: TextButton? = nil
 
 local function isPointerPress(input: InputObject): boolean
 	local t = input.UserInputType
 	return t == Enum.UserInputType.MouseButton1 or t == Enum.UserInputType.Touch
+end
+
+local function openAutoRollPowerUp()
+	playerGui:SetAttribute("OceanTD_ForceOpenSkillId", "AutoRoll")
+	playerGui:SetAttribute("OceanTD_ForceOpenSkills", os.clock())
+end
+
+local function hideUnlockAutoRollTeaser(immediate: boolean?)
+	unlockTeaserGen += 1
+	local btn = unlockTeaserBtn
+	unlockTeaserBtn = nil
+	if not btn or not btn.Parent then
+		return
+	end
+	if immediate then
+		btn:Destroy()
+		return
+	end
+	local gen = unlockTeaserGen
+	local scale = btn:FindFirstChildOfClass("UIScale")
+	local host = anchor
+	local restY = if host then host.AbsoluteSize.Y * 0.15 else 8
+	local twInfo = TweenInfo.new(0.28, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
+	if scale then
+		TweenService:Create(scale, twInfo, { Scale = 0.15 }):Play()
+	end
+	local slide = TweenService:Create(btn, twInfo, {
+		Position = UDim2.new(0.5, 0, 1, restY),
+		TextTransparency = 1,
+		BackgroundTransparency = 1,
+	})
+	slide:Play()
+	slide.Completed:Connect(function()
+		if gen == unlockTeaserGen and btn.Parent then
+			btn:Destroy()
+		end
+	end)
+end
+
+-- Slide a small red "UNLOCK AUTOROLL" out from under the roll button; hold 5s then tuck back.
+local function showUnlockAutoRollTeaser()
+	local host = anchor
+	if not host then
+		return
+	end
+	hideUnlockAutoRollTeaser(true)
+	unlockTeaserGen += 1
+	local gen = unlockTeaserGen
+	local parentGui = host.Parent
+	if not parentGui then
+		return
+	end
+	local existing = parentGui:FindFirstChild(UNLOCK_TEASER_NAME)
+	if existing then
+		existing:Destroy()
+	end
+	local btn = Instance.new("TextButton")
+	btn.Name = UNLOCK_TEASER_NAME
+	btn.AnchorPoint = Vector2.new(0.5, 0)
+	btn.Position = UDim2.new(0.5, 0, 1, host.AbsoluteSize.Y * 0.12)
+	btn.Size = UDim2.fromOffset(math.max(96, math.floor(host.AbsoluteSize.X * 1.15)), 22)
+	btn.BackgroundColor3 = STOP_RED
+	btn.BackgroundTransparency = 0.1
+	btn.BorderSizePixel = 0
+	btn.Font = UiTheme.Font
+	btn.Text = "UNLOCK AUTOROLL"
+	btn.TextColor3 = Color3.new(1, 1, 1)
+	btn.TextScaled = true
+	btn.AutoButtonColor = true
+	btn.ZIndex = math.max(host.ZIndex + 2, 20)
+	btn.Parent = parentGui
+	UiCircles.ensure(btn)
+	local pad = Instance.new("UIPadding")
+	pad.PaddingLeft = UDim.new(0, 6)
+	pad.PaddingRight = UDim.new(0, 6)
+	pad.PaddingTop = UDim.new(0, 2)
+	pad.PaddingBottom = UDim.new(0, 2)
+	pad.Parent = btn
+	local scale = Instance.new("UIScale")
+	scale.Scale = 0.2
+	scale.Parent = btn
+	unlockTeaserBtn = btn
+	btn.Activated:Connect(function()
+		hideUnlockAutoRollTeaser(true)
+		openAutoRollPowerUp()
+	end)
+	local slideOut = TweenInfo.new(0.35, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
+	TweenService:Create(scale, slideOut, { Scale = 1 }):Play()
+	TweenService:Create(btn, slideOut, {
+		Position = UDim2.new(0.5, 0, 1, UNLOCK_TEASER_SLIDE_PX),
+	}):Play()
+	task.delay(UNLOCK_TEASER_HOLD_SEC, function()
+		if gen ~= unlockTeaserGen then
+			return
+		end
+		hideUnlockAutoRollTeaser(false)
+	end)
 end
 
 local function canAcceptRollPress(): boolean
@@ -1222,8 +1324,12 @@ local function beginRollPress()
 		playRollPressSound()
 		if wasAuto then
 			stopAutoRoll()
-		else
+		elseif canStartAutoRoll() then
 			startAutoRoll()
+		else
+			-- Locked / stage-1: still roll once like a tap, plus unlock teaser.
+			showUnlockAutoRollTeaser()
+			rollOnce(false)
 		end
 	end)
 	return true

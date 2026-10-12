@@ -838,6 +838,11 @@ function PlacementService.placeFromSave(
 		then
 			webColor = Color3.new(extras.webColorR, extras.webColorG, extras.webColorB)
 		end
+	elseif CoralVisual.needsFacingYaw(species.speciesId) then
+		-- Ball / non-mesh species also get rot chrome + persisted yaw.
+		facingYaw = if typeof(extras.facingYaw) == "number" then extras.facingYaw
+			elseif CoralVisual.hasYawRotateChrome(species.speciesId) then 0
+			else CoralVisual.randomFacingYaw()
 	end
 	local occupied, occupyErr = GridService.tryOccupy(
 		plotId,

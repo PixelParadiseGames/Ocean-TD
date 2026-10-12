@@ -94,21 +94,14 @@ function CoralVisual.isDualColorMesh(speciesId: any): boolean
 	return CoralVisual.isSeaFan(speciesId) or CoralVisual.isMainAccentMesh(speciesId)
 end
 
--- Species that plant with a Y facing (plot-local). SeaFan / TreeCoral / Sponge use rotate chrome; others roll random.
+-- All placeable species store a plot-local Y facing (rot chrome + persistence).
 function CoralVisual.needsFacingYaw(speciesId: any): boolean
-	return speciesId == "SeaFan"
-		or speciesId == "FireCoral"
-		or speciesId == "Zoas"
-		or speciesId == "LeatherCoral"
-		or speciesId == "TreeCoral"
-		or speciesId == "Sponge"
+	return typeof(speciesId) == "string" and speciesId ~= ""
 end
 
--- Player yaw buttons (place + relocate), same as Sea Fan.
+-- Player yaw buttons (place + relocate) — every coral species.
 function CoralVisual.hasYawRotateChrome(speciesId: any): boolean
-	return CoralVisual.isSeaFan(speciesId)
-		or CoralVisual.isTreeCoral(speciesId)
-		or speciesId == "Sponge"
+	return CoralVisual.needsFacingYaw(speciesId)
 end
 
 function CoralVisual.randomFacingYaw(): number

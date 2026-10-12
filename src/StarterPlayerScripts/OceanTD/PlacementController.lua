@@ -927,7 +927,9 @@ local function updateGhostAt(anchorPos: Vector3)
 		if speciesId == "BrainCoral" then
 			ghostDiameter = ghostPlaceDiameter or CoralVisual.randomBrainDiameter()
 			ghostPlaceDiameter = ghostDiameter
-		elseif CoralVisual.hasYawRotateChrome(speciesId) then
+			-- Rot chrome for every species — start upright; player can yaw.
+			ghostPlaceFacingYaw = 0
+		elseif CoralVisual.isMeshSpecies(speciesId) then
 			ghostPlaceDiameter = nil
 			if CoralVisual.isSeaFan(speciesId) then
 				ghostPlaceVariant = 1
@@ -940,16 +942,9 @@ local function updateGhostAt(anchorPos: Vector3)
 			end
 			-- Default upright; player rotates with chrome. Do not auto-face the character.
 			ghostPlaceFacingYaw = 0
-		elseif CoralVisual.isMeshSpecies(speciesId) then
-			ghostPlaceDiameter = nil
-			ghostPlaceVariant = CoralVisual.randomMeshVariant(speciesId)
-			ghostPlaceScale = CoralVisual.randomMeshScale(speciesId)
-			-- FireCoral (and any other yaw mesh): random facing; no rotate chrome.
-			if CoralVisual.needsFacingYaw(speciesId) then
-				ghostPlaceFacingYaw = CoralVisual.randomFacingYaw()
-			end
 		else
 			ghostPlaceDiameter = nil
+			ghostPlaceFacingYaw = 0
 		end
 		ghost = CoralVisual.create(speciesId, anchorPos, {
 			ghost = true,
@@ -1066,7 +1061,9 @@ local function syncConfirmButtonsImpl()
 	-- Placement: Confirm only (Close hidden for now). Esc / X / B still cancel.
 	cancelBtn.Visible = false
 	local armedSid = if armedItemId then getSpeciesIdForItem(armedItemId) else nil
-	local showRot = (not hideForSoftDrag) and (
+	-- Rot chrome for every species in Confirm (SeaGrass / Fan / Brain / …).
+	-- Hidden during Aim so discs don't steal the terrain park click.
+	local showRot = mode == MODE_CONFIRM and (not hideForSoftDrag) and (
 		CoralVisual.hasYawRotateChrome(armedSid)
 		or (armedItemId == "BrainCoral" and BrainSnapPreview.isSnapped())
 	)
@@ -1854,7 +1851,7 @@ local function commitPlace(opts: { stayInConfirm: boolean? }?)
 			placePayload.parentPlaceId = snap.hostPlaceId
 		end
 	end
-	if CoralVisual.isMeshSpecies(armedItemId) or ghostPlaceVariant ~= nil then
+	do
 		local yaw = ghostPlaceFacingYaw
 		if typeof(yaw) ~= "number" and ghost then
 			yaw = CoralVisual.readFacingYaw(ghost)
@@ -1862,12 +1859,14 @@ local function commitPlace(opts: { stayInConfirm: boolean? }?)
 		if typeof(yaw) ~= "number" then
 			yaw = 0
 		end
+		placePayload.facingYaw = yaw
+	end
+	if CoralVisual.isMeshSpecies(armedItemId) or ghostPlaceVariant ~= nil then
 		placePayload.variantIndex = ghostPlaceVariant
 		placePayload.scaleMult = ghostPlaceScale
 		placePayload.sizeClass = 1
 		placePayload.scaleWidth = ghostPlaceScaleWidth
 		placePayload.scaleHeight = ghostPlaceScaleHeight
-		placePayload.facingYaw = yaw
 	end
 	local placedSpeciesId = armedItemId
 	local result = rf:InvokeServer(armedItemId, placePos, placePayload)
@@ -2145,7 +2144,8 @@ local function enterConfirm(worldPos: Vector3)
 	-- Chrome tracks the ghost each frame (below move icon); no feet freeze.
 	chromeScreenPos = nil
 	-- Zoom PlotCam down onto the parked seed; restore when they hit PLANT / cancel.
-	PlaceSoftPlant.beginCamZoom(worldPos)
+	local seedSid = if armedItemId then getSpeciesIdForItem(armedItemId) else nil
+	PlaceSoftPlant.beginCamZoom(worldPos, 1, PlaceSoftPlant.measureCoralHeight(ghost), seedSid)
 	PlaceVfx.playParkSound(worldPos)
 	makeConfirmUi()
 	updateGhostAt(worldPos)
@@ -2240,8 +2240,10 @@ function PlacementController.isOverConfirmMoveHandle(screenPos: Vector2?): boole
 	if typeof(pos) ~= "Vector2" then
 		pos = UserInputService:GetMouseLocation()
 	end
-	return PlaceConfirmHitTest.isOverMoveHandle(
-		pos :: Vector2,
+	local p = pos :: Vector2
+	-- Green move icon OR white pick ring (ring is Active=false so GUI probes miss it).
+	if PlaceConfirmHitTest.isOverMoveHandle(
+		p,
 		playerGui,
 		moveHintImage,
 		moveHintBillboard,
@@ -2249,7 +2251,10 @@ function PlacementController.isOverConfirmMoveHandle(screenPos: Vector2?): boole
 		cancelBtn,
 		rotLeftBtn,
 		rotRightBtn
-	)
+	) then
+		return true
+	end
+	return SelectRing.isOver(placeSelectRing, p)
 end
 
 function PlacementController.isGamepadPlacement(): boolean
@@ -2533,7 +2538,13 @@ function PlacementController.rebindSoftPlantedPart(newPart: BasePart)
 	syncConfirmButtons()
 	-- Medium/large close-up seat after size upgrade (keeps original pre-place restore stash).
 	local _, sizeClass = CoralSize.readFromPart(newPart)
-	PlaceSoftPlant.retargetCamZoom(placeAnchor, sizeClass)
+	local sid = newPart:GetAttribute("OceanTD_SpeciesId")
+	PlaceSoftPlant.retargetCamZoom(
+		placeAnchor,
+		sizeClass,
+		PlaceSoftPlant.measureCoralHeight(newPart),
+		if typeof(sid) == "string" then sid else nil
+	)
 end
 
 -- Drag-out from backpack (mobile) / click-drop (PC)
@@ -2774,6 +2785,30 @@ table.insert(inputConns, UserInputService.InputBegan:Connect(function(input, _pr
 
 	local screenPos = PlaceConfirmHitTest.pointerScreenPos(input)
 
+	-- Aim: park on terrain click. Ghost chrome (move/rot) sits under the cursor while
+	-- aiming — must not steal this press (was forcing a second click to place).
+	if mode == MODE_AIM and not backpackDrag then
+		if InventoryState.isPointerOverBackpack(screenPos) then
+			confirmPressOrigin = nil
+			confirmDragging = false
+			aimFingerDown = false
+			placePointerHeld = true
+			return
+		end
+		parkAtPointer(screenPos)
+		-- Mouse: park on press (one click). Touch keeps hold→release park via InputEnded.
+		if isMouse and placeAnchor then
+			local parkPos = placeAnchor
+			aimFingerDown = false
+			placePointerHeld = false
+			confirmDragging = false
+			confirmPressOrigin = nil
+			suppressAimParkOnce = true
+			parkOrQuickPlace(parkPos)
+		end
+		return
+	end
+
 	-- Soft-plant / Confirm: grab move handle BEFORE chrome resolve. Billboard AbsolutePosition
 	-- often maps PLANT over the disc, so resolveTarget stole the press and drag never started.
 	if mode == MODE_CONFIRM then
@@ -2782,32 +2817,22 @@ table.insert(inputConns, UserInputService.InputBegan:Connect(function(input, _pr
 			confirmDragging = true
 			chromeBtnPointerDown = false
 			chromePressTarget = nil
+			-- Don't carry a stale "No Seeds" / place-fail label onto the move disc.
+			rejectReason = nil
+			if warnLabel then
+				warnLabel.Text = ""
+				warnLabel.Visible = false
+			end
 			PlaceConfirmChrome.stopRotateHold()
 			PlaceSoftPlant.beginZoomDrag(placeAnchor or confirmPos, fromScreen, function(worldPos: Vector3)
 				confirmPos = worldPos
 				updateGhostAt(worldPos)
 			end)
 		end
-		if PlaceConfirmHitTest.isOverMoveHandle(
-			screenPos,
-			playerGui,
-			moveHintImage,
-			moveHintBillboard,
-			checkBtn,
-			cancelBtn,
-			rotLeftBtn,
-			rotRightBtn
-		) then
+		-- Soft-plant drag from green move icon OR white pick ring (not mesh outside).
+		if PlacementController.isOverConfirmMoveHandle(screenPos) then
 			beginSoftPlantDrag(screenPos)
 			return
-		end
-		-- Soft-planted coral body (Relocate primary) — same as reselect relocate grab.
-		if confirmPlantedId and confirmPlantedPart and confirmPlantedPart.Parent then
-			local RelocatePickHover = require(script.Parent:WaitForChild("RelocatePickHover"))
-			if RelocatePickHover.pointerHitsSelected(screenPos) then
-				beginSoftPlantDrag(screenPos)
-				return
-			end
 		end
 	end
 
@@ -2872,11 +2897,6 @@ table.insert(inputConns, UserInputService.InputBegan:Connect(function(input, _pr
 		confirmDragging = false
 		aimFingerDown = false
 		return
-	end
-
-	-- Aim / intro: world press parks immediately so ✓ shows while the finger is still down.
-	if mode == MODE_AIM and not backpackDrag then
-		parkAtPointer(screenPos)
 	end
 end))
 
@@ -2976,8 +2996,9 @@ table.insert(inputConns, UserInputService.InputEnded:Connect(function(input, _pr
 	end
 	if mode == MODE_AIM then
 		local overBackpack = InventoryState.isPointerOverBackpack(screenPos)
-		local ghostOnPlot = not aimPinnedToHand
-		local shouldPark = aimFingerDown or backpackDrag or ghostOnPlot or (placePointerHeld and not overBackpack)
+		-- Only park from a real world press/drag — not backpack select release (ghostOnPlot
+		-- used to true-park on the same click that armed the coral).
+		local shouldPark = aimFingerDown or backpackDrag or (placePointerHeld and not overBackpack)
 		aimFingerDown = false
 		backpackDrag = false
 		placePointerHeld = false
@@ -2985,8 +3006,7 @@ table.insert(inputConns, UserInputService.InputEnded:Connect(function(input, _pr
 			suppressAimParkOnce = false
 			return
 		end
-		-- Select-tap lift is still on the backpack with the coral in-hand — don't park.
-		if (overBackpack and not ghostOnPlot) or not shouldPark then
+		if overBackpack or not shouldPark then
 			return
 		end
 		-- Park at the last preview foot when available so place matches the ghost.

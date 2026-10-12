@@ -58,6 +58,15 @@ local startPlotCamPending = true
 local cinematicResumeMode: CamMode? = nil
 local buildResumeMode: CamMode? = nil
 local resumePreserveView = false
+-- Skills bubbles: stash mode + viewpoint so close restores the exact seat (PlotCam2 won't overwrite).
+type SkillsResume = {
+	mode: CamMode,
+	cf: CFrame?,
+	plotSnap: PlotCam2.ViewSnapshot?,
+}
+local skillsResume: SkillsResume? = nil
+local skillsResumeToken = 0
+local SKILLS_RESTORE_WAIT = 0.55 -- after SkillsAvatarCam TWEEN_OUT_SEC (0.45)
 local camPos = Vector3.zero
 local lookYaw = 0
 local lookPitch = 0
@@ -981,14 +990,31 @@ local function plotMouseStickFromOrigin(origin: Vector2, pos: Vector2): Vector2
 	return delta.Unit * curved
 end
 
-local function plotMousePanBlocked(screenPos: Vector2): boolean
-	if mode ~= "plotcam" then
-		return true
-	end
+-- True only when Relocate/Place will actually own this press (never leave a dead zone).
+local function coralToolOwnsPress(screenPos: Vector2): boolean
 	if coralMoveLocksCam() then
 		return true
 	end
+	-- Green pick disc always owns pan while place-confirm / relocate can drag.
 	if pointerOnCoralMoveHandle(screenPos) then
+		return true
+	end
+	-- Soft-plant / relocate already selected: mesh outside the disc must pan.
+	if RelocateController.isActive() or PlacementController.isConfirmMode() then
+		return false
+	end
+	-- Idle select only works with backpack open and placement off — match Relocate gates.
+	if PlacementController.isActive() then
+		return false
+	end
+	if not InventoryState.isOpen() or InventoryState.isBuildModalBlocking() then
+		return false
+	end
+	return RelocatePickHover.pick(screenPos) ~= nil
+end
+
+local function plotMousePanBlocked(screenPos: Vector2): boolean
+	if mode ~= "plotcam" then
 		return true
 	end
 	if InventoryState.isPointerOverBackpack(screenPos) then
@@ -997,25 +1023,7 @@ local function plotMousePanBlocked(screenPos: Vector2): boolean
 	if isOverCamCycleButton(Vector3.new(screenPos.X, screenPos.Y, 0)) then
 		return true
 	end
-	-- Soft-plant confirm: pressing the planted coral / move disc must not start a plot pan.
-	if PlacementController.isConfirmMode() then
-		if PlacementController.isOverConfirmMoveHandle(screenPos) then
-			return true
-		end
-		if RelocatePickHover.pointerHitsSelected(screenPos) then
-			return true
-		end
-	end
-	-- Clicking a coral selects / drags it — don't also pan the plot.
-	if RelocateController.isActive() then
-		if RelocatePickHover.pointerHitsSelected(screenPos) then
-			return true
-		end
-	end
-	if RelocatePickHover.pick(screenPos) ~= nil then
-		return true
-	end
-	return false
+	return coralToolOwnsPress(screenPos)
 end
 
 local function moveSpeedForWish(): number
@@ -1834,11 +1842,9 @@ UserInputService.InputBegan:Connect(function(input, _gameProcessed)
 		if InventoryState.isPointerOverBackpack(pos) then
 			return
 		end
-		-- Press started on coral / move disc — Relocate/Place own this finger.
-		if pointerOnCoralMoveHandle(pos)
-			or RelocatePickHover.pointerHitsSelected(pos)
-			or RelocatePickHover.pick(pos) ~= nil
-		then
+		-- Only skip pan when Relocate/Place will claim this press (avoids dead zones
+		-- when pick radius hits a coral but backpack is closed / tool can't select).
+		if coralToolOwnsPress(pos) then
 			return
 		end
 		if isFishCamLook() then
@@ -2310,6 +2316,61 @@ local function bindMobileLeftUi(left: Instance)
 		playerGui:GetAttributeChangedSignal("OceanTD_SkillsBubblesOpen"):Connect(function()
 			syncDPadIcon()
 			syncCamModeIconsForHud()
+			local open = skillsBubblesOpen()
+			if open then
+				skillsResumeToken += 1
+				local cam = getCamera()
+				skillsResume = {
+					mode = mode,
+					cf = if cam then cam.CFrame else nil,
+					plotSnap = if mode == "plotcam" and PlotCam2.isActive() then PlotCam2.captureView() else nil,
+				}
+			else
+				local my = skillsResumeToken
+				local snap = skillsResume
+				skillsResume = nil
+				if not snap then
+					return
+				end
+				task.spawn(function()
+					task.wait(SKILLS_RESTORE_WAIT)
+					if my ~= skillsResumeToken or skillsBubblesOpen() then
+						return
+					end
+					if mode ~= snap.mode then
+						forceModeOverride = true
+						resumePreserveView = true
+						setMode(snap.mode)
+						resumePreserveView = false
+						forceModeOverride = false
+					end
+					local cam = getCamera()
+					if snap.mode == "plotcam" then
+						if snap.plotSnap then
+							if not PlotCam2.isActive() then
+								PlotCam2.begin(snap.cf)
+							end
+							PlotCam2.applyViewSnapshot(snap.plotSnap)
+						elseif snap.cf then
+							PlotCam2.begin(snap.cf)
+						end
+						local want = PlotCam2.getCFrame() or snap.cf
+						if cam and want then
+							cam.CameraType = Enum.CameraType.Scriptable
+							cam.CFrame = want
+							camPos = want.Position
+							syncLookFromCFrame(want)
+						end
+					elseif (snap.mode == "fishcam" or snap.mode == "dronecam") and snap.cf then
+						if cam then
+							cam.CameraType = Enum.CameraType.Scriptable
+							cam.CFrame = snap.cf
+							camPos = snap.cf.Position
+							syncLookFromCFrame(snap.cf)
+						end
+					end
+				end)
+			end
 		end)
 		playerGui:GetAttributeChangedSignal("OceanTD_ReefReportOpen"):Connect(function()
 			syncDPadIcon()

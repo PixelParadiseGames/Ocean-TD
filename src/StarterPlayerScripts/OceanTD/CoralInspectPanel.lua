@@ -1033,7 +1033,7 @@ local function revealCinePart(part: BasePart, surfaceAnchor: Vector3?)
 	part.Size = full
 	part.Transparency = 0
 	part.LocalTransparencyModifier = 0
-	if CoralVisual.isDualColorMesh(part:GetAttribute("OceanTD_SpeciesId")) then
+	if meshNeedsAccentCineReveal(part:GetAttribute("OceanTD_SpeciesId")) then
 		CoralVisual.clearSeaFanClientHide(part)
 	else
 		for _, ch in ipairs(part:GetChildren()) do
@@ -1096,7 +1096,13 @@ local function prepReplacementForCine(desc: BasePart, placeId: string): boolean
 			CoralVisual.alignMeshToSurface(desc, anchor, nil, desc.CFrame)
 		end
 		for _, ch in ipairs(desc:GetChildren()) do
-			if ch:IsA("BasePart") and (ch.Name == "Web" or string.sub(ch.Name, 1, 4) == "Food") then
+			if ch:IsA("BasePart")
+				and (
+					ch.Name == "Web"
+					or ch.Name == "Accent"
+					or string.sub(ch.Name, 1, 4) == "Food"
+				)
+			then
 				ch.LocalTransparencyModifier = 1
 			end
 		end
@@ -1107,6 +1113,11 @@ end
 -- SeaGrass / SeaFan / TreeCoral rebuild a new instance; Sponge ApplyMesh-es in place (same part).
 local function meshReplacesInstanceOnRestyle(speciesId: any): boolean
 	return speciesId == "SeaGrass" or speciesId == "SeaFan" or CoralVisual.isMainAccentMesh(speciesId)
+end
+
+-- SeaFan dual-color + MainAccent (Leather/Tree/Zoas): stem + Accent/Web children need LTM clear.
+local function meshNeedsAccentCineReveal(speciesId: any): boolean
+	return CoralVisual.isDualColorMesh(speciesId) or CoralVisual.isMainAccentMesh(speciesId)
 end
 
 local function waitForPlacedByPlaceId(id: string, timeoutSec: number, exclude: BasePart?): BasePart?
@@ -1153,10 +1164,9 @@ local function waitForRestyledPart(placeId: string, oldPart: BasePart, result: a
 	while os.clock() < deadline do
 		local p = findPlacedByPlaceId(placeId, oldPart)
 		if p then
-			if p:GetAttribute("OceanTD_CinePrep") == true then
-				return p
-			end
-			if typeof(expectedClass) == "number" and p:GetAttribute("OceanTD_SizeClass") == expectedClass then
+			local classOk = typeof(expectedClass) ~= "number" or p:GetAttribute("OceanTD_SizeClass") == expectedClass
+			-- Don't return on CinePrep alone — MainAccent swaps can prep before SizeClass lands.
+			if classOk and (p:GetAttribute("OceanTD_CinePrep") == true or typeof(expectedClass) == "number") then
 				return p
 			end
 		end
@@ -1366,6 +1376,13 @@ applyServerSize = function(result: any, unlock: boolean, partOverride: BasePart?
 			RelocateController.restoreSelectionByPlaceIds({ pid })
 			updatedPart = RelocateController.getSelectedPart() or updatedPart
 		end
+		-- Soft-plant Confirm keeps its own stem ref — rebind after MainAccent mesh swap.
+		pcall(function()
+			local PlacementController = require(script.Parent:WaitForChild("PlacementController"))
+			if PlacementController.isConfirmMode and PlacementController.isConfirmMode() then
+				PlacementController.rebindSoftPlantedPart(updatedPart)
+			end
+		end)
 		refreshSizeColors(updatedPart)
 		if RelocateController.isMultiSelect() then
 			RelocateMultiSelect.refreshSummary()
@@ -1397,7 +1414,7 @@ applyServerSize = function(result: any, unlock: boolean, partOverride: BasePart?
 
 	local speciesId = part:GetAttribute("OceanTD_SpeciesId")
 	if CoralVisual.isMeshSpecies(speciesId) then
-		if CoralVisual.isDualColorMesh(speciesId) then
+		if meshNeedsAccentCineReveal(speciesId) then
 			CoralVisual.clearSeaFanClientHide(part)
 			local stemT = part:GetAttribute("OceanTD_RestTransparency")
 			if typeof(stemT) == "number" then
@@ -1407,6 +1424,9 @@ applyServerSize = function(result: any, unlock: boolean, partOverride: BasePart?
 			local accentT = part:GetAttribute("OceanTD_WebRestTransparency")
 			if accent and accent:IsA("BasePart") and typeof(accentT) == "number" then
 				accent.Transparency = accentT
+			elseif accent and accent:IsA("BasePart") then
+				accent.Transparency = 0
+				accent.LocalTransparencyModifier = 0
 			end
 		else
 			part.Transparency = 0
@@ -1592,7 +1612,7 @@ local function runSpongeSizeCinematic(
 			revealAllCinePrepParts(placeId)
 			if oldPart.Parent then
 				oldPart.LocalTransparencyModifier = 0
-				if CoralVisual.isDualColorMesh(speciesId) then
+				if meshNeedsAccentCineReveal(speciesId) then
 					CoralVisual.clearSeaFanClientHide(oldPart)
 				end
 			end
@@ -1604,7 +1624,7 @@ local function runSpongeSizeCinematic(
 
 		if oldPart.Parent then
 			oldPart.LocalTransparencyModifier = 1
-			if CoralVisual.isDualColorMesh(speciesId) then
+			if meshNeedsAccentCineReveal(speciesId) then
 				for _, ch in ipairs(oldPart:GetChildren()) do
 					if ch:IsA("BasePart") then
 						ch.LocalTransparencyModifier = 1
@@ -1646,7 +1666,7 @@ local function runSpongeSizeCinematic(
 			revealAllCinePrepParts(placeId)
 			if oldPart.Parent then
 				oldPart.LocalTransparencyModifier = 0
-				if CoralVisual.isDualColorMesh(oldPart:GetAttribute("OceanTD_SpeciesId")) then
+				if meshNeedsAccentCineReveal(oldPart:GetAttribute("OceanTD_SpeciesId")) then
 					CoralVisual.clearSeaFanClientHide(oldPart)
 				end
 			end
@@ -1666,7 +1686,7 @@ local function runSpongeSizeCinematic(
 			revealAllCinePrepParts(placeId)
 			if oldPart.Parent then
 				oldPart.LocalTransparencyModifier = 0
-				if CoralVisual.isDualColorMesh(speciesId) then
+				if meshNeedsAccentCineReveal(speciesId) then
 					CoralVisual.clearSeaFanClientHide(oldPart)
 				end
 			end
@@ -1682,7 +1702,7 @@ local function runSpongeSizeCinematic(
 		revealAllCinePrepParts(placeId)
 		if oldPart.Parent then
 			oldPart.LocalTransparencyModifier = 0
-			if CoralVisual.isDualColorMesh(oldPart:GetAttribute("OceanTD_SpeciesId")) then
+			if meshNeedsAccentCineReveal(oldPart:GetAttribute("OceanTD_SpeciesId")) then
 				CoralVisual.clearSeaFanClientHide(oldPart)
 			end
 		end
@@ -1784,7 +1804,7 @@ local function runSpongeSizeCinematic(
 	if typeof(expectedDFinal) == "number" and expectedDFinal > 0 then
 		part:SetAttribute("OceanTD_Diameter", expectedDFinal)
 	end
-	if CoralVisual.isDualColorMesh(part:GetAttribute("OceanTD_SpeciesId")) then
+	if meshNeedsAccentCineReveal(part:GetAttribute("OceanTD_SpeciesId")) then
 		CoralVisual.clearSeaFanClientHide(part)
 	end
 
@@ -1978,7 +1998,7 @@ local function runSizeJobsWithCinematic(jobs: { SizeJob }, unlockNext: boolean, 
 					revealAllCinePrepParts(ctx.placeId)
 					if ctx.oldPart.Parent then
 						ctx.oldPart.LocalTransparencyModifier = 0
-						if CoralVisual.isDualColorMesh(ctx.speciesId) then
+						if meshNeedsAccentCineReveal(ctx.speciesId) then
 							CoralVisual.clearSeaFanClientHide(ctx.oldPart)
 						end
 					end
@@ -4114,7 +4134,8 @@ function CoralInspectPanel.bind(panel: GuiObject, catalogFrame: GuiObject)
 		local pad = 6
 		local cellW = math.floor((w - pad * 2) / 3)
 		-- Circles fill ~80% of each column.
-		local circle = math.max(36, math.floor(cellW * 0.8))
+		-- Circles ~10% smaller than prior 80% column fill.
+		local circle = math.max(32, math.floor(cellW * 0.72))
 		-- Fit "Medium" to circle width so S/M/L don't clip; shared TextSize.
 		local wordSize = textSizeToFitWidth("Medium", circle, math.floor(circle * 0.55), 10)
 		local wordH = math.floor(wordSize * 1.25)

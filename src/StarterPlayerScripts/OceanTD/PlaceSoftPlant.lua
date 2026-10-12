@@ -7,6 +7,7 @@
 local Players = game:GetService("Players")
 local TweenService = game:GetService("TweenService")
 local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
 local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
@@ -16,13 +17,41 @@ local CoralVisual = require(oceanRoot:WaitForChild("Shared"):WaitForChild("Coral
 
 local InventoryState = require(script.Parent:WaitForChild("InventoryState"))
 local ClientPlot = require(script.Parent:WaitForChild("ClientPlot"))
+local PlaceAimScreen = require(script.Parent:WaitForChild("PlaceAimScreen"))
 local PlotCam2 = require(script.Parent:WaitForChild("PlotCam2"))
 local PlotCam2Tune = require(script.Parent:WaitForChild("PlotCam2Tune"))
 
 local PlaceSoftPlant = {}
 
+-- World-space height of the planted / ghost coral (AABB). Prefer Model bounds when present.
+function PlaceSoftPlant.measureCoralHeight(part: BasePart?): number?
+	if not part or not part.Parent then
+		return nil
+	end
+	local model = part:FindFirstAncestorOfClass("Model")
+	if model then
+		local ok, _cf, size = pcall(function()
+			return model:GetBoundingBox()
+		end)
+		if ok and typeof(size) == "Vector3" and (size :: Vector3).Y > 0.5 then
+			return (size :: Vector3).Y
+		end
+	end
+	local top = part.Position.Y + part.Size.Y * 0.5
+	local bot = part.Position.Y - part.Size.Y * 0.5
+	for _, d in ipairs(part:GetDescendants()) do
+		if d:IsA("BasePart") then
+			local p = d :: BasePart
+			top = math.max(top, p.Position.Y + p.Size.Y * 0.5)
+			bot = math.min(bot, p.Position.Y - p.Size.Y * 0.5)
+		end
+	end
+	return math.max(top - bot, part.Size.Y)
+end
+
 -- PlotCam: stash pre-place view, lean in on the coral, restore on PLANT / cancel.
-function PlaceSoftPlant.beginCamZoom(worldPos: Vector3?, sizeClass: number?)
+-- heightStuds: mesh/ball height so S/M/L pullback matches real size (short vs tall species).
+function PlaceSoftPlant.beginCamZoom(worldPos: Vector3?, sizeClass: number?, heightStuds: number?, speciesId: string?)
 	-- Studio / avatar-cam place: PlotCam2 may be inactive — start it and ask FreeCam
 	-- to drive plotcam so the close-up tween actually runs (mobile is usually already on plotcam).
 	if not PlotCam2.isActive() then
@@ -32,19 +61,17 @@ function PlaceSoftPlant.beginCamZoom(worldPos: Vector3?, sizeClass: number?)
 	if pg then
 		pg:SetAttribute("OceanTD_EnsurePlotCam", os.clock())
 	end
-	PlotCam2.beginPlaceZoom(worldPos, sizeClass)
-	-- Right-side Plot Cam 2 tune (± rows + paste readout) while close-up is up.
-	PlotCam2Tune.setPlaceZoomDebug(true)
-	PlotCam2Tune.refresh()
+	PlotCam2.beginPlaceZoom(worldPos, sizeClass, heightStuds, speciesId)
+	-- Tune ± debug panel off during place (was on for baking seats).
+	PlotCam2Tune.setPlaceZoomDebug(false)
 end
 
-function PlaceSoftPlant.retargetCamZoom(worldPos: Vector3?, sizeClass: number?)
+function PlaceSoftPlant.retargetCamZoom(worldPos: Vector3?, sizeClass: number?, heightStuds: number?, speciesId: string?)
 	if not PlotCam2.isPlaceZoomActive() then
-		PlaceSoftPlant.beginCamZoom(worldPos, sizeClass)
+		PlaceSoftPlant.beginCamZoom(worldPos, sizeClass, heightStuds, speciesId)
 		return
 	end
-	PlotCam2.retargetPlaceZoom(worldPos, sizeClass)
-	PlotCam2Tune.refresh()
+	PlotCam2.retargetPlaceZoom(worldPos, sizeClass, heightStuds, speciesId)
 end
 
 function PlaceSoftPlant.updateCamZoom(worldPos: Vector3?)
@@ -59,45 +86,14 @@ function PlaceSoftPlant.endCamZoom()
 end
 
 --[[
-	Close-up drag: virtual stick from press origin (same feel as Plot Cam mouse pan).
-	Hold away from the click = keep crawling that way; move around the origin to turn;
-	near the origin = slow/precise. Speed capped so screen-edge can't fling the coral.
+	Drag B (place-zoom soft-plant + relocate pick): coral follows cursor / finger ray.
+	(Old Drag A virtual-stick crawl removed — it ran past the pointer off-screen.)
 ]]
-local ZOOM_DRAG_STICK_DEADZONE_PX = 10
-local ZOOM_DRAG_STICK_RADIUS_PX = 110
-local ZOOM_DRAG_MIN_SPEED = 1.6
-local ZOOM_DRAG_MAX_SPEED = 14
-local ZOOM_DRAG_HEIGHT_REFRESH_SEC = 0.5 -- re-sample terrain Y so slopes don't bury the plant
 local placeZoomDragPos: Vector3? = nil
-local placeZoomDragScreen0: Vector2? = nil -- press origin (stick center)
-local placeZoomDragScreen: Vector2? = nil -- current pointer
+local placeZoomDragScreen: Vector2? = nil -- current pointer (viewport)
 local placeZoomDragConn: RBXScriptConnection? = nil
 local placeZoomDragApply: ((Vector3) -> ())? = nil
-local placeZoomDragHeightAge = 0
-local zoomDragHeightParams: RaycastParams? = nil
-
-local function screenPullToWorldFlat(pull: Vector2): Vector3
-	local cam = Workspace.CurrentCamera
-	if not cam then
-		return Vector3.new(pull.X, 0, pull.Y)
-	end
-	local right = cam.CFrame.RightVector
-	local look = cam.CFrame.LookVector
-	local flatRight = Vector3.new(right.X, 0, right.Z)
-	local flatFwd = Vector3.new(look.X, 0, look.Z)
-	if flatRight.Magnitude < 1e-3 then
-		flatRight = Vector3.new(1, 0, 0)
-	else
-		flatRight = flatRight.Unit
-	end
-	if flatFwd.Magnitude < 1e-3 then
-		flatFwd = Vector3.new(0, 0, -1)
-	else
-		flatFwd = flatFwd.Unit
-	end
-	-- Screen Y grows downward; negate so dragging up moves toward cam look.
-	return flatRight * pull.X + flatFwd * (-pull.Y)
-end
+local zoomDragRayParams: RaycastParams? = nil
 
 local function stopZoomDragConn()
 	if placeZoomDragConn then
@@ -106,13 +102,23 @@ local function stopZoomDragConn()
 	end
 end
 
-local function sampleGroundY(at: Vector3): number?
-	if not zoomDragHeightParams then
-		zoomDragHeightParams = RaycastParams.new()
-		zoomDragHeightParams.FilterType = Enum.RaycastFilterType.Exclude
+local function zoomDragAimScreen(screenPos: Vector2): Vector2
+	-- Touch: raise so the plant sits above the thumb. Mouse: exact cursor.
+	return PlaceAimScreen.raiseIfTouch(screenPos, true, false)
+end
+
+local function raycastZoomDrag(screenPos: Vector2): Vector3?
+	local cam = Workspace.CurrentCamera
+	if not cam then
+		return nil
+	end
+	local aim = zoomDragAimScreen(screenPos)
+	local ray = cam:ViewportPointToRay(aim.X, aim.Y)
+	if not zoomDragRayParams then
+		zoomDragRayParams = RaycastParams.new()
+		zoomDragRayParams.FilterType = Enum.RaycastFilterType.Exclude
 	end
 	local exclude: { Instance } = {}
-	-- Skip all planted meshes (includes the coral being dragged).
 	local placed = Workspace:FindFirstChild("OceanTD_Placed")
 	if placed then
 		table.insert(exclude, placed)
@@ -121,83 +127,44 @@ local function sampleGroundY(at: Vector3): number?
 	if char then
 		table.insert(exclude, char)
 	end
-	zoomDragHeightParams.FilterDescendantsInstances = exclude
-	local hit = Workspace:Raycast(Vector3.new(at.X, at.Y + 80, at.Z), Vector3.new(0, -200, 0), zoomDragHeightParams)
+	zoomDragRayParams.FilterDescendantsInstances = exclude
+	local hit = Workspace:Raycast(ray.Origin, ray.Direction * 800, zoomDragRayParams)
 	if hit then
-		return hit.Position.Y
+		return hit.Position
 	end
 	local plot = ClientPlot.get()
-	if plot then
-		return plot.cframe.Position.Y - plot.size.Y * 0.5
+	if plot and math.abs(ray.Direction.Y) > 1e-4 then
+		local floorY = plot.cframe.Position.Y - plot.size.Y * 0.5
+		local t = (floorY - ray.Origin.Y) / ray.Direction.Y
+		if t == t and t > 0 then
+			return ray.Origin + ray.Direction * t
+		end
 	end
 	return nil
 end
 
-local function refreshZoomDragHeight(pos: Vector3): Vector3
-	local gy = sampleGroundY(pos)
-	if typeof(gy) ~= "number" then
-		return pos
-	end
-	return Vector3.new(pos.X, gy, pos.Z)
-end
-
-local function zoomDragStickFromOrigin(origin: Vector2, pos: Vector2): Vector2
-	local delta = pos - origin
-	local mag = delta.Magnitude
-	if mag < ZOOM_DRAG_STICK_DEADZONE_PX then
-		return Vector2.zero
-	end
-	local t = math.clamp(
-		(mag - ZOOM_DRAG_STICK_DEADZONE_PX) / (ZOOM_DRAG_STICK_RADIUS_PX - ZOOM_DRAG_STICK_DEADZONE_PX),
-		0,
-		1
-	)
-	-- Gentle near center, mild ramp outward (same curve family as Plot Cam mouse pan).
-	local curved = t * t * (0.35 + 0.65 * t)
-	return delta.Unit * curved
-end
-
-local function stepZoomDrag(dt: number)
+local function stepZoomDrag()
 	if not PlotCam2.isPlaceZoomActive() then
 		PlaceSoftPlant.endZoomDrag()
 		return
 	end
-	local pos = placeZoomDragPos
-	local s0 = placeZoomDragScreen0
-	local s1 = placeZoomDragScreen
+	local screen = placeZoomDragScreen
 	local apply = placeZoomDragApply
-	if not pos or not s0 or not s1 or not apply then
+	if not screen or not apply then
 		return
 	end
-	placeZoomDragHeightAge += dt
-	local heightDue = placeZoomDragHeightAge >= ZOOM_DRAG_HEIGHT_REFRESH_SEC
-	if heightDue then
-		placeZoomDragHeightAge = 0
-		pos = refreshZoomDragHeight(pos)
-		placeZoomDragPos = pos
+	-- Prefer live pointer so mouse can move without InputChanged gaps.
+	local live = UserInputService:GetMouseLocation()
+	if typeof(live) == "Vector2" then
+		screen = live
+		placeZoomDragScreen = live
 	end
-
-	-- Virtual stick: hold away from press origin keeps crawling; move around origin to turn.
-	local stick = zoomDragStickFromOrigin(s0, s1)
-	if stick.Magnitude < 0.02 then
-		if heightDue then
-			apply(pos)
-		end
+	local hit = raycastZoomDrag(screen)
+	if not hit then
 		return
 	end
-	local speed = ZOOM_DRAG_MIN_SPEED + (ZOOM_DRAG_MAX_SPEED - ZOOM_DRAG_MIN_SPEED) * stick.Magnitude
-	local dir = screenPullToWorldFlat(stick)
-	if dir.Magnitude < 1e-3 then
-		if heightDue then
-			apply(pos)
-		end
-		return
-	end
-	local nextPos = pos + dir.Unit * (speed * math.clamp(dt, 0, 0.05))
-	-- Keep last sampled ground Y between refreshes (XZ crawl only).
-	nextPos = Vector3.new(nextPos.X, pos.Y, nextPos.Z)
-	placeZoomDragPos = nextPos
-	apply(nextPos)
+	placeZoomDragPos = hit
+	apply(hit)
 end
 
 function PlaceSoftPlant.isZoomDragActive(): boolean
@@ -212,11 +179,11 @@ function PlaceSoftPlant.beginZoomDrag(originWorld: Vector3?, screenPos: Vector2?
 	if typeof(originWorld) ~= "Vector3" or typeof(screenPos) ~= "Vector2" then
 		return
 	end
-	placeZoomDragPos = refreshZoomDragHeight(originWorld)
-	placeZoomDragScreen0 = screenPos
 	placeZoomDragScreen = screenPos
 	placeZoomDragApply = apply
-	placeZoomDragHeightAge = 0
+	local hit = raycastZoomDrag(screenPos) or originWorld
+	placeZoomDragPos = hit
+	apply(hit)
 	stopZoomDragConn()
 	placeZoomDragConn = RunService.Heartbeat:Connect(stepZoomDrag)
 end
@@ -230,10 +197,8 @@ end
 function PlaceSoftPlant.endZoomDrag()
 	stopZoomDragConn()
 	placeZoomDragPos = nil
-	placeZoomDragScreen0 = nil
 	placeZoomDragScreen = nil
 	placeZoomDragApply = nil
-	placeZoomDragHeightAge = 0
 end
 
 -- Legacy no-op kept so older call sites don't error mid-hot-reload.
@@ -366,20 +331,29 @@ function PlaceSoftPlant.updateAt(anchorPos: Vector3)
 	end
 	local part = e.getConfirmPlantedPart()
 	local plantedId = e.getConfirmPlantedId()
-	if not part or not part.Parent or not plantedId then
+	if not plantedId then
+		return
+	end
+	local RelocateController = require(script.Parent:WaitForChild("RelocateController"))
+	-- After size-upgrade mesh swap, soft-plant may still hold a destroyed stem.
+	if RelocateController.isPlaceConfirmBridge() then
+		local live = RelocateController.getSelectedPart()
+		if live and live.Parent then
+			local liveId = live:GetAttribute("OceanTD_PlaceId")
+			if liveId == plantedId and live ~= part then
+				e.setConfirmPlantedPart(live)
+				part = live
+			end
+		end
+	end
+	if not part or not part.Parent then
 		return
 	end
 	anchorPos = e.resolvePlaceAnchor(anchorPos)
 	e.setPlaceAnchor(anchorPos)
 	e.setConfirmPos(anchorPos)
 	-- Do not follow the coral with place-zoom while dragging — same cam lock as relocate.
-	-- (updateCamZoom / retarget still run on park and size upgrade.)
-	local RelocateController = require(script.Parent:WaitForChild("RelocateController"))
-	if RelocateController.isPlaceConfirmBridge() then
-		local ok, reason = RelocateController.bridgePreviewAt(anchorPos)
-		e.setValidSpot(ok)
-		e.setRejectReason(reason)
-	else
+	local function alignPartDirect()
 		local ok, reason = e.evaluatePos(anchorPos)
 		e.setValidSpot(ok)
 		e.setRejectReason(reason)
@@ -395,6 +369,18 @@ function PlaceSoftPlant.updateAt(anchorPos: Vector3)
 		else
 			part.CFrame = CFrame.new(anchorPos)
 		end
+	end
+	if RelocateController.isPlaceConfirmBridge() then
+		local ok, reason = RelocateController.bridgePreviewAt(anchorPos)
+		-- busy / inactive bridge returns false,nil — fall back so chrome doesn't drag alone.
+		if ok == false and reason == nil then
+			alignPartDirect()
+		else
+			e.setValidSpot(ok)
+			e.setRejectReason(reason)
+		end
+	else
+		alignPartDirect()
 	end
 	local chromeAdorneePart = e.getChromeAdorneePart()
 	if chromeAdorneePart and chromeAdorneePart.Parent then
