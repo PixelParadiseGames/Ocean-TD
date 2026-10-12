@@ -35,6 +35,7 @@ local ClientPlot = require(script.Parent:WaitForChild("ClientPlot"))
 local InventoryState = require(script.Parent:WaitForChild("InventoryState"))
 local PlacementController = require(script.Parent:WaitForChild("PlacementController"))
 local RelocateController = require(script.Parent:WaitForChild("RelocateController"))
+local RelocatePickHover = require(script.Parent:WaitForChild("RelocatePickHover"))
 local WaveSim = require(script.Parent:WaitForChild("WaveSim"))
 local Wave1FishCam = require(script.Parent:WaitForChild("Wave1FishCam"))
 local SkyCamParts = require(script.Parent:WaitForChild("SkyCamParts"))
@@ -95,6 +96,9 @@ local lookTouch: InputObject? = nil
 local lookTouchLast = Vector2.zero
 local mouseLookLast: Vector2? = nil
 local touchDownCount = 0
+-- Plot Cam: mouse click-drag pans as a virtual stick (hold away from press = keep panning).
+local plotMousePanOrigin: Vector2? = nil
+local plotMousePanVec = Vector2.zero -- -1..1 from origin; sticky while button held
 
 local keysDown: { [Enum.KeyCode]: boolean } = {}
 local moveStick = Vector2.zero
@@ -767,6 +771,11 @@ local function readMoveWish(cf: CFrame): Vector3
 		wish += flatLook * -touchMoveVec.Y + right * touchMoveVec.X
 	end
 
+	-- Plot Cam mouse stick: same axes as touch (drag right → pan right); hold keeps panning.
+	if plotMousePanVec.Magnitude > 0.02 then
+		wish += flatLook * -plotMousePanVec.Y + right * plotMousePanVec.X
+	end
+
 	if keysDown[Enum.KeyCode.W] then
 		wish += flatLook
 	end
@@ -940,6 +949,75 @@ local function tickLookInput(dt: number)
 	end
 end
 
+-- Coral drag — freeze pan/look until release (include pre-threshold press on coral).
+local function coralMoveLocksCam(): boolean
+	return RelocateController.isDragging()
+		or RelocateController.isCoralMovePointerDown()
+		or PlacementController.isConfirmCoralDragging()
+end
+
+local function pointerOnCoralMoveHandle(screenPos: Vector2): boolean
+	return RelocateController.isOverMoveHandle(screenPos)
+		or PlacementController.isOverConfirmMoveHandle(screenPos)
+end
+
+local function clearPlotMousePan()
+	plotMousePanOrigin = nil
+	plotMousePanVec = Vector2.zero
+end
+
+-- Soft stick: small pull = precise crawl; full pull caps below sprint.
+local PLOT_MOUSE_STICK_RADIUS = 110
+local PLOT_MOUSE_STICK_DEADZONE = 6
+local function plotMouseStickFromOrigin(origin: Vector2, pos: Vector2): Vector2
+	local delta = pos - origin
+	local mag = delta.Magnitude
+	if mag < PLOT_MOUSE_STICK_DEADZONE then
+		return Vector2.zero
+	end
+	local t = math.clamp((mag - PLOT_MOUSE_STICK_DEADZONE) / (PLOT_MOUSE_STICK_RADIUS - PLOT_MOUSE_STICK_DEADZONE), 0, 1)
+	-- Gentle near center, mild ramp outward.
+	local curved = t * t * (0.35 + 0.65 * t)
+	return delta.Unit * curved
+end
+
+local function plotMousePanBlocked(screenPos: Vector2): boolean
+	if mode ~= "plotcam" then
+		return true
+	end
+	if coralMoveLocksCam() then
+		return true
+	end
+	if pointerOnCoralMoveHandle(screenPos) then
+		return true
+	end
+	if InventoryState.isPointerOverBackpack(screenPos) then
+		return true
+	end
+	if isOverCamCycleButton(Vector3.new(screenPos.X, screenPos.Y, 0)) then
+		return true
+	end
+	-- Soft-plant confirm: pressing the planted coral / move disc must not start a plot pan.
+	if PlacementController.isConfirmMode() then
+		if PlacementController.isOverConfirmMoveHandle(screenPos) then
+			return true
+		end
+		if RelocatePickHover.pointerHitsSelected(screenPos) then
+			return true
+		end
+	end
+	-- Clicking a coral selects / drags it — don't also pan the plot.
+	if RelocateController.isActive() then
+		if RelocatePickHover.pointerHitsSelected(screenPos) then
+			return true
+		end
+	end
+	if RelocatePickHover.pick(screenPos) ~= nil then
+		return true
+	end
+	return false
+end
+
 local function moveSpeedForWish(): number
 	local speed = FC.MOVE_SPEED
 	if keysDown[Enum.KeyCode.LeftShift] then
@@ -947,6 +1025,9 @@ local function moveSpeedForWish(): number
 	end
 	if touchMoveVec.Magnitude > 0.08 then
 		speed *= math.clamp(touchMoveVec.Magnitude, 0.08, 1)
+	elseif plotMousePanVec.Magnitude > 0.02 then
+		-- Stick magnitude already curved; far pull ~20% faster than prior 0.75 cap.
+		speed *= math.clamp(0.2 + plotMousePanVec.Magnitude * 0.66, 0.2, 0.9)
 	elseif moveStick.Magnitude > 0.08 then
 		speed *= math.clamp(moveStick.Magnitude, 0.08, 1)
 	end
@@ -968,6 +1049,7 @@ local function restoreDefaultCamera()
 	PlotCam2Tune.setVisible(false)
 	bindSink(false)
 	clearTouchMove()
+	clearPlotMousePan()
 	if controlsDisabled then
 		setControlsEnabled(true)
 	end
@@ -1147,7 +1229,14 @@ local function tickPlotCam1(dt: number)
 		end
 	end
 	local cf = lookAtFocus(focusPos)
-	local wish = readMoveWish(cf)
+	local coralDrag = coralMoveLocksCam()
+	if coralDrag then
+		clearTouchMove()
+		clearPlotMousePan()
+	elseif plotMousePanOrigin then
+		plotMousePanVec = plotMouseStickFromOrigin(plotMousePanOrigin, mouseScreenPos())
+	end
+	local wish = if coralDrag then Vector3.zero else readMoveWish(cf)
 	camPos = clampToSkyPose(camPos + wish * moveSpeedForWish() * dt, pose)
 	cam.CameraType = Enum.CameraType.Scriptable
 	cam.CFrame = lookAtFocus(focusPos)
@@ -1176,10 +1265,14 @@ local function tickPlotCam2(dt: number)
 	end
 	PlotCam2Tune.setVisible(true)
 	local preview = PlotCam2.getCFrame()
-	-- Finger is moving a coral — don't pan Plot Cam with the same drag.
-	local coralDrag = RelocateController.isDragging()
+	-- Coral move pointer — don't pan Plot Cam with the same drag.
+	local coralDrag = coralMoveLocksCam()
 	if coralDrag then
 		clearTouchMove()
+		clearPlotMousePan()
+	elseif plotMousePanOrigin then
+		-- Refresh stick each frame so hold-still away from origin keeps panning.
+		plotMousePanVec = plotMouseStickFromOrigin(plotMousePanOrigin, mouseScreenPos())
 	end
 	local wish = if coralDrag then Vector3.zero elseif preview then readMoveWish(preview) else Vector3.zero
 	local cf = PlotCam2.tick(dt, {
@@ -1211,7 +1304,12 @@ local function tickFishFollow(dt: number)
 		return
 	end
 	keepCharacterStill()
-	tickLookInput(dt)
+	if coralMoveLocksCam() then
+		clearTouchMove()
+		clearTouchLook()
+	else
+		tickLookInput(dt)
+	end
 
 	local now = os.clock()
 	local running = WaveSim.isRunning()
@@ -1330,9 +1428,15 @@ local function tickDroneCam(dt: number)
 	end
 	keepCharacterStill()
 	setDroneLookCapture(true)
-	tickLookInput(dt)
+	local coralDrag = coralMoveLocksCam()
+	if coralDrag then
+		clearTouchMove()
+		clearTouchLook()
+	else
+		tickLookInput(dt)
+	end
 	local cf = droneLookCFrame()
-	local wish = readDroneMoveWish(cf)
+	local wish = if coralDrag then Vector3.zero else readDroneMoveWish(cf)
 	camPos += wish * moveSpeedForWish() * dt
 	cam.CameraType = Enum.CameraType.Scriptable
 	cam.CFrame = droneLookCFrame()
@@ -1700,8 +1804,24 @@ UserInputService.InputBegan:Connect(function(input, _gameProcessed)
 			or input.UserInputType == Enum.UserInputType.MouseButton2
 		)
 	then
-		if touchDownCount == 0 and not isOverCamCycleButton(input.Position) then
-			mouseLookLast = mouseScreenPos()
+		local mousePos = mouseScreenPos()
+		if touchDownCount == 0
+			and not isOverCamCycleButton(input.Position)
+			and not pointerOnCoralMoveHandle(mousePos)
+		then
+			mouseLookLast = mousePos
+		end
+		return
+	end
+	-- Plot Cam: mouse click-drag pans (unless press starts on a coral / move disc).
+	if mode == "plotcam"
+		and input.UserInputType == Enum.UserInputType.MouseButton1
+		and touchDownCount == 0
+	then
+		local mousePos = mouseScreenPos()
+		if not plotMousePanBlocked(mousePos) then
+			plotMousePanOrigin = mousePos
+			plotMousePanVec = Vector2.zero
 		end
 		return
 	end
@@ -1712,6 +1832,13 @@ UserInputService.InputBegan:Connect(function(input, _gameProcessed)
 		local pos = Vector2.new(input.Position.X, input.Position.Y)
 		-- Scrolling backpack coral list must not steal the finger as a plot pan stick.
 		if InventoryState.isPointerOverBackpack(pos) then
+			return
+		end
+		-- Press started on coral / move disc — Relocate/Place own this finger.
+		if pointerOnCoralMoveHandle(pos)
+			or RelocatePickHover.pointerHitsSelected(pos)
+			or RelocatePickHover.pick(pos) ~= nil
+		then
 			return
 		end
 		if isFishCamLook() then
@@ -1745,6 +1872,14 @@ UserInputService.InputChanged:Connect(function(input, _gameProcessed)
 		lookStick = Vector2.new(input.Position.X, input.Position.Y)
 		return
 	end
+	if input.UserInputType == Enum.UserInputType.MouseMovement and plotMousePanOrigin then
+		if coralMoveLocksCam() then
+			clearPlotMousePan()
+			return
+		end
+		plotMousePanVec = plotMouseStickFromOrigin(plotMousePanOrigin, mouseScreenPos())
+		return
+	end
 	if input.UserInputType == Enum.UserInputType.Touch then
 		if input == lookTouch then
 			local pos = Vector2.new(input.Position.X, input.Position.Y)
@@ -1773,6 +1908,9 @@ UserInputService.InputEnded:Connect(function(input, _gameProcessed)
 	end
 	if input.KeyCode == Enum.KeyCode.Thumbstick2 then
 		lookStick = Vector2.zero
+	end
+	if input.UserInputType == Enum.UserInputType.MouseButton1 then
+		clearPlotMousePan()
 	end
 	if input == lookTouch then
 		clearTouchLook()
@@ -2226,6 +2364,29 @@ local function bindMobileLeftUi(left: Instance)
 			forceModeOverride = true
 			setMode("off")
 			forceModeOverride = false
+		end)
+
+		-- Soft-plant close-up: ensure PlotCam2 is ticking (Studio often places from avatar cam).
+		playerGui:GetAttributeChangedSignal("OceanTD_EnsurePlotCam"):Connect(function()
+			if FC.PLOT_CAM_VARIANT ~= 2 then
+				return
+			end
+			if mode == "plotcam" then
+				if not PlotCam2.isActive() then
+					PlotCam2.begin(nil)
+				end
+				if not renderConn then
+					startRenderLoop()
+				end
+				return
+			end
+			-- Bypass PlacementController.isActive gate so place-zoom can run mid-place.
+			forceModeOverride = true
+			setMode("plotcam")
+			forceModeOverride = false
+			if mode == "plotcam" and not PlotCam2.isActive() then
+				PlotCam2.begin(nil)
+			end
 		end)
 
 		-- Hard stop FishCam/PlotCam writes the instant shark/urchin/tang intro claims the cam.

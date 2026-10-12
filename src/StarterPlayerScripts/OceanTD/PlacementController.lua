@@ -2226,6 +2226,32 @@ function PlacementController.isConfirmMode(): boolean
 	return mode == MODE_CONFIRM
 end
 
+-- Soft-plant / confirm: finger is dragging the planted coral (move disc or mesh).
+function PlacementController.isConfirmCoralDragging(): boolean
+	return mode == MODE_CONFIRM
+		and (confirmDragging == true or PlaceSoftPlant.isZoomDragActive())
+end
+
+function PlacementController.isOverConfirmMoveHandle(screenPos: Vector2?): boolean
+	if mode ~= MODE_CONFIRM then
+		return false
+	end
+	local pos = screenPos
+	if typeof(pos) ~= "Vector2" then
+		pos = UserInputService:GetMouseLocation()
+	end
+	return PlaceConfirmHitTest.isOverMoveHandle(
+		pos :: Vector2,
+		playerGui,
+		moveHintImage,
+		moveHintBillboard,
+		checkBtn,
+		cancelBtn,
+		rotLeftBtn,
+		rotRightBtn
+	)
+end
+
 function PlacementController.isGamepadPlacement(): boolean
 	return gamepadPlacement
 end
@@ -2357,6 +2383,16 @@ function PlacementController.forceExit()
 		cancelBtn.Visible = false
 	end
 	exitPlacement(true)
+end
+
+-- Soft-plant coral was recycled via Coral Power UI — drop refs then exit without a second RequestRecycle.
+function PlacementController.exitAfterSoftPlantRecycle()
+	confirmPlantedId = nil
+	confirmPlantedPart = nil
+	confirmPowerupOpen = false
+	softPlantOriginPos = nil
+	confirmPlantToken += 1
+	PlacementController.forceExit()
 end
 
 PlaceSoftPlant.bind({
@@ -2741,6 +2777,17 @@ table.insert(inputConns, UserInputService.InputBegan:Connect(function(input, _pr
 	-- Soft-plant / Confirm: grab move handle BEFORE chrome resolve. Billboard AbsolutePosition
 	-- often maps PLANT over the disc, so resolveTarget stole the press and drag never started.
 	if mode == MODE_CONFIRM then
+		local function beginSoftPlantDrag(fromScreen: Vector2)
+			confirmPressOrigin = fromScreen
+			confirmDragging = true
+			chromeBtnPointerDown = false
+			chromePressTarget = nil
+			PlaceConfirmChrome.stopRotateHold()
+			PlaceSoftPlant.beginZoomDrag(placeAnchor or confirmPos, fromScreen, function(worldPos: Vector3)
+				confirmPos = worldPos
+				updateGhostAt(worldPos)
+			end)
+		end
 		if PlaceConfirmHitTest.isOverMoveHandle(
 			screenPos,
 			playerGui,
@@ -2751,22 +2798,14 @@ table.insert(inputConns, UserInputService.InputBegan:Connect(function(input, _pr
 			rotLeftBtn,
 			rotRightBtn
 		) then
-			confirmPressOrigin = screenPos
-			confirmDragging = true
-			chromeBtnPointerDown = false
-			chromePressTarget = nil
-			PlaceConfirmChrome.stopRotateHold()
+			beginSoftPlantDrag(screenPos)
 			return
 		end
 		-- Soft-planted coral body (Relocate primary) — same as reselect relocate grab.
 		if confirmPlantedId and confirmPlantedPart and confirmPlantedPart.Parent then
 			local RelocatePickHover = require(script.Parent:WaitForChild("RelocatePickHover"))
 			if RelocatePickHover.pointerHitsSelected(screenPos) then
-				confirmPressOrigin = screenPos
-				confirmDragging = true
-				chromeBtnPointerDown = false
-				chromePressTarget = nil
-				PlaceConfirmChrome.stopRotateHold()
+				beginSoftPlantDrag(screenPos)
 				return
 			end
 		end
@@ -2827,13 +2866,11 @@ table.insert(inputConns, UserInputService.InputBegan:Connect(function(input, _pr
 	-- even when the press is meant for the plot, which left ghosts stuck without ✓.
 
 	if mode == MODE_CONFIRM then
-		-- Do not re-park on a bare click. That ray often goes through Confirm at the feet
-		-- when hit-test misses, then ✓ places the wrong cell and the orb snaps back.
-		-- Reposition via the move handle (or touch-drag below).
-		if isTouch then
-			confirmPressOrigin = screenPos
-			confirmDragging = false
-		end
+		-- Empty screen press: do NOT arm coral drag — Plot Cam owns pan (virtual stick).
+		-- Coral only moves when press started on the planted coral / green move disc above.
+		confirmPressOrigin = nil
+		confirmDragging = false
+		aimFingerDown = false
 		return
 	end
 
@@ -2891,6 +2928,7 @@ table.insert(inputConns, UserInputService.InputChanged:Connect(function(input, _
 			PlaceSoftPlant.noteZoomDragScreen(now)
 			return
 		end
+		-- Zoom drag unavailable (no place-zoom): fall back to clamped ray follow.
 		local pos = raycastForPlace()
 		if pos then
 			confirmPos = pos

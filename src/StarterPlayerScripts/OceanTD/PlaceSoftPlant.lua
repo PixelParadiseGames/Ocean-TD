@@ -23,6 +23,15 @@ local PlaceSoftPlant = {}
 
 -- PlotCam: stash pre-place view, lean in on the coral, restore on PLANT / cancel.
 function PlaceSoftPlant.beginCamZoom(worldPos: Vector3?, sizeClass: number?)
+	-- Studio / avatar-cam place: PlotCam2 may be inactive — start it and ask FreeCam
+	-- to drive plotcam so the close-up tween actually runs (mobile is usually already on plotcam).
+	if not PlotCam2.isActive() then
+		PlotCam2.begin(nil)
+	end
+	local pg = Players.LocalPlayer:FindFirstChildOfClass("PlayerGui")
+	if pg then
+		pg:SetAttribute("OceanTD_EnsurePlotCam", os.clock())
+	end
 	PlotCam2.beginPlaceZoom(worldPos, sizeClass)
 	-- Right-side Plot Cam 2 tune (± rows + paste readout) while close-up is up.
 	PlotCam2Tune.setPlaceZoomDebug(true)
@@ -50,18 +59,18 @@ function PlaceSoftPlant.endCamZoom()
 end
 
 --[[
-	Close-up drag: pull-distance velocity (not scaled raycasts).
-	Holding farther from the press point keeps a slow crawl in that direction —
-	no release/re-grab, and screen-edge terrain rays can't fling the coral.
+	Close-up drag: virtual stick from press origin (same feel as Plot Cam mouse pan).
+	Hold away from the click = keep crawling that way; move around the origin to turn;
+	near the origin = slow/precise. Speed capped so screen-edge can't fling the coral.
 ]]
-local ZOOM_DRAG_DEADZONE_PX = 16
-local ZOOM_DRAG_FULL_PULL_PX = 110 -- reach max crawl speed
-local ZOOM_DRAG_MIN_SPEED = 1.6 -- studs/sec just outside deadzone
-local ZOOM_DRAG_MAX_SPEED = 12 -- studs/sec at full pull (precision, not sprint)
+local ZOOM_DRAG_STICK_DEADZONE_PX = 10
+local ZOOM_DRAG_STICK_RADIUS_PX = 110
+local ZOOM_DRAG_MIN_SPEED = 1.6
+local ZOOM_DRAG_MAX_SPEED = 14
 local ZOOM_DRAG_HEIGHT_REFRESH_SEC = 0.5 -- re-sample terrain Y so slopes don't bury the plant
 local placeZoomDragPos: Vector3? = nil
-local placeZoomDragScreen0: Vector2? = nil
-local placeZoomDragScreen: Vector2? = nil
+local placeZoomDragScreen0: Vector2? = nil -- press origin (stick center)
+local placeZoomDragScreen: Vector2? = nil -- current pointer
 local placeZoomDragConn: RBXScriptConnection? = nil
 local placeZoomDragApply: ((Vector3) -> ())? = nil
 local placeZoomDragHeightAge = 0
@@ -132,6 +141,22 @@ local function refreshZoomDragHeight(pos: Vector3): Vector3
 	return Vector3.new(pos.X, gy, pos.Z)
 end
 
+local function zoomDragStickFromOrigin(origin: Vector2, pos: Vector2): Vector2
+	local delta = pos - origin
+	local mag = delta.Magnitude
+	if mag < ZOOM_DRAG_STICK_DEADZONE_PX then
+		return Vector2.zero
+	end
+	local t = math.clamp(
+		(mag - ZOOM_DRAG_STICK_DEADZONE_PX) / (ZOOM_DRAG_STICK_RADIUS_PX - ZOOM_DRAG_STICK_DEADZONE_PX),
+		0,
+		1
+	)
+	-- Gentle near center, mild ramp outward (same curve family as Plot Cam mouse pan).
+	local curved = t * t * (0.35 + 0.65 * t)
+	return delta.Unit * curved
+end
+
 local function stepZoomDrag(dt: number)
 	if not PlotCam2.isPlaceZoomActive() then
 		PlaceSoftPlant.endZoomDrag()
@@ -152,21 +177,16 @@ local function stepZoomDrag(dt: number)
 		placeZoomDragPos = pos
 	end
 
-	local pull = s1 - s0
-	local mag = pull.Magnitude
-	local over = mag - ZOOM_DRAG_DEADZONE_PX
-	if over <= 0 then
+	-- Virtual stick: hold away from press origin keeps crawling; move around origin to turn.
+	local stick = zoomDragStickFromOrigin(s0, s1)
+	if stick.Magnitude < 0.02 then
 		if heightDue then
 			apply(pos)
 		end
 		return
 	end
-	-- Cap pull so "finger at screen edge" doesn't explode speed.
-	local t = math.clamp(over / ZOOM_DRAG_FULL_PULL_PX, 0, 1)
-	-- Ease-in: small pulls stay very slow; long holds ramp up.
-	local eased = t * t
-	local speed = ZOOM_DRAG_MIN_SPEED + (ZOOM_DRAG_MAX_SPEED - ZOOM_DRAG_MIN_SPEED) * eased
-	local dir = screenPullToWorldFlat(pull)
+	local speed = ZOOM_DRAG_MIN_SPEED + (ZOOM_DRAG_MAX_SPEED - ZOOM_DRAG_MIN_SPEED) * stick.Magnitude
+	local dir = screenPullToWorldFlat(stick)
 	if dir.Magnitude < 1e-3 then
 		if heightDue then
 			apply(pos)
@@ -352,7 +372,8 @@ function PlaceSoftPlant.updateAt(anchorPos: Vector3)
 	anchorPos = e.resolvePlaceAnchor(anchorPos)
 	e.setPlaceAnchor(anchorPos)
 	e.setConfirmPos(anchorPos)
-	PlaceSoftPlant.updateCamZoom(anchorPos)
+	-- Do not follow the coral with place-zoom while dragging — same cam lock as relocate.
+	-- (updateCamZoom / retarget still run on park and size upgrade.)
 	local RelocateController = require(script.Parent:WaitForChild("RelocateController"))
 	if RelocateController.isPlaceConfirmBridge() then
 		local ok, reason = RelocateController.bridgePreviewAt(anchorPos)

@@ -115,10 +115,19 @@ local CHECK_HUNTER = Color3.fromRGB(35, 85, 45)
 local CONFIRM_GRAD_NAME = "_OceanTD_ConfirmGrad"
 local CONFIRM_WORD_LABEL = "ConfirmWord"
 
+local function disarmConfirmFaceChild(gui: GuiObject)
+	gui.Active = false
+	pcall(function()
+		local g: any = gui
+		g.Interactable = false
+	end)
+end
+
 function PlaceConfirmChrome.ensureConfirmCheckIcon(btn: GuiObject): ImageLabel
 	local existing = btn:FindFirstChild("ConfirmCheckIcon")
 	if existing and existing:IsA("ImageLabel") then
 		existing.Size = UDim2.fromScale(CHECK_ICON_SCALE, CHECK_ICON_SCALE)
+		disarmConfirmFaceChild(existing)
 		return existing
 	end
 	if existing then
@@ -132,7 +141,7 @@ function PlaceConfirmChrome.ensureConfirmCheckIcon(btn: GuiObject): ImageLabel
 	icon.Size = UDim2.fromScale(CHECK_ICON_SCALE, CHECK_ICON_SCALE)
 	icon.Image = CONFIRM_CHECK_IMAGE
 	icon.ScaleType = Enum.ScaleType.Fit
-	icon.Active = false
+	disarmConfirmFaceChild(icon)
 	icon.Visible = false
 	icon.ZIndex = (btn :: GuiObject).ZIndex + 1
 	icon.Parent = btn
@@ -142,6 +151,7 @@ end
 local function ensureConfirmWordLabel(btn: TextButton): TextLabel
 	local existing = btn:FindFirstChild(CONFIRM_WORD_LABEL)
 	if existing and existing:IsA("TextLabel") then
+		disarmConfirmFaceChild(existing)
 		return existing
 	end
 	if existing then
@@ -158,7 +168,7 @@ local function ensureConfirmWordLabel(btn: TextButton): TextLabel
 	lbl.TextScaled = false
 	lbl.TextSize = PlaceConfirmChrome.confirmLabelTextSize()
 	lbl.ZIndex = btn.ZIndex + 1
-	lbl.Active = false
+	disarmConfirmFaceChild(lbl)
 	lbl.Visible = false
 	lbl.Parent = btn
 	return lbl

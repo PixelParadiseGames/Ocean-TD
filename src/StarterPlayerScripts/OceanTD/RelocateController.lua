@@ -1650,9 +1650,15 @@ function RelocateController.isActive(): boolean
 	return active
 end
 
--- True while the player is actively dragging a selected coral (past drag threshold).
+-- True while the player is actively dragging a selected coral.
+-- FreeCam uses this to freeze pan/look for the drag finger only.
 function RelocateController.isDragging(): boolean
-	return active and dragging
+	return active and dragging == true
+end
+
+-- Press started on a coral for move (before or after drag threshold).
+function RelocateController.isCoralMovePointerDown(): boolean
+	return active and (fingerDown == true or dragging == true)
 end
 
 function RelocateController.getSelectedPart(): BasePart?
@@ -2135,8 +2141,15 @@ function RelocateController.cancel(instant: boolean?)
 end
 
 function RelocateController.beginRecycleConfirm()
-	if not active or busy or recyclePending or recycleFlying then
+	if not active or recyclePending or recycleFlying then
 		return
+	end
+	if busy and not cinematicHold then
+		return
+	end
+	if cinematicHold then
+		cinematicHold = false
+		busy = false
 	end
 	if not part or not originPos then
 		return
@@ -2247,17 +2260,25 @@ local function flyRecycleToBackpack(creditedItemId: string, onDone: () -> ())
 end
 
 local function commitRecycle()
-	if not active or busy or not recyclePending or recycleFlying then
+	-- Cinematic hold sets busy; recycle confirm must still be able to commit.
+	if not active or not recyclePending or recycleFlying then
+		return
+	end
+	if busy and not cinematicHold then
 		return
 	end
 	if not part or not originPos or not itemId then
 		return
+	end
+	if cinematicHold then
+		cinematicHold = false
 	end
 	UiHaptics.pulseShort()
 	local fromPos = gridAnchorPos or originPos
 	local id = placeId
 	local p = part
 	local creditedId = itemId
+	local wasBridge = placeConfirmBridge
 	-- Capture inspect Recycle screen pos before the panel closes on activeChanged.
 	inspectRecycle.flyCenter = nil
 	inspectRecycle.flySize = nil
@@ -2297,6 +2318,7 @@ local function commitRecycle()
 		busy = false
 		recyclePending = false
 		introAnimating = false
+		placeConfirmBridge = false
 		gamepadRelocate = false
 		gamepadCursor = nil
 		unfreeze()
@@ -2306,6 +2328,11 @@ local function commitRecycle()
 			inspectRecycle.uiHandler(false)
 		end
 		activeChanged:Fire(false, nil)
+		if wasBridge then
+			pcall(function()
+				PlacementController.exitAfterSoftPlantRecycle()
+			end)
+		end
 		flyRecycleToBackpack(creditedId, function()
 			recycleFlying = false
 			-- A new relocate may have started mid-fly — don't wipe its chrome.
@@ -2447,11 +2474,15 @@ local function playConfirmSuccessOutro(thenDone: () -> ())
 end
 
 function RelocateController.commit()
-	if not active or busy then
+	if not active then
 		return
 	end
+	-- Recycle confirm must work even if size-upgrade cinematic left busy stuck.
 	if recyclePending then
 		commitRecycle()
+		return
+	end
+	if busy then
 		return
 	end
 	-- Idle Confirm (replaces Close): deselect without reverting.
@@ -2741,6 +2772,18 @@ local function isOverMoveIcon(screenPos: Vector2): boolean
 	return RelocateHitTest.isOverMoveIcon(chromeRefs(), screenPos)
 end
 
+-- Green move disc under the selected coral (not the mesh body / white ring).
+function RelocateController.isOverMoveHandle(screenPos: Vector2?): boolean
+	if not active then
+		return false
+	end
+	local pos = screenPos
+	if typeof(pos) ~= "Vector2" then
+		pos = UserInputService:GetMouseLocation()
+	end
+	return isOverMoveIcon(pos :: Vector2)
+end
+
 local function isOverChrome(screenPos: Vector2): boolean
 	return RelocateHitTest.isOverChrome(chromeRefs(), screenPos)
 end
@@ -2871,24 +2914,26 @@ table.insert(inputConns, UserInputService.InputBegan:Connect(function(input, _pr
 			end
 			return
 		end
+		-- Drag only if press STARTS on this coral (mesh / white ring / green disc).
+		-- Empty-ground pan that later slides over a coral must not steal into a drag.
+		local onSelected = grabHandle or pointerHitsSelectedCoral(pickPos)
+		if onSelected then
+			fingerDown = true
+			pressOrigin = pickPos
+			dragging = grabHandle -- disc: drag immediately; mesh: after DRAG_PX
+			grabFromMoveIcon = grabHandle
+			pendingCoralSwitch = nil
+			pendingCoralSwitchScreen = nil
+			return
+		end
 		local other = pickPlacedCoral(pickPos)
-		if other and other ~= part and not grabHandle and not pointerHitsSelectedCoral(pickPos) then
+		if other and other ~= part then
 			pendingCoralSwitch = other
 			pendingCoralSwitchScreen = pickPos
 			return
 		end
-		if not other and not grabHandle and not pointerHitsSelectedCoral(pickPos) then
-			-- Empty ground: clear multi-select on release (Windows Explorer).
-			RelocateMultiSelect.setPendingClear(true)
-			fingerDown = true
-			pressOrigin = pickPos
-			dragging = false
-			return
-		end
-		fingerDown = true
-		pressOrigin = pickPos
-		dragging = grabHandle
-		grabFromMoveIcon = grabHandle
+		-- Empty ground: clear multi-select on release (Windows Explorer). No coral drag.
+		RelocateMultiSelect.setPendingClear(true)
 		return
 	end
 
@@ -2929,8 +2974,7 @@ table.insert(inputConns, UserInputService.InputBegan:Connect(function(input, _pr
 		pendingPick = hit
 		pendingPickScreen = screenPos
 		RelocateController.begin(hit)
-		-- Same press can continue into drag (begin() clears fingerDown).
-		-- Past DRAG_PX on InputChanged → move without click-release-click again.
+		-- Same press can continue into drag (hover ring → click-drag without a second click).
 		if active and part == hit then
 			fingerDown = true
 			pressOrigin = screenPos
@@ -2950,6 +2994,7 @@ table.insert(inputConns, UserInputService.InputChanged:Connect(function(input, _
 	if input.UserInputType ~= Enum.UserInputType.MouseMovement and input.UserInputType ~= Enum.UserInputType.Touch then
 		return
 	end
+	-- Only continue a drag whose press started on the coral / green disc (not empty pan).
 	if not fingerDown and not dragging then
 		return
 	end

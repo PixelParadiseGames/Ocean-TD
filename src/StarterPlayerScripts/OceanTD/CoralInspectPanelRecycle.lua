@@ -29,6 +29,9 @@ local hideConfirm: (() -> ())? = nil
 local confirmUi = false
 local pulseConn: RBXScriptConnection? = nil
 local headerSide = 40
+-- Activated + MouseButton1Click both fire on many platforms — dedupe one press.
+local lastRecyclePressAt = 0
+local RECYCLE_PRESS_DEDUP_SEC = 0.12
 
 local function isGamepad(): boolean
 	local t = UserInputService:GetLastInputType()
@@ -70,6 +73,15 @@ local function restoreIdleFace()
 	local checkIcon = btn:FindFirstChild("ConfirmCheckIcon")
 	if checkIcon and checkIcon:IsA("ImageLabel") then
 		checkIcon.Visible = false
+	end
+	-- syncConfirmFace leaves ConfirmWord visible; hide it so idle shows the recycle icon.
+	local wordLbl = btn:FindFirstChild("ConfirmWord")
+	if wordLbl and wordLbl:IsA("TextLabel") then
+		wordLbl.Visible = false
+	end
+	local grad = btn:FindFirstChild("_OceanTD_ConfirmGrad")
+	if grad and grad:IsA("UIGradient") then
+		grad.Enabled = false
 	end
 	if recycleIconLbl then
 		recycleIconLbl.Visible = true
@@ -169,6 +181,19 @@ function M.onRecyclePressed()
 	if not RelocateController.isActive() then
 		return
 	end
+	local now = os.clock()
+	if now - lastRecyclePressAt < RECYCLE_PRESS_DEDUP_SEC then
+		return
+	end
+	lastRecyclePressAt = now
+	local btn = recycleBtn
+	if btn then
+		btn.Active = true
+		pcall(function()
+			local b: any = btn
+			b.Interactable = true
+		end)
+	end
 	if RelocateController.isRecyclePending() then
 		UiHaptics.pulseShort()
 		RelocateController.commit()
@@ -188,6 +213,11 @@ function M.onCancelPressed()
 	if not RelocateController.isRecyclePending() then
 		return
 	end
+	local now = os.clock()
+	if now - lastRecyclePressAt < RECYCLE_PRESS_DEDUP_SEC then
+		return
+	end
+	lastRecyclePressAt = now
 	UiHaptics.pulseShort()
 	RelocateController.cancelRecycleConfirm()
 end
@@ -226,8 +256,13 @@ function M.mount(row1: Frame, nm: TextLabel, opts: {
 	recycle.Position = UDim2.new(1, 0, 0.5, 2)
 	recycle.Size = UDim2.fromOffset(40, 40)
 	recycle.AutoButtonColor = false
+	recycle.Active = true
 	recycle.ZIndex = 3
 	recycle.Parent = row1
+	pcall(function()
+		local b: any = recycle
+		b.Interactable = true
+	end)
 	UiCircles.ensure(recycle)
 	local edge = Instance.new("UIStroke")
 	edge.Color = Consts.WHITE
@@ -288,8 +323,12 @@ function M.mount(row1: Frame, nm: TextLabel, opts: {
 			M.exit(true)
 		end
 	end)
+	-- Activated + MouseButton1Click: ConfirmWord/Check overlays can sink Activated alone
+	-- (same backup pattern as PlacementController PLANT).
 	recycle.Activated:Connect(M.onRecyclePressed)
+	recycle.MouseButton1Click:Connect(M.onRecyclePressed)
 	recycleCancel.Activated:Connect(M.onCancelPressed)
+	recycleCancel.MouseButton1Click:Connect(M.onCancelPressed)
 	return recycle
 end
 
