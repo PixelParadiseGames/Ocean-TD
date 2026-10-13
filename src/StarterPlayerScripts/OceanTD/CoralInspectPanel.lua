@@ -165,6 +165,22 @@ local function tutorialTrackedCoralSelected(): boolean
 	return pid == wantPid
 end
 
+local function advanceTutorialAfterHue()
+	-- Soft-plant confirm still open → PLANT finger, then close backpack.
+	-- Already planted / no confirm chrome → close backpack directly.
+	local okPlace, PlacementController = pcall(function()
+		return require(script.Parent:WaitForChild("PlacementController"))
+	end)
+	local softPlantConfirm = okPlace
+		and PlacementController
+		and PlacementController.isConfirmMode()
+		and typeof(PlacementController.getConfirmPlantedId()) == "string"
+		and PlacementController.getConfirmPlantedId() ~= ""
+	clearTutorialHueTracking()
+	HuePad.hideDpadPrompt()
+	playerGui:SetAttribute(HINT_ATTR, if softPlantConfirm then "plant" else "closeBackpack")
+end
+
 local function noteTutorialHueApplied(appliedIdx: number?)
 	if tutorialHueDemoSuppressNote then
 		return
@@ -177,10 +193,8 @@ local function noteTutorialHueApplied(appliedIdx: number?)
 	if typeof(want) == "number" and typeof(appliedIdx) == "number" and appliedIdx ~= want then
 		return
 	end
-	-- One real user hue press → close-backpack finger (demo taps don't call this).
-	clearTutorialHueTracking()
-	HuePad.hideDpadPrompt()
-	playerGui:SetAttribute(HINT_ATTR, "closeBackpack")
+	-- One real user hue press → plant (soft-plant) or close-backpack (demo taps don't call this).
+	advanceTutorialAfterHue()
 end
 
 -- Forward-declared; assigned after colorScroll exists.
@@ -189,7 +203,7 @@ local refreshColorSwatches: (() -> ())?
 local isSwatchVisibleInScroll: ((ScrollingFrame, GuiObject, number) -> boolean)?
 
 local function beginTutorialHueFinger(resumeMode: string?)
-	-- Finger demo + one user hue press → closeBackpack (hueReroll step removed).
+	-- Finger demo + one user hue press → plant (soft-plant) or closeBackpack.
 	local mode = "hue"
 	-- Cancel any in-flight scroll from a prior arm attempt, then re-arm.
 	hueScrollToken += 1
@@ -204,8 +218,7 @@ local function beginTutorialHueFinger(resumeMode: string?)
 	local hue = resolveTutorialHueIndex()
 	if typeof(hue) ~= "number" then
 		hueFingerArming = false
-		clearTutorialHueTracking()
-		playerGui:SetAttribute(HINT_ATTR, "closeBackpack")
+		advanceTutorialAfterHue()
 		return
 	end
 	rememberTutorialHueIndex(hue)
@@ -737,6 +750,8 @@ local function handleSizeResult(result: any, unlockNext: boolean): boolean
 			showToast("Collect More $D")
 		elseif code == "Maxed" then
 			showToast("Max size")
+		elseif code == "RestyleFail" then
+			showToast("Size swap failed — try again")
 		end
 		-- Unlock failed after dismissing the tutorial confirm — restore the finger.
 		if suppressTutorialSizeConfirm then
@@ -1000,14 +1015,22 @@ local function findPlacedByPlaceId(id: string, exclude: BasePart?): BasePart?
 	if not root then
 		return nil
 	end
+	local fallback: BasePart? = nil
 	for _, desc in ipairs(root:GetDescendants()) do
 		if desc:IsA("BasePart") and desc ~= exclude and desc.Name ~= "OceanTD_Climb" then
 			if desc:GetAttribute("OceanTD_PlaceId") == id then
-				return desc
+				-- Prefer stem root (has SpeciesId); skip Accent/Web that somehow carry PlaceId.
+				local sid = desc:GetAttribute("OceanTD_SpeciesId")
+				if typeof(sid) == "string" and sid ~= "" then
+					return desc
+				end
+				if not fallback then
+					fallback = desc
+				end
 			end
 		end
 	end
-	return nil
+	return fallback
 end
 
 local function readCineFullSize(part: BasePart): Vector3?
@@ -1025,6 +1048,17 @@ local function clearCinePrepAttrs(part: BasePart)
 	part:SetAttribute("OceanTD_CineFullX", nil)
 	part:SetAttribute("OceanTD_CineFullY", nil)
 	part:SetAttribute("OceanTD_CineFullZ", nil)
+end
+
+-- SeaGrass / SeaFan / TreeCoral rebuild a new instance; Sponge ApplyMesh-es in place (same part).
+local function meshReplacesInstanceOnRestyle(speciesId: any): boolean
+	return speciesId == "SeaGrass" or speciesId == "SeaFan" or CoralVisual.isMainAccentMesh(speciesId)
+end
+
+-- SeaFan dual-color + MainAccent (Leather/Tree/Zoas): stem + Accent/Web children need LTM clear.
+-- Must be above revealCinePart (local, not forward-declared).
+local function meshNeedsAccentCineReveal(speciesId: any): boolean
+	return CoralVisual.isDualColorMesh(speciesId) or CoralVisual.isMainAccentMesh(speciesId)
 end
 
 local function revealCinePart(part: BasePart, surfaceAnchor: Vector3?)
@@ -1110,16 +1144,6 @@ local function prepReplacementForCine(desc: BasePart, placeId: string): boolean
 	return true
 end
 
--- SeaGrass / SeaFan / TreeCoral rebuild a new instance; Sponge ApplyMesh-es in place (same part).
-local function meshReplacesInstanceOnRestyle(speciesId: any): boolean
-	return speciesId == "SeaGrass" or speciesId == "SeaFan" or CoralVisual.isMainAccentMesh(speciesId)
-end
-
--- SeaFan dual-color + MainAccent (Leather/Tree/Zoas): stem + Accent/Web children need LTM clear.
-local function meshNeedsAccentCineReveal(speciesId: any): boolean
-	return CoralVisual.isDualColorMesh(speciesId) or CoralVisual.isMainAccentMesh(speciesId)
-end
-
 local function waitForPlacedByPlaceId(id: string, timeoutSec: number, exclude: BasePart?): BasePart?
 	local deadline = os.clock() + timeoutSec
 	while os.clock() < deadline do
@@ -1130,6 +1154,33 @@ local function waitForPlacedByPlaceId(id: string, timeoutSec: number, exclude: B
 		RunService.RenderStepped:Wait()
 	end
 	return nil
+end
+
+local function restyleReplacementReady(p: BasePart, oldPart: BasePart, expectedClass: number?): boolean
+	if p == oldPart or not p.Parent then
+		return false
+	end
+	-- Stem only — Accent/Web children sometimes get PlaceId via clone mistakes; skip non-roots.
+	local sid = p:GetAttribute("OceanTD_SpeciesId")
+	if typeof(sid) ~= "string" or sid == "" then
+		return false
+	end
+	if typeof(expectedClass) == "number" and p:GetAttribute("OceanTD_SizeClass") ~= expectedClass then
+		return false
+	end
+	-- MainAccent / SeaFan: wait until dual mesh children replicate (else grow hides Accent forever).
+	if CoralVisual.isMainAccentMesh(sid) then
+		local accent = p:FindFirstChild("Accent")
+		if not (accent and accent:IsA("BasePart")) then
+			return false
+		end
+	elseif CoralVisual.isSeaFan(sid) then
+		local web = p:FindFirstChild("Web")
+		if not (web and web:IsA("BasePart")) then
+			return false
+		end
+	end
+	return true
 end
 
 local function waitForRestyledPart(placeId: string, oldPart: BasePart, result: any, replacesInstance: boolean): BasePart?
@@ -1160,23 +1211,16 @@ local function waitForRestyledPart(placeId: string, oldPart: BasePart, result: a
 	end
 	RunService.RenderStepped:Wait()
 	local expectedClass = tonumber(result.sizeClass)
-	local deadline = os.clock() + 2.5
+	local deadline = os.clock() + 3.5
 	while os.clock() < deadline do
 		local p = findPlacedByPlaceId(placeId, oldPart)
-		if p then
-			local classOk = typeof(expectedClass) ~= "number" or p:GetAttribute("OceanTD_SizeClass") == expectedClass
-			-- Don't return on CinePrep alone — MainAccent swaps can prep before SizeClass lands.
-			if classOk and (p:GetAttribute("OceanTD_CinePrep") == true or typeof(expectedClass) == "number") then
-				return p
-			end
+		if p and restyleReplacementReady(p, oldPart, expectedClass) then
+			return p
 		end
 		RunService.RenderStepped:Wait()
 	end
-	local part = findPlacedByPlaceId(placeId, oldPart)
-	if not part and oldPart.Parent then
-		part = oldPart
-	end
-	return part
+	-- Never fall back to oldPart for instance-swap species (grows Small + leaves Accent LTM=1).
+	return findPlacedByPlaceId(placeId, oldPart)
 end
 
 local function playGrowSound()
@@ -1372,6 +1416,13 @@ applyServerSize = function(result: any, unlock: boolean, partOverride: BasePart?
 
 	local function finishSizeApply(updatedPart: BasePart)
 		local pid = updatedPart:GetAttribute("OceanTD_PlaceId")
+		-- Prefer live placed stem (cinematic may hand a destroyed Small after instance swap).
+		if typeof(pid) == "string" and pid ~= "" then
+			local live = findPlacedByPlaceId(pid, nil)
+			if live and live.Parent then
+				updatedPart = live
+			end
+		end
 		if typeof(pid) == "string" and pid ~= "" and RelocateController.isActive() then
 			RelocateController.restoreSelectionByPlaceIds({ pid })
 			updatedPart = RelocateController.getSelectedPart() or updatedPart
@@ -1383,6 +1434,7 @@ applyServerSize = function(result: any, unlock: boolean, partOverride: BasePart?
 				PlacementController.rebindSoftPlantedPart(updatedPart)
 			end
 		end)
+		CoralVisual.clearSeaFanClientHide(updatedPart)
 		refreshSizeColors(updatedPart)
 		if RelocateController.isMultiSelect() then
 			RelocateMultiSelect.refreshSummary()
@@ -1422,10 +1474,12 @@ applyServerSize = function(result: any, unlock: boolean, partOverride: BasePart?
 			end
 			local accent = part:FindFirstChild("Accent") or part:FindFirstChild("Web")
 			local accentT = part:GetAttribute("OceanTD_WebRestTransparency")
-			if accent and accent:IsA("BasePart") and typeof(accentT) == "number" then
-				accent.Transparency = accentT
-			elseif accent and accent:IsA("BasePart") then
-				accent.Transparency = 0
+			if accent and accent:IsA("BasePart") then
+				if typeof(accentT) == "number" and accentT < 0.99 then
+					accent.Transparency = accentT
+				else
+					accent.Transparency = 0
+				end
 				accent.LocalTransparencyModifier = 0
 			end
 		else
@@ -1737,8 +1791,20 @@ local function runSpongeSizeCinematic(
 		return
 	end
 
+	-- AccentDiag: re-enable wait warn here when debugging upgrade cine target.
+
 	local cineFull = readCineFullSize(part)
 	disarmHide()
+	-- Other prep'd clones (wrong wait target) must not stay tiny / Accent-hidden.
+	revealAllCinePrepParts(placeId)
+	if token ~= nil and token ~= cineToken then
+		CoralVisual.clearSeaFanClientHide(part)
+		if useCamera then
+			RelocateController.setCinematicHold(false)
+		end
+		applyServerSize(result, useCamera, part, true)
+		return
+	end
 	local newFull = cineFull or part.Size
 	if not replacesInstance then
 		-- ApplyMesh in place (Sponge / FireCoral): client Size tween often keeps the pre-restyle
@@ -1774,7 +1840,12 @@ local function runSpongeSizeCinematic(
 	clearCinePrepAttrs(part)
 
 	local growAnchor = anchor or CoralVisual.readGridAnchor(part)
-	if CoralVisual.isDualColorMesh(part:GetAttribute("OceanTD_SpeciesId")) then
+	-- Prefer live SpeciesId; fall back to pre-swap id (attrs can lag one frame after replace).
+	local growSid = part:GetAttribute("OceanTD_SpeciesId")
+	if typeof(growSid) ~= "string" or growSid == "" then
+		growSid = speciesId
+	end
+	if CoralVisual.isDualColorMesh(growSid) then
 		CoralVisual.applySeaFanScaleMult(part, newFull, 0.05, growAnchor)
 		CoralVisual.clearSeaFanClientHide(part)
 	else
@@ -1785,6 +1856,8 @@ local function runSpongeSizeCinematic(
 		end
 		part.Transparency = 0
 		part.LocalTransparencyModifier = 0
+		-- MainAccent Accent child stays LTM=1 if SpeciesId lagged into the non-dual branch.
+		CoralVisual.clearSeaFanClientHide(part)
 	end
 
 	playGrowSound()
@@ -1793,8 +1866,17 @@ local function runSpongeSizeCinematic(
 	else
 		tweenMeshScale(part, newFull, 0.05, 1, Consts.CINE_GROW_SEC, false)
 	end
+	if token ~= nil and token ~= cineToken then
+		revealAllCinePrepParts(placeId)
+		CoralVisual.clearSeaFanClientHide(part)
+		if useCamera then
+			RelocateController.setCinematicHold(false)
+		end
+		applyServerSize(result, useCamera, part, true)
+		return
+	end
 	-- Lock final Size to the recovered target (replication can leave a stale Large box).
-	if not CoralVisual.isDualColorMesh(part:GetAttribute("OceanTD_SpeciesId")) then
+	if not CoralVisual.isDualColorMesh(growSid) then
 		part.Size = newFull
 		if growAnchor then
 			CoralVisual.alignMeshToSurface(part, growAnchor, nil, part.CFrame)
@@ -1804,9 +1886,7 @@ local function runSpongeSizeCinematic(
 	if typeof(expectedDFinal) == "number" and expectedDFinal > 0 then
 		part:SetAttribute("OceanTD_Diameter", expectedDFinal)
 	end
-	if meshNeedsAccentCineReveal(part:GetAttribute("OceanTD_SpeciesId")) then
-		CoralVisual.clearSeaFanClientHide(part)
-	end
+	CoralVisual.clearSeaFanClientHide(part)
 
 	if useCamera and startCf and workspace.CurrentCamera then
 		local backCam = workspace.CurrentCamera

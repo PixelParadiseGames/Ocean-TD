@@ -2733,6 +2733,17 @@ function RelocateController.bridgePreviewAt(worldPos: Vector3): (boolean, string
 	if not placeConfirmBridge or not active or busy or recyclePending then
 		return false, nil
 	end
+	-- Size-cine can leave cinematicHold true; still report validity so place PLANT chrome returns.
+	if cinematicHold then
+		if not part or not originPos then
+			return false, nil
+		end
+		local surfacePos = resolveRelocatePos(worldPos)
+		local ok, reason = evaluate(surfacePos)
+		validSpot = ok
+		rejectReason = reason
+		return ok, reason
+	end
 	updateAt(worldPos)
 	return validSpot == true, rejectReason
 end

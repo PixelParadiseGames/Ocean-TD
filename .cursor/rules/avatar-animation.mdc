@@ -1,0 +1,34 @@
+---
+description: How to animate the local player avatar (throws, gestures) — what works vs what does not
+globs: "**/HandOrb.lua,**/*Anim*.lua,**/*Throw*.lua,**/*Gesture*.lua"
+alwaysApply: false
+---
+
+# Avatar animation (local player)
+
+Reference implementation: `HandOrb.playFeedThrow` / `ensureThrowTrack` (Player Cam feed throw).
+
+## Use this (works)
+
+Build a **local `KeyframeSequence`**, register it, play an **`AnimationTrack`** at high priority:
+
+1. Pose tree uses R15 part names: `HumanoidRootPart` → `LowerTorso` → `UpperTorso` → `RightUpperArm` → `RightLowerArm` → `RightHand` (nest Poses as children).
+2. `KeyframeSequenceProvider:RegisterKeyframeSequence(seq)` → animation id string (no uploaded asset).
+3. `Humanoid.Animator:LoadAnimation(anim)` → `AnimationTrack`.
+4. Set `track.Priority = Enum.AnimationPriority.Action4`, `Looped = false`, then `track:Play(...)`.
+5. Reload the track on character respawn (new Animator). Clear/stop on `CharacterRemoving`.
+
+This participates in the Animator correctly and **overrides** idle/walk on those limbs.
+
+## Do not rely on this alone (failed in practice)
+
+- Setting `Motor6D.Transform` from `RunService.Stepped` — Animate overwrites it; arm never moves.
+- Tiny / subtle C0 or Transform offsets without Action priority — easy to miss in third person.
+
+## Fallback only
+
+If `RegisterKeyframeSequence` / `LoadAnimation` fails: drive `Motor6D.Transform` from `RunService:BindToRenderStep(..., Enum.RenderPriority.Last, ...)` so it runs **after** Animate for that frame. Prefer the AnimationTrack path first.
+
+## Scope
+
+Client-local only (same as HandOrb) unless we intentionally replicate. Plant-seed HandOrb and feed-hold can share the hand; plant `armed` wins over feed hold visuals.

@@ -2515,6 +2515,15 @@ function PlacementService.setCoralSize(
 			scaleWidth,
 			scaleHeight
 		)
+		-- Instance-swap species must not stamp M/L onto a failed Small restyle.
+		if CoralVisual.isSeaFan(speciesId)
+			or CoralVisual.isMainAccentMesh(speciesId)
+			or speciesId == "SeaGrass"
+		then
+			if not newPart or not newPart.Parent then
+				return { ok = false, errorCode = "RestyleFail", placeId = placeId }
+			end
+		end
 		if newPart then
 			visual = newPart
 			newDiam = height or newPart.Size.Y

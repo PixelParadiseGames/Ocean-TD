@@ -1317,6 +1317,7 @@ local function createMainAccentMesh(
 	if typeof(facingYaw) == "number" then
 		stem:SetAttribute("OceanTD_FacingYaw", facingYaw)
 	end
+	-- AccentDiag: re-enable warns here when debugging Main+Accent create.
 	return stem
 end
 
@@ -1469,12 +1470,12 @@ function CoralVisual.restyleSponge(
 		for name, value in part:GetAttributes() do
 			keep[name] = value
 		end
-		part:Destroy()
-
+		-- Assemble before Destroy — never leave the plot empty if template assemble fails.
 		local newStem, newWeb = assembleSeaFanFromTemplate(template, class, scale, scaleWidth, scaleHeight)
 		if not newStem then
 			return nil
 		end
+		part:Destroy()
 		for name, value in keep do
 			newStem:SetAttribute(name, value)
 		end
@@ -1507,14 +1508,24 @@ function CoralVisual.restyleSponge(
 		local parent = part.Parent
 		local keep: { [string]: any } = {}
 		for name, value in part:GetAttributes() do
-			keep[name] = value
+			-- Never carry cine / rest-transparency onto the rebuilt mesh (hides Accent).
+			if name ~= "OceanTD_CinePrep"
+				and name ~= "OceanTD_CineShrunk"
+				and name ~= "OceanTD_CineFullX"
+				and name ~= "OceanTD_CineFullY"
+				and name ~= "OceanTD_CineFullZ"
+				and name ~= "OceanTD_WebRestTransparency"
+				and name ~= "OceanTD_RestTransparency"
+			then
+				keep[name] = value
+			end
 		end
-		part:Destroy()
-
+		-- Assemble before Destroy — keep the planted coral if the template fails.
 		local newStem, newAccent = assembleMainAccentFromTemplate(speciesId, template, scale, class)
 		if not newStem then
 			return nil
 		end
+		part:Destroy()
 		for name, value in keep do
 			newStem:SetAttribute(name, value)
 		end
@@ -1539,6 +1550,7 @@ function CoralVisual.restyleSponge(
 		applyTreeCoralWalkCollision(newStem, newAccent, false)
 		alignMeshToSurface(newStem, surfacePos, nil, keepRotation)
 		newStem.Parent = parent
+		-- AccentDiag: re-enable warns here when debugging Main+Accent restyle.
 		return newStem, newStem.Size.Y, variant, scale
 	end
 

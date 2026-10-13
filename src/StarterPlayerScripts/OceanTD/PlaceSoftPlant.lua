@@ -21,8 +21,14 @@ local ClientPlot = require(script.Parent:WaitForChild("ClientPlot"))
 local PlaceAimScreen = require(script.Parent:WaitForChild("PlaceAimScreen"))
 local PlotCam2 = require(script.Parent:WaitForChild("PlotCam2"))
 local PlotCam2Tune = require(script.Parent:WaitForChild("PlotCam2Tune"))
+local PlantWorkerVfx = require(script.Parent:WaitForChild("PlantWorkerVfx"))
 
 local PlaceSoftPlant = {}
+
+-- Lazy: RelocateController → PlacementController → PlaceSoftPlant (cycle if top-level).
+local function relocateController()
+	return require(script.Parent:WaitForChild("RelocateController"))
+end
 
 -- World-space height of the planted / ghost coral (AABB). Prefer Model bounds when present.
 function PlaceSoftPlant.measureCoralHeight(part: BasePart?): number?
@@ -428,6 +434,24 @@ function PlaceSoftPlant.updateAt(anchorPos: Vector3)
 			warnLabel.Visible = true
 		end
 	end
+	-- Bridge preview can no-op (busy / cine hold) and leave Out Of Plot stuck; Placement
+	-- evaluate ignores the soft-planted stem so back-in-plot restores PLANT chrome.
+	local foot = e.getPlaceAnchor() or anchorPos
+	if typeof(foot) == "Vector3" then
+		local ok, reason = e.evaluatePos(foot)
+		if ok and not e.getValidSpot() then
+			e.setValidSpot(true)
+			e.setRejectReason(nil)
+			if warnLabel then
+				warnLabel.Text = ""
+				warnLabel.Visible = false
+			end
+			ClientPlot.setOutOfPlotFlash(false)
+			PlaceSoftPlant.noteOutOfPlotAim(false)
+		elseif not ok and reason ~= nil and not e.getValidSpot() then
+			e.setRejectReason(reason)
+		end
+	end
 end
 
 -- recycleAbandoned=true: RequestRecycle so seeds/hues return (backpack close / Esc / no PLANT).
@@ -492,32 +516,95 @@ function PlaceSoftPlant.recycleOrphan(placedId: string, worldPos: Vector3)
 	end
 end
 
+local finishConfirmBusy = false
+
 function PlaceSoftPlant.finishConfirm()
 	local e = env
-	if not e then
+	-- Activated + MouseButton1Click both fire commit — guard before any yield.
+	if not e or finishConfirmBusy then
 		return
 	end
 	local part = e.getConfirmPlantedPart()
 	local id = e.getConfirmPlantedId()
+	if typeof(id) ~= "string" or id == "" then
+		return
+	end
+	finishConfirmBusy = true
+
 	local toPos = e.getPlaceAnchor()
 	if part and part.Parent then
 		toPos = e.getPlaceAnchor() or CoralVisual.readGridAnchor(part) or part.Position
 	end
 	local fromPos = e.getSoftPlantOriginPos() or toPos
 	local yaw = e.getGhostPlaceFacingYaw()
-	if part and part.Parent and typeof(id) == "string" and id ~= "" and typeof(toPos) == "Vector3" then
-		if typeof(yaw) ~= "number" then
-			yaw = CoralVisual.readFacingYaw(part)
-		end
-		pcall(function()
-			Remotes.getFunction("RequestMove"):InvokeServer(id, fromPos, toPos, yaw, nil)
-		end)
+	if part and part.Parent and typeof(yaw) ~= "number" then
+		yaw = CoralVisual.readFacingYaw(part)
 	end
-	-- Restore pre-place PlotCam before exit tears down confirm.
+	-- Capture before clearState / exit wipe confirm refs.
+	local workerPart = if part and part.Parent then part else nil
+	local Relocate = relocateController()
+	-- Close place-bridge Relocate so power chrome isn't glued to a buried coral.
+	if Relocate.isPlaceConfirmBridge() then
+		Relocate.cancel(true)
+	end
+	-- Clear planted id NOW so a second PLANT click can't re-enter during RequestMove.
 	PlaceSoftPlant.endCamZoom()
 	PlaceSoftPlant.clearState(false)
 	e.setSuppressAimParkOnce(true)
 	e.forceExit()
+
+	local moveCommitted = false
+	local function commitMoveAfterRise()
+		if moveCommitted then
+			return
+		end
+		moveCommitted = true
+		if not workerPart or not workerPart.Parent then
+			return
+		end
+		if typeof(toPos) ~= "Vector3" then
+			return
+		end
+		local moveFrom = if typeof(fromPos) == "Vector3" then fromPos else toPos
+		pcall(function()
+			Remotes.getFunction("RequestMove"):InvokeServer(id, moveFrom, toPos, yaw, nil)
+		end)
+	end
+
+	-- Soft-plant ✓ / PLANT: chrome is gone — Lego worker dash+dig (cam stay put).
+	-- RequestMove AFTER rise: server CFrame write mid-bury snaps the coral back up.
+	-- Do not auto-reselect the coral after the rise.
+	local startedWorker = false
+	if typeof(toPos) == "Vector3" then
+		startedWorker = PlantWorkerVfx.playAt(toPos, {
+			coralPart = workerPart,
+			onDone = function()
+				commitMoveAfterRise()
+				finishConfirmBusy = false
+			end,
+		}) == true
+	end
+	if not startedWorker then
+		commitMoveAfterRise()
+		finishConfirmBusy = false
+	else
+		-- If worker is cancelled (no onDone), still commit move + unlock.
+		task.spawn(function()
+			local t0 = os.clock()
+			local gui = Players.LocalPlayer:FindFirstChild("PlayerGui")
+			while finishConfirmBusy and os.clock() - t0 < 12 do
+				local busy = gui and gui:GetAttribute("OceanTD_PlantWorkerBusy") == true
+				if not busy and os.clock() - t0 > 0.35 then
+					break
+				end
+				task.wait(0.1)
+			end
+			if finishConfirmBusy then
+				commitMoveAfterRise()
+				finishConfirmBusy = false
+			end
+		end)
+	end
 end
 
 return PlaceSoftPlant

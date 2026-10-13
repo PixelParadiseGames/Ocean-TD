@@ -1,7 +1,7 @@
 --!strict
 --[[
 	During a live wave: click/tap near a critter to lob a free food orb
-	from top-center → fish (+1 hunger, cooldown).
+	from top-center → fish (+1 hunger, cooldown). Player Cam: orb in hand + throw.
 	Successful taps get instant juice: green sphere spray + short haptic.
 	Touch/mouse: help text above the finger, tap crosshair fades over reload.
 	TAP_FEED_DEBUG draws a translucent ball = clickable world radius.
@@ -31,6 +31,7 @@ local InventoryState = require(script.Parent:WaitForChild("InventoryState"))
 local PlacementController = require(script.Parent:WaitForChild("PlacementController"))
 local RelocateController = require(script.Parent:WaitForChild("RelocateController"))
 local PlaceConfirmHitTest = require(script.Parent:WaitForChild("PlaceConfirmHitTest"))
+local HandOrb = require(script.Parent:WaitForChild("HandOrb"))
 
 local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui") :: PlayerGui
@@ -1241,6 +1242,16 @@ local function bindAimLoop(on: boolean)
 	end)
 end
 
+-- Player Cam mid-wave: food orb sits in the right hand (other cams keep screen-top lobs).
+local function syncFeedHandOrb()
+	local want = WaveSim.isRunning()
+		and isPlayerCamAim()
+		and not InventoryState.isOpen()
+		and not PlacementController.isActive()
+		and not RelocateController.isActive()
+	HandOrb.setFeedHold(want)
+end
+
 local function refreshAimMode()
 	local want = canShowAimCrosshair()
 	bindAimLoop(want)
@@ -1250,6 +1261,7 @@ local function refreshAimMode()
 		setAimVisible(false)
 		aHeld = false
 	end
+	syncFeedHandOrb()
 end
 
 local function bindFullAutoLoop(want: boolean)
@@ -1361,6 +1373,7 @@ WaveSim.onStopped(function()
 	setStickyCrosshair(false)
 	refreshFullAutoLoop()
 	bindReloadRingLoop(false)
+	HandOrb.setFeedHold(false)
 end)
 task.defer(function()
 	refreshAimMode()

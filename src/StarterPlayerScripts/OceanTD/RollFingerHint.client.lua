@@ -3,7 +3,7 @@
 	Join-intro finger tutorial pipeline:
 	roll → await → backpack → equip → plot → upgrade (from bottom-right → UNLOCK)
 	→ hue (finger stays on swatch, cycles colors until user taps)
-	→ closeBackpack → waves
+	→ plant (soft-plant PLANT confirm) → closeBackpack → waves
 	(reselectCoral if inspect closes mid-upgrade / mid-hue) → …
 	→ (after first wave-session Finish) if defeat: roll again → skills; if win: skills
 	→ plotSize → plotSizeUpgrade → closePlotSize → closeSkills → cam
@@ -32,6 +32,7 @@ local WaveSim = require(script.Parent:WaitForChild("WaveSim"))
 local WaveSlotSummary = require(script.Parent:WaitForChild("WaveSlotSummary"))
 local SkillPowerUpUI = require(script.Parent:WaitForChild("SkillPowerUpUI"))
 local CoralInspectPanel = require(script.Parent:WaitForChild("CoralInspectPanel"))
+local PlacementController = require(script.Parent:WaitForChild("PlacementController"))
 local RelocatePickHover = require(script.Parent:WaitForChild("RelocatePickHover"))
 
 local HINT_ATTR = "OceanTD_RollFingerHint"
@@ -103,6 +104,7 @@ export type HintMode =
 	| "hue"
 	| "hueReroll"
 	| "reselectCoral"
+	| "plant"
 	| "closeBackpack"
 	| "waves"
 	| "skills"
@@ -121,6 +123,7 @@ local MODE_SET: { [string]: boolean } = {
 	hue = true,
 	hueReroll = true,
 	reselectCoral = true,
+	plant = true,
 	closeBackpack = true,
 	waves = true,
 	skills = true,
@@ -136,6 +139,7 @@ local SLOW_TRAVEL_MODES: { [string]: boolean } = {
 	upgrade = true,
 	hue = true,
 	hueReroll = true,
+	plant = true,
 	closeBackpack = true,
 	closePlotSize = true,
 	closeSkills = true,
@@ -1066,6 +1070,10 @@ local function resolveTarget(mode: HintMode): Vector2?
 		end
 		-- Belt-and-suspenders: never aim the tutorial finger off-screen.
 		return clampFingerToViewport(guiCenterInsetInclusive(a))
+	elseif mode == "plant" then
+		-- Billboard AbsolutePosition X is unreliable — use world project + chrome offset.
+		local c = PlacementController.getPlantConfirmScreenCenter()
+		return if c then clampFingerToViewport(c) else nil
 	elseif mode == "waves" then
 		local a = findWaveSlot()
 		return if a and a.Visible and a.AbsoluteSize.X >= 2 then guiCenterInsetInclusive(a) else nil
@@ -1100,7 +1108,7 @@ end
 
 local function restOf(mode: HintMode, btn: Vector2): Vector2
 	-- Mid-screen skill targets: retreat to bottom-center so the finger clears the button.
-	if mode == "plotSize" or mode == "plotSizeUpgrade" or mode == "hue" or mode == "hueReroll" then
+	if mode == "plotSize" or mode == "plotSizeUpgrade" or mode == "hue" or mode == "hueReroll" or mode == "plant" then
 		return viewportBottomCenter()
 	end
 	if mode == "upgrade" then
@@ -1122,6 +1130,39 @@ local function restOf(mode: HintMode, btn: Vector2): Vector2
 		return btn:Lerp(viewportCenter(), WAVE_REST_TOWARD_CENTER)
 	end
 	return Vector2.new(btn.X, btn.Y + BELOW_PAD_PX)
+end
+
+local function beginWavesAfterCloseBackpack()
+	-- After plant → close backpack (or backpack already shut) → Slot5 / waves finger.
+	playHowManyWavesSoundOnce()
+	if playerGui:GetAttribute("OceanTD_TutorialGateCam") == true then
+		playerGui:SetAttribute("OceanTD_TutorialGateCam", false)
+	end
+	wavesFingerDelayGen += 1
+	local my = wavesFingerDelayGen
+	playerGui:SetAttribute(HINT_ATTR, false)
+	task.spawn(function()
+		local deadline = os.clock() + 6
+		while playerGui:GetAttribute("OceanTD_TutorialWavesSlotReady") ~= true do
+			if my ~= wavesFingerDelayGen then
+				return
+			end
+			if os.clock() > deadline then
+				break
+			end
+			task.wait(0.05)
+		end
+		if my ~= wavesFingerDelayGen then
+			return
+		end
+		if InventoryState.isOpen() then
+			return
+		end
+		local cur = playerGui:GetAttribute(HINT_ATTR)
+		if cur == false or cur == nil or cur == "await" then
+			playerGui:SetAttribute(HINT_ATTR, "waves")
+		end
+	end)
 end
 
 local function startHint(mode: HintMode)
@@ -1168,6 +1209,15 @@ local function startHint(mode: HintMode)
 		playFingerSkillsSoundOnce()
 	elseif mode == "cam" then
 		playFingerCamSoundOnce()
+	elseif mode == "closeBackpack" then
+		-- Soft-plant PLANT may leave backpack already closed — don't stall the pipeline.
+		if not InventoryState.isOpen() then
+			task.defer(function()
+				if playerGui:GetAttribute(HINT_ATTR) == "closeBackpack" and not InventoryState.isOpen() then
+					beginWavesAfterCloseBackpack()
+				end
+			end)
+		end
 	end
 	-- closeSkills: wait for Skills open in the heartbeat (don't clear the hint early).
 
@@ -1333,7 +1383,7 @@ local function startHint(mode: HintMode)
 
 			local hideChrome = uiHidesChrome()
 			-- Skills/powerup open is expected for later tutorial steps.
-			if mode == "plotSize" or mode == "plotSizeUpgrade" or mode == "closePlotSize" or mode == "closeSkills" or mode == "upgrade" or mode == "hue" or mode == "hueReroll" or mode == "cam" then
+			if mode == "plotSize" or mode == "plotSizeUpgrade" or mode == "closePlotSize" or mode == "closeSkills" or mode == "upgrade" or mode == "hue" or mode == "hueReroll" or mode == "plant" or mode == "cam" then
 				hideChrome = playerGui:GetAttribute(REPORT_OPEN_ATTR) == true
 					or playerGui:GetAttribute(HIDE_UI_ACTIVE_ATTR) == true
 			elseif mode == "plot" or mode == "reselectCoral" then
@@ -1511,36 +1561,7 @@ InventoryState.onOpenChanged(function(isOpen: boolean)
 	if v == "equip" then
 		playerGui:SetAttribute(HINT_ATTR, "backpack")
 	elseif v == "closeBackpack" then
-		-- Closed backpack after hue tutorial → unlock cam cycle, wait for Slot5 pop, then point at Start Waves.
-		playHowManyWavesSoundOnce()
-		if playerGui:GetAttribute("OceanTD_TutorialGateCam") == true then
-			playerGui:SetAttribute("OceanTD_TutorialGateCam", false)
-		end
-		wavesFingerDelayGen += 1
-		local my = wavesFingerDelayGen
-		playerGui:SetAttribute(HINT_ATTR, false)
-		task.spawn(function()
-			local deadline = os.clock() + 6
-			while playerGui:GetAttribute("OceanTD_TutorialWavesSlotReady") ~= true do
-				if my ~= wavesFingerDelayGen then
-					return
-				end
-				if os.clock() > deadline then
-					break
-				end
-				task.wait(0.05)
-			end
-			if my ~= wavesFingerDelayGen then
-				return
-			end
-			if InventoryState.isOpen() then
-				return
-			end
-			local cur = playerGui:GetAttribute(HINT_ATTR)
-			if cur == false or cur == nil or cur == "await" then
-				playerGui:SetAttribute(HINT_ATTR, "waves")
-			end
-		end)
+		beginWavesAfterCloseBackpack()
 	end
 end)
 

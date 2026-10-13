@@ -31,6 +31,7 @@ local InventoryState = require(script.Parent:WaitForChild("InventoryState"))
 local ClientPlot = require(script.Parent:WaitForChild("ClientPlot"))
 local PlaceVfx = require(script.Parent:WaitForChild("PlaceVfx"))
 local HandOrb = require(script.Parent:WaitForChild("HandOrb"))
+local PlantWorkerVfx = require(script.Parent:WaitForChild("PlantWorkerVfx"))
 local SelectRing = require(script.Parent:WaitForChild("SelectRing"))
 local PlaceConfirmHitTest = require(script.Parent:WaitForChild("PlaceConfirmHitTest"))
 local PlaceConfirmChrome = require(script.Parent:WaitForChild("PlaceConfirmChrome"))
@@ -632,7 +633,28 @@ local function fireGamepadReturnToList()
 end
 
 local function evaluatePos(worldPos: Vector3): (boolean, string?)
-	return PlaceRaycast.evaluatePos(worldPos, armedItemId)
+	-- Soft-plant drag: ignore the planted stem so returning into the plot isn't "Spot Taken" / max-cap.
+	local ignore = if confirmPlantedPart and confirmPlantedPart.Parent then confirmPlantedPart else nil
+	return PlaceRaycast.evaluatePos(worldPos, armedItemId, ignore)
+end
+
+local function endConfirmDragAndRefreshChrome()
+	confirmDragging = false
+	confirmPressOrigin = nil
+	PlaceSoftPlant.endZoomDrag()
+	if mode ~= MODE_CONFIRM then
+		return
+	end
+	-- Re-validate at the foot so PLANT/rot return after out-of-plot → back-in drag.
+	local foot = placeAnchor or confirmPos
+	if typeof(foot) == "Vector3" then
+		if confirmPlantedId then
+			PlaceSoftPlant.updateAt(foot)
+		else
+			validSpot, rejectReason = evaluatePos(foot)
+		end
+	end
+	syncConfirmButtons()
 end
 
 local function syncBlockFlashForAim(worldPos: Vector3?)
@@ -1412,10 +1434,17 @@ local function makeConfirmUiImpl()
 			markChromePointerDown("rotRight", input)
 		end
 	end)
+	local lastCommitCheckAt = 0.0
 	local function commitCheckFromGui()
 		if mode ~= MODE_CONFIRM and not gamepadPlacement then
 			return
 		end
+		-- Activated + MouseButton1Click both fire on PC — debounce double commit.
+		local now = os.clock()
+		if now - lastCommitCheckAt < 0.2 then
+			return
+		end
+		lastCommitCheckAt = now
 		-- Clear drag flags that move-icon steal can leave stuck after upgrade.
 		confirmDragging = false
 		aimFingerDown = false
@@ -1944,6 +1973,7 @@ local function commitPlace(opts: { stayInConfirm: boolean? }?)
 			local freeUp = playerGui:GetAttribute("OceanTD_TutorialFreeUpgrade") == true
 			local pastUpgrade = hint == "hue"
 				or hint == "hueReroll"
+				or hint == "plant"
 				or hint == "closeBackpack"
 				or hint == "waves"
 				or hint == "skills"
@@ -2038,6 +2068,25 @@ local function commitPlace(opts: { stayInConfirm: boolean? }?)
 		local keepPlacing = typeof(placedSpeciesId) == "string"
 			and placedSpeciesId ~= ""
 			and isShiftKeepPlacing()
+		local workerPos = vfxPos
+		local workerPlaceId = if typeof(placedId) == "string" then placedId else nil
+		-- Plot / Fish / Free cam: Lego worker (no auto-reselect after rise).
+		task.spawn(function()
+			local RelocatePickHover = require(script.Parent:WaitForChild("RelocatePickHover"))
+			local coral: BasePart? = nil
+			if workerPlaceId then
+				for _ = 1, 45 do
+					coral = RelocatePickHover.findByPlaceId(workerPlaceId)
+					if coral and coral.Parent then
+						break
+					end
+					task.wait()
+				end
+			end
+			PlantWorkerVfx.playAt(workerPos, {
+				coralPart = coral,
+			})
+		end)
 		if keepPlacing then
 			placeCommitBusy = false
 			beginAim(placedSpeciesId, true)
@@ -2045,40 +2094,6 @@ local function commitPlace(opts: { stayInConfirm: boolean? }?)
 			-- Clear busy only after exit so a second InputEnded can't re-place.
 			PlacementController.forceExit()
 			placeCommitBusy = false
-			if typeof(placedId) == "string" and placedId ~= "" then
-				task.spawn(function()
-					local RelocatePickHover = require(script.Parent:WaitForChild("RelocatePickHover"))
-					local RelocateController = require(script.Parent:WaitForChild("RelocateController"))
-					-- Replication can lag after InvokeServer; keep trying so the upgrade finger has a target.
-					local part: BasePart? = nil
-					for _ = 1, 90 do
-						part = RelocatePickHover.findByPlaceId(placedId)
-						if part and part.Parent then
-							break
-						end
-						task.wait()
-					end
-					if not part or not part.Parent then
-						return
-					end
-					for _ = 1, 60 do
-						if not InventoryState.isOpen() then
-							return
-						end
-						if PlacementController.isActive() then
-							PlacementController.forceExit()
-						end
-						if RelocateController.isActive() and RelocateController.getSelectedPart() == part then
-							return
-						end
-						RelocateController.begin(part)
-						if RelocateController.isActive() then
-							return
-						end
-						task.wait()
-					end
-				end)
-			end
 		end
 	else
 		local code = typeof(result) == "table" and result.errorCode or "Reject"
@@ -2131,6 +2146,10 @@ onCheck = function()
 	end
 	-- Soft-plant already done + powerup open: PLANT finishes and closes inspect.
 	if confirmPlantedId then
+		-- Tutorial: after hue → plant finger; PLANT advances to close-backpack.
+		if playerGui:GetAttribute("OceanTD_RollFingerHint") == "plant" then
+			playerGui:SetAttribute("OceanTD_RollFingerHint", "closeBackpack")
+		end
 		PlaceSoftPlant.finishConfirm()
 		return
 	end
@@ -2285,6 +2304,33 @@ end
 
 function PlacementController.isConfirmMode(): boolean
 	return mode == MODE_CONFIRM
+end
+
+function PlacementController.getConfirmPlantedId(): string?
+	return confirmPlantedId
+end
+
+-- Soft-plant Confirm PLANT button (Billboard TextButton) — prefer getPlantConfirmScreenCenter for aim.
+function PlacementController.getPlantConfirmButton(): GuiObject?
+	if mode ~= MODE_CONFIRM or not checkBtn or not checkBtn.Parent or not checkBtn.Visible then
+		return nil
+	end
+	if typeof(confirmPlantedId) ~= "string" or confirmPlantedId == "" then
+		return nil
+	end
+	return checkBtn
+end
+
+-- Tutorial finger aim: world-project adornee + chrome offset (never Billboard AbsolutePosition).
+function PlacementController.getPlantConfirmScreenCenter(): Vector2?
+	if mode ~= MODE_CONFIRM or not checkBtn or not checkBtn.Visible then
+		return nil
+	end
+	if typeof(confirmPlantedId) ~= "string" or confirmPlantedId == "" then
+		return nil
+	end
+	local adornee = chromeAdornee()
+	return PlaceConfirmChrome.plantConfirmScreenCenter(adornee, MOVE_ICON_SIZE, BTN_SIZE)
 end
 
 -- Soft-plant / confirm: finger is dragging the planted coral (move disc or mesh).
@@ -2692,8 +2738,7 @@ function PlacementController.notifyPointerUp(_screenPos: Vector2)
 		return
 	end
 	if mode == MODE_CONFIRM then
-		confirmDragging = false
-		PlaceSoftPlant.endZoomDrag()
+		endConfirmDragAndRefreshChrome()
 		-- Soft-plant + powerup already running — wait for PLANT (don't re-place on release).
 		if confirmPlantedId then
 			return
@@ -3077,9 +3122,7 @@ table.insert(inputConns, UserInputService.InputEnded:Connect(function(input, _pr
 		end
 		return
 	end
-	confirmDragging = false
-	confirmPressOrigin = nil
-	PlaceSoftPlant.endZoomDrag()
+	endConfirmDragAndRefreshChrome()
 end))
 
 player.CharacterAdded:Connect(function()

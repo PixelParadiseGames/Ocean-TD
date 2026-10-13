@@ -68,6 +68,32 @@ function PlaceConfirmChrome.originBelowMoveIcon(movePos: Vector2, moveIconSize: 
 	return Vector2.new(movePos.X, movePos.Y + moveIconSize * 0.5 + gap + btnSize * 0.5)
 end
 
+--[[
+	PLANT (confirm) screen center while chrome is on the move Billboard.
+	Never use Billboard child AbsolutePosition — X is often wrong (far left).
+	Matches layoutOnMoveBillboard: Confirm in Close's slot under the disc.
+	Returns inset-exclusive viewport coords (same as WorldToViewportPoint / plot finger).
+]]
+function PlaceConfirmChrome.plantConfirmScreenCenter(
+	adornee: BasePart?,
+	moveIconSize: number,
+	baseBtnPx: number?
+): Vector2?
+	if not adornee or not adornee.Parent then
+		return nil
+	end
+	local movePos = PlaceConfirmChrome.guiPosFromWorld(adornee.Position)
+	if not movePos or not PlaceConfirmChrome.isPlausibleGuiPos(movePos) then
+		return nil
+	end
+	local s = PlaceConfirmChrome.placeChromeBtnSize(baseBtnPx)
+	local checkS = PlaceConfirmChrome.placeConfirmBtnSize(baseBtnPx)
+	local gapUnder = math.max(math.floor(s * 0.45 + 0.5), 14)
+	-- Placement: Close hidden → Confirm at topY under move icon (same as layoutOnMoveBillboard).
+	local topY = moveIconSize * 0.5 + gapUnder + checkS * 0.5
+	return Vector2.new(movePos.X, movePos.Y + topY)
+end
+
 function PlaceConfirmChrome.layoutBelowMoveIcon(
 	movePos: Vector2,
 	moveIconSize: number,

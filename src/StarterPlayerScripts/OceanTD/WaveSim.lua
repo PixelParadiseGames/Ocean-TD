@@ -22,6 +22,7 @@ local WaveSim = {}
 local WaveSimConsts = require(script.Parent:WaitForChild("WaveSimConsts"))
 local Path = require(script.Parent:WaitForChild("WaveSimPath"))
 local CoralBuckets = require(script.Parent:WaitForChild("WaveSimCoralBuckets"))
+local HandOrb = require(script.Parent:WaitForChild("HandOrb"))
 local C = WaveSimConsts
 
 local feedSound = Instance.new("Sound")
@@ -4071,6 +4072,16 @@ end
 
 local lastPlayerTapAt = 0
 
+local function isPlayerCamFeed(): boolean
+	local pg = Players.LocalPlayer and Players.LocalPlayer:FindFirstChildOfClass("PlayerGui")
+	if not pg then
+		return false
+	end
+	local m = pg:GetAttribute("OceanTD_CamCycleMode")
+	-- Player Cam is mode "off" (default when unset).
+	return m == nil or m == "off"
+end
+
 local function tapFeedStartFromCamera(cam: Camera, targetPos: Vector3): Vector3
 	local vp = cam.ViewportSize
 	local sy = math.clamp(C.TAP_FEED_SCREEN_Y or 0.08, 0.02, 0.9) * vp.Y
@@ -4083,6 +4094,30 @@ local function tapFeedStartFromCamera(cam: Camera, targetPos: Vector3): Vector3
 		C.TAP_FEED_START_DEPTH_MAX or 20
 	)
 	return ray.Origin + ray.Direction.Unit * depth
+end
+
+-- Player Cam: lob from the right-hand food orb; other cams keep screen-top spawn.
+local function tapFeedStartPos(cam: Camera, targetPos: Vector3): Vector3
+	if isPlayerCamFeed() then
+		local hand = HandOrb.getHoldWorldPos()
+		if hand then
+			return hand
+		end
+		local char = Players.LocalPlayer and Players.LocalPlayer.Character
+		if char then
+			local rh = char:FindFirstChild("RightHand") or char:FindFirstChild("Right Arm")
+			if rh and rh:IsA("BasePart") then
+				return rh.Position
+			end
+		end
+	end
+	return tapFeedStartFromCamera(cam, targetPos)
+end
+
+local function playPlayerCamThrow()
+	if isPlayerCamFeed() then
+		HandOrb.playFeedThrow()
+	end
 end
 
 -- Terrain / plot under the finger (FishCam-safe). Falls back to a long ray if nothing hits.
@@ -4124,7 +4159,7 @@ function Feed.fireMissTapVisual(meet: Vector3)
 	if not cam then
 		return
 	end
-	local start = tapFeedStartFromCamera(cam, meet)
+	local start = tapFeedStartPos(cam, meet)
 	local allow = placedCoralCount <= (C.FOOD_CULL_MIN_CORALS or 100)
 		or Feed.shotWantsVisual(start, meet)
 	if not allow then
@@ -4159,6 +4194,7 @@ function Feed.fireMissTapVisual(meet: Vector3)
 		visualOnly = true,
 		playerTap = true,
 	})
+	playPlayerCamThrow()
 	-- Miss SFX is the fail sound in WaveTapFeed (not the hit fire whoosh).
 end
 
@@ -4232,10 +4268,11 @@ function WaveSim.tryTapFeedAtScreen(screenPos: Vector2): TapFeedResult
 		end
 	end
 	if bestHungry then
-		local start = tapFeedStartFromCamera(cam, bestHungry.root.Position)
+		local start = tapFeedStartPos(cam, bestHungry.root.Position)
 		if not Feed.firePlayerTap(bestHungry, start) then
 			return "miss"
 		end
+		playPlayerCamThrow()
 		HungerUi.flashTapStroke(bestHungry)
 		lastPlayerTapAt = now
 		return "hit"

@@ -34,16 +34,16 @@ export type ExcludeRefs = {
 	character: Model?,
 }
 
-function PlaceRaycast.findBlockingCoral(worldPos: Vector3): BasePart?
+function PlaceRaycast.findBlockingCoral(worldPos: Vector3, ignore: BasePart?): BasePart?
 	local plot = ClientPlot.get()
 	if not plot then
 		return nil
 	end
-	return PlacedCoralIndex.getAtWorld(plot.plotId, worldPos, plot.cframe, nil)
+	return PlacedCoralIndex.getAtWorld(plot.plotId, worldPos, plot.cframe, ignore)
 end
 
-function PlaceRaycast.isSpotTaken(worldPos: Vector3): boolean
-	return PlaceRaycast.findBlockingCoral(worldPos) ~= nil
+function PlaceRaycast.isSpotTaken(worldPos: Vector3, ignore: BasePart?): boolean
+	return PlaceRaycast.findBlockingCoral(worldPos, ignore) ~= nil
 end
 
 -- Snap Brain aim onto a nearby host (offset nest). Optional screenPos improves circle pick.
@@ -62,14 +62,15 @@ function PlaceRaycast.isAtPlaceCap(): boolean
 	return PlacedCoralIndex.countLocal() >= placeMax
 end
 
-function PlaceRaycast.evaluatePos(worldPos: Vector3, itemId: string?): (boolean, string?)
-	if PlaceRaycast.isAtPlaceCap() then
+function PlaceRaycast.evaluatePos(worldPos: Vector3, itemId: string?, ignore: BasePart?): (boolean, string?)
+	-- Soft-plant move already occupies a slot — don't treat "at cap" as invalid while dragging it.
+	if ignore == nil and PlaceRaycast.isAtPlaceCap() then
 		return false, "Max Placed"
 	end
 	if not ClientPlot.isInside(worldPos) then
 		return false, "Out Of Plot"
 	end
-	local blocker = PlaceRaycast.findBlockingCoral(worldPos)
+	local blocker = PlaceRaycast.findBlockingCoral(worldPos, ignore)
 	if blocker then
 		-- Brain-on-Brain stack: same cell OK when the new center sits above the lower ball.
 		if BrainStack.isBrainId(itemId) and BrainStack.isBrainId(blocker:GetAttribute("OceanTD_SpeciesId")) then

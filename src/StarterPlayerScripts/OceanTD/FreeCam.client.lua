@@ -672,6 +672,10 @@ local function setCharacterLocked(locked: boolean)
 end
 
 local function keepCharacterStill()
+	-- Lego plant worker owns HRP for a short dash+dig; cam mode/CFrame stay unchanged.
+	if playerGui:GetAttribute("OceanTD_PlantWorkerBusy") == true then
+		return
+	end
 	local character = player.Character
 	local hum = character and character:FindFirstChildOfClass("Humanoid")
 	local hrp = character and character:FindFirstChild("HumanoidRootPart")
@@ -1649,6 +1653,7 @@ end
 local function tickFishPovSchool(dt: number, cam: Camera)
 	local now = os.clock()
 	local running = WaveSim.isRunning()
+	local paused = FishCamTune.isPaused()
 	local waveIdx = if running then WaveSim.getWaveIndex() else 0
 	local pathDist: number? = nil
 	if waveIdx > 0 and waveIdx ~= fishSt.lastWaveIndex then
@@ -1677,110 +1682,114 @@ local function tickFishPovSchool(dt: number, cam: Camera)
 		fishSt.waveStartBoostUntil = 0
 	end
 
-	local waveStartBoost = now < fishSt.waveStartBoostUntil
-	local fish = WaveSim.getFurthestUnfedFish()
-	local goal: Vector3
-	if fish then
-		goal = fish.position
-		pathDist = fish.dist
-		if fishSt.targetId ~= fish.id then
-			local firstOfWave = fishSt.targetId == nil or waveStartBoost
-			fishSt.targetId = fish.id
-			if firstOfWave then
-				seedFishFocus(goal)
-				fishSt.switching = false
-			else
-				beginFishSwitch(goal)
-			end
-		elseif fishSt.switching then
-			fishSt.switchTo = goal
-		end
-	else
-		local held = if fishSt.targetId then WaveSim.getFishPosition(fishSt.targetId) else nil
-		pathDist = if fishSt.targetId then WaveSim.getFishPathDist(fishSt.targetId) else pathDist
-		if held then
-			goal = held
-			if fishSt.switching then
+	-- Pause pad: freeze path follow / school chase; free-look still works.
+	if not paused then
+		local waveStartBoost = now < fishSt.waveStartBoostUntil
+		local fish = WaveSim.getFurthestUnfedFish()
+		local goal: Vector3
+		if fish then
+			goal = fish.position
+			pathDist = fish.dist
+			if fishSt.targetId ~= fish.id then
+				local firstOfWave = fishSt.targetId == nil or waveStartBoost
+				fishSt.targetId = fish.id
+				if firstOfWave then
+					seedFishFocus(goal)
+					fishSt.switching = false
+				else
+					beginFishSwitch(goal)
+				end
+			elseif fishSt.switching then
 				fishSt.switchTo = goal
 			end
 		else
-			fishSt.targetId = nil
-			local spawnFocus = resolveFishSpawnFocus()
-			goal = spawnFocus or fishSt.focusPos
-			pathDist = 0
-			if spawnFocus and (fishSt.focusPos - spawnFocus).Magnitude > 1.5 then
-				if waveStartBoost then
-					seedFishFocus(spawnFocus)
-					fishSt.switching = false
-				elseif not fishSt.switching then
-					beginFishSwitch(spawnFocus)
-				else
-					fishSt.switchTo = spawnFocus
+			local held = if fishSt.targetId then WaveSim.getFishPosition(fishSt.targetId) else nil
+			pathDist = if fishSt.targetId then WaveSim.getFishPathDist(fishSt.targetId) else pathDist
+			if held then
+				goal = held
+				if fishSt.switching then
+					fishSt.switchTo = goal
 				end
+			else
+				fishSt.targetId = nil
+				local spawnFocus = resolveFishSpawnFocus()
+				goal = spawnFocus or fishSt.focusPos
+				pathDist = 0
+				if spawnFocus and (fishSt.focusPos - spawnFocus).Magnitude > 1.5 then
+					if waveStartBoost then
+						seedFishFocus(spawnFocus)
+						fishSt.switching = false
+					elseif not fishSt.switching then
+						beginFishSwitch(spawnFocus)
+					else
+						fishSt.switchTo = spawnFocus
+					end
+				end
+			end
+		end
+
+		-- Softer focus chase during school POV so lead swaps don't whip.
+		local focusErr = (goal - fishSt.dampPos).Magnitude
+		local dampRate = if waveStartBoost then FC.FISH_WAVE_START_DAMP_RATE else FC.FISH_DAMP_RATE * 0.55
+		if not waveStartBoost and focusErr > FC.FISH_DAMP_CATCHUP_STUDS then
+			local catchT = math.clamp((focusErr - FC.FISH_DAMP_CATCHUP_STUDS) / 14, 0, 1)
+			dampRate = dampRate + (FC.FISH_DAMP_RATE_CATCHUP * 0.45 - dampRate) * catchT * 0.5
+		end
+		local maxFocusSpeed = if waveStartBoost then nil else FC.FISH_FOCUS_MAX_SPEED * 0.45
+		fishSt.dampPos = dampToward(fishSt.dampPos, goal, dampRate, dt, maxFocusSpeed)
+
+		if fishSt.switching then
+			local u = math.clamp((now - fishSt.switchT0) / fishSwitchDuration(), 0, 1)
+			local e = u * u * (3 - 2 * u)
+			fishSt.switchTo = fishSt.dampPos
+			fishSt.focusPos = fishSt.switchFrom:Lerp(fishSt.switchTo, e)
+			if u >= 1 then
+				fishSt.switching = false
+				fishSt.focusPos = fishSt.dampPos
+			end
+		else
+			fishSt.focusPos = fishSt.dampPos
+		end
+
+		local lookRate = if waveStartBoost then FC.FISH_WAVE_START_LOOK_RATE else FC.FISH_LOOK_RATE * 0.5
+		fishSt.lookPos = dampToward(fishSt.lookPos, goal, lookRate, dt, maxFocusSpeed)
+
+		-- Soft path progress + hard speed cap (kills gas/brake on hungry-lead swap).
+		local targetDist = if typeof(pathDist) == "number" then pathDist else fishSt.camPathDist
+		if fishSt.pathSnap or waveStartBoost then
+			fishSt.camPathDist = targetDist
+			fishSt.pathSnap = false
+		else
+			local goingFwd = targetDist >= fishSt.camPathDist
+			local distRate = if goingFwd then FC.FISH_POV_PATH_DIST_FWD else FC.FISH_POV_PATH_DIST_BACK
+			local maxSpeed = if goingFwd then FC.FISH_POV_PATH_DIST_MAX_SPEED_FWD else FC.FISH_POV_PATH_DIST_MAX_SPEED_BACK
+			local a = 1 - math.exp(-distRate * math.max(dt, 0))
+			local nextDist = fishSt.camPathDist + (targetDist - fishSt.camPathDist) * a
+			local maxStep = maxSpeed * math.max(dt, 0)
+			local step = nextDist - fishSt.camPathDist
+			if math.abs(step) > maxStep then
+				nextDist = fishSt.camPathDist + math.sign(step) * maxStep
+			end
+			fishSt.camPathDist = nextDist
+		end
+
+		local desired, lookTarget = schoolCamOnPath(fishSt.lookPos, fishSt.camPathDist)
+		if waveStartBoost then
+			camPos = desired
+			fishSt.camLookAt = lookTarget
+			pov.lookCf = CFrame.lookAt(camPos, lookTarget)
+		else
+			camPos = dampToward(camPos, desired, FC.FISH_POV_SCHOOL_CAM_RATE, dt, nil)
+			if fishSt.camLookAt.Magnitude < 1e-3 then
+				fishSt.camLookAt = lookTarget
+			else
+				fishSt.camLookAt = dampToward(fishSt.camLookAt, lookTarget, FC.FISH_POV_SCHOOL_LOOK_RATE, dt, nil)
 			end
 		end
 	end
 
-	-- Softer focus chase during school POV so lead swaps don't whip.
-	local focusErr = (goal - fishSt.dampPos).Magnitude
-	local dampRate = if waveStartBoost then FC.FISH_WAVE_START_DAMP_RATE else FC.FISH_DAMP_RATE * 0.55
-	if not waveStartBoost and focusErr > FC.FISH_DAMP_CATCHUP_STUDS then
-		local catchT = math.clamp((focusErr - FC.FISH_DAMP_CATCHUP_STUDS) / 14, 0, 1)
-		dampRate = dampRate + (FC.FISH_DAMP_RATE_CATCHUP * 0.45 - dampRate) * catchT * 0.5
-	end
-	local maxFocusSpeed = if waveStartBoost then nil else FC.FISH_FOCUS_MAX_SPEED * 0.45
-	fishSt.dampPos = dampToward(fishSt.dampPos, goal, dampRate, dt, maxFocusSpeed)
-
-	if fishSt.switching then
-		local u = math.clamp((now - fishSt.switchT0) / fishSwitchDuration(), 0, 1)
-		local e = u * u * (3 - 2 * u)
-		fishSt.switchTo = fishSt.dampPos
-		fishSt.focusPos = fishSt.switchFrom:Lerp(fishSt.switchTo, e)
-		if u >= 1 then
-			fishSt.switching = false
-			fishSt.focusPos = fishSt.dampPos
-		end
-	else
-		fishSt.focusPos = fishSt.dampPos
-	end
-
-	local lookRate = if waveStartBoost then FC.FISH_WAVE_START_LOOK_RATE else FC.FISH_LOOK_RATE * 0.5
-	fishSt.lookPos = dampToward(fishSt.lookPos, goal, lookRate, dt, maxFocusSpeed)
-
-	-- Soft path progress + hard speed cap (kills gas/brake on hungry-lead swap).
-	local targetDist = if typeof(pathDist) == "number" then pathDist else fishSt.camPathDist
-	if fishSt.pathSnap or waveStartBoost then
-		fishSt.camPathDist = targetDist
-		fishSt.pathSnap = false
-	else
-		local goingFwd = targetDist >= fishSt.camPathDist
-		local distRate = if goingFwd then FC.FISH_POV_PATH_DIST_FWD else FC.FISH_POV_PATH_DIST_BACK
-		local maxSpeed = if goingFwd then FC.FISH_POV_PATH_DIST_MAX_SPEED_FWD else FC.FISH_POV_PATH_DIST_MAX_SPEED_BACK
-		local a = 1 - math.exp(-distRate * math.max(dt, 0))
-		local nextDist = fishSt.camPathDist + (targetDist - fishSt.camPathDist) * a
-		local maxStep = maxSpeed * math.max(dt, 0)
-		local step = nextDist - fishSt.camPathDist
-		if math.abs(step) > maxStep then
-			nextDist = fishSt.camPathDist + math.sign(step) * maxStep
-		end
-		fishSt.camPathDist = nextDist
-	end
-
-	local desired, lookTarget = schoolCamOnPath(fishSt.lookPos, fishSt.camPathDist)
-	if waveStartBoost then
-		camPos = desired
-		fishSt.camLookAt = lookTarget
-		pov.lookCf = CFrame.lookAt(camPos, lookTarget)
-	else
-		camPos = dampToward(camPos, desired, FC.FISH_POV_SCHOOL_CAM_RATE, dt, nil)
-		if fishSt.camLookAt.Magnitude < 1e-3 then
-			fishSt.camLookAt = lookTarget
-		else
-			fishSt.camLookAt = dampToward(fishSt.camLookAt, lookTarget, FC.FISH_POV_SCHOOL_LOOK_RATE, dt, nil)
-		end
-	end
-
-	if not isLookSteeringHeld() then
+	-- Playing: ease free-look back to path facing. Paused: keep absolute seat (seeded on pause).
+	if not paused and not isLookSteeringHeld() then
 		local recentera = 1 - math.exp(-FC.FISH_POV_RECENTER_SMOOTH * math.max(dt, 0))
 		pov.freeYaw += (0 - pov.freeYaw) * recentera
 		pov.freePitch += (0 - pov.freePitch) * recentera
@@ -1792,19 +1801,29 @@ local function tickFishPovSchool(dt: number, cam: Camera)
 		end
 	end
 
-	local base = CFrame.lookAt(camPos, fishSt.camLookAt)
-	local basePitch, baseYaw = base:ToOrientation()
-	local want = CFrame.new(camPos)
-		* CFrame.Angles(0, baseYaw + pov.freeYaw, 0)
-		* CFrame.Angles(math.clamp(basePitch + pov.freePitch, -1.15, 1.15), 0, 0)
-	if isLookSteeringHeld() then
+	local want: CFrame
+	if paused then
+		-- Absolute FPS seat (same as idle POV pause) — freeYaw/Pitch were seeded from the live view.
+		want = CFrame.new(camPos)
+			* CFrame.Angles(0, pov.freeYaw, 0)
+			* CFrame.Angles(pov.freePitch, 0, 0)
 		pov.lookCf = want
 	else
-		local cfA = 1 - math.exp(-FC.FISH_POV_SCHOOL_CF_SMOOTH * math.max(dt, 0))
-		if pov.lookCf then
-			pov.lookCf = pov.lookCf:Lerp(want, cfA)
-		else
+		local lookAt = if fishSt.camLookAt.Magnitude > 1e-3 then fishSt.camLookAt else (camPos + Vector3.new(0, 0, -1))
+		local base = CFrame.lookAt(camPos, lookAt)
+		local basePitch, baseYaw = base:ToOrientation()
+		want = CFrame.new(camPos)
+			* CFrame.Angles(0, baseYaw + pov.freeYaw, 0)
+			* CFrame.Angles(math.clamp(basePitch + pov.freePitch, -1.15, 1.15), 0, 0)
+		if isLookSteeringHeld() then
 			pov.lookCf = want
+		else
+			local cfA = 1 - math.exp(-FC.FISH_POV_SCHOOL_CF_SMOOTH * math.max(dt, 0))
+			if pov.lookCf then
+				pov.lookCf = pov.lookCf:Lerp(want, cfA)
+			else
+				pov.lookCf = want
+			end
 		end
 	end
 	cam.CFrame = pov.lookCf :: CFrame

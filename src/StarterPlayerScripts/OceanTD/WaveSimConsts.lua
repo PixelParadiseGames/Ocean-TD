@@ -94,7 +94,7 @@ local C = {
 	HUNGER_EVERY_WAVES = 5, -- +6 food every 5 waves
 	HUNGER_PER_TIER = 6,
 	FOOD_RADIUS = 0.52, -- was 0.65 (−20%)
-	-- Player tap-to-feed: click/tap near a critter → food orb from screen-top center.
+	-- Player tap-to-feed: click/tap near a critter → food orb (screen-top; Player Cam = from hand).
 	TAP_FEED_RADIUS = 5, -- was 10; tighter click/tap hit radius
 	-- Early waves: larger tap hitbox so feeding is easier.
 	TAP_FEED_RADIUS_MULT_W1_10 = 1.32, -- was 1.2; +10% again for waves 1–10
