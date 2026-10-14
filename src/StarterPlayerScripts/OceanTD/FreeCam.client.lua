@@ -2069,6 +2069,14 @@ local function startRenderLoop()
 		then
 			return
 		end
+		-- Coral size / hue inspect close-ups (RelocateController.setCinematicHold).
+		-- Must yield before plotcam — otherwise PlotCam overwrites the tween every frame.
+		if RelocateController.isCinematicHold() then
+			return
+		end
+		if playerGui:GetAttribute("OceanTD_HueCamBusy") == true then
+			return
+		end
 		if playerGui:GetAttribute("OceanTD_JoinIntroBusy") == true then
 			-- Still drive plotcam when intro supplies OceanTD_JoinIntroCamPos.
 			if mode ~= "plotcam" then
@@ -2924,6 +2932,8 @@ do
 			or playerGui:GetAttribute("OceanTD_PlotSizeCinematicBusy") == true
 			or playerGui:GetAttribute("OceanTD_PlantDigCamBusy") == true
 			or playerGui:GetAttribute("OceanTD_PlantWorkerBusy") == true
+			or playerGui:GetAttribute("OceanTD_HueCamBusy") == true
+			or RelocateController.isCinematicHold()
 		then
 			return true
 		end

@@ -38,7 +38,19 @@ return {
 	CINE_UNLOCK_GROW_SEC = 0.7 * CINE_TIME_SCALE,
 	CINE_BRAIN_RESIZE_SEC = 0.28 * CINE_TIME_SCALE,
 
+	-- Hue paint: quick close-up so the color change is readable, then restore.
+	HUE_CAM_IN_SEC = 0.28,
+	HUE_CAM_HOLD_SEC = 3,
+	HUE_CAM_OUT_SEC = 0.4,
+	HUE_CAM_DIST_FRAC = 0.42, -- fraction of current cam→coral distance (lower = closer)
+	HUE_RANGE_HIDE_SEC = 5, -- hide range preview while the hue close-up reads
+
 	DEFAULT_PALETTE_SWATCH = 0,
 	LETTERS = { "S", "M", "L" },
 	WORDS = { "Small", "Medium", "Large" },
+	STAT_ICONS = { "↔️", "🍴", "🔄", "🛡️" },
+	STAT_KEY_NAMES = { "Feed Range", "Food Count", "Reload", "Defense" },
+	BASE_HUE_COUNT_MAX_TEXT = 12,
+	BASE_HUE_COUNT_MIN_TEXT = 8,
+	WIDE_HUE_COUNT_TEXT_MULT = 3,
 }

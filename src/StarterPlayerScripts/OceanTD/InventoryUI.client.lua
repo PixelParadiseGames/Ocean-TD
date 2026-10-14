@@ -2438,6 +2438,10 @@ end
 
 -- Client-only shovel (other players never see it).
 local function unequipBackpackShovel()
+	-- Dig dash/dig owns the shovel until PlantWorkerVfx finishes.
+	if playerGui:GetAttribute("OceanTD_PlantWorkerBusy") == true then
+		return
+	end
 	LocalShovel.unequip()
 end
 

@@ -1,7 +1,7 @@
 --!strict
 --[[
-	Session-only undo stack for build ops (place / move / recycle / clearPlot).
-	Max 10 steps. Cleared on leave — never persisted.
+	Session-only undo stack for build ops (place / move / recycle / clearPlot / color).
+	Max 20 steps (hue browsing). Cleared on leave — never persisted.
 ]]
 
 local UndoService = {}
@@ -21,11 +21,19 @@ export type UndoStep = {
 	toWorldPos: Vector3?, -- move destination
 	entries: { ClearPlotEntry }?, -- clearPlot compound
 	seedHue: number?, -- hue stack debited / credited
-	fromColorIndex: number?, -- color undo
+	fromColorIndex: number?, -- color undo (nil = was default / unpainted)
 	toColorIndex: number?,
+	-- Exact shade before the paint (so dice reshades + hue swaps restore faithfully).
+	fromColorR: number?,
+	fromColorG: number?,
+	fromColorB: number?,
+	fromWebColorIndex: number?,
+	fromWebColorR: number?,
+	fromWebColorG: number?,
+	fromWebColorB: number?,
 }
 
-local MAX_STEPS = 10
+local MAX_STEPS = 20
 local stacks: { [Player]: { UndoStep } } = {}
 
 local function log(...: any)

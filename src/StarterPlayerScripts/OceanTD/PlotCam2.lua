@@ -1031,6 +1031,37 @@ function PlotCam2.endPlaceZoom()
 	startPlaceZoomTween(toPitch, toDist, stash.focusHeight, toFocus, true)
 end
 
+--[[
+	Dig worker owns the camera after PLANT. Steal the pre-place stash as the dig
+	restore target and cancel the place-zoom restore tween so it can't expire
+	during dig and snap when FreeCam resumes.
+]]
+function PlotCam2.claimPlaceZoomRestoreCf(): CFrame?
+	local stash = placeZoomStash
+	if not stash then
+		return nil
+	end
+	local plotCf, plotSize = getPlot()
+	placeZoomTween = nil
+	placeZoomFocusGoal = nil
+	placeZoomFocusOffsetY = nil
+	clearPlaceZoomHeightTrack()
+	placeZoomStash = nil
+	if not plotCf or not plotSize or not active then
+		return nil
+	end
+	local toPitch = math.clamp(stash.pitchDeg, PITCH_MIN, PITCH_MAX)
+	local toDist = math.clamp(stash.distOffset, DIST_OFFSET_MIN, DIST_OFFSET_MAX)
+	local toFocus = placeZoomFocusAt(stash.focus, toPitch, stash.focusHeight, toDist)
+	tune.pitchDeg = toPitch
+	tune.distOffset = toDist
+	tune.focusHeight = stash.focusHeight
+	focus = toFocus
+	liveDist = if typeof(stash.liveDist) == "number" then stash.liveDist else targetDist(plotCf, plotSize)
+	persistTune()
+	return placeZoomCamAt(toFocus, toPitch, liveDist, plotCf)
+end
+
 function PlotCam2.begin(resumeCf: CFrame?): boolean
 	local plotCf, plotSize, plotId = getPlot()
 	if not plotCf or not plotSize or not plotId then

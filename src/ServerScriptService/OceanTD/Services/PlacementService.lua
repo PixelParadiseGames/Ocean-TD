@@ -2078,10 +2078,19 @@ local function removePlacedAndCredit(player: Player, placeId: string, itemId: st
 	return true
 end
 
--- Undo last place / move / recycle / clearPlot for this session (does not push a new undo step).
+-- Undo last place / move / recycle / clearPlot / color for this session (does not push a new undo step).
 function PlacementService.undoLast(player: Player): UndoResult
 	if not PlayerSession.canSave(player) then
 		return { ok = false, errorCode = "NotReady" }
+	end
+	-- Wait out an in-flight hue paint so we pop THAT step, not an older one while
+	-- the paint still commits afterward and re-greys / recolors the coral.
+	local uid = player.UserId
+	while coralColorBusyByUser[uid] do
+		task.wait()
+		if not player.Parent then
+			return { ok = false, errorCode = "NotReady" }
+		end
 	end
 	local step = UndoService.pop(player)
 	if not step then
@@ -2132,13 +2141,13 @@ function PlacementService.undoLast(player: Player): UndoResult
 				player,
 				step.placeId,
 				step.fromColorIndex,
-				nil,
-				nil,
-				nil,
-				nil,
-				nil,
-				nil,
-				nil,
+				step.fromColorR,
+				step.fromColorG,
+				step.fromColorB,
+				step.fromWebColorIndex,
+				step.fromWebColorR,
+				step.fromWebColorG,
+				step.fromWebColorB,
 				true
 			)
 			ok = result.ok == true
@@ -2812,6 +2821,12 @@ function PlacementService.setCoralColor(
 	local itemId = visual:GetAttribute("OceanTD_ItemId")
 	local prevAttr = visual:GetAttribute("OceanTD_ColorIndex")
 	local prevIdx = if typeof(prevAttr) == "number" then PlotOutlineColors.clampCoralIndex(prevAttr) else nil
+	local _, prevPaint = CoralVisual.readRestLook(visual)
+	local prevWebIdxAttr = visual:GetAttribute("OceanTD_WebColorIndex")
+	local prevWebIdx = if typeof(prevWebIdxAttr) == "number" then prevWebIdxAttr else nil
+	local pwr = visual:GetAttribute("OceanTD_WebRestR")
+	local pwg = visual:GetAttribute("OceanTD_WebRestG")
+	local pwb = visual:GetAttribute("OceanTD_WebRestB")
 	-- Resolve cell by placeId (stacked brains sit off worldToGrid of the mesh center).
 	local cell = GridService.findCellByPlaceId(plotId, placeId)
 	if not cell then
@@ -2888,13 +2903,22 @@ function PlacementService.setCoralColor(
 	else
 		CoralVisual.setRestColor(visual, paint)
 	end
-	if skipCapCheck ~= true and not suppressUndoRecord and prevIdx ~= idx then
+	-- Record every successful paint (hue swap or same-hue reshade) so Undo can step
+	-- back up to UndoService.maxSteps() while browsing colors.
+	if skipCapCheck ~= true and not suppressUndoRecord then
 		UndoService.push(player, {
 			kind = "color",
 			placeId = placeId,
 			itemId = if typeof(itemId) == "string" then itemId else "",
 			fromColorIndex = prevIdx,
 			toColorIndex = idx,
+			fromColorR = prevPaint.R,
+			fromColorG = prevPaint.G,
+			fromColorB = prevPaint.B,
+			fromWebColorIndex = prevWebIdx,
+			fromWebColorR = if typeof(pwr) == "number" then pwr else nil,
+			fromWebColorG = if typeof(pwg) == "number" then pwg else nil,
+			fromWebColorB = if typeof(pwb) == "number" then pwb else nil,
 		})
 	end
 	-- Live grid/visual now; DataStore after 5s idle so rapid dice rolls don't thrash saves.

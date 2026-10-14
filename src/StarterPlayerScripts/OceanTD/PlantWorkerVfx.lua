@@ -9,10 +9,12 @@ local KeyframeSequenceProvider = game:GetService("KeyframeSequenceProvider")
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local SoundService = game:GetService("SoundService")
-local TweenService = game:GetService("TweenService")
 local Workspace = game:GetService("Workspace")
 
 local ClientPlot = require(script.Parent:WaitForChild("ClientPlot"))
+local InventoryState = require(script.Parent:WaitForChild("InventoryState"))
+local LocalShovel = require(script.Parent:WaitForChild("LocalShovel"))
+local PlotCam2 = require(script.Parent:WaitForChild("PlotCam2"))
 
 local ATTR_BUSY = "OceanTD_PlantWorkerBusy"
 local ATTR_DIG_CAM = "OceanTD_PlantDigCamBusy"
@@ -51,7 +53,10 @@ local ICE_BUBBLE_LIFE_MAX = 4.5
 -- Discrete S / M / L / XL glass spheres (stud diameter).
 local ICE_BUBBLE_SIZES = { 0.55, 1.05, 1.7, 2.5 } :: { number }
 local ICE_BUBBLE_SCATTER = 3.2 -- horizontal scatter radius (studs)
-local ICE_BUBBLE_RISE = 1.15 -- base studs/sec upward float
+local ICE_BUBBLE_RISE = 1.495 -- base studs/sec (+30%); each bubble still rolls +30%–+110% on top
+local ICE_BUBBLE_DASH_BLAST = 10 -- radial burst when dash lands
+local ICE_BUBBLE_BLAST_SPEED_MIN = 6.5
+local ICE_BUBBLE_BLAST_SPEED_MAX = 11
 local RUN_SOUND_ID = "rbxassetid://75773150278794"
 local WORK_SOUND_ID = "rbxassetid://76312376951471"
 local RUN_FADE_IN_SEC = 0.2
@@ -94,9 +99,9 @@ local digCamToken = 0
 local digCamSavedCf: CFrame? = nil
 local digCamSavedType: Enum.CameraType? = nil
 local digCamSavedFov: number? = nil
-local digCamTween: Tween? = nil
 local digCamFollowConn: RBXScriptConnection? = nil
 local digCamPlantPos: Vector3? = nil
+local digHeldShovel = false
 
 export type PlayOpts = {
 	coralPart: BasePart?,
@@ -110,6 +115,23 @@ end
 
 local function setBusy(on: boolean)
 	playerGui:SetAttribute(ATTR_BUSY, on == true)
+end
+
+local function ensureDigShovel()
+	LocalShovel.equip()
+	digHeldShovel = true
+end
+
+local function releaseDigShovel()
+	if not digHeldShovel then
+		return
+	end
+	digHeldShovel = false
+	-- Keep shovel if backpack is still open (its own equip owns the prop).
+	if InventoryState.isOpen() then
+		return
+	end
+	LocalShovel.unequip()
 end
 
 local function setDigCamBusy(on: boolean)
@@ -136,10 +158,6 @@ local function stopDigCamFollow()
 		digCamFollowConn:Disconnect()
 		digCamFollowConn = nil
 	end
-	if digCamTween then
-		digCamTween:Cancel()
-		digCamTween = nil
-	end
 end
 
 local function restoreDigCamImmediate()
@@ -163,12 +181,7 @@ local function restoreDigCamImmediate()
 		cam.FieldOfView = savedFov
 	end
 	if savedType then
-		local restore = savedType
-		if restore == Enum.CameraType.Scriptable then
-			-- FreeCam / PlotCam re-assert Scriptable on next tick.
-			restore = Enum.CameraType.Scriptable
-		end
-		cam.CameraType = restore
+		cam.CameraType = savedType
 	end
 end
 
@@ -184,19 +197,18 @@ local function endDigCamZoom(token: number)
 		return
 	end
 	cam.CameraType = Enum.CameraType.Scriptable
-	local tw = TweenService:Create(
-		cam,
-		TweenInfo.new(DIG_CAM_OUT_SEC, Enum.EasingStyle.Quad, Enum.EasingDirection.InOut),
-		{ CFrame = savedCf }
-	)
-	digCamTween = tw
-	tw:Play()
-	task.spawn(function()
-		tw.Completed:Wait()
+	local fromCf = cam.CFrame
+	local t0 = os.clock()
+	digCamFollowConn = RunService.RenderStepped:Connect(function()
 		if token ~= digCamToken then
 			return
 		end
-		restoreDigCamImmediate()
+		local u = math.clamp((os.clock() - t0) / DIG_CAM_OUT_SEC, 0, 1)
+		local a = u * u * (3 - 2 * u)
+		cam.CFrame = fromCf:Lerp(savedCf, a)
+		if u >= 1 then
+			restoreDigCamImmediate()
+		end
 	end)
 end
 
@@ -208,7 +220,10 @@ local function beginDigCamZoom(hrp: BasePart, plantPos: Vector3)
 	digCamToken += 1
 	local token = digCamToken
 	stopDigCamFollow()
-	digCamSavedCf = cam.CFrame
+	-- Prefer pre-place PlotCam seat (not the coral place-zoom close-up) so dig-out
+	-- tweens to the player's previous view instead of snapping after a coral flash.
+	local plotRestore = PlotCam2.claimPlaceZoomRestoreCf()
+	digCamSavedCf = plotRestore or cam.CFrame
 	digCamSavedType = cam.CameraType
 	digCamSavedFov = cam.FieldOfView
 	digCamPlantPos = plantPos
@@ -216,7 +231,7 @@ local function beginDigCamZoom(hrp: BasePart, plantPos: Vector3)
 	setDigCamBusy(true)
 
 	local t0 = os.clock()
-	local fromCf = digCamSavedCf
+	local fromCf = cam.CFrame
 	digCamFollowConn = RunService.RenderStepped:Connect(function()
 		if token ~= digCamToken or not hrp.Parent then
 			return
@@ -873,9 +888,49 @@ local function makeDustHost(feetPos: Vector3): (BasePart, ParticleEmitter)
 	return host, pe
 end
 
--- Light-blue ice spheres that scatter out and slowly float upward.
+local function makeIceBubblePart(size: number, at: Vector3): BasePart
+	local ball = Instance.new("Part")
+	ball.Name = "OceanTD_DigIceBubble"
+	ball.Shape = Enum.PartType.Ball
+	ball.Material = Enum.Material.Glass
+	ball.Color = ICE_BUBBLE_COLOR
+	ball.Transparency = ICE_BUBBLE_TRANS
+	ball.Reflectance = 0.15
+	ball.Anchored = true
+	ball.CanCollide = false
+	ball.CanQuery = false
+	ball.CanTouch = false
+	ball.CastShadow = false
+	ball.Massless = true
+	ball.Size = Vector3.new(size, size, size)
+	ball.CFrame = CFrame.new(at)
+	ball.Parent = fxFolder()
+	return ball
+end
+
+local function animateIceBubble(ball: BasePart, start: Vector3, drift: Vector3, life: number)
+	task.spawn(function()
+		local t0 = os.clock()
+		while ball.Parent do
+			local elapsed = os.clock() - t0
+			local u = elapsed / life
+			if u >= 1 then
+				break
+			end
+			if u > 0.72 then
+				ball.Transparency = ICE_BUBBLE_TRANS + (1 - ICE_BUBBLE_TRANS) * ((u - 0.72) / 0.28)
+			end
+			ball.CFrame = CFrame.new(start + drift * elapsed)
+			task.wait()
+		end
+		if ball.Parent then
+			ball:Destroy()
+		end
+	end)
+end
+
+-- Light-blue glass spheres that scatter out and slowly float upward.
 local function spawnIceBubbles(origin: Vector3, count: number)
-	local folder = fxFolder()
 	for _ = 1, count do
 		local size = ICE_BUBBLE_SIZES[math.random(1, #ICE_BUBBLE_SIZES)]
 		local angle = math.random() * math.pi * 2
@@ -885,42 +940,34 @@ local function spawnIceBubbles(origin: Vector3, count: number)
 		-- Each bubble: +30% to +110% rise speed (independent roll).
 		local rise = ICE_BUBBLE_RISE * (1.3 + math.random() * 0.8)
 		local drift = Vector3.new((math.random() - 0.5) * 0.85, rise, (math.random() - 0.5) * 0.85)
+		animateIceBubble(makeIceBubblePart(size, start), start, drift, life)
+	end
+end
 
-		local ball = Instance.new("Part")
-		ball.Name = "OceanTD_DigIceBubble"
-		ball.Shape = Enum.PartType.Ball
-		ball.Material = Enum.Material.Glass
-		ball.Color = ICE_BUBBLE_COLOR
-		ball.Transparency = ICE_BUBBLE_TRANS
-		ball.Reflectance = 0.15
-		ball.Anchored = true
-		ball.CanCollide = false
-		ball.CanQuery = false
-		ball.CanTouch = false
-		ball.CastShadow = false
-		ball.Massless = true
-		ball.Size = Vector3.new(size, size, size)
-		ball.CFrame = CFrame.new(start)
-		ball.Parent = folder
-
-		task.spawn(function()
-			local t0 = os.clock()
-			while ball.Parent do
-				local elapsed = os.clock() - t0
-				local u = elapsed / life
-				if u >= 1 then
-					break
-				end
-				if u > 0.72 then
-					ball.Transparency = ICE_BUBBLE_TRANS + (1 - ICE_BUBBLE_TRANS) * ((u - 0.72) / 0.28)
-				end
-				ball.CFrame = CFrame.new(start + drift * elapsed)
-				task.wait()
-			end
-			if ball.Parent then
-				ball:Destroy()
-			end
-		end)
+-- Radial burst in all directions (dash land).
+local function blastIceBubbles(origin: Vector3, count: number)
+	for _ = 1, count do
+		local size = ICE_BUBBLE_SIZES[math.random(1, #ICE_BUBBLE_SIZES)]
+		-- Uniform-ish random direction on a sphere.
+		local yaw = math.random() * math.pi * 2
+		local pitch = math.acos(2 * math.random() - 1) - math.pi * 0.5
+		local dir = Vector3.new(
+			math.cos(pitch) * math.cos(yaw),
+			math.sin(pitch),
+			math.cos(pitch) * math.sin(yaw)
+		)
+		if dir.Magnitude < 1e-4 then
+			dir = Vector3.yAxis
+		else
+			dir = dir.Unit
+		end
+		local speed = ICE_BUBBLE_BLAST_SPEED_MIN
+			+ math.random() * (ICE_BUBBLE_BLAST_SPEED_MAX - ICE_BUBBLE_BLAST_SPEED_MIN)
+		local rise = ICE_BUBBLE_RISE * (1.3 + math.random() * 0.8)
+		-- Blast outward, then keep a gentle upward float mixed in.
+		local drift = dir * speed + Vector3.new(0, rise * 0.45, 0)
+		local life = ICE_BUBBLE_LIFE_MIN + math.random() * (ICE_BUBBLE_LIFE_MAX - ICE_BUBBLE_LIFE_MIN)
+		animateIceBubble(makeIceBubblePart(size, origin), origin, drift, life)
 	end
 end
 
@@ -1241,6 +1288,7 @@ local function finish(
 	stopWorkSound(true) -- fade out 0.5s when work ends / cuts short
 	destroyDust(dustHost)
 	restoreCoralRise()
+	releaseDigShovel()
 	if hrp and hrp.Parent then
 		hrp.Anchored = wasAnchored
 		burstHeartFirework(hrp.Position)
@@ -1291,6 +1339,7 @@ function PlantWorkerVfx.playAt(worldPos: Vector3, opts: PlayOpts?): boolean
 	hum.JumpHeight = 0
 	hum.AutoRotate = false
 	setBusy(true)
+	ensureDigShovel()
 
 	local coralPart = if opts then opts.coralPart else nil
 	local onDone = if opts then opts.onDone else nil
@@ -1352,6 +1401,7 @@ function PlantWorkerVfx.playAt(worldPos: Vector3, opts: PlayOpts?): boolean
 				hrp.CFrame = base
 				stopRunSound()
 				stopRunTrack()
+				blastIceBubbles(feetWorldPos(base, hum), ICE_BUBBLE_DASH_BLAST)
 			end
 			return
 		end
@@ -1417,6 +1467,7 @@ function PlantWorkerVfx.cancel()
 	end)
 	restoreCoralRise()
 	restoreDigCamImmediate()
+	releaseDigShovel()
 	local cam = Workspace.CurrentCamera
 	local folder = cam and cam:FindFirstChild("OceanTD_LocalFX")
 	if folder then

@@ -624,9 +624,12 @@ local confirmStrokeConn: RBXScriptConnection? = nil
 local sizeFlashConn: RBXScriptConnection? = nil
 local cineToken = 0
 local bound = false
-local fedAttrConn: RBXScriptConnection? = nil
-local wavesAttrConn: RBXScriptConnection? = nil
-local lifePart: BasePart? = nil
+-- Hue / life helpers live in do-blocks (Luau 200-local budget).
+local abortHueCam: () -> ()
+local runHueColorCloseup: (BasePart?) -> ()
+local refreshLifeRows: (BasePart?) -> ()
+local clearLifeConns: () -> ()
+local bindLifeAttrs: (BasePart) -> ()
 
 local remotes = {
 	size = Remotes.getFunction("RequestCoralSize"),
@@ -636,6 +639,9 @@ local remotes = {
 }
 
 local function invokeSizeRemote(placeId: string, targetClass: number, unlockNext: boolean): any
+	-- Client drag / soft-plant park is local until RequestMove — push first so
+	-- server restyle doesn't plant at the old GridAnchor and snap the coral back.
+	RelocateController.ensureServerPosMatchesClient()
 	local free = pendingTutorialFreeInvoke
 	pendingTutorialFreeInvoke = false
 	return remotes.size:InvokeServer(placeId, targetClass, unlockNext, free)
@@ -870,9 +876,6 @@ local function stopPulses()
 	stopSizeFlash()
 end
 
-local STAT_ICONS = { "↔️", "🍴", "🔄", "🛡️" }
-local STAT_KEY_NAMES = { "Feed Range", "Food Count", "Reload", "Defense" }
-
 local statsKeyPopup: GuiObject? = nil
 
 local function hideStatsKey()
@@ -935,7 +938,7 @@ local function paintStatColumn(i: number, asDelta: boolean, fromClass: number?, 
 		if fromVals then
 			n = n - fromVals[k]
 		end
-		labels[k].Text = formatStatLine(STAT_ICONS[k], n, asDelta)
+		labels[k].Text = formatStatLine(Consts.STAT_ICONS[k], n, asDelta)
 		if asDelta then
 			labels[k].TextColor3 = Consts.ACTIVE_GREEN
 		elseif isActive then
@@ -1302,79 +1305,64 @@ local function waitForRestyledPart(placeId: string, oldPart: BasePart, result: a
 	return findPlacedByPlaceId(placeId, oldPart)
 end
 
-local function playGrowSound()
-	local s = Instance.new("Sound")
-	s.SoundId = Consts.GROW_SOUND_ID
-	s.Volume = 0.85
-	s.Parent = SoundService
-	s:Play()
-	s.Ended:Connect(function()
-		s:Destroy()
-	end)
-	task.delay(4, function()
-		if s.Parent then
-			s:Destroy()
+-- Sounds + default-swatch flash nested for register budget (export 4 names only).
+local playGrowSound: () -> ()
+local playDiceSpinSound: () -> ()
+local playDefaultPaletteSound: () -> ()
+local flashDefaultSwatchStroke: () -> ()
+do
+	local function playInspectSfx(soundId: string, pitchJitter: boolean?)
+		local s = Instance.new("Sound")
+		s.SoundId = soundId
+		s.Volume = 0.85
+		if pitchJitter then
+			s.PlaybackSpeed = 0.92 + math.random() * 0.16
 		end
-	end)
-end
-
-local function playDiceSpinSound()
-	local s = Instance.new("Sound")
-	s.SoundId = Consts.DICE_SPIN_SOUND_ID
-	s.Volume = 0.85
-	-- Slight pitch variance so re-rolls don't sound identical.
-	s.PlaybackSpeed = 0.92 + math.random() * 0.16
-	s.Parent = SoundService
-	s:Play()
-	s.Ended:Connect(function()
-		s:Destroy()
-	end)
-	task.delay(4, function()
-		if s.Parent then
+		s.Parent = SoundService
+		s:Play()
+		s.Ended:Connect(function()
 			s:Destroy()
-		end
-	end)
-end
-
-local function playDefaultPaletteSound()
-	local s = Instance.new("Sound")
-	s.SoundId = Consts.DEFAULT_PALETTE_SOUND_ID
-	s.Volume = 0.85
-	s.Parent = SoundService
-	s:Play()
-	s.Ended:Connect(function()
-		s:Destroy()
-	end)
-	task.delay(4, function()
-		if s.Parent then
-			s:Destroy()
-		end
-	end)
-end
-
-local function flashDefaultSwatchStroke()
-	local stroke = colorSwatchStrokes[Consts.DEFAULT_PALETTE_SWATCH]
-	if not stroke then
-		return
+		end)
+		task.delay(4, function()
+			if s.Parent then
+				s:Destroy()
+			end
+		end)
 	end
-	if defaultStrokeFlashTween then
-		defaultStrokeFlashTween:Cancel()
-		defaultStrokeFlashTween = nil
+
+	playGrowSound = function()
+		playInspectSfx(Consts.GROW_SOUND_ID)
 	end
-	defaultStrokeFlashUntil = os.clock() + 0.28
-	stroke.Color = Consts.GREEN
-	defaultStrokeFlashTween = TweenService:Create(
-		stroke,
-		TweenInfo.new(0.22, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
-		{ Color = Consts.DEFAULT_SWATCH_STROKE }
-	)
-	defaultStrokeFlashTween:Play()
-	defaultStrokeFlashTween.Completed:Connect(function()
-		defaultStrokeFlashTween = nil
-		if stroke.Parent then
-			stroke.Color = Consts.DEFAULT_SWATCH_STROKE
+	playDiceSpinSound = function()
+		playInspectSfx(Consts.DICE_SPIN_SOUND_ID, true)
+	end
+	playDefaultPaletteSound = function()
+		playInspectSfx(Consts.DEFAULT_PALETTE_SOUND_ID)
+	end
+	flashDefaultSwatchStroke = function()
+		local stroke = colorSwatchStrokes[Consts.DEFAULT_PALETTE_SWATCH]
+		if not stroke then
+			return
 		end
-	end)
+		if defaultStrokeFlashTween then
+			defaultStrokeFlashTween:Cancel()
+			defaultStrokeFlashTween = nil
+		end
+		defaultStrokeFlashUntil = os.clock() + 0.28
+		stroke.Color = Consts.GREEN
+		defaultStrokeFlashTween = TweenService:Create(
+			stroke,
+			TweenInfo.new(0.22, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+			{ Color = Consts.DEFAULT_SWATCH_STROKE }
+		)
+		defaultStrokeFlashTween:Play()
+		defaultStrokeFlashTween.Completed:Connect(function()
+			defaultStrokeFlashTween = nil
+			if stroke.Parent then
+				stroke.Color = Consts.DEFAULT_SWATCH_STROKE
+			end
+		end)
+	end
 end
 
 local function zoomToward(part: BasePart, fromCf: CFrame, closer: boolean): CFrame
@@ -1391,11 +1379,169 @@ local function zoomToward(part: BasePart, fromCf: CFrame, closer: boolean): CFra
 	return CFrame.lookAt(pos, look)
 end
 
+-- Hue close-up + range suppress (nested to stay under Luau's 200-local chunk limit).
+do
+	local HUE_CAM_ATTR = "OceanTD_HueCamBusy"
+	local hueCamToken = 0
+	local hueCamConn: RBXScriptConnection? = nil
+	local hueCamRestoreCf: CFrame? = nil
+	local hueRangeHideToken = 0
+
+	local function zoomHueCloseup(part: BasePart, fromCf: CFrame): CFrame
+		local look = part.Position + Vector3.new(0, math.min(part.Size.Y * 0.25, 2), 0)
+		local origin = fromCf.Position
+		local delta = look - origin
+		local mag = delta.Magnitude
+		if mag < 0.05 then
+			return fromCf
+		end
+		local dist = math.clamp(mag * Consts.HUE_CAM_DIST_FRAC, 3.5, 32)
+		return CFrame.lookAt(look - delta.Unit * dist, look)
+	end
+
+	local function stopHueCamFollow()
+		if hueCamConn then
+			hueCamConn:Disconnect()
+			hueCamConn = nil
+		end
+	end
+
+	local function endHueCamBusy()
+		stopHueCamFollow()
+		hueCamRestoreCf = nil
+		playerGui:SetAttribute(HUE_CAM_ATTR, false)
+		if RelocateController.isCinematicHold() then
+			RelocateController.setCinematicHold(false)
+		end
+	end
+
+	local function suppressRangeForHue()
+		hueRangeHideToken += 1
+		local token = hueRangeHideToken
+		CoralRangeRings.hide(false)
+		task.delay(Consts.HUE_RANGE_HIDE_SEC, function()
+			if token ~= hueRangeHideToken then
+				return
+			end
+			local r = root
+			if not r or not r.Visible then
+				return
+			end
+			local part = selectedPart()
+			if part and part.Parent then
+				showRangeRing(part)
+			end
+		end)
+	end
+
+	abortHueCam = function()
+		hueCamToken += 1
+		hueRangeHideToken += 1
+		endHueCamBusy()
+	end
+
+	-- Quick zoom onto the painted coral, hold so the hue reads, then restore prior view.
+	runHueColorCloseup = function(part: BasePart?)
+		if not part or not part.Parent then
+			return
+		end
+		if tutorialHueDemoSuppressNote then
+			return
+		end
+		suppressRangeForHue()
+		local cam = workspace.CurrentCamera
+		if not cam then
+			return
+		end
+
+		local alreadyBusy = playerGui:GetAttribute(HUE_CAM_ATTR) == true
+		local restore = hueCamRestoreCf
+		if not alreadyBusy or typeof(restore) ~= "CFrame" then
+			restore = cam.CFrame
+		end
+		hueCamRestoreCf = restore
+
+		hueCamToken += 1
+		local token = hueCamToken
+		stopHueCamFollow()
+
+		local focusPart = part
+		local startCf = restore :: CFrame
+		local fromCf = cam.CFrame
+		local phase = if alreadyBusy then "hold" else "in"
+		local phaseT0 = os.clock()
+		playerGui:SetAttribute(HUE_CAM_ATTR, true)
+		RelocateController.setCinematicHold(true)
+		cam.CameraType = Enum.CameraType.Scriptable
+		if alreadyBusy then
+			cam.CFrame = zoomHueCloseup(focusPart, startCf)
+		end
+
+		hueCamConn = RunService.RenderStepped:Connect(function()
+			if token ~= hueCamToken then
+				stopHueCamFollow()
+				return
+			end
+			if not cam.Parent then
+				endHueCamBusy()
+				return
+			end
+			local lost = not focusPart.Parent or not RelocateController.isPartSelected(focusPart)
+			local now = os.clock()
+			cam.CameraType = Enum.CameraType.Scriptable
+
+			if phase == "in" then
+				local goal = zoomHueCloseup(focusPart, startCf)
+				local u = math.clamp((now - phaseT0) / Consts.HUE_CAM_IN_SEC, 0, 1)
+				local a = u * u * (3 - 2 * u)
+				cam.CFrame = fromCf:Lerp(goal, a)
+				if u >= 1 or lost then
+					if lost then
+						cam.CFrame = startCf
+						endHueCamBusy()
+						return
+					end
+					phase = "hold"
+					phaseT0 = now
+					cam.CFrame = goal
+				end
+				return
+			end
+
+			if phase == "hold" then
+				if lost or (now - phaseT0) >= Consts.HUE_CAM_HOLD_SEC then
+					phase = "out"
+					phaseT0 = now
+					fromCf = cam.CFrame
+					if lost then
+						cam.CFrame = startCf
+						endHueCamBusy()
+						return
+					end
+					return
+				end
+				cam.CFrame = zoomHueCloseup(focusPart, startCf)
+				return
+			end
+
+			local u = math.clamp((now - phaseT0) / Consts.HUE_CAM_OUT_SEC, 0, 1)
+			local a = u * u * (3 - 2 * u)
+			cam.CFrame = fromCf:Lerp(startCf, a)
+			if u >= 1 then
+				cam.CFrame = startCf
+				RelocateController.setLiveCameraCFrame(startCf)
+				endHueCamBusy()
+			end
+		end)
+	end
+end -- hue cam do-block
+
 -- Forward-declared; assigned after runUnlockCinematic (Luau strict needs this before runSpongeSizeCinematic).
 local applyServerSize: (any, boolean, BasePart?, boolean?) -> ()
 
 local function runUnlockCinematic(part: BasePart, newDiam: number)
 	cineToken += 1
+	abortHueCam()
 	local token = cineToken
 	local saved = RelocateController.getSavedCameraCFrame()
 	local startCf = saved or (workspace.CurrentCamera and workspace.CurrentCamera.CFrame)
@@ -1683,6 +1829,7 @@ local function runSpongeSizeCinematic(
 	local token: number? = nil
 	if not parallel and mode == "full" then
 		cineToken += 1
+		abortHueCam()
 		token = cineToken
 	end
 	local useCamera = unlockNext and not parallel and mode == "full"
@@ -2358,13 +2505,9 @@ local function seedCountLabelColor(swatchIndex: number): Color3
 	return Consts.WHITE
 end
 
-local BASE_HUE_COUNT_MAX_TEXT = 12
-local BASE_HUE_COUNT_MIN_TEXT = 8
-local WIDE_HUE_COUNT_TEXT_MULT = 3
-
 local function hueCountTextSizes(): (number, number)
-	local mult = if UiViewportTags.isWideWidth() then WIDE_HUE_COUNT_TEXT_MULT else 1
-	return math.floor(BASE_HUE_COUNT_MAX_TEXT * mult + 0.5), math.floor(BASE_HUE_COUNT_MIN_TEXT * mult + 0.5)
+	local mult = if UiViewportTags.isWideWidth() then Consts.WIDE_HUE_COUNT_TEXT_MULT else 1
+	return math.floor(Consts.BASE_HUE_COUNT_MAX_TEXT * mult + 0.5), math.floor(Consts.BASE_HUE_COUNT_MIN_TEXT * mult + 0.5)
 end
 
 local function applyHueCountLabelSizing(countLbl: TextLabel)
@@ -2382,47 +2525,60 @@ local function getHueAvailableSlots(itemId: string, hue: number, excludePlaceId:
 	return PlacedCoralIndex.hueAvailableSlots(if plot then plot.plotId else nil, itemId, hue, owned, excludePlaceId)
 end
 
--- Paintbrush first, then hues with seeds left, then empty (0) hues on the right.
-swatchOrderForScroll = function(): { number }
-	local itemId = selectedItemId()
-	local withSeeds: { number } = {}
-	local without: { number } = {}
-	for _, sw in ipairs(PlotOutlineColors.coralSwatches()) do
-		local idx = sw.index
-		local n = if typeof(itemId) == "string" then getHueAvailableSlots(itemId, idx) else 0
-		if n > 0 then
-			table.insert(withSeeds, idx)
-		else
-			table.insert(without, idx)
+-- Swatch row order cached in do-block (register budget). forceRebuild on backpack open only.
+local resolvedSwatchOrder: () -> { number }
+local applySwatchLayoutOrder: (forceRebuild: boolean?) -> ()
+do
+	local cachedSwatchOrder: { number }? = nil
+	local cachedSwatchOrderItemId: string? = nil
+
+	local function computeSwatchOrder(): { number }
+		local itemId = selectedItemId()
+		local withSeeds: { number } = {}
+		local without: { number } = {}
+		for _, sw in ipairs(PlotOutlineColors.coralSwatches()) do
+			local idx = sw.index
+			local n = if typeof(itemId) == "string" then getHueAvailableSlots(itemId, idx) else 0
+			if n > 0 then
+				table.insert(withSeeds, idx)
+			else
+				table.insert(without, idx)
+			end
 		end
+		local order: { number } = { Consts.DEFAULT_PALETTE_SWATCH }
+		for _, idx in ipairs(withSeeds) do
+			table.insert(order, idx)
+		end
+		for _, idx in ipairs(without) do
+			table.insert(order, idx)
+		end
+		return order
 	end
-	local order: { number } = { Consts.DEFAULT_PALETTE_SWATCH }
-	for _, idx in ipairs(withSeeds) do
-		table.insert(order, idx)
-	end
-	for _, idx in ipairs(without) do
-		table.insert(order, idx)
-	end
-	return order
-end
 
-local function resolvedSwatchOrder(): { number }
-	local fn = swatchOrderForScroll
-	if fn then
-		return fn()
-	end
-	local order: { number } = { Consts.DEFAULT_PALETTE_SWATCH }
-	for _, sw in ipairs(PlotOutlineColors.coralSwatches()) do
-		table.insert(order, sw.index)
-	end
-	return order
-end
+	-- Tutorial scroll can still ask for a live order; inspect layout uses the cache.
+	swatchOrderForScroll = computeSwatchOrder
 
-local function applySwatchLayoutOrder()
-	for layoutPos, idx in ipairs(resolvedSwatchOrder()) do
-		local btn = colorSwatchBtns[idx]
-		if btn then
-			btn.LayoutOrder = layoutPos
+	resolvedSwatchOrder = function(): { number }
+		local itemId = selectedItemId()
+		local key = if typeof(itemId) == "string" then itemId else ""
+		if cachedSwatchOrder and cachedSwatchOrderItemId == key then
+			return cachedSwatchOrder
+		end
+		cachedSwatchOrder = computeSwatchOrder()
+		cachedSwatchOrderItemId = key
+		return cachedSwatchOrder
+	end
+
+	applySwatchLayoutOrder = function(forceRebuild: boolean?)
+		if forceRebuild == true then
+			cachedSwatchOrder = nil
+			cachedSwatchOrderItemId = nil
+		end
+		for layoutPos, idx in ipairs(resolvedSwatchOrder()) do
+			local btn = colorSwatchBtns[idx]
+			if btn then
+				btn.LayoutOrder = layoutPos
+			end
 		end
 	end
 end
@@ -2455,7 +2611,7 @@ local function refreshColorSeedLabels()
 			btn.BackgroundTransparency = if available <= 0 and not isActive then 0.35 else 0
 		end
 	end
-	applySwatchLayoutOrder()
+	-- Do not reshuffle LayoutOrder here — hue taps must not move 0-seed swatches.
 end
 
 local function showConfirmUnlock(targetClass: number?)
@@ -3226,6 +3382,10 @@ local function spinColorDice()
 end
 
 local function applyCoralPaint(part: BasePart, idx: number, paint: Color3, placeId: string, skipHaptic: boolean?): boolean
+	-- Invalidate in-flight paints so a slow HueCap reject can't wipe a newer tap
+	-- (that race left the coral grey while ColorIndex / undo still advanced).
+	colorSendToken += 1
+	local myToken = colorSendToken
 	activeColorIndex = idx
 	-- Finger demo taps must not yank D-pad focus back to the tutorial hue.
 	if not tutorialHueDemoSuppressNote then
@@ -3262,6 +3422,10 @@ local function applyCoralPaint(part: BasePart, idx: number, paint: Color3, place
 			if webPaint then webPaint.B else nil
 		)
 	end)
+	if myToken ~= colorSendToken then
+		-- Newer hue tap owns the mesh; never apply this response.
+		return true
+	end
 	if not RelocateController.isPartSelected(part) then
 		return ok == true and typeof(result) == "table" and result.ok == true
 	end
@@ -3378,8 +3542,8 @@ local function selectCoralColor(index: number)
 		if activeColorIndex == idx then
 			spinColorDice()
 			local ok = applyCoralPaint(part, idx, PlotOutlineColors.randomHueVariant(idx), placeId)
-			if not ok then
-				showToast("All slots in use")
+			if ok then
+				runHueColorCloseup(part)
 			end
 			return true
 		end
@@ -3398,9 +3562,9 @@ local function selectCoralColor(index: number)
 		if not ok then
 			if typeof(itemId) == "string" and getHueAvailableSlots(itemId, idx, placeId) <= 0 then
 				showConfirmColorUnlock(itemId, idx)
-			else
-				showToast("All slots in use")
 			end
+		else
+			runHueColorCloseup(part)
 		end
 		return true
 	end
@@ -3409,6 +3573,7 @@ local function selectCoralColor(index: number)
 		local applied = shuffleSelectedHueShades(idx, parts)
 		if applied > 0 then
 			UiHaptics.pulseShort()
+			runHueColorCloseup(parts[1])
 		end
 		return true
 	end
@@ -3427,7 +3592,6 @@ local function selectCoralColor(index: number)
 	local totalCandidates = 0
 	local totalApplied = 0
 	local anyLocked = false
-	local hitCap = false
 	for itemId, group in pairs(byItem) do
 		local remaining = getHueAvailableSlots(itemId, idx)
 		local targets = listBulkHueTargets(group, itemId, idx)
@@ -3449,7 +3613,6 @@ local function selectCoralColor(index: number)
 					remaining -= 1
 				end
 			else
-				hitCap = true
 				remaining = 0
 				anyLocked = true
 			end
@@ -3460,18 +3623,15 @@ local function selectCoralColor(index: number)
 		local itemId = if primary then primary:GetAttribute("OceanTD_ItemId") else nil
 		if typeof(itemId) == "string" then
 			showConfirmColorUnlock(itemId, idx)
-			return true
 		end
-		showToast("All slots in use")
 		return true
 	end
 	if totalApplied > 0 and totalApplied < totalCandidates then
 		showToast("Only some corals got this color")
-	elseif hitCap and totalApplied == 0 then
-		showToast("All slots in use")
 	end
 	if totalApplied > 0 then
 		UiHaptics.pulseShort()
+		runHueColorCloseup(parts[1])
 	end
 	refreshColorSwatches()
 	return true
@@ -3507,6 +3667,7 @@ local function selectDefaultPalette(): boolean
 		playDefaultPaletteSound()
 		flashDefaultSwatchStroke()
 		UiHaptics.pulseShort()
+		runHueColorCloseup(parts[1])
 	end
 	colorSendToken += 1
 	local myToken = colorSendToken
@@ -3544,6 +3705,7 @@ local function rollActiveHueShade()
 		return
 	end
 	UiHaptics.pulseShort()
+	runHueColorCloseup(parts[1])
 end
 
 local function refreshHeaderSeedBadge()
@@ -3569,70 +3731,99 @@ local function fillHeader(part: BasePart)
 	end
 	refreshHeaderSeedBadge()
 	syncColorFromPart(part)
+	-- Backpack open often fires before a coral is selected (nil itemId → useless sort).
+	-- Apply once the inspect target is known so 0-count hues go to the end.
+	-- Cached by itemId: same-species reselect / hue taps do not reshuffle.
+	applySwatchLayoutOrder()
 end
 
-local function refreshLifeRows(part: BasePart?)
-	if not fedLbl or not wavesLbl then
-		return
-	end
-	local fed = 0
-	local waves = 0
-	if part then
-		WaveSim.noteCoralPart(part)
-		local pid = placeIdOf(part)
-		if pid then
-			fed, waves = WaveSim.getCoralLifeStats(pid)
-		end
-		local a = part:GetAttribute("OceanTD_CoralFedTotal")
-		local attrFed = 0
-		if typeof(a) == "number" then
-			attrFed = math.floor(a)
-		elseif typeof(a) == "string" then
-			attrFed = math.floor(tonumber(a) or 0)
-		end
-		local b = part:GetAttribute("OceanTD_CoralWavesTotal")
-		local attrWaves = 0
-		if typeof(b) == "number" then
-			attrWaves = math.floor(b)
-		elseif typeof(b) == "string" then
-			attrWaves = math.floor(tonumber(b) or 0)
-		end
-		fed = math.max(fed, attrFed)
-		waves = math.max(waves, attrWaves)
-	end
-	fedLbl.Text = "Fed: " .. tostring(math.max(0, fed))
-	wavesLbl.Text = "Waves: " .. tostring(math.max(0, waves))
-end
+do
+	local fedAttrConn: RBXScriptConnection? = nil
+	local wavesAttrConn: RBXScriptConnection? = nil
+	local colorAttrConn: RBXScriptConnection? = nil
+	local lifePart: BasePart? = nil
 
-local function clearLifeConns()
-	if fedAttrConn then
-		fedAttrConn:Disconnect()
-		fedAttrConn = nil
-	end
-	if wavesAttrConn then
-		wavesAttrConn:Disconnect()
-		wavesAttrConn = nil
-	end
-	lifePart = nil
-end
-
-local function bindLifeAttrs(part: BasePart)
-	clearLifeConns()
-	lifePart = part
-	refreshLifeRows(part)
-	fedAttrConn = part:GetAttributeChangedSignal("OceanTD_CoralFedTotal"):Connect(function()
-		if lifePart ~= part then
+	refreshLifeRows = function(part: BasePart?)
+		if not fedLbl or not wavesLbl then
 			return
 		end
-		refreshLifeRows(part)
-	end)
-	wavesAttrConn = part:GetAttributeChangedSignal("OceanTD_CoralWavesTotal"):Connect(function()
-		if lifePart ~= part then
-			return
+		local fed = 0
+		local waves = 0
+		if part then
+			WaveSim.noteCoralPart(part)
+			local pid = placeIdOf(part)
+			if pid then
+				fed, waves = WaveSim.getCoralLifeStats(pid)
+			end
+			local a = part:GetAttribute("OceanTD_CoralFedTotal")
+			local attrFed = 0
+			if typeof(a) == "number" then
+				attrFed = math.floor(a)
+			elseif typeof(a) == "string" then
+				attrFed = math.floor(tonumber(a) or 0)
+			end
+			local b = part:GetAttribute("OceanTD_CoralWavesTotal")
+			local attrWaves = 0
+			if typeof(b) == "number" then
+				attrWaves = math.floor(b)
+			elseif typeof(b) == "string" then
+				attrWaves = math.floor(tonumber(b) or 0)
+			end
+			fed = math.max(fed, attrFed)
+			waves = math.max(waves, attrWaves)
 		end
+		fedLbl.Text = "Fed: " .. tostring(math.max(0, fed))
+		wavesLbl.Text = "Waves: " .. tostring(math.max(0, waves))
+	end
+
+	clearLifeConns = function()
+		if fedAttrConn then
+			fedAttrConn:Disconnect()
+			fedAttrConn = nil
+		end
+		if wavesAttrConn then
+			wavesAttrConn:Disconnect()
+			wavesAttrConn = nil
+		end
+		if colorAttrConn then
+			colorAttrConn:Disconnect()
+			colorAttrConn = nil
+		end
+		lifePart = nil
+	end
+
+	bindLifeAttrs = function(part: BasePart)
+		clearLifeConns()
+		lifePart = part
 		refreshLifeRows(part)
-	end)
-end
+		fedAttrConn = part:GetAttributeChangedSignal("OceanTD_CoralFedTotal"):Connect(function()
+			if lifePart ~= part then
+				return
+			end
+			refreshLifeRows(part)
+		end)
+		wavesAttrConn = part:GetAttributeChangedSignal("OceanTD_CoralWavesTotal"):Connect(function()
+			if lifePart ~= part then
+				return
+			end
+			refreshLifeRows(part)
+		end)
+		-- Server hue undo / remote paint: keep swatch + relocate flash color in sync.
+		colorAttrConn = part:GetAttributeChangedSignal("OceanTD_ColorIndex"):Connect(function()
+			if lifePart ~= part or not root or not root.Visible then
+				return
+			end
+			syncColorFromPart(part)
+			-- Defer so RestR/G/B from the same undo replicate before we refresh the flash cache.
+			task.defer(function()
+				if lifePart ~= part then
+					return
+				end
+				RelocateController.syncPartRestColor(part)
+			end)
+		end)
+	end
+end -- life attrs do-block
 
 local function setVisible(on: boolean)
 	if root then
@@ -3667,6 +3858,7 @@ local function setVisible(on: boolean)
 		RelocateController.setInspectPanelVisible(false)
 		clearLifeConns()
 		cineToken += 1
+		abortHueCam() -- also cancels pending range-preview restore
 		-- In-flight size cine may have left the new mesh LTM-hidden; unhide on close.
 		revealAllCinePrepParts(nil)
 		onInspectVisibilityForTutorial(false)
@@ -3995,6 +4187,7 @@ function CoralInspectPanel.bind(panel: GuiObject, catalogFrame: GuiObject)
 			selectCoralColor(idx)
 		end)
 	end
+	applySwatchLayoutOrder()
 
 	-- Mouse/touch drag to slide the color row (scroll wheel still works).
 	local COLOR_DRAG_PX = 8
@@ -4157,7 +4350,7 @@ function CoralInspectPanel.bind(panel: GuiObject, catalogFrame: GuiObject)
 			row.Size = UDim2.new(1, 0, 0, 15)
 			row.LayoutOrder = li
 			row.Font = UiTheme.Font
-			row.Text = formatStatLine(STAT_ICONS[li], n, false)
+			row.Text = formatStatLine(Consts.STAT_ICONS[li], n, false)
 			row.TextColor3 = Consts.WHITE
 			row.TextSize = 13
 			row.TextXAlignment = Enum.TextXAlignment.Center
@@ -4292,13 +4485,13 @@ function CoralInspectPanel.bind(panel: GuiObject, catalogFrame: GuiObject)
 		boxPad.Parent = box
 
 		local textSize = math.clamp(math.floor(lineH * 0.85), 14, 28)
-		for i, name in ipairs(STAT_KEY_NAMES) do
+		for i, name in ipairs(Consts.STAT_KEY_NAMES) do
 			local row = Instance.new("TextLabel")
 			row.BackgroundTransparency = 1
 			row.Size = UDim2.new(1, 0, 0, lineH)
 			row.LayoutOrder = i
 			row.Font = UiTheme.Font
-			row.Text = string.format("%s  %s", STAT_ICONS[i], name)
+			row.Text = string.format("%s  %s", Consts.STAT_ICONS[i], name)
 			row.TextColor3 = Consts.WHITE
 			row.TextSize = textSize
 			row.TextXAlignment = Enum.TextXAlignment.Center
@@ -4408,6 +4601,17 @@ function CoralInspectPanel.bind(panel: GuiObject, catalogFrame: GuiObject)
 		refreshHeaderSeedBadge()
 		if root and root.Visible then
 			refreshColorSwatches()
+		end
+	end)
+	InventoryState.onOpenChanged(function(isOpen: boolean)
+		if not isOpen then
+			return
+		end
+		-- Force reshuffle when backpack opens (e.g. 0-count hues after painting).
+		-- If no coral is selected yet, fillHeader applies the real order on select.
+		applySwatchLayoutOrder(true)
+		if root and root.Visible then
+			refreshColorSeedLabels()
 		end
 	end)
 	PlacedCoralIndex.onChanged(function()
@@ -4664,6 +4868,11 @@ function CoralInspectPanel.tutorialDemoApplyHue(): boolean
 		return false
 	end
 	return ok
+end
+
+-- Bump so an in-flight RequestCoralColor response won't overwrite an undo / newer tap.
+function CoralInspectPanel.invalidatePendingHuePaint()
+	colorSendToken += 1
 end
 
 return CoralInspectPanel

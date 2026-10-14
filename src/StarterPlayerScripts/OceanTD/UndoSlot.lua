@@ -265,13 +265,19 @@ function UndoSlot.requestUndo()
 	playUndoSound()
 	playSlot3UndoPressFeedback()
 
-	-- Local selection undo (no yield).
-	if RelocateController.tryRestoreSelectionUndo() then
-		undoBusy = false
-		deps.log("Undo", "selection")
-		return
+	-- Single-coral inspect: prefer server undo (hue / place / move) so Undo steps
+	-- back through paints instead of deselecting. Multi-select still peels locally.
+	local preferServerUndo = RelocateController.isActive() and not RelocateController.isMultiSelect()
+	if not preferServerUndo then
+		if RelocateController.tryRestoreSelectionUndo() then
+			undoBusy = false
+			deps.log("Undo", "selection")
+			return
+		end
 	end
-	if RelocateController.isActive() then
+	-- Abort an in-progress drag so move state can't fight the undo; keep idle
+	-- inspect selection so hue undos can step back while the panel stays open.
+	if RelocateController.isDragging() or RelocateController.isCoralMovePointerDown() then
 		RelocateController.cancel(true)
 	end
 
@@ -282,6 +288,14 @@ function UndoSlot.requestUndo()
 		undoBusy = false
 		if ok and typeof(result) == "table" and result.ok then
 			deps.log("Undo", result.kind)
+			-- Relocate flash caches rest color; refresh after server hue restore.
+			if result.kind == "color" then
+				local Inspect = require(script.Parent:WaitForChild("CoralInspectPanel"))
+				Inspect.invalidatePendingHuePaint()
+				task.defer(function()
+					RelocateController.syncSelectedRestColor()
+				end)
+			end
 			return
 		end
 		local code = if ok and typeof(result) == "table" then result.errorCode else "Fail"

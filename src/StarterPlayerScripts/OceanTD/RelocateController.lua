@@ -49,6 +49,10 @@ local RelocateController = {}
 
 local C = RelocateConsts
 
+-- Forward-declared: chrome markDown (makeUi) runs before the pinch do-block assigns these.
+local pinchOrMultiTouch: () -> boolean
+local abortCoralDragForPinch: () -> ()
+
 local cinematicHold = false
 local inspectModal = false
 local inspectPanelVisible = false
@@ -1363,9 +1367,7 @@ local function applyBrainAtCenter(surfacePos: Vector3)
 	moveGridAnchor = surfacePos
 end
 
--- Pinch helpers nested for Luau 200-local chunk budget.
-local pinchOrMultiTouch: () -> boolean
-local abortCoralDragForPinch: () -> ()
+-- Pinch helpers nested for Luau 200-local chunk budget (assigned into forward decls above).
 do
 	pinchOrMultiTouch = function(): boolean
 		return CamPinchZoom.isPinchOrMultiTouch()
@@ -2190,6 +2192,100 @@ function RelocateController.syncHomeToPart(target: BasePart?)
 		SelectRing.ensure(selectRing, p, playerGui)
 		syncChrome()
 	end
+end
+
+--[[
+	Size upgrade restyles on the server at the server's GridAnchor. Client drag /
+	soft-plant park only move the mesh locally — push that seat to the server
+	first so upgrade doesn't snap the coral back.
+	Keeps selection / soft-plant bridge open (unlike commit).
+]]
+function RelocateController.ensureServerPosMatchesClient(): boolean
+	if not active or not part or not part.Parent then
+		return true
+	end
+	if busy and not cinematicHold then
+		return false
+	end
+	local toPos = moveGridAnchor or CoralVisual.readGridAnchor(part) or part.Position
+	local fromPos = gridAnchorPos or originPos or toPos
+	local needMove = hasMoved == true or placeConfirmBridge == true
+	local needYaw = hasRotated == true
+	if not needMove and not needYaw then
+		return true
+	end
+	if needMove and (toPos - fromPos).Magnitude < 0.04 and not needYaw then
+		-- Soft-plant bridge still needs a same-cell save if the park never RequestMove'd.
+		if not placeConfirmBridge then
+			hasMoved = false
+			return true
+		end
+	end
+	if not validSpot and needMove then
+		return false
+	end
+	local id = placeId
+	if typeof(id) ~= "string" or id == "" then
+		return false
+	end
+	local yaw = relocateFacingYaw
+	local parentId: string? = nil
+	if BrainStack.isBrainId(part:GetAttribute("OceanTD_SpeciesId")) then
+		local snap = BrainSnapPreview.getActive()
+		if snap and snap.valid and typeof(snap.hostPlaceId) == "string" and snap.hostPlaceId ~= "" then
+			parentId = snap.hostPlaceId
+		end
+	end
+	local wasBusy = busy
+	busy = true
+	local ok, result = pcall(function()
+		return Remotes.getFunction("RequestMove"):InvokeServer(id, fromPos, toPos, yaw, parentId)
+	end)
+	busy = wasBusy
+	if not ok or typeof(result) ~= "table" or result.ok ~= true then
+		return false
+	end
+	local finalPos = if typeof(result.worldPos) == "Vector3" then result.worldPos else toPos
+	local sid = part:GetAttribute("OceanTD_SpeciesId")
+	if BrainStack.isBrainId(sid) then
+		local finalYaw = if typeof(result.facingYaw) == "number" then result.facingYaw else yaw
+		if typeof(finalYaw) ~= "number" then
+			finalYaw = CoralVisual.readFacingYaw(part)
+		end
+		local yawCf = CFrame.Angles(0, finalYaw :: number, 0)
+		local mir = ClientPlot.get()
+		if mir then
+			yawCf = (mir.cframe - mir.cframe.Position) * yawCf
+		end
+		part.CFrame = CFrame.new(finalPos) * yawCf
+		part:SetAttribute("OceanTD_FacingYaw", finalYaw)
+		part:SetAttribute("OceanTD_GridAnchorX", finalPos.X)
+		part:SetAttribute("OceanTD_GridAnchorY", finalPos.Y)
+		part:SetAttribute("OceanTD_GridAnchorZ", finalPos.Z)
+	elseif CoralVisual.needsFacingYaw(sid) then
+		local finalYaw = if typeof(result.facingYaw) == "number" then result.facingYaw else yaw
+		local mir = ClientPlot.get()
+		CoralVisual.alignMeshToSurface(part, finalPos, finalYaw, nil, if mir then mir.cframe else nil)
+	elseif CoralVisual.isMeshSpecies(sid) then
+		CoralVisual.alignMeshToSurface(part, finalPos)
+	else
+		part.CFrame = CFrame.new(finalPos)
+		part:SetAttribute("OceanTD_GridAnchorX", finalPos.X)
+		part:SetAttribute("OceanTD_GridAnchorY", finalPos.Y)
+		part:SetAttribute("OceanTD_GridAnchorZ", finalPos.Z)
+	end
+	PlacedCoralIndex.reindex(part)
+	gridAnchorPos = finalPos
+	originPos = finalPos
+	moveGridAnchor = finalPos
+	hasMoved = false
+	hasRotated = false
+	originFacingYaw = CoralVisual.readFacingYaw(part)
+	relocateFacingYaw = originFacingYaw
+	validSpot = true
+	rejectReason = nil
+	syncChrome()
+	return true
 end
 
 function RelocateController.clearHoverHighlight()
