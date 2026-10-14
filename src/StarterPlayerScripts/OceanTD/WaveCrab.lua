@@ -595,20 +595,22 @@ function WaveCrab.stunQueryRadius(shell: BasePart): number
 	return shellR + 8
 end
 
-local function paintStunWhitePlastic(p: BasePart)
+-- Crab / urchin stun: ice-bleached look (clears MeshPart textures so Color shows).
+local STUN_BLEACH_COLOR = Color3.fromRGB(255, 242, 197)
+local function paintStunBleached(p: BasePart)
 	if p:IsA("MeshPart") then
 		p.TextureID = ""
 	end
-	p.Material = Enum.Material.Plastic
-	p.Color = Color3.new(1, 1, 1)
+	p.Material = Enum.Material.Ice
+	p.Color = STUN_BLEACH_COLOR
 end
 
 function WaveCrab.stunCoralPart(part: BasePart)
 	part:SetAttribute("OceanTD_CrabStunned", true)
-	paintStunWhitePlastic(part)
+	paintStunBleached(part)
 	local accent = CoralVisual.getAccentPart(part)
 	if accent then
-		paintStunWhitePlastic(accent)
+		paintStunBleached(accent)
 	end
 end
 
@@ -688,7 +690,7 @@ function WaveCrab.clearCoralStun(part: BasePart, fade: boolean)
 	local accentColor = if typeof(webColor) == "number" and typeof(webG) == "number" and typeof(webB) == "number"
 		then Color3.new(webColor, webG, webB)
 		else color
-	-- Restore authored materials immediately; fade only color so Plastic doesn't linger.
+	-- Restore authored materials immediately; fade only color so Ice bleach doesn't linger.
 	part.Material = mat
 	if accent then
 		accent.Material = mat

@@ -1,7 +1,8 @@
 --!strict
 --[[
 	Relocate a previously placed coral while the backpack is open.
-	Click coral → move icon + X scale up from its center.
+	Tap coral → select (move icon + inspect). Drag ONLY from the green move disc / white ring
+	so accidental presses don't slide corals. Switch selection by tapping another coral.
 	X (unmoved) → close tool. Drag / rotate saves immediately on release (undo covers mistakes).
 	Recycle still uses ✓ confirm.
 ]]
@@ -42,6 +43,7 @@ local RelocateHitTest = require(script.Parent:WaitForChild("RelocateHitTest"))
 local BrainSnapPreview = require(script.Parent:WaitForChild("BrainSnapPreview"))
 local RelocateMultiSelect = require(script.Parent:WaitForChild("RelocateMultiSelect"))
 local RelocatePickHover = require(script.Parent:WaitForChild("RelocatePickHover"))
+local CamPinchZoom = require(script.Parent:WaitForChild("CamPinchZoom"))
 
 local RelocateController = {}
 
@@ -123,6 +125,8 @@ local fingerDown = false
 local pressOrigin: Vector2? = nil
 local dragging = false
 local grabFromMoveIcon = false
+-- Pinch / second finger aborted this press — do not auto-commit on release.
+local suppressMoveCommit = false
 local relocateFacingYaw: number? = nil
 local originFacingYaw: number? = nil
 local hasRotated = false
@@ -691,6 +695,11 @@ local function makeUi()
 	recyclePlus = plus
 
 	local function markDown(claimed: string?, input: InputObject?)
+		-- Pinch / two-finger: never arm ✓/X/rot (second finger often lands on rot chrome).
+		if pinchOrMultiTouch() then
+			PlaceConfirmChrome.stopRotateHold()
+			return
+		end
 		-- Sliding over cancel/rot while dragging the coral must not activate them.
 		if (dragging or fingerDown) and not chromeBtnDown then
 			return
@@ -1354,11 +1363,109 @@ local function applyBrainAtCenter(surfacePos: Vector3)
 	moveGridAnchor = surfacePos
 end
 
+-- Pinch helpers nested for Luau 200-local chunk budget.
+local pinchOrMultiTouch: () -> boolean
+local abortCoralDragForPinch: () -> ()
+do
+	pinchOrMultiTouch = function(): boolean
+		return CamPinchZoom.isPinchOrMultiTouch()
+	end
+
+	-- Snap coral back to home without deselecting (pinch aborted a drag).
+	local function snapDragHomeKeepSelection()
+		local p = part
+		local origin = originPos
+		if not p or not p.Parent then
+			return
+		end
+		local sid = p:GetAttribute("OceanTD_SpeciesId")
+		local homeAnchor = gridAnchorPos or origin
+		if BrainStack.isBrainId(sid) and homeAnchor then
+			local yaw = originFacingYaw
+			if typeof(yaw) ~= "number" then
+				yaw = CoralVisual.readFacingYaw(p)
+			end
+			local yawCf = CFrame.Angles(0, yaw, 0)
+			local mir = ClientPlot.get()
+			if mir then
+				yawCf = (mir.cframe - mir.cframe.Position) * yawCf
+			end
+			p.CFrame = CFrame.new(homeAnchor) * yawCf
+			p:SetAttribute("OceanTD_FacingYaw", yaw)
+			p:SetAttribute("OceanTD_GridAnchorX", homeAnchor.X)
+			p:SetAttribute("OceanTD_GridAnchorY", homeAnchor.Y)
+			p:SetAttribute("OceanTD_GridAnchorZ", homeAnchor.Z)
+			relocateFacingYaw = yaw
+			moveGridAnchor = homeAnchor
+		elseif CoralVisual.needsFacingYaw(sid) and homeAnchor then
+			local yaw = originFacingYaw
+			if typeof(yaw) ~= "number" then
+				yaw = CoralVisual.readFacingYaw(p)
+			end
+			local mir = ClientPlot.get()
+			CoralVisual.alignMeshToSurface(p, homeAnchor, yaw, nil, if mir then mir.cframe else nil)
+			relocateFacingYaw = yaw
+			moveGridAnchor = homeAnchor
+		elseif CoralVisual.isMeshSpecies(sid) and homeAnchor then
+			CoralVisual.alignMeshToSurface(p, homeAnchor)
+			moveGridAnchor = homeAnchor
+		elseif origin then
+			p.CFrame = CFrame.new(origin)
+			p:SetAttribute("OceanTD_GridAnchorX", origin.X)
+			p:SetAttribute("OceanTD_GridAnchorY", origin.Y)
+			p:SetAttribute("OceanTD_GridAnchorZ", origin.Z)
+			moveGridAnchor = origin
+		end
+		PlacedCoralIndex.reindex(p)
+		hasMoved = false
+		validSpot = true
+		rejectReason = nil
+		ClientPlot.setOutOfPlotFlash(false)
+		clearBlockHighlight()
+		syncMoveIconToGround()
+		syncWarnLabel()
+		syncChrome()
+	end
+
+	abortCoralDragForPinch = function()
+		if not active or placeConfirmBridge then
+			return
+		end
+		-- Always kill rotate-hold: second finger / pinch often mis-hits rot chrome and
+		-- beginRotateHold would keep stepping every 0.5s until plant/backpack close.
+		PlaceConfirmChrome.stopRotateHold()
+		chromeBtnDown = false
+		chromePressTarget = nil
+		chromeClaimSource = nil
+		if not fingerDown and not dragging then
+			return
+		end
+		suppressMoveCommit = true
+		local moved = hasMoved
+		fingerDown = false
+		pressOrigin = nil
+		dragging = false
+		grabFromMoveIcon = false
+		pendingCoralSwitch = nil
+		pendingCoralSwitchScreen = nil
+		RelocateMultiSelect.clearPendingInput()
+		if moved then
+			snapDragHomeKeepSelection()
+		end
+	end
+end -- pinch helpers do-block
+
 local function updateAt(worldPos: Vector3)
 	if recyclePending then
 		return
 	end
 	if cinematicHold then
+		return
+	end
+	-- Soft-plant bridge: PlacementController owns pinch abort + drag. Never no-op
+	-- preview moves here or the planted coral freezes until PLANT.
+	if not placeConfirmBridge and pinchOrMultiTouch() then
+		abortCoralDragForPinch()
 		return
 	end
 	if not part or not originPos then
@@ -1691,6 +1798,7 @@ local function clearState()
 	pressOrigin = nil
 	dragging = false
 	grabFromMoveIcon = false
+	suppressMoveCommit = false
 	RelocateMultiSelect.clearPendingInput()
 	cinematicHold = false
 	stopMoveIconDropTween()
@@ -2478,10 +2586,12 @@ local function commitRecycle()
 end
 
 -- Dark green pop: scale up 0.2s, then scale to 0 over 0.5s on Confirm press.
-local CONFIRM_SCALE_UP_SEC = 0.2
-local CONFIRM_SCALE_DOWN_SEC = 0.5
-local CONFIRM_SCALE_PEAK = 1.2
-local CONFIRM_DARK_GREEN = Color3.fromRGB(35, 85, 45)
+local CONFIRM_FX = {
+	scaleUpSec = 0.2,
+	scaleDownSec = 0.5,
+	scalePeak = 1.2,
+	darkGreen = Color3.fromRGB(35, 85, 45),
+}
 
 local function beginConfirmPressedLook()
 	local btn = checkBtn
@@ -2511,7 +2621,7 @@ local function beginConfirmPressedLook()
 	btn.Active = false
 	btn.Text = if isUsingGamepad() then "A" else ""
 	btn.TextTransparency = if isUsingGamepad() then 0 else 1
-	btn.BackgroundColor3 = CONFIRM_DARK_GREEN
+	btn.BackgroundColor3 = CONFIRM_FX.darkGreen
 	local checkIcon = PlaceConfirmChrome.ensureConfirmCheckIcon(btn)
 	checkIcon.Visible = not isUsingGamepad()
 	local scale = btn:FindFirstChildOfClass("UIScale")
@@ -2528,8 +2638,8 @@ local function beginConfirmPressedLook()
 	task.spawn(function()
 		local twUp = TweenService:Create(
 			scale,
-			TweenInfo.new(CONFIRM_SCALE_UP_SEC, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
-			{ Scale = CONFIRM_SCALE_PEAK }
+			TweenInfo.new(CONFIRM_FX.scaleUpSec, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+			{ Scale = CONFIRM_FX.scalePeak }
 		)
 		confirmOutroTween = twUp
 		twUp:Play()
@@ -2540,7 +2650,7 @@ local function beginConfirmPressedLook()
 		end
 		local twDown = TweenService:Create(
 			scale,
-			TweenInfo.new(CONFIRM_SCALE_DOWN_SEC, Enum.EasingStyle.Quad, Enum.EasingDirection.In),
+			TweenInfo.new(CONFIRM_FX.scaleDownSec, Enum.EasingStyle.Quad, Enum.EasingDirection.In),
 			{ Scale = 0 }
 		)
 		confirmOutroTween = twDown
@@ -2563,7 +2673,7 @@ local function playConfirmSuccessOutro(thenDone: () -> ())
 		return
 	end
 	confirmOutroPlaying = true
-	btn.BackgroundColor3 = CONFIRM_DARK_GREEN
+	btn.BackgroundColor3 = CONFIRM_FX.darkGreen
 	task.spawn(function()
 		while not confirmOutroDone do
 			task.wait()
@@ -2574,7 +2684,7 @@ local function playConfirmSuccessOutro(thenDone: () -> ())
 	end)
 end
 
-function RelocateController.commit()
+function RelocateController.commit(opts: { silent: boolean? }?)
 	if not active then
 		return
 	end
@@ -2597,12 +2707,44 @@ function RelocateController.commit()
 	if not part or not originPos or not itemId then
 		return
 	end
+	local silent = opts ~= nil and opts.silent == true
 	local toPos = moveGridAnchor or CoralVisual.readGridAnchor(part) or part.Position
 	local fromPos = gridAnchorPos or originPos
 	local id = placeId
 	local yaw = relocateFacingYaw
 	busy = true
-	beginConfirmPressedLook()
+	if silent then
+		-- Drag/stick drop: plant immediately — don't flash PLANT chrome as if auto-pressed.
+		-- Keep confirmOutroPlaying so Heartbeat syncChrome can't re-show buttons mid-save.
+		confirmOutroPlaying = true
+		confirmOutroDone = true
+		confirmOutroGen += 1
+		if confirmOutroTween then
+			confirmOutroTween:Cancel()
+			confirmOutroTween = nil
+		end
+		if checkBtn then
+			checkBtn.Visible = false
+		end
+		if cancelBtn then
+			cancelBtn.Visible = false
+		end
+		if rotLeftBtn then
+			rotLeftBtn.Visible = false
+		end
+		if rotRightBtn then
+			rotRightBtn.Visible = false
+		end
+		if recycleBtn then
+			recycleBtn.Visible = false
+		end
+		if moveIcon then
+			moveIcon.Visible = false
+		end
+		setRelocateChromeAttr(false)
+	else
+		beginConfirmPressedLook()
+	end
 	PlaceVfx.playSound(toPos)
 	local rf = Remotes.getFunction("RequestMove")
 	local parentId: string? = nil
@@ -2651,9 +2793,13 @@ function RelocateController.commit()
 		end
 		PlaceVfx.playVisuals(toPos, baseColor or Color3.fromRGB(100, 200, 255))
 		log("Saved move")
-		playConfirmSuccessOutro(function()
+		if silent then
 			clearState()
-		end)
+		else
+			playConfirmSuccessOutro(function()
+				clearState()
+			end)
+		end
 	else
 		local code = typeof(result) == "table" and result.errorCode or "Reject"
 		log("Move rejected", code)
@@ -2730,19 +2876,12 @@ end
 -- Soft-plant Confirm owns PLANT/rot chrome; Placement forwards move-handle drags here
 -- so the real coral previews like a normal relocate (ignore self / brain snap / align).
 function RelocateController.bridgePreviewAt(worldPos: Vector3): (boolean, string?)
-	if not placeConfirmBridge or not active or busy or recyclePending then
+	-- busy/cine/recycle: signal "bridge didn't move" so PlaceSoftPlant can alignPartDirect.
+	if not placeConfirmBridge or not active or recyclePending then
 		return false, nil
 	end
-	-- Size-cine can leave cinematicHold true; still report validity so place PLANT chrome returns.
-	if cinematicHold then
-		if not part or not originPos then
-			return false, nil
-		end
-		local surfacePos = resolveRelocatePos(worldPos)
-		local ok, reason = evaluate(surfacePos)
-		validSpot = ok
-		rejectReason = reason
-		return ok, reason
+	if busy or cinematicHold then
+		return false, nil
 	end
 	updateAt(worldPos)
 	return validSpot == true, rejectReason
@@ -2916,14 +3055,6 @@ function RelocateController.isOverMoveHandle(screenPos: Vector2?): boolean
 	return isOverMoveIcon(pos :: Vector2)
 end
 
-local function isOverChrome(screenPos: Vector2): boolean
-	return RelocateHitTest.isOverChrome(chromeRefs(), screenPos)
-end
-
-local function resolveRelocateChrome(screenPos: Vector2): string?
-	return RelocateHitTest.resolveChrome(chromeRefs(), screenPos)
-end
-
 table.insert(inputConns, UserInputService.InputBegan:Connect(function(input, _processed)
 	local isMouse = input.UserInputType == Enum.UserInputType.MouseButton1
 	local isTouch = input.UserInputType == Enum.UserInputType.Touch
@@ -2970,6 +3101,12 @@ table.insert(inputConns, UserInputService.InputBegan:Connect(function(input, _pr
 		if not isMouse and not isTouch then
 			return
 		end
+		-- Pinch / second finger first: abort drag and never claim ✓/X/rot (mis-hits start
+		-- a sticky beginRotateHold that keeps spinning the coral).
+		if pinchOrMultiTouch() or (isTouch and (fingerDown or dragging)) then
+			abortCoralDragForPinch()
+			return
+		end
 		local screenPos = PlaceConfirmHitTest.pointerScreenPos(input)
 		-- World picks: GetMouseLocation tracks mouse and touch in viewport space.
 		-- Do not use PlaceConfirmHitTest's touch+inset for rays (that parks hits above the finger).
@@ -2977,7 +3114,7 @@ table.insert(inputConns, UserInputService.InputBegan:Connect(function(input, _pr
 		-- Move handle wins over ✓/X/recycle so grabbing the icon starts a drag.
 		local grabHandle = isOverMoveIcon(screenPos)
 		if not grabHandle then
-			local chromeTarget = resolveRelocateChrome(screenPos)
+			local chromeTarget = RelocateHitTest.resolveChrome(chromeRefs(), screenPos)
 			if chromeTarget then
 				claimChromeTarget(chromeTarget, "uis")
 				pendingCoralSwitch = nil
@@ -3018,8 +3155,8 @@ table.insert(inputConns, UserInputService.InputBegan:Connect(function(input, _pr
 			return
 		end
 		-- Never world-pick through chrome. Never default unresolved hits to Cancel.
-		if isOverChrome(screenPos) then
-			local resolved = resolveRelocateChrome(screenPos)
+		if RelocateHitTest.isOverChrome(chromeRefs(), screenPos) then
+			local resolved = RelocateHitTest.resolveChrome(chromeRefs(), screenPos)
 			if resolved then
 				claimChromeTarget(resolved, "uis")
 			end
@@ -3049,6 +3186,7 @@ table.insert(inputConns, UserInputService.InputBegan:Connect(function(input, _pr
 		-- Drag ONLY from the green pick disc. Mesh outside the disc (med/large) must
 		-- not steal plot pan — FreeCam owns those presses.
 		if grabHandle then
+			suppressMoveCommit = false
 			fingerDown = true
 			pressOrigin = pickPos
 			dragging = true
@@ -3059,12 +3197,8 @@ table.insert(inputConns, UserInputService.InputBegan:Connect(function(input, _pr
 		end
 		local other = pickPlacedCoral(pickPos)
 		if other and other ~= part and not pointerHitsSelectedCoral(pickPos) then
-			-- Press-drag another coral: switch + Drag B follow in one gesture.
+			-- Tap another coral: select only — never start a drag on the same press.
 			RelocateController.begin(other)
-			fingerDown = true
-			pressOrigin = pickPos
-			dragging = true
-			grabFromMoveIcon = true
 			pendingCoralSwitch = nil
 			pendingCoralSwitchScreen = nil
 			return
@@ -3089,7 +3223,8 @@ table.insert(inputConns, UserInputService.InputBegan:Connect(function(input, _pr
 		return
 	end
 
-	-- Idle pick: backpack open — open move tool on press (don't require drag).
+	-- Idle pick: backpack open — select on press only (no drag). Move requires a
+	-- second press on the green disc / white ring after the coral is selected.
 	-- Ignore `processed`: open backpack GUIs often mark clicks processed even over the world.
 	-- Skip while a coral is armed for place — touches aim/place instead of relocating.
 	if not isMouse and not isTouch then
@@ -3109,19 +3244,32 @@ table.insert(inputConns, UserInputService.InputBegan:Connect(function(input, _pr
 		pendingPickScreen = nil
 		return
 	end
+	-- Pinch / two-finger: don't open relocate on an accidental coral under the fingers.
+	if pinchOrMultiTouch() then
+		pendingPick = nil
+		pendingPickScreen = nil
+		return
+	end
 	local hit = pickPlacedCoral(screenPos)
 	if hit then
 		pendingPick = hit
 		pendingPickScreen = screenPos
 		RelocateController.begin(hit)
-		-- Drag B: same press can hold-drag — coral follows cursor/finger (no second click).
-		fingerDown = true
-		pressOrigin = screenPos
-		dragging = true
-		grabFromMoveIcon = true
 	else
 		pendingPick = nil
 		pendingPickScreen = nil
+	end
+end))
+
+table.insert(inputConns, UserInputService.TouchPinch:Connect(function(
+	_touchPositions: { any },
+	_scale: number,
+	_velocity: number,
+	state: Enum.UserInputState,
+	_gameProcessed: boolean
+)
+	if state == Enum.UserInputState.Begin then
+		abortCoralDragForPinch()
 	end
 end))
 
@@ -3134,6 +3282,10 @@ table.insert(inputConns, UserInputService.InputChanged:Connect(function(input, _
 	end
 	-- Only continue a drag whose press started on the coral / green disc (not empty pan).
 	if not fingerDown and not dragging then
+		return
+	end
+	if pinchOrMultiTouch() then
+		abortCoralDragForPinch()
 		return
 	end
 	local now = pointerScreenPos()
@@ -3176,7 +3328,8 @@ finalizeMoveOrRotateIfReady = function()
 		return
 	end
 	if validSpot then
-		RelocateController.commit()
+		-- Silent: no PLANT button press/outro flash after a drag drop.
+		RelocateController.commit({ silent = true })
 	else
 		-- Invalid drop: revert instead of leaving a stuck confirm state.
 		RelocateController.cancel()
@@ -3197,6 +3350,7 @@ table.insert(inputConns, UserInputService.InputEnded:Connect(function(input, _pr
 	local shiftTarget, shiftOrigin = RelocateMultiSelect.getPendingShift()
 	local clearSel = RelocateMultiSelect.getPendingClear()
 	local wasDragging = dragging
+	local skipCommit = suppressMoveCommit
 	local chromeTarget = chromePressTarget
 	local wasChrome = chromeBtnDown
 	chromeBtnDown = false
@@ -3206,9 +3360,18 @@ table.insert(inputConns, UserInputService.InputEnded:Connect(function(input, _pr
 	pressOrigin = nil
 	dragging = false
 	grabFromMoveIcon = false
+	suppressMoveCommit = false
 	pendingCoralSwitch = nil
 	pendingCoralSwitchScreen = nil
 	RelocateMultiSelect.clearPendingInput()
+
+	-- Pinch / multi-touch aborted this drag — never auto-commit the move.
+	if skipCommit then
+		PlaceConfirmChrome.stopRotateHold()
+		pendingPick = nil
+		pendingPickScreen = nil
+		return
+	end
 
 	-- Trust the press target (same as PlacementController). Re-hit-testing on release
 	-- fought ScreenGui/Billboard coords and canceled moves when tapping Confirm.

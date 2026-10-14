@@ -1,24 +1,37 @@
 --!strict
 --[[
 	Client-only Lego-style plant worker (Plot / Fish / Free cam).
-	Dash beside coral → dig 3s with dust → coral rises from underground. Camera untouched.
+	Dash beside coral → dig 3s with dust + bubbles → coral rises from underground.
+	Camera zooms in on the digger for the dig, then restores the prior view.
 ]]
 
 local KeyframeSequenceProvider = game:GetService("KeyframeSequenceProvider")
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local SoundService = game:GetService("SoundService")
+local TweenService = game:GetService("TweenService")
 local Workspace = game:GetService("Workspace")
 
 local ClientPlot = require(script.Parent:WaitForChild("ClientPlot"))
 
 local ATTR_BUSY = "OceanTD_PlantWorkerBusy"
+local ATTR_DIG_CAM = "OceanTD_PlantDigCamBusy"
 local ATTR_CAM = "OceanTD_CamCycleMode"
 
 -- Travel a bit longer than the original 0.32s dash; legs animate separately (silly-fast).
 local DASH_SEC = 0.95
 local WORK_SEC = 3
+local DIG_CAM_IN_SEC = 0.55 -- ease into dig close-up during dash → dig
+local DIG_CAM_OUT_SEC = 0.45 -- restore prior view after dig
+-- Another 10% farther than the prior close-up (less aggressive zoom).
+local DIG_CAM_DIST = 11.314
+local DIG_CAM_HEIGHT = 4.0
+local DIG_CAM_LOOK_Y = 1.35
 local STAND_OFFSET = 1.15 -- slight offset from coral center (stand on/at the plant spot)
+local HIP_PAD = 0.35 -- keep soles above sand (HipHeight alone sinks R15 a bit)
+local HEART_FIREWORK_MIN = 5
+local HEART_FIREWORK_MAX = 10
+local HEART_EMOJI = "❤️"
 local DIG_CYCLE_SEC = 0.2 -- 5 full up/down cycles per second
 local RUN_CYCLE_SEC = 0.14 -- short loop; played at RUN_PLAY_SPEED for cartoon legs
 local RUN_PLAY_SPEED = 3.4
@@ -31,6 +44,14 @@ local RAY_DOWN = 180
 local CORAL_BURY_MIN = 2.8
 local CORAL_BURY_PAD = 1.2
 local DUST_TEXTURE = "rbxasset://textures/particles/smoke_main.dds"
+local ICE_BUBBLE_COLOR = Color3.fromRGB(170, 220, 255)
+local ICE_BUBBLE_TRANS = 0.5
+local ICE_BUBBLE_LIFE_MIN = 2.8
+local ICE_BUBBLE_LIFE_MAX = 4.5
+-- Discrete S / M / L / XL glass spheres (stud diameter).
+local ICE_BUBBLE_SIZES = { 0.55, 1.05, 1.7, 2.5 } :: { number }
+local ICE_BUBBLE_SCATTER = 3.2 -- horizontal scatter radius (studs)
+local ICE_BUBBLE_RISE = 1.15 -- base studs/sec upward float
 local RUN_SOUND_ID = "rbxassetid://75773150278794"
 local WORK_SOUND_ID = "rbxassetid://76312376951471"
 local RUN_FADE_IN_SEC = 0.2
@@ -68,6 +89,15 @@ local riseFinalCF: CFrame? = nil
 local runSound: Sound? = nil
 local workSound: Sound? = nil
 
+-- Dig close-up: stash FreeCam / PlotCam view, Scriptable zoom on avatar, restore after.
+local digCamToken = 0
+local digCamSavedCf: CFrame? = nil
+local digCamSavedType: Enum.CameraType? = nil
+local digCamSavedFov: number? = nil
+local digCamTween: Tween? = nil
+local digCamFollowConn: RBXScriptConnection? = nil
+local digCamPlantPos: Vector3? = nil
+
 export type PlayOpts = {
 	coralPart: BasePart?,
 	onDone: (() -> ())?,
@@ -80,6 +110,126 @@ end
 
 local function setBusy(on: boolean)
 	playerGui:SetAttribute(ATTR_BUSY, on == true)
+end
+
+local function setDigCamBusy(on: boolean)
+	playerGui:SetAttribute(ATTR_DIG_CAM, on == true)
+end
+
+local function digCamGoalCf(hrp: BasePart, plantPos: Vector3, fromCf: CFrame): CFrame
+	local focus = hrp.Position + Vector3.new(0, DIG_CAM_LOOK_Y, 0)
+	local flat = Vector3.new(fromCf.Position.X - focus.X, 0, fromCf.Position.Z - focus.Z)
+	if flat.Magnitude < 0.4 then
+		flat = Vector3.new(fromCf.LookVector.X, 0, fromCf.LookVector.Z)
+	end
+	if flat.Magnitude < 0.1 then
+		local away = Vector3.new(hrp.Position.X - plantPos.X, 0, hrp.Position.Z - plantPos.Z)
+		flat = if away.Magnitude > 0.1 then away else Vector3.new(0, 0, 1)
+	end
+	flat = flat.Unit
+	local eye = focus + flat * DIG_CAM_DIST + Vector3.new(0, DIG_CAM_HEIGHT, 0)
+	return CFrame.lookAt(eye, focus)
+end
+
+local function stopDigCamFollow()
+	if digCamFollowConn then
+		digCamFollowConn:Disconnect()
+		digCamFollowConn = nil
+	end
+	if digCamTween then
+		digCamTween:Cancel()
+		digCamTween = nil
+	end
+end
+
+local function restoreDigCamImmediate()
+	stopDigCamFollow()
+	setDigCamBusy(false)
+	local cam = Workspace.CurrentCamera
+	local savedCf = digCamSavedCf
+	local savedType = digCamSavedType
+	local savedFov = digCamSavedFov
+	digCamSavedCf = nil
+	digCamSavedType = nil
+	digCamSavedFov = nil
+	digCamPlantPos = nil
+	if not cam then
+		return
+	end
+	if savedCf then
+		cam.CFrame = savedCf
+	end
+	if typeof(savedFov) == "number" then
+		cam.FieldOfView = savedFov
+	end
+	if savedType then
+		local restore = savedType
+		if restore == Enum.CameraType.Scriptable then
+			-- FreeCam / PlotCam re-assert Scriptable on next tick.
+			restore = Enum.CameraType.Scriptable
+		end
+		cam.CameraType = restore
+	end
+end
+
+local function endDigCamZoom(token: number)
+	if token ~= digCamToken then
+		return
+	end
+	stopDigCamFollow()
+	local cam = Workspace.CurrentCamera
+	local savedCf = digCamSavedCf
+	if not cam or not savedCf then
+		restoreDigCamImmediate()
+		return
+	end
+	cam.CameraType = Enum.CameraType.Scriptable
+	local tw = TweenService:Create(
+		cam,
+		TweenInfo.new(DIG_CAM_OUT_SEC, Enum.EasingStyle.Quad, Enum.EasingDirection.InOut),
+		{ CFrame = savedCf }
+	)
+	digCamTween = tw
+	tw:Play()
+	task.spawn(function()
+		tw.Completed:Wait()
+		if token ~= digCamToken then
+			return
+		end
+		restoreDigCamImmediate()
+	end)
+end
+
+local function beginDigCamZoom(hrp: BasePart, plantPos: Vector3)
+	local cam = Workspace.CurrentCamera
+	if not cam then
+		return
+	end
+	digCamToken += 1
+	local token = digCamToken
+	stopDigCamFollow()
+	digCamSavedCf = cam.CFrame
+	digCamSavedType = cam.CameraType
+	digCamSavedFov = cam.FieldOfView
+	digCamPlantPos = plantPos
+	cam.CameraType = Enum.CameraType.Scriptable
+	setDigCamBusy(true)
+
+	local t0 = os.clock()
+	local fromCf = digCamSavedCf
+	digCamFollowConn = RunService.RenderStepped:Connect(function()
+		if token ~= digCamToken or not hrp.Parent then
+			return
+		end
+		local goal = digCamGoalCf(hrp, plantPos, fromCf)
+		local u = math.clamp((os.clock() - t0) / DIG_CAM_IN_SEC, 0, 1)
+		local a = u * u * (3 - 2 * u)
+		cam.CFrame = fromCf:Lerp(goal, a)
+		if u >= 1 then
+			-- Keep framed on the digger while they work.
+			cam.CFrame = digCamGoalCf(hrp, plantPos, fromCf)
+		end
+	end)
 end
 
 local function getCharacterParts(): (Model?, Humanoid?, BasePart?)
@@ -723,6 +873,66 @@ local function makeDustHost(feetPos: Vector3): (BasePart, ParticleEmitter)
 	return host, pe
 end
 
+-- Light-blue ice spheres that scatter out and slowly float upward.
+local function spawnIceBubbles(origin: Vector3, count: number)
+	local folder = fxFolder()
+	for _ = 1, count do
+		local size = ICE_BUBBLE_SIZES[math.random(1, #ICE_BUBBLE_SIZES)]
+		local angle = math.random() * math.pi * 2
+		local rad = math.random() * ICE_BUBBLE_SCATTER
+		local start = origin + Vector3.new(math.cos(angle) * rad, (math.random() - 0.25) * 1.1, math.sin(angle) * rad)
+		local life = ICE_BUBBLE_LIFE_MIN + math.random() * (ICE_BUBBLE_LIFE_MAX - ICE_BUBBLE_LIFE_MIN)
+		-- Each bubble: +30% to +110% rise speed (independent roll).
+		local rise = ICE_BUBBLE_RISE * (1.3 + math.random() * 0.8)
+		local drift = Vector3.new((math.random() - 0.5) * 0.85, rise, (math.random() - 0.5) * 0.85)
+
+		local ball = Instance.new("Part")
+		ball.Name = "OceanTD_DigIceBubble"
+		ball.Shape = Enum.PartType.Ball
+		ball.Material = Enum.Material.Glass
+		ball.Color = ICE_BUBBLE_COLOR
+		ball.Transparency = ICE_BUBBLE_TRANS
+		ball.Reflectance = 0.15
+		ball.Anchored = true
+		ball.CanCollide = false
+		ball.CanQuery = false
+		ball.CanTouch = false
+		ball.CastShadow = false
+		ball.Massless = true
+		ball.Size = Vector3.new(size, size, size)
+		ball.CFrame = CFrame.new(start)
+		ball.Parent = folder
+
+		task.spawn(function()
+			local t0 = os.clock()
+			while ball.Parent do
+				local elapsed = os.clock() - t0
+				local u = elapsed / life
+				if u >= 1 then
+					break
+				end
+				if u > 0.72 then
+					ball.Transparency = ICE_BUBBLE_TRANS + (1 - ICE_BUBBLE_TRANS) * ((u - 0.72) / 0.28)
+				end
+				ball.CFrame = CFrame.new(start + drift * elapsed)
+				task.wait()
+			end
+			if ball.Parent then
+				ball:Destroy()
+			end
+		end)
+	end
+end
+
+local function clearIceBubbles()
+	local folder = fxFolder()
+	for _, child in ipairs(folder:GetChildren()) do
+		if child.Name == "OceanTD_DigIceBubble" then
+			child:Destroy()
+		end
+	end
+end
+
 local function destroyDust(host: BasePart?)
 	if host and host.Parent then
 		host:Destroy()
@@ -801,8 +1011,13 @@ local function startWorkSound()
 	s:Play()
 end
 
-local function groundHipY(xzX: number, xzZ: number, hintY: number, hum: Humanoid): number
+local function hipStandOffset(hum: Humanoid): number
 	local hip = if hum.HipHeight > 0.5 then hum.HipHeight else 2
+	return hip + HIP_PAD
+end
+
+local function groundHipY(xzX: number, xzZ: number, hintY: number, hum: Humanoid): number
+	local hip = hipStandOffset(hum)
 	local params = RaycastParams.new()
 	params.FilterType = Enum.RaycastFilterType.Exclude
 	local exclude: { Instance } = {}
@@ -815,6 +1030,7 @@ local function groundHipY(xzX: number, xzZ: number, hintY: number, hum: Humanoid
 	if fx then
 		table.insert(exclude, fx)
 	end
+	-- Exclude placed corals so a buried soft-plant mesh doesn't become the "ground".
 	local placed = Workspace:FindFirstChild("OceanTD_Placed")
 	if placed then
 		table.insert(exclude, placed)
@@ -863,11 +1079,13 @@ local function coralTopWorld(part: BasePart): Vector3
 	return part.Position + Vector3.new(0, part.Size.Y * 0.5, 0)
 end
 
--- Stand on top of the coral (rises with it while buried → final).
+-- Stand on top of the coral (rises with it). Never sink below terrain while buried.
 local function standOnCoralCF(part: BasePart, hum: Humanoid, lookAt: Vector3): CFrame
 	local top = coralTopWorld(part)
-	local hip = if hum.HipHeight > 0.5 then hum.HipHeight else 2
-	local pos = Vector3.new(top.X, top.Y + hip, top.Z)
+	local hip = hipStandOffset(hum)
+	local groundY = groundHipY(top.X, top.Z, top.Y, hum)
+	local y = math.max(top.Y + hip, groundY)
+	local pos = Vector3.new(top.X, y, top.Z)
 	return lookFlat(pos, lookAt, nil)
 end
 
@@ -911,8 +1129,100 @@ local function easeOutQuad(u: number): number
 end
 
 local function feetWorldPos(standCF: CFrame, hum: Humanoid): Vector3
-	local hip = if hum.HipHeight > 0.5 then hum.HipHeight else 2
+	local hip = hipStandOffset(hum)
 	return standCF.Position - Vector3.new(0, hip * 0.92, 0)
+end
+
+local function burstHeartFirework(at: Vector3)
+	local cam = Workspace.CurrentCamera
+	if not cam then
+		return
+	end
+	local folder = cam:FindFirstChild("OceanTD_LocalFX")
+	if not folder then
+		folder = Instance.new("Folder")
+		folder.Name = "OceanTD_LocalFX"
+		folder.Parent = cam
+	end
+	local origin = at + Vector3.new(0, 2.2, 0)
+	local rng = Random.new()
+	local count = rng:NextInteger(HEART_FIREWORK_MIN, HEART_FIREWORK_MAX)
+	for i = 1, count do
+		local delaySec = rng:NextNumber(0, 0.1)
+		task.delay(delaySec, function()
+			local anchor = Instance.new("Part")
+			anchor.Name = "OceanTD_PlantHeartSpark"
+			anchor.Anchored = true
+			anchor.CanCollide = false
+			anchor.CanQuery = false
+			anchor.CanTouch = false
+			anchor.CastShadow = false
+			anchor.Transparency = 1
+			anchor.Size = Vector3.new(0.35, 0.35, 0.35)
+			anchor.CFrame = CFrame.new(origin)
+			anchor.Parent = folder
+
+			local sizeStuds = rng:NextNumber(1.6, 2.8)
+			local bb = Instance.new("BillboardGui")
+			bb.Name = "HeartSpark"
+			bb.Adornee = anchor
+			bb.AlwaysOnTop = true
+			bb.LightInfluence = 0
+			bb.MaxDistance = 2000
+			bb.Size = UDim2.fromScale(sizeStuds, sizeStuds)
+			bb.Parent = anchor
+
+			local scale = Instance.new("UIScale")
+			scale.Scale = 0.15
+			scale.Parent = bb
+
+			local lbl = Instance.new("TextLabel")
+			lbl.BackgroundTransparency = 1
+			lbl.Size = UDim2.fromScale(1, 1)
+			lbl.Font = Enum.Font.SourceSansBold
+			lbl.Text = HEART_EMOJI
+			lbl.TextScaled = true
+			lbl.TextStrokeTransparency = 0.4
+			lbl.TextStrokeColor3 = Color3.fromRGB(80, 20, 40)
+			lbl.Parent = bb
+
+			local yaw = rng:NextNumber(0, math.pi * 2)
+			local pitch = rng:NextNumber(-0.2, 1.25)
+			local dir = Vector3.new(
+				math.cos(yaw) * math.cos(pitch),
+				math.sin(pitch),
+				math.sin(yaw) * math.cos(pitch)
+			).Unit
+			local vel = dir * rng:NextNumber(14, 28)
+			local grav = rng:NextNumber(18, 32)
+			local life = rng:NextNumber(0.85, 1.35)
+			local peak = rng:NextNumber(0.95, 1.4)
+			local popAt = rng:NextNumber(0.08, 0.2)
+			local pos = origin
+			local t0 = os.clock()
+			local conn: RBXScriptConnection
+			conn = RunService.RenderStepped:Connect(function(dt)
+				local age = os.clock() - t0
+				if age >= life or not anchor.Parent then
+					conn:Disconnect()
+					if anchor.Parent then
+						anchor:Destroy()
+					end
+					return
+				end
+				vel = vel + Vector3.new(0, -grav, 0) * dt
+				pos = pos + vel * dt
+				anchor.CFrame = CFrame.new(pos)
+				if age < popAt then
+					scale.Scale = 0.15 + (peak - 0.15) * (age / popAt)
+				else
+					local u = math.clamp((age - popAt) / math.max(0.05, life - popAt), 0, 1)
+					scale.Scale = peak * (1 - 0.35 * u)
+					lbl.TextTransparency = math.clamp((u - 0.45) / 0.55, 0, 1)
+				end
+			end)
+		end)
+	end
 end
 
 local function finish(
@@ -933,11 +1243,22 @@ local function finish(
 	restoreCoralRise()
 	if hrp and hrp.Parent then
 		hrp.Anchored = wasAnchored
+		burstHeartFirework(hrp.Position)
+	elseif digCamPlantPos then
+		burstHeartFirework(digCamPlantPos)
 	end
-	setBusy(false)
-	if onDone then
-		task.defer(onDone)
-	end
+	local digTok = digCamToken
+	endDigCamZoom(digTok)
+	-- Hold busy through dig-cam restore so FreeCam / next place don't fight the zoom-out.
+	task.delay(DIG_CAM_OUT_SEC + 0.05, function()
+		if token ~= playToken then
+			return
+		end
+		setBusy(false)
+		if onDone then
+			onDone()
+		end
+	end)
 end
 
 function PlantWorkerVfx.playAt(worldPos: Vector3, opts: PlayOpts?): boolean
@@ -989,6 +1310,8 @@ function PlantWorkerVfx.playAt(worldPos: Vector3, opts: PlayOpts?): boolean
 	if runAnim then
 		runAnim:Play(0.04, 1, RUN_PLAY_SPEED)
 	end
+	-- Zoom in on the digger; FreeCam yields while OceanTD_PlantDigCamBusy is set.
+	beginDigCamZoom(hrp, worldPos)
 
 	RunService:BindToRenderStep(DASH_BIND_NAME, Enum.RenderPriority.Last.Value, function()
 		if token ~= playToken then
@@ -1049,6 +1372,7 @@ function PlantWorkerVfx.playAt(worldPos: Vector3, opts: PlayOpts?): boolean
 				dustHost = host
 				dustPe = pe
 				pe:Emit(12)
+				spawnIceBubbles(feetWorldPos(base, hum), 6)
 				startWorkSound()
 			end
 			return
@@ -1069,6 +1393,7 @@ function PlantWorkerVfx.playAt(worldPos: Vector3, opts: PlayOpts?): boolean
 		if dustPe and bucket ~= lastDustBucket then
 			lastDustBucket = bucket
 			dustPe:Emit(8)
+			spawnIceBubbles(feetWorldPos(base, hum), 3)
 		end
 
 		if workU >= 1 then
@@ -1091,6 +1416,7 @@ function PlantWorkerVfx.cancel()
 		RunService:UnbindFromRenderStep(DASH_BIND_NAME)
 	end)
 	restoreCoralRise()
+	restoreDigCamImmediate()
 	local cam = Workspace.CurrentCamera
 	local folder = cam and cam:FindFirstChild("OceanTD_LocalFX")
 	if folder then
@@ -1099,6 +1425,7 @@ function PlantWorkerVfx.cancel()
 			dust:Destroy()
 		end
 	end
+	clearIceBubbles()
 	local _c, _h, hrp = getCharacterParts()
 	if hrp then
 		hrp.Anchored = false

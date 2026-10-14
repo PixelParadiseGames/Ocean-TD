@@ -45,11 +45,13 @@ local playGen = 0
 local playNow: (string, string?, PlayOpts?) -> ()
 
 local function clearDuck()
-	if not ducking then
-		return
-	end
+	local was = ducking
 	ducking = false
-	BgmController.clearBgmFactor(BGM_FADE_SEC)
+	if was then
+		BgmController.clearBgmFactor(BGM_FADE_SEC)
+	end
+	-- Always restore SFX even if TutorialVo already thought duck was clear
+	-- (AudioSettings can be left mid-duck after an interrupted unduck tween).
 	AudioSettings.clearSfxFactor(BGM_FADE_SEC)
 end
 
@@ -129,11 +131,17 @@ playNow = function(soundId: string, name: string?, opts: PlayOpts?)
 		while my == playGen and s.Parent and not s.IsLoaded and (os.clock() - tLoad) < LOAD_TIMEOUT_SEC do
 			task.wait()
 		end
-		if my ~= playGen or not s.Parent then
+		if my ~= playGen then
+			-- Newer play/stop owns duck state.
+			return
+		end
+		if not s.Parent then
+			-- Destroyed while still current — unduck (AncestryChanged may have missed).
+			complete()
 			return
 		end
 		if not s.IsLoaded then
-			-- Failed to load — unduck so music isn't left buried with no VO.
+			-- Failed to load — unduck so music/SFX aren't left buried with no VO.
 			complete()
 			return
 		end

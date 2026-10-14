@@ -255,6 +255,9 @@ local reefHealth = C.REEF_START_HEALTH
 local joinIntroDemo = false
 -- Session one-shots for tutorial VO (ids live on WaveSimLibs).
 local firstVoPlayed = { reefEmpty = false, urchin = false, crab = false, shark = false }
+-- Wave-2 tutorial grant of Reload Speed stage 8 (session once; ends when wave 2 ends).
+local wave2FullAutoTrialOffered = false
+local wave2FullAutoTrialActive = false
 local demoCoralParts: { BasePart }? = nil
 -- Green fish-train before the player's first Start Waves this session (finger tutorial planning).
 local hasStartedWavesThisSession = false
@@ -2691,7 +2694,35 @@ local function restoreStunnedCorals(fade: boolean, armAmmo: boolean?)
 	end
 end
 
+local function endWave2FullAutoTrial()
+	if not wave2FullAutoTrialActive then
+		return
+	end
+	wave2FullAutoTrialActive = false
+	L.SkillPowerUpUI.endReloadFullAutoTrial()
+end
+
+local function tryOfferWave2FullAutoTrial()
+	if wave2FullAutoTrialOffered or joinIntroDemo then
+		return
+	end
+	local pg = Players.LocalPlayer and Players.LocalPlayer:FindFirstChildOfClass("PlayerGui")
+	if pg and pg:GetAttribute("OceanTD_FingerTutorialSkipped") == true then
+		return
+	end
+	wave2FullAutoTrialOffered = true
+	-- Long safety cap; we end the trial when wave 2 finishes / waves stop.
+	if L.SkillPowerUpUI.beginReloadFullAutoTrial(600) then
+		wave2FullAutoTrialActive = true
+		L.TutorialVo.playWhenIdle(L.VO_TRY_FULL_AUTO_RELOAD, "OceanTD_TryFullAutoReload")
+	end
+end
+
 local function beginWave(wave: number)
+	-- Leaving wave 2 ends the tutorial full-auto grant (manual UI trials are untouched).
+	if wave2FullAutoTrialActive and wave ~= 2 then
+		endWave2FullAutoTrial()
+	end
 	pruneFinishedFish()
 	waveIndex = wave
 	waveFishExpected = waveFishCount(wave)
@@ -2707,6 +2738,9 @@ local function beginWave(wave: number)
 		WaveUrchin.beginWave(WaveUrchin.rollCount(wave))
 	end
 	restoreStunnedCorals(wave > 1)
+	if wave == 2 then
+		tryOfferWave2FullAutoTrial()
+	end
 	-- After W20: roll 20–40% of this wave's Tang onto A2.
 	fishA2Remaining = 0
 	waveUsesFishA2 = false
@@ -4601,6 +4635,7 @@ function WaveSim.stop(opts: { silent: boolean?, preserveAmmoFade: boolean?, pres
 	local silent = opts ~= nil and opts.silent == true
 	local preserveAmmoFade = opts ~= nil and opts.preserveAmmoFade == true
 	local preserveCritterFade = opts ~= nil and opts.preserveCritterFade == true
+	endWave2FullAutoTrial()
 	if not joinIntroDemo then
 		LifeStats.flush(true)
 	end
@@ -4990,6 +5025,10 @@ local function tryStartPlanningAfterIntro()
 		return
 	end
 	WaveSim.startPlanningArrowPreview()
+end
+
+function WaveSim.getWavesStartCount(): number
+	return wavesStartCount
 end
 
 function WaveSim.start(): boolean

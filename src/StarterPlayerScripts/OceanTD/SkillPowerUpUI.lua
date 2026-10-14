@@ -666,14 +666,15 @@ local ReloadTrialUI = (function()
 		return LABEL
 	end
 
-	function api.begin()
+	function api.begin(durationSec: number?): boolean
 		if active() then
-			return
+			return false
 		end
 		if unlockedStage("ReloadSpeed") >= SkillStages.RELOAD_SPEED_FULL_AUTO_STAGE then
-			return
+			return false
 		end
-		st.endsAt = os.clock() + SEC
+		local dur = if typeof(durationSec) == "number" and durationSec > 0 then durationSec else SEC
+		st.endsAt = os.clock() + dur
 		publish()
 		stopTimer()
 		st.token += 1
@@ -692,6 +693,11 @@ local ReloadTrialUI = (function()
 			end
 		end)
 		syncButton()
+		return true
+	end
+
+	function api.endNow()
+		endTrial()
 	end
 
 	return api
@@ -2958,22 +2964,29 @@ refreshTemplate = function()
 					)
 				end)
 			elseif activeSkillId == "Skip" then
-				local uses = SkillStages.skipUsesAtStage(descStage)
-				if uses <= 0 then
-					stopUnlockDescPulse()
-					unlockDescLbl.RichText = false
-					unlockDescLbl.Text = SkillStages.unlockDesc(activeSkillId, descStage)
-					unlockDescLbl.Visible = true
-				else
-					local inc = SkillStages.skipUsesIncrementAtStage(descStage)
+				-- Stage 8 = math.huge; %d formats that as a huge negative int.
+				if SkillStages.isSkipUnlimited(descStage) then
 					startUnlockDescPulse("Skip", function(c: Color3)
-						return string.format(
-							'<font color="%s">+%d</font>  New Max: %d per session',
-							rgbFontTag(c),
-							inc,
-							uses
-						)
+						return string.format('<font color="%s">Unlimited Skips</font>', rgbFontTag(c))
 					end)
+				else
+					local uses = SkillStages.skipUsesAtStage(descStage)
+					if uses <= 0 then
+						stopUnlockDescPulse()
+						unlockDescLbl.RichText = false
+						unlockDescLbl.Text = SkillStages.unlockDesc(activeSkillId, descStage)
+						unlockDescLbl.Visible = true
+					else
+						local inc = SkillStages.skipUsesIncrementAtStage(descStage)
+						startUnlockDescPulse("Skip", function(c: Color3)
+							return string.format(
+								'<font color="%s">+%d</font>  New Max: %d per session',
+								rgbFontTag(c),
+								inc,
+								uses
+							)
+						end)
+					end
 				end
 			elseif activeSkillId == "WaveSpeed" then
 				if descStage == 2 then
@@ -3426,6 +3439,19 @@ function SkillPowerUpUI.getStage(skillId: string): number
 		return SkillStages.RELOAD_SPEED_FULL_AUTO_STAGE
 	end
 	return currentStage(skillId)
+end
+
+-- Session demo of Reload Speed stage 8 (full auto). Returns false if already unlocked/active.
+function SkillPowerUpUI.beginReloadFullAutoTrial(durationSec: number?): boolean
+	return ReloadTrialUI.begin(durationSec)
+end
+
+function SkillPowerUpUI.endReloadFullAutoTrial()
+	ReloadTrialUI.endNow()
+end
+
+function SkillPowerUpUI.isReloadFullAutoTrialActive(): boolean
+	return ReloadTrialUI.active()
 end
 
 function SkillPowerUpUI.getUnlockedStage(skillId: string): number

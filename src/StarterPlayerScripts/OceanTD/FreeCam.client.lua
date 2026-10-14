@@ -672,7 +672,7 @@ local function setCharacterLocked(locked: boolean)
 end
 
 local function keepCharacterStill()
-	-- Lego plant worker owns HRP for a short dash+dig; cam mode/CFrame stay unchanged.
+	-- Lego plant worker owns HRP for a short dash+dig (PlantWorkerVfx also owns dig cam).
 	if playerGui:GetAttribute("OceanTD_PlantWorkerBusy") == true then
 		return
 	end
@@ -1649,6 +1649,59 @@ local function schoolCamOnPath(fishWorld: Vector3, fishPathDist: number?): (Vect
 	return cam, lookAt
 end
 
+-- Snap Fish Cam for a new wave (or RETRY). forcePathStart = always W1, not defeat end.
+local function applyFishCamWaveStartSnap(cam: Camera?, forcePathStart: boolean?)
+	local now = os.clock()
+	local waveIdx = WaveSim.getWaveIndex()
+	if waveIdx > 0 then
+		fishSt.lastWaveIndex = waveIdx
+	end
+	clearPovFreeLook()
+	if forcePathStart then
+		FishCamTune.setPaused(false, true)
+	end
+	local spawnFocus = resolveFishSpawnFocus()
+	local lead = WaveSim.getFurthestUnfedFish()
+	local focus = if lead then lead.position else spawnFocus
+	local pathDist = if forcePathStart then 0 elseif lead then lead.dist else 0
+	if focus then
+		seedFishFocus(focus)
+		fishSt.targetId = if lead then lead.id else nil
+		fishSt.switching = false
+		fishSt.waveStartBoostUntil = now + FC.FISH_WAVE_START_SEC
+		fishSt.camPathDist = pathDist
+		fishSt.pathSnap = true
+	end
+	local useCam = cam or getCamera()
+	if not useCam then
+		return
+	end
+	useCam.CameraType = Enum.CameraType.Scriptable
+	if fishCamUsePov() then
+		if WaveSim.isRunning() and focus then
+			local desired, lookAt = schoolCamOnPath(focus, pathDist)
+			camPos = desired
+			fishSt.camLookAt = lookAt
+			useCam.CFrame = CFrame.lookAt(camPos, lookAt)
+			pov.lookCf = useCam.CFrame
+		else
+			resetPovRideToW1()
+			if pov.lookCf then
+				useCam.CFrame = pov.lookCf
+			end
+		end
+	elseif focus then
+		camPos = focus + fishChaseOffset(0)
+		useCam.CFrame = lookAtFocus(fishSt.lookPos)
+	else
+		resetPovRideToW1()
+		if pov.lookCf then
+			useCam.CFrame = pov.lookCf
+		end
+	end
+	syncLookFromCFrame(useCam.CFrame)
+end
+
 -- POV during waves: ahead of the pack on the path, facing back to feed.
 local function tickFishPovSchool(dt: number, cam: Camera)
 	local now = os.clock()
@@ -1657,26 +1710,7 @@ local function tickFishPovSchool(dt: number, cam: Camera)
 	local waveIdx = if running then WaveSim.getWaveIndex() else 0
 	local pathDist: number? = nil
 	if waveIdx > 0 and waveIdx ~= fishSt.lastWaveIndex then
-		fishSt.lastWaveIndex = waveIdx
-		clearPovFreeLook()
-		local spawnFocus = resolveFishSpawnFocus()
-		local lead = WaveSim.getFurthestUnfedFish()
-		local focus = if lead then lead.position else spawnFocus
-		pathDist = if lead then lead.dist else 0
-		if focus then
-			seedFishFocus(focus)
-			fishSt.targetId = if lead then lead.id else nil
-			fishSt.switching = false
-			fishSt.waveStartBoostUntil = now + FC.FISH_WAVE_START_SEC
-			fishSt.camPathDist = pathDist or 0
-			fishSt.pathSnap = true
-			local desired, lookAt = schoolCamOnPath(focus, fishSt.camPathDist)
-			camPos = desired
-			fishSt.camLookAt = lookAt
-			cam.CFrame = CFrame.lookAt(camPos, lookAt)
-			syncLookFromCFrame(cam.CFrame)
-			pov.lookCf = cam.CFrame
-		end
+		applyFishCamWaveStartSnap(cam)
 	elseif not running then
 		fishSt.lastWaveIndex = 0
 		fishSt.waveStartBoostUntil = 0
@@ -2027,6 +2061,12 @@ local function startRenderLoop()
 			return
 		end
 		if playerGui:GetAttribute("OceanTD_ReefDefeatCamBusy") == true then
+			return
+		end
+		-- Dig plant worker close-up owns Scriptable cam (zoom in → restore prior view).
+		if playerGui:GetAttribute("OceanTD_PlantDigCamBusy") == true
+			or playerGui:GetAttribute("OceanTD_PlantWorkerBusy") == true
+		then
 			return
 		end
 		if playerGui:GetAttribute("OceanTD_JoinIntroBusy") == true then
@@ -2882,6 +2922,8 @@ do
 			or playerGui:GetAttribute("OceanTD_SharkCamBusy") == true
 			or playerGui:GetAttribute("OceanTD_UrchinCamBusy") == true
 			or playerGui:GetAttribute("OceanTD_PlotSizeCinematicBusy") == true
+			or playerGui:GetAttribute("OceanTD_PlantDigCamBusy") == true
+			or playerGui:GetAttribute("OceanTD_PlantWorkerBusy") == true
 		then
 			return true
 		end
@@ -3218,13 +3260,24 @@ local function bindMobileLeftUi(left: Instance)
 					resume = attr :: CamMode
 				end
 			end
+			-- RETRY WAVE: don't keep defeat-end pose — snap Fish Cam to path start.
+			local wantPathStart = playerGui:GetAttribute("OceanTD_ResetFishCamPathStart") ~= nil
+			if wantPathStart then
+				playerGui:SetAttribute("OceanTD_ResetFishCamPathStart", nil)
+				fishSt.lastWaveIndex = 0
+				fishSt.targetId = nil
+				fishSt.camPathDist = 0
+				fishSt.pathSnap = true
+				clearPovFreeLook()
+			end
 			if resume and resume ~= "off" then
 				-- Force past TangCam/defeat busy races so Retry restores the pre-defeat cam.
 				task.defer(function()
 					if PlacementController.isActive() or RelocateController.isActive() then
 						return
 					end
-					resumePreserveView = true
+					local snapFishStart = wantPathStart and resume == "fishcam"
+					resumePreserveView = not snapFishStart
 					forceModeOverride = true
 					setMode(resume)
 					forceModeOverride = false
@@ -3232,10 +3285,15 @@ local function bindMobileLeftUi(left: Instance)
 					if mode == resume then
 						cinematicResumeMode = nil
 						playerGui:SetAttribute(FC.ATTR_CINEMATIC_RESUME_MODE, "")
-						local cam = getCamera()
-						if cam then
-							camPos = cam.CFrame.Position
-							syncLookFromCFrame(cam.CFrame)
+						if snapFishStart then
+							-- setMode no-ops when already fishcam; always re-seat at W1.
+							applyFishCamWaveStartSnap(getCamera(), true)
+						else
+							local cam = getCamera()
+							if cam then
+								camPos = cam.CFrame.Position
+								syncLookFromCFrame(cam.CFrame)
+							end
 						end
 					end
 				end)

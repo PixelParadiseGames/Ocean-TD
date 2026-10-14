@@ -396,8 +396,9 @@ function PlaceSoftPlant.updateAt(anchorPos: Vector3)
 		end
 	end
 	if RelocateController.isPlaceConfirmBridge() then
+		local beforeFoot = CoralVisual.readGridAnchor(part) or part.Position
 		local ok, reason = RelocateController.bridgePreviewAt(rawPos)
-		-- busy / inactive bridge returns false,nil — fall back so chrome doesn't drag alone.
+		-- busy / inactive / cine / pinch no-op: false,nil — move the stem ourselves.
 		if ok == false and reason == nil then
 			alignPartDirect(e.resolvePlaceAnchor(rawPos))
 		else
@@ -405,11 +406,21 @@ function PlaceSoftPlant.updateAt(anchorPos: Vector3)
 			local foot = if live and live.Parent
 				then (CoralVisual.readGridAnchor(live) or live.Position)
 				else rawPos
-			e.setPlaceAnchor(foot)
-			e.setConfirmPos(foot)
-			e.setValidSpot(ok)
-			e.setRejectReason(reason)
-			anchorPos = foot
+			-- Bridge claimed success but didn't move (e.g. updateAt early-out) — force align.
+			if typeof(beforeFoot) == "Vector3"
+				and typeof(foot) == "Vector3"
+				and (foot - beforeFoot).Magnitude < 0.02
+				and typeof(rawPos) == "Vector3"
+				and (rawPos - beforeFoot).Magnitude > 0.15
+			then
+				alignPartDirect(e.resolvePlaceAnchor(rawPos))
+			else
+				e.setPlaceAnchor(foot)
+				e.setConfirmPos(foot)
+				e.setValidSpot(ok)
+				e.setRejectReason(reason)
+				anchorPos = foot
+			end
 		end
 	else
 		anchorPos = e.resolvePlaceAnchor(rawPos)
@@ -571,7 +582,7 @@ function PlaceSoftPlant.finishConfirm()
 		end)
 	end
 
-	-- Soft-plant ✓ / PLANT: chrome is gone — Lego worker dash+dig (cam stay put).
+	-- Soft-plant ✓ / PLANT: chrome is gone — Lego worker dash+dig (dig cam zooms avatar).
 	-- RequestMove AFTER rise: server CFrame write mid-bury snaps the coral back up.
 	-- Do not auto-reselect the coral after the rise.
 	local startedWorker = false

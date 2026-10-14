@@ -232,6 +232,20 @@ local function findAuthoredEndPoint(): Instance?
 	return a and a:FindFirstChild("EndPoint")
 end
 
+-- Preferred authored package: ReplicatedStorage.OceanTD.ReefHeart (heart + Sphere + light).
+-- Avoids fragile EndPoint sibling / proximity orb discovery on the live WaveRoute.
+local function getReefHeartTemplate(): Instance?
+	local tmpl = oceanRoot:FindFirstChild("ReefHeart")
+	if not tmpl then
+		return nil
+	end
+	local heart = tmpl:FindFirstChild("heart", true)
+	if not (heart and heart:IsA("BasePart")) then
+		return nil
+	end
+	return tmpl
+end
+
 local function nameLooksLikeHeart(name: string): boolean
 	local n = string.lower(name)
 	return n == "heart" or string.find(n, "heart", 1, true) ~= nil
@@ -353,6 +367,8 @@ local function collectOrbSiblings(endPoint: Instance): { Instance }
 end
 
 local FULL_NATIVE_ATTR = "OceanTD_FullNativeScale"
+-- Stamped after Plot1→local-plot rigid remap (RS ReefHeart is authored in Plot1 space).
+local PLOT_REMAP_ATTR = "OceanTD_HeartPlotRemapped"
 
 local function rememberFullNative(plotId: string, scale: number)
 	if scale < 0.85 then
@@ -577,28 +593,40 @@ local function syncNonHeartAppearanceFromSource(cloneRoot: Instance?, sourceRoot
 	end
 end
 
--- Clone EndPoint (+ nearby orb siblings) into one Model so ScaleTo/PivotTo keep them together.
+-- Clone a complete template (RS ReefHeart or EndPoint+orb) into one Model for ScaleTo/PivotTo.
 local function cloneHeartOrbPackage(sourceRoot: Instance, sourceHeart: BasePart): Model
-	local companions = collectOrbSiblings(sourceRoot)
-
 	local model = Instance.new("Model")
 	model.Name = "OceanTD_RouteHeartPkg"
-	local endClone = sourceRoot:Clone()
-	endClone.Parent = model
-	for _, sib in ipairs(companions) do
-		local c = sib:Clone()
-		c.Parent = model
+
+	-- RS ReefHeart / self-contained package: clone children flat (heart + Sphere + lights).
+	local looksSelfContained = sourceRoot:FindFirstChild("heart", true) ~= nil
+		and (sourceRoot:FindFirstChild("Sphere", true) ~= nil or packageHasOrb(sourceRoot))
+	if looksSelfContained and (sourceRoot:IsA("Model") or sourceRoot:IsA("Folder")) then
+		for _, ch in ipairs(sourceRoot:GetChildren()) do
+			local c = ch:Clone()
+			c.Parent = model
+		end
+	else
+		-- Legacy: EndPoint + nearby orb siblings gathered by proximity.
+		local companions = collectOrbSiblings(sourceRoot)
+		local endClone = sourceRoot:Clone()
+		endClone.Parent = model
+		for _, sib in ipairs(companions) do
+			local c = sib:Clone()
+			c.Parent = model
+		end
+		if not findHeartIn(model) and sourceHeart.Parent ~= sourceRoot then
+			local hc = sourceHeart:Clone()
+			hc.Parent = model
+		end
 	end
-	-- If source was just the heart part, still use it.
-	if not findHeartIn(model) and sourceHeart.Parent ~= sourceRoot then
-		local hc = sourceHeart:Clone()
-		hc.Parent = model
-	end
+
 	prepareLocalHeartClone(model)
 	-- Clear hide left over from cloning a LocalTransparencyModifier=1 source.
 	for _, d in ipairs(model:GetDescendants()) do
 		if d:IsA("BasePart") then
 			d.LocalTransparencyModifier = 0
+			capturePartAppearanceAttrs(d)
 		end
 	end
 	local heart = findHeartIn(model) or sourceHeart
@@ -622,6 +650,23 @@ local function findPlotEndHeartRoot(plotId: string): Instance?
 		return nil
 	end
 	return folder:FindFirstChild(plotId)
+end
+
+-- Template used for clone + orb repair. Prefer RS ReefHeart over live EndPoint.
+local function getHeartCloneSource(plotId: string): (Instance?, BasePart?)
+	local tmpl = getReefHeartTemplate()
+	if tmpl then
+		local heart = findHeartIn(tmpl)
+		if heart then
+			return tmpl, heart
+		end
+	end
+	local root = findPlotEndHeartRoot(plotId)
+	local heart = findHeartIn(root)
+	if heart then
+		return root, heart
+	end
+	return root, nil
 end
 
 local heartByPlotId: { [string]: BasePart } = {}
@@ -749,6 +794,26 @@ local function setPivot(inst: Instance, cf: CFrame)
 	end
 end
 
+-- RS ReefHeart / Plot1 EndPoint are authored in Plot1 space — rigid remap onto the
+-- local plot so yaw matches the player's pad (Plot2+ were facing Plot1 before).
+local function remapHeartPackageToLocalPlot(inst: Instance)
+	if inst:GetAttribute(PLOT_REMAP_ATTR) == true then
+		return
+	end
+	local function remapPart(p: BasePart)
+		p.CFrame = ClientPlot.remapCFrameFromPlot1(p.CFrame)
+	end
+	if inst:IsA("BasePart") then
+		remapPart(inst)
+	end
+	for _, d in ipairs(inst:GetDescendants()) do
+		if d:IsA("BasePart") then
+			remapPart(d)
+		end
+	end
+	inst:SetAttribute(PLOT_REMAP_ATTR, true)
+end
+
 local function snapHeartRootToRouteEnd(plotId: string)
 	local routeEnd = routeEndPosByPlot[plotId]
 	local root = heartVisualRoot(plotId)
@@ -759,6 +824,7 @@ local function snapHeartRootToRouteEnd(plotId: string)
 	if not heart or not heart:IsA("BasePart") then
 		return
 	end
+	-- Keep plot-remapped rotation; only slide so the heart mesh sits on the waypoint.
 	local delta = routeEnd - heart.Position
 	if delta.Magnitude < 1e-4 then
 		return
@@ -979,6 +1045,7 @@ local function playHeartInkSoundTwice()
 end
 
 local function resolveSourceHeart(plotId: string): (Instance?, BasePart?)
+	-- Live plot EndPoint (for hide-in-place). Clone visuals prefer RS ReefHeart.
 	local root = findPlotEndHeartRoot(plotId)
 	local heart = findHeartIn(root)
 	if heart then
@@ -991,41 +1058,58 @@ end
 
 local function applyRouteHeartForPlot(plotId: string): BasePart?
 	local routeEnd = routeEndPosByPlot[plotId]
-	local sourceRoot, sourceHeart = resolveSourceHeart(plotId)
-	if not sourceHeart then
+	local authoredRoot, authoredHeart = resolveSourceHeart(plotId)
+	local cloneSrc, cloneHeartSrc = getHeartCloneSource(plotId)
+	if not cloneHeartSrc then
 		destroyRouteHeartClone(plotId)
 		return nil
 	end
 
-	-- No override → show authored heart in place.
+	-- No override → show authored heart in place (or RS clone at authored pose).
 	if not routeEnd then
 		destroyRouteHeartClone(plotId)
-		endHeartPart = sourceHeart
-		endHeartPlotId = plotId
-		if heartIntroHoldHidden then
-			if sourceRoot then
-				setTreeLocalHidden(sourceRoot, true)
-			else
-				sourceHeart.LocalTransparencyModifier = 1
+		if authoredHeart then
+			endHeartPart = authoredHeart
+			endHeartPlotId = plotId
+			if heartIntroHoldHidden then
+				if authoredRoot then
+					setTreeLocalHidden(authoredRoot, true)
+				else
+					authoredHeart.LocalTransparencyModifier = 1
+				end
 			end
+			return authoredHeart
 		end
-		return sourceHeart
+		return nil
 	end
 
-	-- Hide authored EndPoint (+ orb siblings) locally; show clone at the fish stop.
-	if sourceRoot then
-		setTreeLocalHidden(sourceRoot, true)
-		for _, sib in ipairs(collectOrbSiblings(sourceRoot)) do
+	-- Hide authored EndPoint (+ orb siblings) locally; show RS/cloned package at fish stop.
+	if authoredRoot then
+		setTreeLocalHidden(authoredRoot, true)
+		for _, sib in ipairs(collectOrbSiblings(authoredRoot)) do
 			setTreeLocalHidden(sib, true)
 		end
-		hiddenSourceRootByPlot[plotId] = sourceRoot
+		hiddenSourceRootByPlot[plotId] = authoredRoot
 	end
 
 	local clone = routeHeartCloneByPlot[plotId]
+	-- Stale packages (missing Sphere/heart, or never plot-remapped): rebuild from RS ReefHeart.
+	if clone and clone.Parent then
+		local hasHeart = findHeartIn(clone) ~= nil
+		local hasOrb = packageHasOrb(clone)
+		local needsRs = getReefHeartTemplate() ~= nil
+		local unmapped = clone:GetAttribute(PLOT_REMAP_ATTR) ~= true
+		if not hasHeart or (needsRs and (not hasOrb or unmapped)) then
+			destroyRouteHeartClone(plotId)
+			clone = nil
+		end
+	end
 	if not clone or not clone.Parent then
-		local template = sourceRoot or sourceHeart
-		local model = cloneHeartOrbPackage(template, sourceHeart)
+		local template = cloneSrc or cloneHeartSrc
+		local model = cloneHeartOrbPackage(template, cloneHeartSrc)
 		model.Name = "OceanTD_RouteHeart_" .. plotId
+		-- Orient into this player's plot before parenting/snapping (Plot2+ yaw).
+		remapHeartPackageToLocalPlot(model)
 		model.Parent = resolveFolder()
 		clone = model
 		routeHeartCloneByPlot[plotId] = clone
@@ -1039,21 +1123,24 @@ local function applyRouteHeartForPlot(plotId: string): BasePart?
 		else
 			rememberFullNative(plotId, captured)
 		end
-		ensureOrbInPackage(clone, sourceRoot)
+		ensureOrbInPackage(clone, cloneSrc)
+	else
+		-- Repair missing Sphere pieces from the RS template without full rebuild.
+		ensureOrbInPackage(clone, cloneSrc)
 	end
 
 	local cloneHeart = findHeartIn(clone) or (clone:IsA("BasePart") and clone or nil)
 	if not cloneHeart or not cloneHeart:IsA("BasePart") then
 		destroyRouteHeartClone(plotId)
-		endHeartPart = sourceHeart
+		endHeartPart = authoredHeart
 		endHeartPlotId = plotId
-		if heartIntroHoldHidden and sourceHeart then
-			sourceHeart.LocalTransparencyModifier = 1
+		if heartIntroHoldHidden and authoredHeart then
+			authoredHeart.LocalTransparencyModifier = 1
 		end
-		return sourceHeart
+		return authoredHeart
 	end
 
-	-- Translate whole package (heart + orb) so the heart mesh sits on the route end.
+	-- Slide package so the heart mesh sits on the route end (keep plot yaw).
 	local delta = routeEnd - cloneHeart.Position
 	setPivot(clone, CFrame.new(delta) * pivotOf(clone))
 
@@ -1275,7 +1362,8 @@ function WaveEndVfx.prepareHeartShrunkForInkReveal(stage: number?, plotId: strin
 			end)
 			snapHeartRootToRouteEnd(id)
 		end
-		ensureOrbInPackage(root, findPlotEndHeartRoot(id))
+		local orbSrc = getHeartCloneSource(id)
+		ensureOrbInPackage(root, orbSrc)
 	end
 	if heart then
 		local sz = heart.Size
@@ -1397,7 +1485,7 @@ finishInkHeartVisible = function(plotId: string)
 	end
 
 	-- Pull glass orb + authored materials onto the package (Skip used to leave heart-only).
-	local src = findPlotEndHeartRoot(plotId)
+	local src = getHeartCloneSource(plotId)
 	ensureOrbInPackage(clone, src)
 	syncNonHeartAppearanceFromSource(clone, src)
 

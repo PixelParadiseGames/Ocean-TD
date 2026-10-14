@@ -316,7 +316,17 @@ local function flashQuickButton(btn: TextButton, ok: boolean)
 	end)
 end
 
-local function makeRoundQuick(parent: Frame, name: string, text: string, order: number, sizePx: number): TextButton
+local YAW_LEFT_ICON = "rbxassetid://96091927054382"
+local YAW_RIGHT_ICON = "rbxassetid://98172417849326"
+
+local function makeRoundQuick(
+	parent: Frame,
+	name: string,
+	text: string,
+	order: number,
+	sizePx: number,
+	imageId: string?
+): TextButton
 	local b = Instance.new("TextButton")
 	b.Name = name
 	b.LayoutOrder = order
@@ -328,7 +338,7 @@ local function makeRoundQuick(parent: Frame, name: string, text: string, order: 
 	b.Font = UiTheme.Font
 	b.TextSize = math.clamp(math.floor(sizePx * 0.55), 14, 22)
 	b.TextColor3 = Color3.new(1, 1, 1)
-	b.Text = text
+	b.Text = if imageId then "" else text
 	b.ZIndex = 50
 	b.Parent = parent
 	local c = Instance.new("UICorner")
@@ -339,6 +349,19 @@ local function makeRoundQuick(parent: Frame, name: string, text: string, order: 
 	stroke.Color = Color3.fromRGB(80, 100, 120)
 	stroke.Transparency = 0.35
 	stroke.Parent = b
+	if imageId then
+		local icon = Instance.new("ImageLabel")
+		icon.Name = "Icon"
+		icon.BackgroundTransparency = 1
+		icon.AnchorPoint = Vector2.new(0.5, 0.5)
+		icon.Position = UDim2.fromScale(0.5, 0.5)
+		icon.Size = UDim2.fromScale(0.72, 0.72)
+		icon.Image = imageId
+		icon.ScaleType = Enum.ScaleType.Fit
+		icon.Active = false
+		icon.ZIndex = b.ZIndex + 1
+		icon.Parent = b
+	end
 	return b
 end
 
@@ -383,7 +406,12 @@ local function layoutQuickButtons()
 	for _, ch in ipairs(holder:GetChildren()) do
 		if ch:IsA("TextButton") then
 			ch.Size = UDim2.fromOffset(side, side)
-			ch.TextSize = math.clamp(math.floor(side * 0.55), 14, 22)
+			-- Dist −/+ glyphs: larger text, same circle size. Yaw uses icons (empty text).
+			if ch.Name == "DistOffMinus" or ch.Name == "DistOffPlus" then
+				ch.TextSize = math.clamp(math.floor(side * 0.92), 20, 36)
+			else
+				ch.TextSize = math.clamp(math.floor(side * 0.55), 14, 22)
+			end
 		end
 	end
 end
@@ -416,10 +444,13 @@ local function ensureQuickPad(): Frame?
 	grid.Parent = holder
 	quickGrid = grid
 
-	local yawLeft = makeRoundQuick(holder, "YawLeft", "‹", 1, 36)
-	local yawRight = makeRoundQuick(holder, "YawRight", "›", 2, 36)
+	local yawLeft = makeRoundQuick(holder, "YawLeft", "‹", 1, 36, YAW_LEFT_ICON)
+	local yawRight = makeRoundQuick(holder, "YawRight", "›", 2, 36, YAW_RIGHT_ICON)
 	local offMinus = makeRoundQuick(holder, "DistOffMinus", "-", 3, 36)
 	local offPlus = makeRoundQuick(holder, "DistOffPlus", "+", 4, 36)
+	-- Larger −/+ glyphs at create time (layoutQuickButtons keeps circles fixed).
+	offMinus.TextSize = math.clamp(math.floor(36 * 0.92), 20, 36)
+	offPlus.TextSize = math.clamp(math.floor(36 * 0.92), 20, 36)
 
 	local function wireQuick(btn: TextButton, key: string, delta: number)
 		btn.Activated:Connect(function()

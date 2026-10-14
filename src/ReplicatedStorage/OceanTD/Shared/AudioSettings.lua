@@ -233,9 +233,10 @@ function AudioSettings.fadeSfxToFactor(factor: number, fadeSec: number?)
 	sfxDuckToken += 1
 	local my = sfxDuckToken
 	if not sfxDuckActive then
-		sfxDuckBase = readAttr(ATTR_SFX, g.Volume)
+		-- Always use the saved slider — never live Volume (may still be mid-duck).
+		sfxDuckBase = readAttr(ATTR_SFX, 1)
 		if sfxDuckBase <= 0 then
-			sfxDuckBase = math.max(g.Volume, 0.01)
+			sfxDuckBase = 1
 		end
 		sfxDuckActive = true
 	end
@@ -248,13 +249,14 @@ function AudioSettings.fadeSfxToFactor(factor: number, fadeSec: number?)
 end
 
 function AudioSettings.clearSfxFactor(fadeSec: number?)
-	if not sfxDuckActive then
-		return
-	end
 	local fade = if typeof(fadeSec) == "number" then math.max(0, fadeSec :: number) else 0.35
 	sfxDuckToken += 1
 	local my = sfxDuckToken
-	local base = sfxDuckBase
+	-- Prefer remembered duck base; fall back to slider so a stuck duck still recovers.
+	local base = if sfxDuckActive then sfxDuckBase else readAttr(ATTR_SFX, 1)
+	if base <= 0 then
+		base = 1
+	end
 	sfxDuckActive = false
 	sfxDuckFactor = 1
 	if sfxPriorityGroup then

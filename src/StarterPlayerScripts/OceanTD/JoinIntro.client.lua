@@ -99,7 +99,7 @@ local LOAD_TIPS = {
 }
 local CAM_DOWN_SEC = 12 -- CamStart→CamEnd through the reef (+3s)
 local LOAD_BAR_FILL_SEC = 4 -- player-facing fill: always a full 4s from empty, never less
-local INTRO_EXPLAINER_SOUND_ID = "rbxassetid://75344299140384" -- "your reef"
+local INTRO_EXPLAINER_SOUND_ID = "rbxassetid://125061664833492" -- "your reef"
 local INTRO_PLOT_SOUND_ID = "rbxassetid://97343154059938" -- "the plot" after your-reef ends
 local CAM_HANDOFF_SEC = 1.35 -- intro cam → Plot Cam seat
 local CAM_HANDOFF_SKIP_SEC = 0.55
@@ -1404,6 +1404,46 @@ local function tweenCamToPlotView(durationSec: number, startInkReveal: boolean?,
 		finishCamToPlot()
 		return
 	end
+
+	-- Prep route now; start green-line + path VO once "the plot" finishes (no cut,
+	-- no fixed extra hold). Cam handoff runs in parallel.
+	local abortedAtStart = shouldAbortInk ~= nil and shouldAbortInk() == true
+	task.spawn(function()
+		pcall(function()
+			local stage = SkillPowerUpUI.getStage("PlotSize")
+			WaveSim.rebuildRouteForPlotSize(stage, { skipPathLines = true })
+			local WaveEndVfx = require(script.Parent:WaitForChild("WaveEndVfx"))
+			WaveEndVfx.syncToPlotSizeStage(stage)
+		end)
+		local WavePathLines = require(script.Parent:WaitForChild("WavePathLines"))
+		if abortedAtStart or startInkReveal == false then
+			pcall(function()
+				WavePathLines.finishIntroCinematicSkipped()
+			end)
+			return
+		end
+		-- Let JoinIntroPlot finish; start path VO on the same frame it ends.
+		local deadline = os.clock() + 12
+		while TutorialVo.isPlaying() and os.clock() < deadline do
+			if shouldAbortInk and shouldAbortInk() then
+				pcall(function()
+					WavePathLines.finishIntroCinematicSkipped()
+				end)
+				return
+			end
+			task.wait()
+		end
+		if shouldAbortInk and shouldAbortInk() then
+			pcall(function()
+				WavePathLines.finishIntroCinematicSkipped()
+			end)
+			return
+		end
+		pcall(function()
+			WavePathLines.playInkReveal()
+		end)
+	end)
+
 	local startCf = cam.CFrame
 	local t0 = os.clock()
 	while os.clock() - t0 < durationSec and player.Parent do
@@ -1424,23 +1464,13 @@ local function tweenCamToPlotView(durationSec: number, startInkReveal: boolean?,
 	end
 	-- Leave PlotCam2 active; FreeCam ForceCamMode will adopt it without a hard snap.
 	finishCamToPlot()
-	pcall(function()
-		local stage = SkillPowerUpUI.getStage("PlotSize")
-		WaveSim.rebuildRouteForPlotSize(stage, { skipPathLines = true })
-		local WaveEndVfx = require(script.Parent:WaitForChild("WaveEndVfx"))
-		-- Intro hold must not outlive ink prep (HUD/route sync used to leave heart stuck dark).
-		WaveEndVfx.syncToPlotSizeStage(stage)
-		local aborted = shouldAbortInk ~= nil and shouldAbortInk() == true
-		if aborted or startInkReveal == false then
-			-- Skip Intro: snap to finished path — never begin the cinematic draw.
+	-- Skip pressed mid-handoff after ink already started — snap to finished path.
+	if startInkReveal ~= false and shouldAbortInk and shouldAbortInk() then
+		pcall(function()
 			local WavePathLines = require(script.Parent:WaitForChild("WavePathLines"))
 			WavePathLines.finishIntroCinematicSkipped()
-		else
-			-- Intro cinematic: green line → heart → fish → fork/rating → GAME OVER.
-			local WavePathLines = require(script.Parent:WaitForChild("WavePathLines"))
-			WavePathLines.playInkReveal()
-		end
-	end)
+		end)
+	end
 end
 
 local function markSeen()

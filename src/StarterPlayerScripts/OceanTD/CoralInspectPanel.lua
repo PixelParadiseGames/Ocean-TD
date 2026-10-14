@@ -59,10 +59,14 @@ local root: Frame? = nil
 -- runs above the bind locals and would otherwise index nil globals.
 local colorScroll: ScrollingFrame? = nil
 local colorSwatchBtns: { [number]: GuiButton } = {}
--- True while beginTutorialHueFinger has HINT cleared for swatch scroll — must not
--- be treated as "inspect closed mid-hue" (that wrongly forces reselectCoral).
-local hueFingerArming = false
--- Demo finger taps apply paint without advancing the hue tutorial hint.
+-- Forward decls: bodies in do-block below (keeps main-chunk locals under Luau's 200 limit).
+local noteTutorialUpgradeSucceeded: () -> ()
+local noteTutorialHueApplied: (number?) -> ()
+local onInspectVisibilityForTutorial: (boolean) -> ()
+local ensureInspectVisibleForHue: () -> ()
+-- Hue row visual order (0-seed → right). Assigned near seed-label refresh (main chunk).
+local swatchOrderForScroll: (() -> { number })? = nil
+-- Demo finger taps apply paint without advancing the hue tutorial hint (used outside do-block).
 local tutorialHueDemoSuppressNote = false
 
 local function tutorialFreeUpgradeAvailable(): boolean
@@ -101,8 +105,14 @@ local function rememberTutorialHueIndex(idx: number?)
 	SeedWheelRevealApi.lastAwardedColorIndex = clamped
 end
 
--- Force inspect chrome on after size cine without calling setVisible (defined later).
-local function ensureInspectVisibleForHue()
+-- Tutorial handoff helpers — scoped so their locals don't burn main-chunk registers.
+do
+-- True while beginTutorialHueFinger has HINT cleared for swatch scroll — must not
+-- be treated as "inspect closed mid-hue" (that wrongly forces reselectCoral).
+local hueFingerArming = false
+local hueArmToken = 0 -- cancels stale finishArming from a prior beginTutorialHueFinger
+
+ensureInspectVisibleForHue = function()
 	if not RelocateController.isActive() then
 		return
 	end
@@ -178,10 +188,14 @@ local function advanceTutorialAfterHue()
 		and PlacementController.getConfirmPlantedId() ~= ""
 	clearTutorialHueTracking()
 	HuePad.hideDpadPrompt()
+	-- Hue scroll left AutomaticCanvasSize off so the target stayed in view.
+	if colorScroll then
+		colorScroll.AutomaticCanvasSize = Enum.AutomaticSize.X
+	end
 	playerGui:SetAttribute(HINT_ATTR, if softPlantConfirm then "plant" else "closeBackpack")
 end
 
-local function noteTutorialHueApplied(appliedIdx: number?)
+noteTutorialHueApplied = function(appliedIdx: number?)
 	if tutorialHueDemoSuppressNote then
 		return
 	end
@@ -202,11 +216,59 @@ local animateScrollToSwatch: ((number, (() -> ())?, boolean?) -> ())?
 local refreshColorSwatches: (() -> ())?
 local isSwatchVisibleInScroll: ((ScrollingFrame, GuiObject, number) -> boolean)?
 
+local function hueRowOrderForScroll(): { number }
+	local fn = swatchOrderForScroll
+	if fn then
+		return fn()
+	end
+	-- Palette index order until main-chunk sort helper is assigned.
+	local order: { number } = { Consts.DEFAULT_PALETTE_SWATCH }
+	for _, sw in ipairs(PlotOutlineColors.coralSwatches()) do
+		table.insert(order, sw.index)
+	end
+	return order
+end
+
+-- Instant canvas snap so the tutorial hue is on-screen before the finger arms.
+local function snapTutorialHueIntoView(idx: number)
+	local sc = colorScroll
+	local sw = colorSwatchBtns[idx]
+	if not sc or not sw then
+		return
+	end
+	local gap = 6
+	local pad = 4
+	local fallbackW = 36
+	local x = pad
+	local centerX = pad
+	for _, i in ipairs(hueRowOrderForScroll()) do
+		local b = colorSwatchBtns[i]
+		local w = fallbackW
+		if b and b.AbsoluteSize.X >= 2 then
+			w = b.AbsoluteSize.X
+		end
+		if i == idx then
+			centerX = x + w * 0.5
+		end
+		x += w + gap
+	end
+	local totalW = math.max(pad * 2, x - gap + pad)
+	local viewW = math.max(8, sc.AbsoluteSize.X)
+	local need = math.max(totalW, centerX + viewW * 0.5 + 8)
+	sc.AutomaticCanvasSize = Enum.AutomaticSize.None
+	sc.CanvasSize = UDim2.fromOffset(math.ceil(math.max(need, sc.AbsoluteCanvasSize.X)), 0)
+	local maxX = math.max(0, math.max(sc.AbsoluteCanvasSize.X, need) - viewW)
+	local targetX = math.clamp(centerX - viewW * 0.5, 0, maxX)
+	sc.CanvasPosition = Vector2.new(targetX, 0)
+end
+
 local function beginTutorialHueFinger(resumeMode: string?)
 	-- Finger demo + one user hue press → plant (soft-plant) or closeBackpack.
 	local mode = "hue"
-	-- Cancel any in-flight scroll from a prior arm attempt, then re-arm.
+	-- Cancel any in-flight scroll / finishArming from a prior arm attempt.
 	hueScrollToken += 1
+	hueArmToken += 1
+	local myArm = hueArmToken
 	hueFingerArming = true
 	rememberTutorialHueCoral()
 	playerGui:SetAttribute(HUE_RESUME_ATTR, mode)
@@ -245,11 +307,18 @@ local function beginTutorialHueFinger(resumeMode: string?)
 
 	local finished = false
 	local function finishArming()
-		if finished then
+		if finished or myArm ~= hueArmToken then
 			return
 		end
 		finished = true
-		-- animateScrollToSwatch only calls this after the swatch is in the scroll viewport.
+		-- Last-chance snap so the finger never aims at an off-screen swatch.
+		snapTutorialHueIntoView(hue)
+		local visibleFn = isSwatchVisibleInScroll
+		local sc = colorScroll
+		local sw = colorSwatchBtns[hue]
+		if sc and sw and visibleFn and not visibleFn(sc, sw, 4) then
+			snapTutorialHueIntoView(hue)
+		end
 		hueFingerArming = false
 		-- Re-assert D-Pad start (scroll must not leave selection on the finger hue).
 		if onGamepad then
@@ -257,10 +326,12 @@ local function beginTutorialHueFinger(resumeMode: string?)
 			if refreshColorSwatches then
 				refreshColorSwatches()
 			end
+			-- refresh can reset canvas — snap again after overlays.
+			snapTutorialHueIntoView(hue)
 			HuePad.syncOverlays()
 			HuePad.armDpadPrompt()
 		end
-		-- Always show the hue finger after size upgrade — don't leave HINT stuck on false.
+		-- Only arm the finger after scroll/snap so RollFingerHint aims on-screen.
 		local cur = playerGui:GetAttribute(HINT_ATTR)
 		if cur == false or cur == nil or cur == "upgrade" or cur == "reselectCoral" then
 			playerGui:SetAttribute(HINT_ATTR, mode)
@@ -272,7 +343,7 @@ local function beginTutorialHueFinger(resumeMode: string?)
 		-- Wait for inspect + color row after size cinematic (AbsoluteSize is often 0 mid-swap).
 		local deadline = os.clock() + 5
 		while os.clock() < deadline do
-			if finished then
+			if finished or myArm ~= hueArmToken then
 				return
 			end
 			ensureInspectVisibleForHue()
@@ -283,7 +354,14 @@ local function beginTutorialHueFinger(resumeMode: string?)
 			end
 			task.wait()
 		end
-		if finished then
+		if finished or myArm ~= hueArmToken then
+			return
+		end
+
+		-- Pre-snap before tween so mid-upgrade layout already has canvas range.
+		snapTutorialHueIntoView(targetHue)
+		task.wait(0.05)
+		if finished or myArm ~= hueArmToken then
 			return
 		end
 
@@ -338,30 +416,30 @@ local function beginTutorialHueFinger(resumeMode: string?)
 		end
 
 		runScroll(function()
-			if finished then
+			if finished or myArm ~= hueArmToken then
 				return
 			end
 			local sc = colorScroll
 			local sw = colorSwatchBtns[targetHue]
 			local visibleFn = isSwatchVisibleInScroll
 			if sc and sw and visibleFn and not visibleFn(sc, sw, 4) then
-				-- One hard retry if layout settled late (common after upgrade mesh swap).
+				-- Hard snap + one animated retry after upgrade mesh swap.
+				snapTutorialHueIntoView(targetHue)
 				local retryFn = animateScrollToSwatch
 				if retryFn then
 					retryFn(targetHue, finishArming, onGamepad)
-					-- Belt-and-suspenders: if retry is cancelled mid-flight, still arm.
-					task.delay(1.2, finishArming)
+					task.delay(1.5, finishArming)
 					return
 				end
 			end
 			finishArming()
 		end)
 		-- Scroll path can bail on token cancel without onDone — never leave HINT=false.
-		task.delay(2.5, finishArming)
+		task.delay(3.5, finishArming)
 	end)
 end
 
-local function noteTutorialUpgradeSucceeded()
+noteTutorialUpgradeSucceeded = function()
 	suppressTutorialSizeConfirm = false
 	local hadFreeUpgrade = playerGui:GetAttribute(TUTORIAL_FREE_ATTR) == true
 	if hadFreeUpgrade then
@@ -439,7 +517,7 @@ local function requestReselectCoral(resume: string)
 	playerGui:SetAttribute(HINT_ATTR, "reselectCoral")
 end
 
-local function onInspectVisibilityForTutorial(visible: boolean)
+onInspectVisibilityForTutorial = function(visible: boolean)
 	local hint = playerGui:GetAttribute(HINT_ATTR)
 	local placeId = playerGui:GetAttribute(HUE_PLACE_ATTR)
 	local hasTrackedPlace = typeof(placeId) == "string" and placeId ~= ""
@@ -496,6 +574,7 @@ local function onInspectVisibilityForTutorial(visible: boolean)
 		requestReselectCoral(if typeof(resume) == "string" then resume else "hue")
 	end
 end
+end -- tutorial handoff do-block (register budget)
 
 local defaultStrokeFlashUntil = 0
 local defaultStrokeFlashTween: Tween? = nil
@@ -2303,6 +2382,51 @@ local function getHueAvailableSlots(itemId: string, hue: number, excludePlaceId:
 	return PlacedCoralIndex.hueAvailableSlots(if plot then plot.plotId else nil, itemId, hue, owned, excludePlaceId)
 end
 
+-- Paintbrush first, then hues with seeds left, then empty (0) hues on the right.
+swatchOrderForScroll = function(): { number }
+	local itemId = selectedItemId()
+	local withSeeds: { number } = {}
+	local without: { number } = {}
+	for _, sw in ipairs(PlotOutlineColors.coralSwatches()) do
+		local idx = sw.index
+		local n = if typeof(itemId) == "string" then getHueAvailableSlots(itemId, idx) else 0
+		if n > 0 then
+			table.insert(withSeeds, idx)
+		else
+			table.insert(without, idx)
+		end
+	end
+	local order: { number } = { Consts.DEFAULT_PALETTE_SWATCH }
+	for _, idx in ipairs(withSeeds) do
+		table.insert(order, idx)
+	end
+	for _, idx in ipairs(without) do
+		table.insert(order, idx)
+	end
+	return order
+end
+
+local function resolvedSwatchOrder(): { number }
+	local fn = swatchOrderForScroll
+	if fn then
+		return fn()
+	end
+	local order: { number } = { Consts.DEFAULT_PALETTE_SWATCH }
+	for _, sw in ipairs(PlotOutlineColors.coralSwatches()) do
+		table.insert(order, sw.index)
+	end
+	return order
+end
+
+local function applySwatchLayoutOrder()
+	for layoutPos, idx in ipairs(resolvedSwatchOrder()) do
+		local btn = colorSwatchBtns[idx]
+		if btn then
+			btn.LayoutOrder = layoutPos
+		end
+	end
+end
+
 local function refreshColorSeedLabels()
 	local itemId = selectedItemId()
 	for idx, lock in pairs(colorSwatchLocks) do
@@ -2331,6 +2455,7 @@ local function refreshColorSeedLabels()
 			btn.BackgroundTransparency = if available <= 0 and not isActive then 0.35 else 0
 		end
 	end
+	applySwatchLayoutOrder()
 end
 
 local function showConfirmUnlock(targetClass: number?)
@@ -2835,8 +2960,7 @@ local function estimateSwatchCanvasCenterX(idx: number): (number, number)
 	local fallbackW = 36
 	local x = pad
 	local centerX = pad
-	local maxI = PlotOutlineColors.CORAL_MAX_INDEX
-	for i = Consts.DEFAULT_PALETTE_SWATCH, maxI do
+	for _, i in ipairs(resolvedSwatchOrder()) do
 		local b = colorSwatchBtns[i]
 		local w = fallbackW
 		if b and b.AbsoluteSize.X >= 2 then
@@ -3007,7 +3131,8 @@ animateScrollToSwatch = function(idx: number, onDone: (() -> ())?, keepFocus: bo
 		if my ~= hueScrollToken then
 			return
 		end
-		-- Final snap, then allow AutomaticCanvasSize again.
+		-- Final snap. Keep AutomaticCanvasSize off during hue finger so Auto can't
+		-- collapse canvas range and hide the target (restored in advanceTutorialAfterHue).
 		local sc = colorScroll
 		local sw = colorSwatchBtns[idx]
 		if sc and sw and visibleFn and not visibleFn(sc, sw, 4) then
@@ -3018,9 +3143,6 @@ animateScrollToSwatch = function(idx: number, onDone: (() -> ())?, keepFocus: bo
 				scrollFocusIntoView()
 			end
 		end
-		if colorScroll then
-			colorScroll.AutomaticCanvasSize = Enum.AutomaticSize.X
-		end
 		task.wait()
 		if my ~= hueScrollToken then
 			return
@@ -3029,6 +3151,14 @@ animateScrollToSwatch = function(idx: number, onDone: (() -> ())?, keepFocus: bo
 		sw = colorSwatchBtns[idx]
 		if sc and sw and visibleFn and not visibleFn(sc, sw, 4) then
 			ensureTargetAndScroll(true, true)
+		end
+		-- Hold manual canvas size for the hue step.
+		sc = colorScroll
+		if sc then
+			local _, totalWHold = estimateSwatchCanvasCenterX(idx)
+			local needHold = math.max(totalWHold, sc.AbsoluteSize.X + 8, sc.AbsoluteCanvasSize.X)
+			sc.AutomaticCanvasSize = Enum.AutomaticSize.None
+			sc.CanvasSize = UDim2.fromOffset(math.ceil(needHold), 0)
 		end
 		if onDone then
 			onDone()
@@ -3040,14 +3170,15 @@ local function nudgeColorFocus(delta: number)
 	if not root or not root.Visible then
 		return
 	end
-	local maxI = PlotOutlineColors.CORAL_MAX_INDEX
-	local next = focusColorIndex + delta
-	if next < Consts.DEFAULT_PALETTE_SWATCH then
-		next = maxI
-	elseif next > maxI then
-		next = Consts.DEFAULT_PALETTE_SWATCH
+	local order = resolvedSwatchOrder()
+	local at = table.find(order, focusColorIndex) or 1
+	local nextAt = at + delta
+	if nextAt < 1 then
+		nextAt = #order
+	elseif nextAt > #order then
+		nextAt = 1
 	end
-	focusColorIndex = next
+	focusColorIndex = order[nextAt]
 	HuePad.noteFocusChanged()
 	refreshColorSwatches()
 	scrollFocusIntoView()

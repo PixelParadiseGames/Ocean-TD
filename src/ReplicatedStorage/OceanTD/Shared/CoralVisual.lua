@@ -1683,15 +1683,17 @@ function CoralVisual.applyRestLook(part: BasePart)
 		syncSeaGrassClimb(part)
 	end
 	if part:GetAttribute("OceanTD_CrabStunned") == true then
-		part.Material = Enum.Material.Plastic
-		part.Color = Color3.new(1, 1, 1)
+		-- Match WaveCrab stun bleach (Ice + cream) so rest APIs don't flash white Plastic.
+		local bleach = Color3.fromRGB(255, 242, 197)
+		part.Material = Enum.Material.Ice
+		part.Color = bleach
 		if part:IsA("MeshPart") then
 			part.TextureID = ""
 		end
 		local web = getAccentPart(part)
 		if web then
-			web.Material = Enum.Material.Plastic
-			web.Color = Color3.new(1, 1, 1)
+			web.Material = Enum.Material.Ice
+			web.Color = bleach
 			if web:IsA("MeshPart") then
 				web.TextureID = ""
 			end

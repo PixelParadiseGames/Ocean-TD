@@ -12,6 +12,7 @@ local Workspace = game:GetService("Workspace")
 
 local WaveSim = require(script.Parent:WaitForChild("WaveSim"))
 local C = require(script.Parent:WaitForChild("WaveSimConsts"))
+local TutorialVo = require(script.Parent:WaitForChild("TutorialVo"))
 
 local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui") :: PlayerGui
@@ -26,6 +27,7 @@ local RETREAT_SEC = 0.45
 local REST_OFFSET = Vector2.new(0, 72)
 local FINGER_PATH = "Plots.IntroElements.Finger"
 local ATTR_TAP_OK = "OceanTD_Wave1TapFeedOk"
+local TAP_FISH_VO_ID = "rbxassetid://100616940418724"
 local TAP_BURST_COUNT = 6
 local TAP_BURST_COLOR = Color3.new(1, 1, 1)
 
@@ -38,6 +40,8 @@ local lastWave = -1
 local phase = "rise"
 local phaseT0 = 0
 local tapBurstRng = Random.new()
+local tapFishVoPlayed = false
+local fingerShowing = false
 
 local function findByPathFallback(): Instance?
 	local cur: Instance? = Workspace
@@ -216,6 +220,7 @@ local function easeIn(u: number): number
 end
 
 local function hideFinger()
+	fingerShowing = false
 	if finger then
 		finger.Visible = false
 	end
@@ -223,6 +228,14 @@ local function hideFinger()
 		gui.Enabled = false
 	end
 	phase = "rise"
+end
+
+local function playTapFishVoOnce()
+	if tapFishVoPlayed then
+		return
+	end
+	tapFishVoPlayed = true
+	TutorialVo.playWhenIdle(TAP_FISH_VO_ID, "OceanTD_TapFishFinger")
 end
 
 playerGui:GetAttributeChangedSignal(ATTR_TAP_OK):Connect(function()
@@ -263,6 +276,10 @@ RunService.RenderStepped:Connect(function()
 	end
 	sg.Enabled = true
 	f.Visible = true
+	if not fingerShowing then
+		fingerShowing = true
+		playTapFishVoOnce()
+	end
 	local restPos = aim + REST_OFFSET
 
 	local now = os.clock()

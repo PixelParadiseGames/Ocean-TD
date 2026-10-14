@@ -29,6 +29,7 @@ local SkillStages = require(oceanRoot:WaitForChild("Shared"):WaitForChild("Skill
 local InventoryState = require(script.Parent:WaitForChild("InventoryState"))
 local PlacementController = require(script.Parent:WaitForChild("PlacementController"))
 local RelocateController = require(script.Parent:WaitForChild("RelocateController"))
+local TutorialVo = require(script.Parent:WaitForChild("TutorialVo"))
 
 local STUDIO_ANCHOR_NAME = "StopAutoRoll"
 local HIT_NAME = "_OceanTD_StopAutoRollHit"
@@ -56,6 +57,9 @@ local DICE_EMOJI = "🎲"
 local FOUNTAIN_GUI_NAME = "OceanTD_DiceFountain"
 local HOLD_FOUNTAIN_GAP = 0.11
 local ROLL_PRESS_SOUND_ID = "rbxassetid://117344652481079"
+-- After first tutorial roll click + "roll for coral" VO ends.
+local EXPLAIN_CORAL_ROLL_VO_ID = "rbxassetid://93340732143198"
+local explainCoralRollVoPlayed = false
 local SKILLS_OPEN_ATTR = "OceanTD_SkillsBubblesOpen"
 local POWERUP_OPEN_ATTR = "OceanTD_SkillPowerUpOpen"
 local REPORT_OPEN_ATTR = "OceanTD_ReefReportOpen"
@@ -81,6 +85,11 @@ local function clearRollFingerHint()
 		playerGui:SetAttribute("OceanTD_TutorialGateLeftHud", false)
 		playerGui:SetAttribute(ROLL_FINGER_ATTR, "skills")
 		return
+	end
+	-- First join roll: after "roll for coral" finishes, play Explain Coral Roll once.
+	if not explainCoralRollVoPlayed then
+		explainCoralRollVoPlayed = true
+		TutorialVo.playWhenIdle(EXPLAIN_CORAL_ROLL_VO_ID, "OceanTD_ExplainCoralRoll")
 	end
 	-- First join roll: wait for coral→backpack slide, then backpack tutorial.
 	playerGui:SetAttribute(ROLL_FINGER_ATTR, "await")

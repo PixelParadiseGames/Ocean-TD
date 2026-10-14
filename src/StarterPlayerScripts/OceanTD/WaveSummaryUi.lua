@@ -6,6 +6,7 @@
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
 
 local oceanRoot = ReplicatedStorage:WaitForChild("OceanTD")
 local Constants = require(oceanRoot:WaitForChild("Shared"):WaitForChild("Constants"))
@@ -17,14 +18,27 @@ local WaveSim = require(script.Parent:WaitForChild("WaveSim"))
 
 local WaveSummaryUi = {}
 
-local FINISH_RED = Color3.fromRGB(200, 45, 50)
-local FINISH_STROKE = Color3.fromRGB(255, 55, 60)
+local FINISH_BLUE = Color3.fromRGB(40, 110, 210)
+local FINISH_STROKE = Color3.fromRGB(90, 170, 255)
 local CONTINUE_GREEN = Color3.fromRGB(40, 180, 80)
 local CONTINUE_STROKE = Color3.fromRGB(70, 255, 110)
 local REEF_PLUS_GREEN = Color3.fromRGB(50, 230, 100)
 local REEF_PLUS_STROKE = Color3.fromRGB(12, 70, 28)
+-- Training first-defeat RETRY lock (matches Skip / LeftHud locked slots).
+local RETRY_LOCK_RED = Color3.fromRGB(220, 40, 45)
+local RETRY_LOCK_STROKE = Color3.fromRGB(255, 90, 95)
+local RETRY_LOCK_IMAGE = "rbxassetid://105420423737825"
+local RETRY_LOCK_SIZE_PX = 22
+local RETRY_LOCK_ORBIT_SPEED = 1.35
+local RETRY_LOCK_ORBIT_FRAC = 0.36
+local RETRY_LOCK_OVERLAY = "_OceanTD_RetryLockOverlay"
+local RETRY_LOCK_ICON = "_OceanTD_RetryLockIcon"
 
-local SUMMARY_BTN_W = 200
+local retryLockOrbitConn: RBXScriptConnection? = nil
+local retryLockOrbitAngle = 0
+
+-- Wide enough for "RETRY WAVE 99" / "END WAVES" without clipping.
+local SUMMARY_BTN_W = 236
 local SUMMARY_BTN_H = 44
 local SUMMARY_BTN_BOTTOM = 18
 local SUMMARY_CAPTION_SIZE = 22
@@ -64,16 +78,117 @@ local function styleSummaryButton(btn: TextButton, fill: Color3, strokeColor: Co
 	stroke.Color = strokeColor
 end
 
+local function stopRetryLockOrbit()
+	if retryLockOrbitConn then
+		retryLockOrbitConn:Disconnect()
+		retryLockOrbitConn = nil
+	end
+end
+
+local function startRetryLockOrbit(host: GuiObject, icon: ImageLabel)
+	if retryLockOrbitConn then
+		return
+	end
+	retryLockOrbitConn = RunService.Heartbeat:Connect(function(dt)
+		if not icon.Parent or not icon.Visible then
+			return
+		end
+		retryLockOrbitAngle += RETRY_LOCK_ORBIT_SPEED * dt
+		local abs = host.AbsoluteSize
+		local radius = math.max(8, math.min(abs.X, abs.Y) * 0.5 * RETRY_LOCK_ORBIT_FRAC)
+		icon.Position = UDim2.new(0.5, math.cos(retryLockOrbitAngle) * radius, 0.5, math.sin(retryLockOrbitAngle) * radius)
+	end)
+end
+
+local function applyRetryLockChrome(btn: TextButton, locked: boolean)
+	local overlay = btn:FindFirstChild(RETRY_LOCK_OVERLAY)
+	local icon = btn:FindFirstChild(RETRY_LOCK_ICON)
+	if not locked then
+		stopRetryLockOrbit()
+		if overlay and overlay:IsA("GuiObject") then
+			overlay.Visible = false
+		end
+		if icon and icon:IsA("GuiObject") then
+			icon.Visible = false
+		end
+		return
+	end
+
+	styleSummaryButton(btn, RETRY_LOCK_RED, RETRY_LOCK_STROKE)
+	btn.AutoButtonColor = false
+	btn.Active = false
+	btn.Selectable = false
+	pcall(function()
+		(btn :: any).Interactable = false
+	end)
+
+	local ov: TextButton
+	if overlay and overlay:IsA("TextButton") then
+		ov = overlay
+		ov.Visible = true
+	else
+		if overlay then
+			overlay:Destroy()
+		end
+		ov = Instance.new("TextButton")
+		ov.Name = RETRY_LOCK_OVERLAY
+		ov.Text = ""
+		ov.AutoButtonColor = false
+		ov.BackgroundColor3 = RETRY_LOCK_RED
+		ov.BackgroundTransparency = 0.45
+		ov.BorderSizePixel = 0
+		ov.Size = UDim2.fromScale(1, 1)
+		ov.Position = UDim2.fromScale(0, 0)
+		ov.Active = true
+		ov.Selectable = false
+		ov.ZIndex = btn.ZIndex + 8
+		ov.Parent = btn
+		local corner = Instance.new("UICorner")
+		corner.CornerRadius = UDim.new(0, 10)
+		corner.Parent = ov
+		ov.Activated:Connect(function() end)
+	end
+	ov.ZIndex = btn.ZIndex + 8
+
+	local img: ImageLabel
+	if icon and icon:IsA("ImageLabel") then
+		img = icon
+		img.Visible = true
+	else
+		if icon then
+			icon:Destroy()
+		end
+		img = Instance.new("ImageLabel")
+		img.Name = RETRY_LOCK_ICON
+		img.BackgroundTransparency = 1
+		img.Image = RETRY_LOCK_IMAGE
+		img.Size = UDim2.fromOffset(RETRY_LOCK_SIZE_PX, RETRY_LOCK_SIZE_PX)
+		img.AnchorPoint = Vector2.new(0.5, 0.5)
+		img.Position = UDim2.fromScale(0.5, 0.5)
+		img.Active = false
+		img.ZIndex = btn.ZIndex + 10
+		img.ScaleType = Enum.ScaleType.Fit
+		img.Parent = btn
+		retryLockOrbitAngle = Random.new():NextNumber(0, math.pi * 2)
+	end
+	img.Size = UDim2.fromOffset(RETRY_LOCK_SIZE_PX, RETRY_LOCK_SIZE_PX)
+	img.ZIndex = btn.ZIndex + 10
+	startRetryLockOrbit(btn, img)
+end
+
 function WaveSummaryUi.ensureButtons(
 	panel: Frame,
 	onContinue: () -> (),
 	onFinish: () -> (),
-	retrySameWave: boolean?
+	retrySameWave: boolean?,
+	retryWaveNumber: number?,
+	retryLocked: boolean?
 ): (TextButton, TextButton)
 	local btnY = -(SUMMARY_BTN_BOTTOM)
 	local captionY = -(SUMMARY_BTN_BOTTOM + SUMMARY_BTN_H + SUMMARY_CAPTION_GAP)
 	local captionH = SUMMARY_CAPTION_SIZE + 6
-	local primaryText = if retrySameWave then "RETRY" else "CONTINUE"
+	local retryN = math.max(1, math.floor(if typeof(retryWaveNumber) == "number" then retryWaveNumber :: number else 1))
+	local primaryText = if retrySameWave then ("RETRY WAVE " .. tostring(retryN)) else "CONTINUE"
 
 	local function ensureCaption(name: string, text: string, xScale: number)
 		local existing = panel:FindFirstChild(name)
@@ -102,8 +217,8 @@ function WaveSummaryUi.ensureButtons(
 		lbl.Size = UDim2.fromOffset(SUMMARY_BTN_W + 24, captionH)
 	end
 
-	ensureCaption("WatchAdCaption", "Watch Ad:", 0.27)
-	ensureCaption("EndSessionCaption", "End Session:", 0.73)
+	ensureCaption("WatchAdCaption", "Watch Ad:", 0.26)
+	ensureCaption("EndSessionCaption", "End Session:", 0.74)
 
 	local continue = panel:FindFirstChild("Continue")
 	if not (continue and continue:IsA("TextButton")) then
@@ -113,7 +228,7 @@ function WaveSummaryUi.ensureButtons(
 		local btn = Instance.new("TextButton")
 		btn.Name = "Continue"
 		btn.AnchorPoint = Vector2.new(0.5, 1)
-		btn.Position = UDim2.new(0.27, 0, 1, btnY)
+		btn.Position = UDim2.new(0.26, 0, 1, btnY)
 		btn.Size = UDim2.fromOffset(SUMMARY_BTN_W, SUMMARY_BTN_H)
 		btn.Font = UiTheme.Font
 		btn.Text = primaryText
@@ -126,12 +241,22 @@ function WaveSummaryUi.ensureButtons(
 		continue = btn
 	else
 		continue.AnchorPoint = Vector2.new(0.5, 1)
-		continue.Position = UDim2.new(0.27, 0, 1, btnY)
+		continue.Position = UDim2.new(0.26, 0, 1, btnY)
 		continue.Size = UDim2.fromOffset(SUMMARY_BTN_W, SUMMARY_BTN_H)
 		continue.Text = primaryText
 	end
 	local continueBtn = continue :: TextButton
-	styleSummaryButton(continueBtn, CONTINUE_GREEN, CONTINUE_STROKE)
+	local lockRetry = retryLocked == true and retrySameWave == true
+	if lockRetry then
+		applyRetryLockChrome(continueBtn, true)
+	else
+		applyRetryLockChrome(continueBtn, false)
+		styleSummaryButton(continueBtn, CONTINUE_GREEN, CONTINUE_STROKE)
+		continueBtn.AutoButtonColor = true
+		pcall(function()
+			(continueBtn :: any).Interactable = true
+		end)
+	end
 
 	local finish = panel:FindFirstChild("Finish")
 	if not (finish and finish:IsA("TextButton")) then
@@ -141,10 +266,10 @@ function WaveSummaryUi.ensureButtons(
 		local btn = Instance.new("TextButton")
 		btn.Name = "Finish"
 		btn.AnchorPoint = Vector2.new(0.5, 1)
-		btn.Position = UDim2.new(0.73, 0, 1, btnY)
+		btn.Position = UDim2.new(0.74, 0, 1, btnY)
 		btn.Size = UDim2.fromOffset(SUMMARY_BTN_W, SUMMARY_BTN_H)
 		btn.Font = UiTheme.Font
-		btn.Text = "FINISH"
+		btn.Text = "END WAVES"
 		btn.TextSize = 22
 		btn.AutoButtonColor = true
 		btn.Selectable = true
@@ -154,13 +279,13 @@ function WaveSummaryUi.ensureButtons(
 		finish = btn
 	else
 		finish.AnchorPoint = Vector2.new(0.5, 1)
-		finish.Position = UDim2.new(0.73, 0, 1, btnY)
+		finish.Position = UDim2.new(0.74, 0, 1, btnY)
 		finish.Size = UDim2.fromOffset(SUMMARY_BTN_W, SUMMARY_BTN_H)
-		finish.Text = "FINISH"
-		finish.BackgroundColor3 = FINISH_RED
+		finish.Text = "END WAVES"
+		finish.BackgroundColor3 = FINISH_BLUE
 	end
 	local finishBtn = finish :: TextButton
-	styleSummaryButton(finishBtn, FINISH_RED, FINISH_STROKE)
+	styleSummaryButton(finishBtn, FINISH_BLUE, FINISH_STROKE)
 	return continueBtn, finishBtn
 end
 
@@ -445,12 +570,22 @@ function WaveSummaryUi.ensurePanelContent(
 	onContinue: () -> (),
 	onFinish: () -> (),
 	onReefPlus: (() -> ())?,
-	retrySameWave: boolean?
+	retrySameWave: boolean?,
+	retryWaveNumber: number?,
+	retryLocked: boolean?
 ): (TextButton, TextButton, UIStroke?)
 	ensureSummaryStats(panel, onReefPlus)
-	local c, f = WaveSummaryUi.ensureButtons(panel, onContinue, onFinish, retrySameWave)
+	local c, f = WaveSummaryUi.ensureButtons(panel, onContinue, onFinish, retrySameWave, retryWaveNumber, retryLocked)
 	local titleStroke = WaveSummaryUi.ensureTitle(panel, onReefPlus)
 	return c, f, titleStroke
+end
+
+function WaveSummaryUi.clearRetryLockChrome(btn: TextButton?)
+	if btn then
+		applyRetryLockChrome(btn, false)
+	else
+		stopRetryLockOrbit()
+	end
 end
 
 return WaveSummaryUi

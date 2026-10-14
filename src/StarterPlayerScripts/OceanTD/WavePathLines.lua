@@ -1228,7 +1228,7 @@ local function buildPolylineFromPoints(points: { Vector3 }, path: PathLike?)
 	-- Path may rebuild while POV is already on — re-sync attr and apply fade.
 	syncPovFadeFromAttr()
 	if povFadeOn then
-		updatePovBeamFade()
+		applyPovFadeToBeams()
 	end
 end
 

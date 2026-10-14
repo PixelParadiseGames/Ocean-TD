@@ -68,10 +68,11 @@ local function playNextWaveUnlockSound()
 	end
 end
 
-local START_ICON = "rbxassetid://74802566438233"
-local STOP_ICON = "rbxassetid://96580667427806"
-local HELP_GREEN = Color3.fromRGB(40, 180, 80)
-local HELP_RED = Color3.fromRGB(200, 45, 50)
+local WAVE_SLOT_ICONS = {
+	start = "rbxassetid://74802566438233",
+	stop = "rbxassetid://96580667427806",
+}
+local HELP_GREEN, HELP_RED = Color3.fromRGB(40, 180, 80), Color3.fromRGB(200, 45, 50)
 -- Shift camera subject up so the avatar sits ~20% lower on screen during waves.
 local WAVE_CAM_SCREEN_SHIFT = 0.2
 local STOP_PANEL_W = 420
@@ -227,66 +228,71 @@ local function isUsingGamepad(): boolean
 		or t == Enum.UserInputType.Gamepad4
 end
 
-local function clearWaveCameraOffset()
-	local char = Players.LocalPlayer.Character
-	local hum = char and char:FindFirstChildOfClass("Humanoid")
-	if hum then
-		hum.CameraOffset = Vector3.zero
+-- Camera helpers nested to stay under Luau's 200-local chunk limit.
+local clearWaveCameraOffset: () -> ()
+local setWaveCameraActive: (on: boolean) -> ()
+do
+	local function computeWaveCameraOffset(): Vector3
+		local cam = Workspace.CurrentCamera
+		if not cam then
+			return Vector3.new(0, 3, 0)
+		end
+		local dist = (cam.CFrame.Position - cam.Focus.Position).Magnitude
+		if dist < 1 then
+			dist = 12.5
+		end
+		local halfH = dist * math.tan(math.rad(cam.FieldOfView) * 0.5)
+		-- 20% of full vertical view in studs at the focus distance (at bake time).
+		return Vector3.new(0, halfH * (WAVE_CAM_SCREEN_SHIFT * 2), 0)
 	end
-end
 
-local function computeWaveCameraOffset(): Vector3
-	local cam = Workspace.CurrentCamera
-	if not cam then
-		return Vector3.new(0, 3, 0)
+	local function applyWaveCameraOffset()
+		local char = Players.LocalPlayer.Character
+		local hum = char and char:FindFirstChildOfClass("Humanoid")
+		if hum then
+			hum.CameraOffset = waveCamOffset
+		end
 	end
-	local dist = (cam.CFrame.Position - cam.Focus.Position).Magnitude
-	if dist < 1 then
-		dist = 12.5
+
+	local function bakeWaveCameraOffset()
+		waveCamOffset = computeWaveCameraOffset()
+		applyWaveCameraOffset()
 	end
-	local halfH = dist * math.tan(math.rad(cam.FieldOfView) * 0.5)
-	-- 20% of full vertical view in studs at the focus distance (at bake time).
-	return Vector3.new(0, halfH * (WAVE_CAM_SCREEN_SHIFT * 2), 0)
-end
 
-local function applyWaveCameraOffset()
-	local char = Players.LocalPlayer.Character
-	local hum = char and char:FindFirstChildOfClass("Humanoid")
-	if hum then
-		hum.CameraOffset = waveCamOffset
+	clearWaveCameraOffset = function()
+		local char = Players.LocalPlayer.Character
+		local hum = char and char:FindFirstChildOfClass("Humanoid")
+		if hum then
+			hum.CameraOffset = Vector3.zero
+		end
 	end
-end
 
-local function bakeWaveCameraOffset()
-	waveCamOffset = computeWaveCameraOffset()
-	applyWaveCameraOffset()
-end
-
-local function setWaveCameraActive(on: boolean)
-	if on then
-		if waveCamConn then
+	setWaveCameraActive = function(on: boolean)
+		if on then
+			if waveCamConn then
+				return
+			end
+			bakeWaveCameraOffset()
+			-- Re-assert fixed offset only (never recompute from zoom distance).
+			waveCamConn = RunService.Heartbeat:Connect(applyWaveCameraOffset)
+			if not waveCamCharConn then
+				waveCamCharConn = Players.LocalPlayer.CharacterAdded:Connect(function()
+					task.defer(bakeWaveCameraOffset)
+				end)
+			end
 			return
 		end
-		bakeWaveCameraOffset()
-		-- Re-assert fixed offset only (never recompute from zoom distance).
-		waveCamConn = RunService.Heartbeat:Connect(applyWaveCameraOffset)
-		if not waveCamCharConn then
-			waveCamCharConn = Players.LocalPlayer.CharacterAdded:Connect(function()
-				task.defer(bakeWaveCameraOffset)
-			end)
+		if waveCamConn then
+			waveCamConn:Disconnect()
+			waveCamConn = nil
 		end
-		return
+		if waveCamCharConn then
+			waveCamCharConn:Disconnect()
+			waveCamCharConn = nil
+		end
+		waveCamOffset = Vector3.zero
+		clearWaveCameraOffset()
 	end
-	if waveCamConn then
-		waveCamConn:Disconnect()
-		waveCamConn = nil
-	end
-	if waveCamCharConn then
-		waveCamCharConn:Disconnect()
-		waveCamCharConn = nil
-	end
-	waveCamOffset = Vector3.zero
-	clearWaveCameraOffset()
 end
 
 local function applyIcon(running: boolean)
@@ -294,7 +300,7 @@ local function applyIcon(running: boolean)
 		return
 	end
 	if slot5Circle:IsA("ImageLabel") or slot5Circle:IsA("ImageButton") then
-		(slot5Circle :: any).Image = if running then STOP_ICON else START_ICON
+		(slot5Circle :: any).Image = if running then WAVE_SLOT_ICONS.stop else WAVE_SLOT_ICONS.start
 	end
 	WaveSlot.refreshHelpBadge()
 end
@@ -398,11 +404,27 @@ function WaveSlot.refreshHelpBadge()
 	end
 end
 
-local dangerFlashToken = 0
 local hungerDangerUi = false
-local fireworkToken = 0
+-- Flash / firework helpers nested for Luau 200-local chunk budget.
+local restoreBarChrome: () -> ()
+local stopFinishFlash: () -> ()
+local stopDangerFlash: () -> ()
+local startFinishFlash: () -> ()
+local waveBarHeight: () -> number
+local setWaveLabelTextSize: (size: number) -> ()
+local animateWaveBarHeight: (targetH: number, withOvershoot: boolean) -> ()
+local animateNextWaveUnlockPop: () -> ()
+local startDangerFlash: () -> ()
+local flashFillHurt: () -> ()
+local refreshForkLabel: () -> ()
+local refreshCritterEmojisInWaveBar: () -> ()
+local refreshCritterBarsEye: () -> ()
+local playFinishFirework: (emojis: { string }) -> ()
+do
+	local dangerFlashToken = 0
+	local fireworkToken = 0
 
-local function restoreBarChrome()
+	restoreBarChrome = function()
 	if hudWaveBar then
 		hudWaveBar.BackgroundColor3 = BAR_BG
 		hudWaveBar.BackgroundTransparency = 0.5
@@ -418,14 +440,14 @@ local function restoreBarChrome()
 	end
 end
 
-local function stopFinishFlash()
+	stopFinishFlash = function()
 	finishFlashToken += 1
 	if not hungerDangerUi then
 		restoreBarChrome()
 	end
 end
 
-local function stopDangerFlash()
+	stopDangerFlash = function()
 	dangerFlashToken += 1
 	if hudBarHeartScale then
 		hudBarHeartScale.Scale = 1
@@ -435,7 +457,7 @@ local function stopDangerFlash()
 	end
 end
 
-local function startFinishFlash()
+	startFinishFlash = function()
 	finishFlashToken += 1
 	dangerFlashToken += 1
 	if hudBarHeartScale then
@@ -476,17 +498,17 @@ local function startFinishFlash()
 	end)
 end
 
-local function waveBarHeight(): number
+	waveBarHeight = function(): number
 	return math.max(BAR_H, math.floor(waveBarAnimH + 0.5))
 end
 
-local function setWaveLabelTextSize(size: number)
+	setWaveLabelTextSize = function(size: number)
 	if hudWaveLabel then
 		hudWaveLabel.TextSize = math.max(1, math.floor(size + 0.5))
 	end
 end
 
-local function animateWaveBarHeight(targetH: number, withOvershoot: boolean)
+	animateWaveBarHeight = function(targetH: number, withOvershoot: boolean)
 	waveBarAnimToken += 1
 	local my = waveBarAnimToken
 	task.spawn(function()
@@ -522,7 +544,7 @@ local function animateWaveBarHeight(targetH: number, withOvershoot: boolean)
 end
 
 -- NEXT WAVE unlock: bar + label pop to 500% height, then ease down over 1.5s.
-local function animateNextWaveUnlockPop()
+	animateNextWaveUnlockPop = function()
 	waveBarAnimToken += 1
 	local my = waveBarAnimToken
 	local peakH = BAR_H * WAVE_NEXT_UNLOCK_PEAK_MULT
@@ -557,7 +579,7 @@ local function animateNextWaveUnlockPop()
 	end)
 end
 
-local function startDangerFlash()
+	startDangerFlash = function()
 	if feedCompleteUi then
 		return
 	end
@@ -604,7 +626,7 @@ local function startDangerFlash()
 	end)
 end
 
-local function flashFillHurt()
+	flashFillHurt = function()
 	fillHurtToken += 1
 	local my = fillHurtToken
 	if hudWaveFill then
@@ -617,7 +639,7 @@ local function flashFillHurt()
 	end)
 end
 
-local function refreshForkLabel()
+	refreshForkLabel = function()
 	if not hudBarFork then
 		return
 	end
@@ -629,7 +651,7 @@ local function refreshForkLabel()
 	hudBarFork.Text = string.format("%d of %d", lastFishFull, lastFishTotal + lastCrabTotal + lastUrchinTotal)
 end
 
-local function formatCritterEmojis(fishTotal: number, crabs: number, urchins: number, sharks: number): string
+	local function formatCritterEmojis(fishTotal: number, crabs: number, urchins: number, sharks: number): string
 	local fishCount = math.max(fishTotal, 0)
 	local line = "🐟:" .. tostring(fishCount)
 	if crabs > 0 then
@@ -644,7 +666,7 @@ local function formatCritterEmojis(fishTotal: number, crabs: number, urchins: nu
 	return line
 end
 
-local function refreshCritterEmojisInWaveBar()
+	refreshCritterEmojisInWaveBar = function()
 	if not hudBarHeart then
 		return
 	end
@@ -662,7 +684,7 @@ local function refreshCritterEmojisInWaveBar()
 	hudBarHeart.TextSize = FORK_COUNT_TEXT_SIZE
 end
 
-local function refreshCritterBarsEye()
+	refreshCritterBarsEye = function()
 	if not hudCritterBarsEye then
 		return
 	end
@@ -670,7 +692,7 @@ local function refreshCritterBarsEye()
 	hudCritterBarsEye.BackgroundColor3 = if on then HELP_GREEN else HELP_RED
 end
 
-local function playFinishFirework(emojis: { string })
+	playFinishFirework = function(emojis: { string })
 	if not hudWaveBar or not deps.mainHUD then
 		return
 	end
@@ -750,6 +772,7 @@ local function playFinishFirework(emojis: { string })
 		end
 	end)
 end
+end -- flash/firework do-block (register budget)
 
 function WaveSlot.isFinishReady(): boolean
 	return feedCompleteUi and WaveSim.isRunning() and not InventoryState.isOpen()
@@ -764,13 +787,116 @@ function WaveSlot.getNextWaveHit(): GuiObject?
 	return nil
 end
 
-function WaveSlot.tryFinishFromShortcut(): boolean
-	if not WaveSlot.isFinishReady() then
-		return false
+do
+	local greenSphereFireworkToken = 0
+	local SPHERE_GREEN_LIGHT = Color3.fromRGB(90, 255, 130)
+	local SPHERE_GREEN_DARK = Color3.fromRGB(20, 160, 55)
+	local SPHERE_STROKE_GREEN = Color3.fromRGB(40, 230, 80)
+	-- L / M / S diameters (px).
+	local SPHERE_DIAMS = { 56, 38, 22 }
+	function WaveSlot.tryFinishFromShortcut(): boolean
+		if not WaveSlot.isFinishReady() then
+			return false
+		end
+		-- Happy emoji burst already fired when NEXT WAVE unlocked; green spheres on press.
+		if hudWaveBar and deps.mainHUD then
+			greenSphereFireworkToken += 1
+			local my = greenSphereFireworkToken
+			local bar = hudWaveBar
+			local origin = bar.AbsolutePosition + bar.AbsoluteSize * 0.5
+			local parentPos = deps.mainHUD.AbsolutePosition
+			local ox = origin.X - parentPos.X
+			local oy = origin.Y - parentPos.Y
+
+			local layer = Instance.new("Frame")
+			layer.Name = "OceanTD_NextWaveGreenSpheres"
+			layer.BackgroundTransparency = 1
+			layer.Size = UDim2.fromScale(1, 1)
+			layer.ZIndex = 82
+			layer.Active = false
+			layer.Parent = deps.mainHUD
+
+			local rng = Random.new()
+			for i = 1, 20 do
+				local diam = SPHERE_DIAMS[((i - 1) % 3) + 1]
+				local ball = Instance.new("Frame")
+				ball.Name = "GreenSphere"
+				ball.AnchorPoint = Vector2.new(0.5, 0.5)
+				ball.Position = UDim2.fromOffset(ox, oy)
+				ball.Size = UDim2.fromOffset(diam, diam)
+				-- White base so UIGradient greens read true.
+				ball.BackgroundColor3 = Color3.new(1, 1, 1)
+				ball.BackgroundTransparency = 0
+				ball.BorderSizePixel = 0
+				ball.ZIndex = 83
+				ball.Parent = layer
+				local corner = Instance.new("UICorner")
+				corner.CornerRadius = UDim.new(1, 0)
+				corner.Parent = ball
+				local grad = Instance.new("UIGradient")
+				grad.Color = ColorSequence.new({
+					ColorSequenceKeypoint.new(0, SPHERE_GREEN_LIGHT),
+					ColorSequenceKeypoint.new(1, SPHERE_GREEN_DARK),
+				})
+				grad.Rotation = 90
+				grad.Parent = ball
+				local stroke = Instance.new("UIStroke")
+				stroke.Color = SPHERE_STROKE_GREEN
+				stroke.Thickness = 2.5
+				stroke.Transparency = 0
+				stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+				stroke.Parent = ball
+				local scale = Instance.new("UIScale")
+				scale.Scale = 0.15
+				scale.Parent = ball
+
+				local angle = rng:NextNumber(-math.pi * 0.88, -math.pi * 0.12)
+				local speed = rng:NextNumber(320, 680)
+				local vx = math.cos(angle) * speed
+				local vy = math.sin(angle) * speed
+				local grav = rng:NextNumber(900, 1300)
+				local life = rng:NextNumber(0.85, 1.35)
+				local popAt = rng:NextNumber(0.08, 0.18)
+				local peak = rng:NextNumber(1.05, 1.35)
+				local x = ox
+				local y = oy
+				task.spawn(function()
+					local t0 = os.clock()
+					while my == greenSphereFireworkToken and ball.Parent do
+						local dt = RunService.RenderStepped:Wait()
+						local age = os.clock() - t0
+						if age >= life then
+							break
+						end
+						vy += grav * dt
+						x += vx * dt
+						y += vy * dt
+						vx *= (1 - 0.4 * dt)
+						ball.Position = UDim2.fromOffset(x, y)
+						if age < popAt then
+							scale.Scale = 0.15 + (peak - 0.15) * (age / popAt)
+						else
+							local u = math.clamp((age - popAt) / math.max(0.05, life - popAt), 0, 1)
+							scale.Scale = peak * (1 - 0.45 * u)
+						end
+						local fade = math.clamp((age - life * 0.45) / (life * 0.55), 0, 1)
+						ball.BackgroundTransparency = fade
+						stroke.Transparency = fade
+					end
+					if ball.Parent then
+						ball:Destroy()
+					end
+				end)
+			end
+			task.delay(2.2, function()
+				if layer.Parent and my == greenSphereFireworkToken then
+					layer:Destroy()
+				end
+			end)
+		end
+		WaveSim.finishWaveEarly()
+		return true
 	end
-	-- Happy emoji burst already fired when NEXT WAVE unlocked.
-	WaveSim.finishWaveEarly()
-	return true
 end
 
 local function refreshReefHudLabels()
@@ -1490,6 +1616,11 @@ local function ensureHud()
 	hudFishNeed = fishNeed
 end
 
+local layoutHud: () -> ()
+local syncTempW100Button: (wavesOn: boolean) -> ()
+local setHudVisible: (on: boolean) -> ()
+do
+local layoutTempW100Button: () -> ()
 local function applyWaveHudScale(root: GuiObject): number
 	local popup = UiPopupScale.get()
 	local barScale = if popup > 1 then popup * WAVE_HUD_SIZE_MULT else 1
@@ -1666,9 +1797,7 @@ local function layoutHudBottomRight()
 	hudFrame.Position = UDim2.new(0.5, 0, 1, -WAVE_HUD_BOTTOM_PAD)
 end
 
-local layoutTempW100Button: () -> ()
-
-local function layoutHud()
+layoutHud = function()
 	syncWaveHudToActiveRightHud()
 	if not hudFrame then
 		return
@@ -1755,7 +1884,7 @@ layoutTempW100Button = function()
 	tempW100Btn.Position = UDim2.fromOffset(math.floor(x + 0.5), math.floor(y + 0.5))
 end
 
-local function syncTempW100Button(wavesOn: boolean)
+syncTempW100Button = function(wavesOn: boolean)
 	ensureTempW100Button()
 	if not tempW100Btn then
 		return
@@ -1769,7 +1898,7 @@ local function syncTempW100Button(wavesOn: boolean)
 	end
 end
 
-local function setHudVisible(on: boolean)
+setHudVisible = function(on: boolean)
 	ensureHud()
 	local wasVisible = hudFrame ~= nil and hudFrame.Visible
 	local pg = Players.LocalPlayer:FindFirstChild("PlayerGui")
@@ -1849,6 +1978,8 @@ local function setHudVisible(on: boolean)
 		hudLayoutConn = nil
 	end
 end
+
+end -- wave HUD layout do-block (register budget)
 
 local function userCamCycleBusy(): boolean
 	local m = deps.playerGui:GetAttribute("OceanTD_CamCycleMode")
@@ -1984,38 +2115,6 @@ end
 
 function WaveSlot.handleSummaryPrimaryConfirm(): boolean
 	return WaveSlotSummary.handlePrimaryConfirm()
-end
-
-local function toggleWaves()
-	if WaveSlotSummary.isOpen() then
-		return
-	end
-	if stopConfirmActive then
-		return
-	end
-	-- Don't start/stop from Slot5 while backpack chrome is up (accidental focus/clicks).
-	if InventoryState.isOpen() then
-		return
-	end
-	if WaveSim.isRunning() then
-		WaveSlot.beginStopConfirm()
-		return
-	end
-	-- Join-intro: hide/block Start Waves until the player has placed a coral.
-	if deps.playerGui:GetAttribute("OceanTD_TutorialGateWaves") == true then
-		return
-	end
-	-- Block clicks while the center pop / settle tween is still playing.
-	if deps.playerGui:GetAttribute(SLOT5_READY_ATTR) ~= true then
-		return
-	end
-	local ok = WaveSim.start()
-	if ok then
-		applyIcon(true)
-		deps.log("Waves started")
-	else
-		deps.log("Waves failed to start (route/fish?)")
-	end
 end
 
 function WaveSlot.isStopConfirmActive(): boolean
@@ -2294,7 +2393,35 @@ function WaveSlot.beginStopConfirm()
 end
 
 function WaveSlot.toggle()
-	toggleWaves()
+	if WaveSlotSummary.isOpen() then
+		return
+	end
+	if stopConfirmActive then
+		return
+	end
+	-- Don't start/stop from Slot5 while backpack chrome is up (accidental focus/clicks).
+	if InventoryState.isOpen() then
+		return
+	end
+	if WaveSim.isRunning() then
+		WaveSlot.beginStopConfirm()
+		return
+	end
+	-- Join-intro: hide/block Start Waves until the player has placed a coral.
+	if deps.playerGui:GetAttribute("OceanTD_TutorialGateWaves") == true then
+		return
+	end
+	-- Block clicks while the center pop / settle tween is still playing.
+	if deps.playerGui:GetAttribute(SLOT5_READY_ATTR) ~= true then
+		return
+	end
+	local ok = WaveSim.start()
+	if ok then
+		applyIcon(true)
+		deps.log("Waves started")
+	else
+		deps.log("Waves failed to start (route/fish?)")
+	end
 end
 
 function WaveSlot.isSummaryOpen(): boolean
@@ -2393,7 +2520,7 @@ function WaveSlot.mount(d: Deps)
 			if helpHit:GetAttribute("_OceanTD_ActBound") ~= true then
 				helpHit:SetAttribute("_OceanTD_ActBound", true)
 				helpHit.Activated:Connect(function()
-					toggleWaves()
+					WaveSlot.toggle()
 				end)
 			end
 		end

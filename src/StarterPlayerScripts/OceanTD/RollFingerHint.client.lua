@@ -45,6 +45,8 @@ local WAVE_EXPLAINER_SOUND_ID = "rbxassetid://72069463774995"
 local FINGER_CAM_SOUND_ID = "rbxassetid://80359058869110"
 local FINGER_SKILLS_SOUND_ID = "rbxassetid://125491130885745"
 local TRY_WAVES_AGAIN_SOUND_ID = "rbxassetid://107210999893937"
+local UPGRADE_EXPLAINER_VO_ID = "rbxassetid://83510865258719"
+local HUE_EXPLAINER_VO_ID = "rbxassetid://107456758453409"
 local TRY_WAVES_AGAIN_DELAY_SEC = 3
 local TutorialVo = require(script.Parent:WaitForChild("TutorialVo"))
 local WaveArrowPreview = require(script.Parent:WaitForChild("WaveArrowPreview"))
@@ -84,6 +86,7 @@ local WAVE_REST_TOWARD_CENTER = 1
 local PLOT_REST_DOWN_PX = 140
 local BELOW_PAD_PX = 130
 local BOTTOM_REST_Y_FRAC = 0.88 -- bottom-center rest for mid-screen targets
+local TOP_REST_Y_FRAC = 0.12 -- top-center rest (plant finger retreat)
 -- First coral upgrade: approach from bottom-right → UNLOCK; retreat to bottom-left.
 local UPGRADE_REST_Y_FRAC = 0.94
 local UPGRADE_APPROACH_X_FRAC = 0.94 -- rise from BR
@@ -162,6 +165,8 @@ local skipTutorialBtn: TextButton? = nil
 local plantFirstCoralSoundPlayed = false
 local howManyWavesSoundPlayed = false
 local waveExplainerSoundPlayed = false
+local upgradeExplainerVoPlayed = false
+local hueExplainerVoPlayed = false
 local fingerCamSoundPlayed = false
 local fingerSkillsSoundPlayed = false
 local tryWavesAgainSoundPlayed = false
@@ -251,6 +256,24 @@ local function playFingerSkillsSoundOnce()
 	fingerSkillsSoundPlayed = true
 	-- Don't cut "out of reef health" (or any active narrator) — queue until idle.
 	TutorialVo.playWhenIdle(FINGER_SKILLS_SOUND_ID, "OceanTD_FingerSkills", { volume = 4 })
+end
+
+local function playUpgradeExplainerOnce()
+	if upgradeExplainerVoPlayed or fingerTutorialSkipped then
+		return
+	end
+	upgradeExplainerVoPlayed = true
+	-- After first plant → upgrade finger; wait if another VO is still speaking.
+	TutorialVo.playWhenIdle(UPGRADE_EXPLAINER_VO_ID, "OceanTD_UpgradeExplainer")
+end
+
+local function playHueExplainerOnce()
+	if hueExplainerVoPlayed or fingerTutorialSkipped then
+		return
+	end
+	hueExplainerVoPlayed = true
+	-- After first upgrade → hue finger; waits until upgrade explainer finishes.
+	TutorialVo.playWhenIdle(HUE_EXPLAINER_VO_ID, "OceanTD_HueExplainer")
 end
 
 local function onCamButtonClickedForTryWaves()
@@ -556,6 +579,12 @@ local function viewportBottomCenter(): Vector2
 	return Vector2.new(vp.X * 0.5, vp.Y * BOTTOM_REST_Y_FRAC)
 end
 
+local function viewportTopCenter(): Vector2
+	local cam = Workspace.CurrentCamera
+	local vp = if cam then cam.ViewportSize else Vector2.new(1280, 720)
+	return Vector2.new(vp.X * 0.5, vp.Y * TOP_REST_Y_FRAC)
+end
+
 local function viewportBottomRight(): Vector2
 	local cam = Workspace.CurrentCamera
 	local vp = if cam then cam.ViewportSize else Vector2.new(1280, 720)
@@ -793,6 +822,7 @@ local function skipEntireFingerTutorial()
 	wavesFingerConsumed = true
 	TutorialVo.stop()
 	stopHint()
+	playerGui:SetAttribute("OceanTD_FingerTutorialSkipped", true)
 	playerGui:SetAttribute(HINT_ATTR, false)
 	playerGui:SetAttribute(HUE_PLACE_ATTR, nil)
 	playerGui:SetAttribute("OceanTD_TutorialHueResume", nil)
@@ -1108,7 +1138,10 @@ end
 
 local function restOf(mode: HintMode, btn: Vector2): Vector2
 	-- Mid-screen skill targets: retreat to bottom-center so the finger clears the button.
-	if mode == "plotSize" or mode == "plotSizeUpgrade" or mode == "hue" or mode == "hueReroll" or mode == "plant" then
+	if mode == "plant" then
+		return viewportTopCenter()
+	end
+	if mode == "plotSize" or mode == "plotSizeUpgrade" or mode == "hue" or mode == "hueReroll" then
 		return viewportBottomCenter()
 	end
 	if mode == "upgrade" then
@@ -1523,6 +1556,12 @@ local function applyAttr(raw: any)
 		if mode == "backpack" then
 			-- First coral rolled → finger on BUILD: VO once.
 			playPlantFirstCoralSoundOnce()
+		elseif mode == "upgrade" then
+			-- First coral planted → upgrade finger + upgrade explainer VO.
+			playUpgradeExplainerOnce()
+		elseif mode == "hue" then
+			-- First upgrade done → hue finger; hue VO waits for upgrade explainer.
+			playHueExplainerOnce()
 		end
 		startHint(mode)
 	else

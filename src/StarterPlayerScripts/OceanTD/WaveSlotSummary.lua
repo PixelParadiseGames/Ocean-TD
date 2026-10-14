@@ -56,6 +56,9 @@ local summaryGui: ScreenGui? = nil
 local summaryOpen = false
 local summaryPausedForSkills = false
 local summaryIsDefeat = false
+local summaryRetryWave = 1
+-- First training defeat: RETRY locked until 2nd+ WaveSim.start (or tutorial skipped).
+local summaryRetryLocked = false
 local finishBtn: TextButton? = nil
 local continueBtn: TextButton? = nil
 local prevGuiSelected: GuiObject? = nil
@@ -258,17 +261,26 @@ local function beginSummaryGamepadNav()
 			consider(d)
 		end
 	end
-	continueBtn.Selectable = true
 	finishBtn.Selectable = true
-	continueBtn.NextSelectionUp = finishBtn
-	continueBtn.NextSelectionDown = finishBtn
-	continueBtn.NextSelectionLeft = finishBtn
-	continueBtn.NextSelectionRight = finishBtn
-	finishBtn.NextSelectionUp = continueBtn
-	finishBtn.NextSelectionDown = continueBtn
-	finishBtn.NextSelectionLeft = continueBtn
-	finishBtn.NextSelectionRight = continueBtn
-	GuiService.SelectedObject = continueBtn
+	if summaryRetryLocked then
+		continueBtn.Selectable = false
+		finishBtn.NextSelectionUp = finishBtn
+		finishBtn.NextSelectionDown = finishBtn
+		finishBtn.NextSelectionLeft = finishBtn
+		finishBtn.NextSelectionRight = finishBtn
+		GuiService.SelectedObject = finishBtn
+	else
+		continueBtn.Selectable = true
+		continueBtn.NextSelectionUp = finishBtn
+		continueBtn.NextSelectionDown = finishBtn
+		continueBtn.NextSelectionLeft = finishBtn
+		continueBtn.NextSelectionRight = finishBtn
+		finishBtn.NextSelectionUp = continueBtn
+		finishBtn.NextSelectionDown = continueBtn
+		finishBtn.NextSelectionLeft = continueBtn
+		finishBtn.NextSelectionRight = continueBtn
+		GuiService.SelectedObject = continueBtn
+	end
 end
 
 local function startSummaryStrokeCycle()
@@ -361,6 +373,41 @@ local function releaseDefeatCam(resumeCycle: boolean)
 	end
 end
 
+local function setSummaryButtonsInteractable(on: boolean)
+	if continueBtn then
+		local allowContinue = on and not summaryRetryLocked
+		continueBtn.Active = allowContinue
+		continueBtn.Selectable = allowContinue
+		pcall(function()
+			(continueBtn :: any).Interactable = allowContinue
+		end)
+	end
+	if finishBtn then
+		finishBtn.Active = on
+		finishBtn.Selectable = on
+	end
+end
+
+-- Lock RETRY on first training defeat so Finish → roll/skills finger can run.
+local function shouldLockTrainingRetry(): boolean
+	if not summaryIsDefeat then
+		return false
+	end
+	local pg = Players.LocalPlayer:FindFirstChild("PlayerGui")
+	if not (pg and pg:IsA("PlayerGui")) then
+		return false
+	end
+	if pg:GetAttribute("OceanTD_FingerTutorialSkipped") == true then
+		return false
+	end
+	-- Still in finger-tutorial pipeline (waitingWaveEnd keeps FingerTutorialLock true).
+	if pg:GetAttribute("OceanTD_FingerTutorialLock") ~= true then
+		return false
+	end
+	-- 2nd+ Start Waves this session → allow retry even if still training.
+	return WaveSim.getWavesStartCount() <= 1
+end
+
 local function closeSummaryPanelUi()
 	if not summaryOpen and not (summaryGui and summaryGui.Enabled) and not summaryPausedForSkills then
 		return false
@@ -368,6 +415,10 @@ local function closeSummaryPanelUi()
 	summaryOpen = false
 	summaryPausedForSkills = false
 	summaryIsDefeat = false
+	-- Kill input immediately: scale-out slides END WAVES under the finger and can
+	-- fire Finish after RETRY already restarted the run.
+	setSummaryButtonsInteractable(false)
+	WaveSummaryUi.clearRetryLockChrome(continueBtn)
 	stopConfetti()
 	stopSummaryStrokeCycle()
 	endSummaryGamepadNav()
@@ -419,6 +470,13 @@ end
 function WaveSlotSummary.hide()
 	-- Capture before closeSummaryPanelUi() clears summaryIsDefeat.
 	local wasDefeat = summaryIsDefeat == true
+	summaryRetryLocked = false
+	-- RETRY/CONTINUE already set running; a late Finish Activated from the close
+	-- tween must not wipe wave HUD / Slot5 or clear the restored fish cam.
+	if WaveSim.isRunning() then
+		closeSummaryPanelUi()
+		return
+	end
 	if not closeSummaryPanelUi() then
 		return
 	end
@@ -491,6 +549,7 @@ function WaveSlotSummary.resumeAfterSkills()
 		end
 		startSummaryStrokeCycle()
 	end
+	setSummaryButtonsInteractable(true)
 	if isUsingGamepad() and continueBtn and finishBtn then
 		prevGuiSelected = GuiService.SelectedObject
 		beginSummaryGamepadNav()
@@ -514,12 +573,19 @@ local function continueFromSummary()
 	if not summaryOpen or not h then
 		return
 	end
+	if summaryRetryLocked then
+		return
+	end
 	local retrySame = summaryIsDefeat
 	closeSummaryPanelUi()
 	-- Drop defeat hold first (clears busy). Resume after wave restart so TangCam can't win.
 	ReefDefeatCam.releaseHeldPose()
 	h.clearWaveCameraOffset()
 	if WaveSim.continueWithHearts(CONTINUE_HEARTS, retrySame) then
+		-- Defeat RETRY: Fish Cam should start at path W1 with the school, not the defeat end.
+		if retrySame then
+			h.playerGui:SetAttribute("OceanTD_ResetFishCamPathStart", os.clock())
+		end
 		h.playerGui:SetAttribute("OceanTD_ResumeDefeatCam", os.clock())
 		h.applyIcon(true)
 		h.setHudVisible(true)
@@ -543,7 +609,7 @@ function WaveSlotSummary.handlePrimaryConfirm(): boolean
 		return false
 	end
 	local sel = GuiService.SelectedObject
-	if sel == finishBtn then
+	if sel == finishBtn or summaryRetryLocked then
 		WaveSlotSummary.hide()
 		return true
 	end
@@ -557,7 +623,9 @@ local function ensureSummaryPanelContent(panel: Frame)
 		continueFromSummary,
 		WaveSlotSummary.hide,
 		openReefHealthFromSummary,
-		summaryIsDefeat
+		summaryIsDefeat,
+		summaryRetryWave,
+		summaryRetryLocked
 	)
 	continueBtn = c
 	finishBtn = f
@@ -580,6 +648,8 @@ function WaveSlotSummary.show(summary: WaveSim.Summary)
 	end)
 	summaryOpen = true
 	summaryIsDefeat = summary.defeated == true
+	summaryRetryWave = math.max(1, math.floor(summary.waveReached))
+	summaryRetryLocked = shouldLockTrainingRetry()
 	h.setHudVisible(false)
 	h.applyIcon(false)
 
@@ -677,6 +747,7 @@ function WaveSlotSummary.show(summary: WaveSim.Summary)
 			summaryStroke = stroke
 		end
 		ensureSummaryPanelContent(panel)
+		setSummaryButtonsInteractable(true)
 		WaveSummaryUi.fillStats(panel, summary, records, openReefHealthFromSummary)
 		panel.Visible = true
 		summaryScaleToken += 1

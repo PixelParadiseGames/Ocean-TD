@@ -42,6 +42,7 @@ local PlaceArmDisarmAnim = require(script.Parent:WaitForChild("PlaceArmDisarmAni
 local PlaceSoftPlant = require(script.Parent:WaitForChild("PlaceSoftPlant"))
 local BrainSnapPreview = require(script.Parent:WaitForChild("BrainSnapPreview"))
 local CoralRangeRings = require(script.Parent:WaitForChild("CoralRangeRings"))
+local CamPinchZoom = require(script.Parent:WaitForChild("CamPinchZoom"))
 local CoralSize = require(oceanRoot:WaitForChild("Shared"):WaitForChild("CoralSize"))
 local BrainStack = require(oceanRoot:WaitForChild("Shared"):WaitForChild("BrainStack"))
 
@@ -80,6 +81,8 @@ local aimFingerDown = false -- world drag after tap-select (mobile/PC)
 local placePointerHeld = false
 local confirmDragging = false
 local confirmPressOrigin: Vector2? = nil -- nil while pressing ✓/X
+-- Pinch / second finger aborted soft-plant drag — don't auto-place on release.
+local suppressConfirmDragCommit = false
 local chromeScreenPos: Vector2? = nil -- move-icon aim freeze; ✓/X / rot sit below it
 local aimPinnedToCenter = false
 local aimPinnedToHand = false -- ghost starts in the right hand until the player aims
@@ -657,6 +660,27 @@ local function endConfirmDragAndRefreshChrome()
 	syncConfirmButtons()
 end
 
+local function abortConfirmDragForPinch()
+	if mode ~= MODE_CONFIRM then
+		return
+	end
+	-- Kill sticky rotate-hold if a pinch finger mis-hit rot chrome.
+	PlaceConfirmChrome.stopRotateHold()
+	chromeBtnPointerDown = false
+	chromePressTarget = nil
+	if not confirmDragging and confirmPressOrigin == nil and not PlaceSoftPlant.isZoomDragActive() then
+		return
+	end
+	suppressConfirmDragCommit = true
+	local home = softPlantOriginPos or placeAnchor
+	endConfirmDragAndRefreshChrome()
+	if typeof(home) == "Vector3" and confirmPlantedId then
+		confirmPos = home
+		placeAnchor = home
+		PlaceSoftPlant.updateAt(home)
+	end
+end
+
 local function syncBlockFlashForAim(worldPos: Vector3?)
 	PlaceBlockFlash.syncForAim(
 		worldPos,
@@ -1095,7 +1119,9 @@ local function syncConfirmButtonsImpl()
 
 	-- Soft-plant move-handle drag: move icon only (same as relocate-while-dragging).
 	local hideForSoftDrag = confirmPlantedId ~= nil and confirmDragging
-	checkBtn.Visible = (not hideForSoftDrag) and validSpot and (mode == MODE_CONFIRM or gamepadPlacement)
+	-- Soft-plant already occupies a slot — show PLANT even if place-cap evaluate is false.
+	local showPlant = validSpot or (confirmPlantedId ~= nil)
+	checkBtn.Visible = (not hideForSoftDrag) and showPlant and (mode == MODE_CONFIRM or gamepadPlacement)
 	-- Placement: Confirm only (Close hidden for now). Esc / X / B still cancel.
 	cancelBtn.Visible = false
 	local armedSid = if armedItemId then getSpeciesIdForItem(armedItemId) else nil
@@ -1132,10 +1158,11 @@ local function syncConfirmButtonsImpl()
 			rotRightBtn.Visible = false
 		end
 	end
-	-- Move disc ZIndex 25 used to sit above PLANT and steal clicks after upgrade re-layout
-	-- (rot sits to the sides so it still worked). Idle: PLANT on top. Dragging: move on top.
+	-- Soft-plant: keep move disc above PLANT so drag always starts (UIS + Gui InputBegan).
+	-- Ghost confirm (pre soft-plant): idle move under PLANT so PLANT clicks aren't stolen.
 	if moveHintImage then
-		moveHintImage.ZIndex = if hideForSoftDrag or confirmDragging then 30 else 12
+		local softPlanted = confirmPlantedId ~= nil
+		moveHintImage.ZIndex = if hideForSoftDrag or confirmDragging or softPlanted then 30 else 12
 	end
 	chromeScreenPos = PlaceConfirmChrome.guiPosFromWorld(adornee.Position)
 	local showWord = (math.floor(os.clock()) % 2) == 1
@@ -1346,6 +1373,11 @@ local function makeConfirmUiImpl()
 	applyGamepadButtonLabels()
 
 	local function markChromePointerDown(claimed: string, input: InputObject?)
+		-- Pinch / two-finger: never arm rot/✓/X (second finger often lands on rot chrome).
+		if CamPinchZoom.isPinchOrMultiTouch() then
+			PlaceConfirmChrome.stopRotateHold()
+			return
+		end
 		-- Only a press that *starts* on chrome counts — sliding over cancel/rot while dragging must not fire.
 		if (aimFingerDown or backpackDrag or confirmDragging or confirmPressOrigin ~= nil) and not chromeBtnPointerDown then
 			return
@@ -1495,6 +1527,22 @@ local function keepCameraFrozen()
 	if camera and savedCameraCFrame then
 		camera.CFrame = savedCameraCFrame
 	end
+end
+
+-- Confirm pulse + chrome layout. commitPlace stops the aim/confirm loop during
+-- RequestPlace; soft-plant stay-in-confirm must restart this or PLANT/rot never
+-- re-layout after the move billboard is rebuilt.
+local function startConfirmChromeLoop()
+	stopAimLoop()
+	aimConn = RunService.RenderStepped:Connect(function()
+		if mode ~= MODE_CONFIRM then
+			return
+		end
+		keepCameraFrozen()
+		updateGhostPulse()
+		PlaceBlockFlash.update()
+		syncConfirmButtons()
+	end)
 end
 
 local animEnv: PlaceArmDisarmAnim.Env = {
@@ -2015,10 +2063,33 @@ local function commitPlace(opts: { stayInConfirm: boolean? }?)
 				return
 			end
 			confirmPlantedId = placedId
+			-- Keep plant foot across clearGhost (it nils placeAnchor) so move-handle
+			-- drag / chrome adornee work before the replica rebind finishes.
+			local softFoot = placePos
+			if typeof(placeAnchor) == "Vector3" then
+				softFoot = placeAnchor
+			elseif typeof(confirmPos) == "Vector3" then
+				softFoot = confirmPos
+			end
 			clearGhost()
+			placeAnchor = softFoot
+			confirmPos = softFoot
+			softPlantOriginPos = softFoot
+			-- Park/drag flags + place-cap evaluate must not hide PLANT/rot after soft-plant.
+			confirmDragging = false
+			confirmPressOrigin = nil
+			chromeBtnPointerDown = false
+			chromePressTarget = nil
+			validSpot = true
+			rejectReason = nil
+			PlaceConfirmChrome.finishRotReveal()
+			attachMoveHintToGhost()
+			-- commitPlace stopped the confirm loop for RequestPlace — restart so PLANT/rot
+			-- re-layout onto the new move billboard (move icon alone was a one-shot sync miss).
+			startConfirmChromeLoop()
+			syncConfirmButtons()
 			placeResumeToken += 1
 			postPlaceWaiting = false
-			stopAimLoop()
 			placeCommitBusy = false
 			task.spawn(function()
 				local RelocatePickHover = require(script.Parent:WaitForChild("RelocatePickHover"))
@@ -2051,10 +2122,18 @@ local function commitPlace(opts: { stayInConfirm: boolean? }?)
 				placeAnchor = CoralVisual.readGridAnchor(part) or part.Position
 				confirmPos = placeAnchor
 				softPlantOriginPos = placeAnchor
+				confirmDragging = false
+				validSpot = true
+				rejectReason = nil
+				PlaceConfirmChrome.finishRotReveal()
 				attachMoveHintToGhost()
 				syncConfirmButtons()
 				RelocateController.begin(part, { placeConfirmBridge = true })
 				confirmPowerupOpen = RelocateController.isActive()
+				-- Bridge begin can race layout — one more sync once inspect is up.
+				if myTok == confirmPlantToken and mode == MODE_CONFIRM then
+					syncConfirmButtons()
+				end
 			end)
 			return
 		end
@@ -2229,16 +2308,7 @@ local function enterConfirm(worldPos: Vector3)
 	PlaceVfx.playParkSound(worldPos)
 	makeConfirmUi()
 	updateGhostAt(worldPos)
-	stopAimLoop()
-	aimConn = RunService.RenderStepped:Connect(function()
-		if mode ~= MODE_CONFIRM then
-			return
-		end
-		keepCameraFrozen()
-		updateGhostPulse()
-		PlaceBlockFlash.update()
-		syncConfirmButtons()
-	end)
+	startConfirmChromeLoop()
 	syncConfirmButtons()
 	log("Confirm mode", if validSpot then "valid" else (rejectReason or "invalid"))
 	-- Soft-plant immediately so coral powerup UI can open beside PLANT.
@@ -2619,8 +2689,8 @@ function PlacementController.rebindSoftPlantedPart(newPart: BasePart)
 		end)
 	end
 	if moveHintImage then
-		-- Idle: below PLANT so upgrade overlap can't steal the plant press.
-		moveHintImage.ZIndex = 12
+		-- Soft-plant: keep move above PLANT so drag still starts after mesh swap.
+		moveHintImage.ZIndex = 30
 	end
 	if rotLeftBtn then
 		rotLeftBtn.Active = true
@@ -2738,7 +2808,12 @@ function PlacementController.notifyPointerUp(_screenPos: Vector2)
 		return
 	end
 	if mode == MODE_CONFIRM then
+		local skipCommit = suppressConfirmDragCommit
+		suppressConfirmDragCommit = false
 		endConfirmDragAndRefreshChrome()
+		if skipCommit then
+			return
+		end
 		-- Soft-plant + powerup already running — wait for PLANT (don't re-place on release).
 		if confirmPlantedId then
 			return
@@ -2919,6 +2994,7 @@ table.insert(inputConns, UserInputService.InputBegan:Connect(function(input, _pr
 	-- often maps PLANT over the disc, so resolveTarget stole the press and drag never started.
 	if mode == MODE_CONFIRM then
 		local function beginSoftPlantDrag(fromScreen: Vector2)
+			suppressConfirmDragCommit = false
 			confirmPressOrigin = fromScreen
 			confirmDragging = true
 			chromeBtnPointerDown = false
@@ -2935,6 +3011,11 @@ table.insert(inputConns, UserInputService.InputBegan:Connect(function(input, _pr
 				updateGhostAt(worldPos)
 			end)
 		end
+		-- Pinch / two-finger zoom: never start a soft-plant coral drag.
+		if CamPinchZoom.isPinchOrMultiTouch() then
+			abortConfirmDragForPinch()
+			return
+		end
 		-- Soft-plant drag from green move icon OR white pick ring (not mesh outside).
 		if PlacementController.isOverConfirmMoveHandle(screenPos) then
 			beginSoftPlantDrag(screenPos)
@@ -2946,6 +3027,10 @@ table.insert(inputConns, UserInputService.InputBegan:Connect(function(input, _pr
 	-- BillboardGui often skips MouseButton1Click — commit happens on InputEnded.
 	-- AbsolutePosition hit-tests on billboard chrome can mis-resolve Confirm as Cancel;
 	-- never downgrade an existing Confirm claim.
+	if CamPinchZoom.isPinchOrMultiTouch() then
+		abortConfirmDragForPinch()
+		return
+	end
 	local chromeTarget = PlaceConfirmHitTest.resolveTarget(screenPos, checkBtn, cancelBtn, playerGui, rotLeftBtn, rotRightBtn)
 	if chromeTarget then
 		confirmPressOrigin = nil
@@ -3040,6 +3125,10 @@ table.insert(inputConns, UserInputService.InputChanged:Connect(function(input, _
 		return
 	end
 	if mode == MODE_CONFIRM and confirmPressOrigin then
+		if CamPinchZoom.isPinchOrMultiTouch() then
+			abortConfirmDragForPinch()
+			return
+		end
 		if not confirmDragging then
 			if (now - confirmPressOrigin).Magnitude < CONFIRM_DRAG_PX then
 				return
@@ -3060,6 +3149,18 @@ table.insert(inputConns, UserInputService.InputChanged:Connect(function(input, _
 			confirmPos = pos
 			updateGhostAt(pos)
 		end
+	end
+end))
+
+table.insert(inputConns, UserInputService.TouchPinch:Connect(function(
+	_touchPositions: { any },
+	_scale: number,
+	_velocity: number,
+	state: Enum.UserInputState,
+	_gameProcessed: boolean
+)
+	if state == Enum.UserInputState.Begin then
+		abortConfirmDragForPinch()
 	end
 end))
 
@@ -3122,7 +3223,13 @@ table.insert(inputConns, UserInputService.InputEnded:Connect(function(input, _pr
 		end
 		return
 	end
+	local skipCommit = suppressConfirmDragCommit
+	suppressConfirmDragCommit = false
 	endConfirmDragAndRefreshChrome()
+	if skipCommit then
+		PlaceConfirmChrome.stopRotateHold()
+		return
+	end
 end))
 
 player.CharacterAdded:Connect(function()

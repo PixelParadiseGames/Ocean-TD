@@ -50,7 +50,7 @@ FreeCamConfig.FISH_POV_POS_SMOOTH = 4.5 -- body catch-up (half prior = 2× lerp 
 FreeCamConfig.FISH_POV_LOOK_SMOOTH = 2.75 -- forward tangent lerp
 FreeCamConfig.FISH_POV_CF_SMOOTH = 3 -- CFrame orientation lerp
 FreeCamConfig.FISH_POV_RECENTER_SMOOTH = 0.14 -- look-release recenter (3× slower than 0.42)
-FreeCamConfig.FISH_POV_FOV = 88 -- wider than default ~70 while riding POV
+FreeCamConfig.FISH_POV_FOV = 105 -- wider than default ~70 while riding POV
 FreeCamConfig.FISH_POV_FOV_TWEEN = TweenInfo.new(0.45, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 -- Wave POV: ahead of the lead hungry fish, looking back at the pack to feed.
 FreeCamConfig.FISH_POV_SCHOOL_DIST = 26 -- studs ahead of lead along the ribbon

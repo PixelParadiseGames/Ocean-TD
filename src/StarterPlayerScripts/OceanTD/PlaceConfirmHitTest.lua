@@ -276,10 +276,9 @@ function PlaceConfirmHitTest.isOverMoveHandle(
 		if not ok or typeof(objs) ~= "table" then
 			return false
 		end
+		-- Prefer move disc when both move + PLANT/rot sit under the pointer
+		-- (Billboard AbsolutePosition often stacks them; chrome-first blocked soft-plant drag).
 		for _, obj in ipairs(objs) do
-			if isChrome(obj) then
-				return false
-			end
 			if obj == moveIcon or obj:IsDescendantOf(moveIcon) then
 				return true
 			end
