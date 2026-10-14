@@ -1,34 +1,49 @@
 ---
-description: How to animate the local player avatar (throws, gestures) — what works vs what does not
-globs: "**/HandOrb.lua,**/*Anim*.lua,**/*Throw*.lua,**/*Gesture*.lua"
+description: How to animate the local player avatar (throws, digs, gestures) — Studio vs live/mobile
+globs: "**/HandOrb.lua,**/PlantWorkerVfx.lua,**/*Anim*.lua,**/*Throw*.lua,**/*Gesture*.lua,**/*Plant*.lua"
 alwaysApply: false
 ---
 
 # Avatar animation (local player)
 
-Reference implementation: `HandOrb.playFeedThrow` / `ensureThrowTrack` (Player Cam feed throw).
+## Critical: Studio ≠ published / mobile
 
-## Use this (works)
+`KeyframeSequenceProvider:RegisterKeyframeSequence` + `AnimationTrack` often looks fine in **Studio** but is **silent on published / mobile** (arms never move). Always verify avatar motion on a live client, not only Play Solo.
 
-Build a **local `KeyframeSequence`**, register it, play an **`AnimationTrack`** at high priority:
+| Approach | Studio | Published / mobile |
+|----------|--------|--------------------|
+| Action4 `AnimationTrack` from registered KS | Usually works | Often no visible limb motion |
+| `Motor6D.Transform` / `C0` while Animate runs | Unreliable | Unreliable (Animate overwrites) |
+| **Disable arm Motor6Ds + Weld limbs + drive Weld.C0** | Works | **Works (proven)** |
 
-1. Pose tree uses R15 part names: `HumanoidRootPart` → `LowerTorso` → `UpperTorso` → `RightUpperArm` → `RightLowerArm` → `RightHand` (nest Poses as children).
-2. `KeyframeSequenceProvider:RegisterKeyframeSequence(seq)` → animation id string (no uploaded asset).
-3. `Humanoid.Animator:LoadAnimation(anim)` → `AnimationTrack`.
-4. Set `track.Priority = Enum.AnimationPriority.Action4`, `Looped = false`, then `track:Play(...)`.
-5. Reload the track on character respawn (new Animator). Clear/stop on `CharacterRemoving`.
+## Prefer for plant / dig / sustained poses (live-safe)
 
-This participates in the Animator correctly and **overrides** idle/walk on those limbs.
+Reference: `PlantWorkerVfx` dig (`playDigFallback` / `startDig`).
 
-## Do not rely on this alone (failed in practice)
+1. Stop playing `AnimationTrack`s; disable character `Animate` (restore after).
+2. Find body parts: `UpperTorso`/`Torso`, `RightUpperArm`/`Right Arm`, etc.
+3. Set `Motor6D.Enabled = false` for motors whose `Part1` is an arm limb (upper + lower).
+4. Create `Weld`s: torso→upper arms; upper→lower arms. Capture rest `C0`.
+5. Each frame (Heartbeat and/or `BindToRenderStep` Last / `PreRender`): `weld.C0 = restC0 * CFrame.Angles(...)`.
+6. On end: destroy dig welds, re-enable motors, restore `Animate.Disabled`.
 
-- Setting `Motor6D.Transform` from `RunService.Stepped` — Animate overwrites it; arm never moves.
-- Tiny / subtle C0 or Transform offsets without Action priority — easy to miss in third person.
+Animator cannot overwrite disabled motors + welds. Use this whenever motion must work outside Studio.
 
-## Fallback only
+## OK for short Studio-first gestures (may need live fallback)
 
-If `RegisterKeyframeSequence` / `LoadAnimation` fails: drive `Motor6D.Transform` from `RunService:BindToRenderStep(..., Enum.RenderPriority.Last, ...)` so it runs **after** Animate for that frame. Prefer the AnimationTrack path first.
+Reference: `HandOrb.playFeedThrow` / `ensureThrowTrack`.
+
+1. Pose tree R15: `HumanoidRootPart` → `LowerTorso` → `UpperTorso` → `RightUpperArm` → …
+2. `RegisterKeyframeSequence` → `Animator:LoadAnimation` → `Priority = Action4` → `Play`.
+3. Reload on respawn; stop on `CharacterRemoving`.
+4. If live clients show no motion, switch that gesture to the **weld dig pattern** above (do not keep patching Transform/C0 alone).
+
+## Do not rely on these alone
+
+- `Motor6D.Transform` from Stepped / RenderStep while Animate is active.
+- `Motor6D.C0` offsets alone on published mobile (still fought by Animator).
+- Assuming Studio Play Solo proves live avatar animation.
 
 ## Scope
 
-Client-local only (same as HandOrb) unless we intentionally replicate. Plant-seed HandOrb and feed-hold can share the hand; plant `armed` wins over feed hold visuals.
+Client-local only unless intentionally replicated. Plant-seed HandOrb and feed-hold can share the hand; plant `armed` wins over feed hold visuals.
