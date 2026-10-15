@@ -13,11 +13,12 @@ local SkillsAvatarCam = {}
 
 local CAM_CYCLE_ATTR = "OceanTD_CamCycleMode"
 local SKILLS_OPEN_ATTR = "OceanTD_SkillsBubblesOpen"
+local CAM_BUSY_ATTR = "OceanTD_SkillsAvatarCamBusy"
 local CINEMATIC_BUSY_ATTR = "OceanTD_PlotSizeCinematicBusy"
 local RENDER_STEP = "OceanTD_SkillsAvatarCam"
 
-local TWEEN_IN_SEC = 0.4
-local TWEEN_OUT_SEC = 0.45
+local TWEEN_IN_SEC = 0.55
+local TWEEN_OUT_SEC = 0.55
 local TURN_SEC = 0.35
 local VERTICAL_FILL = 0.88
 local LEFT_THIRD_CENTER = 1 / 6
@@ -34,9 +35,17 @@ local function waveIntroCamBusy(): boolean
 end
 
 local active = false
+local restoring = false
 local token = 0
 local renderBound = false
 local attrBound = false
+
+local function setBusy(on: boolean)
+	restoring = on
+	playerGui:SetAttribute(CAM_BUSY_ATTR, on == true)
+end
+
+playerGui:SetAttribute(CAM_BUSY_ATTR, false)
 
 local savedCamType: Enum.CameraType? = nil
 local savedCf: CFrame? = nil
@@ -349,17 +358,19 @@ function SkillsAvatarCam.isActive(): boolean
 	return active
 end
 
+function SkillsAvatarCam.isBusy(): boolean
+	return active or restoring
+end
+
 -- Drop avatar-cam ownership immediately (no restore tween) so a cinematic can take the camera.
 function SkillsAvatarCam.releaseForCinematic()
-	if not active then
-		-- Still cancel any in-flight stop tween that would fight the cinematic.
-		token += 1
-		unbindRender()
-		return
-	end
 	token += 1
 	active = false
+	setBusy(false)
 	unbindRender()
+	if not savedCf and not savedHrpCf then
+		return
+	end
 	local char = getCharacter()
 	unlockAutoRotate(char)
 	-- Snap facing back without a long turn so the plot cinematic can start cleanly.
@@ -377,6 +388,9 @@ function SkillsAvatarCam.releaseForCinematic()
 end
 
 function SkillsAvatarCam.stop()
+	if restoring then
+		return
+	end
 	if not active then
 		return
 	end
@@ -384,23 +398,44 @@ function SkillsAvatarCam.stop()
 	local my = token
 	active = false
 	unbindRender()
+	setBusy(true)
 
 	local goal = savedCf
+	local savedType = savedCamType
+	local savedSub = savedSubject
+	local savedCycle = savedCamCycleMode
 	task.spawn(function()
 		-- Spin avatar back while camera returns.
 		task.spawn(function()
 			restoreAvatarFacing(my)
 		end)
+		local ok = false
 		if goal then
-			tweenCameraTo(goal, TWEEN_OUT_SEC, my)
+			ok = tweenCameraTo(goal, TWEEN_OUT_SEC, my)
 		end
 		if my == token then
+			-- Re-apply saved fields in case a racer cleared module locals mid-tween.
+			savedCf = goal
+			savedCamType = savedType
+			savedSubject = savedSub
+			savedCamCycleMode = savedCycle
+			if ok and goal then
+				local cam = getCamera()
+				if cam then
+					cam.CameraType = Enum.CameraType.Scriptable
+					cam.CameraSubject = nil
+					cam.CFrame = goal
+				end
+			end
 			restoreSavedCamera()
 		end
 		savedCamType = nil
 		savedCf = nil
 		savedSubject = nil
 		savedCamCycleMode = nil
+		if my == token then
+			setBusy(false)
+		end
 	end)
 end
 

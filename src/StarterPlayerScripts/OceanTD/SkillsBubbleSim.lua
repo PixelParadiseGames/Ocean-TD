@@ -7,12 +7,13 @@
 
 	Coords: bubble positions use AbsolutePosition space. Hits use native GuiButton
 	InputBegan (Roblox inset-correct) — no manual pointer↔Abs conversion for picking.
-	Bob = visual offset only. Pop-in / pop-out starts instantly; short stagger (~0.35s).
-	BackgroundGradient (Studio) fades in/out over the same window.
+	Bob = visual offset only. Open: rise from below into seat (no scale pop).
+	Close: rise up off-screen. BackgroundGradient slides in/out from the right.
 ]]
 local Players = game:GetService("Players")
 local GuiService = game:GetService("GuiService")
 local RunService = game:GetService("RunService")
+local SoundService = game:GetService("SoundService")
 local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
 local Workspace = game:GetService("Workspace")
@@ -21,8 +22,12 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local oceanShared = ReplicatedStorage:WaitForChild("OceanTD"):WaitForChild("Shared")
 local SkillStages = require(oceanShared:WaitForChild("SkillStages"))
 local UiPopupScale = require(oceanShared:WaitForChild("UiPopupScale"))
+local SkillsAmbientBubbles = require(script.Parent:WaitForChild("SkillsAmbientBubbles"))
 
 local SkillsBubbleSim = {}
+
+local LOUD_MANY_BUBBLES_SOUND_ID = "rbxassetid://137426393727807"
+local MANY_BUBBLES_SOUND_ID = "rbxassetid://9125409840" -- follows loud open/close once
 
 local MAX_BUBBLES = 40
 local PHYS_DT = 1 / 30
@@ -33,16 +38,23 @@ local SEPARATION = 0.48
 local DRAG_SMOOTH = 1 -- 1 = lock under pointer (no lag snap); was 0.55
 local RELEASE_VEL_SCALE = 0.88
 local MAX_SPEED = 380
--- 30% faster than old 2s; stagger is short so motion starts instantly.
-local POP_IN_WINDOW = 0.35
-local POP_OUT_WINDOW = 0.35
-local POP_OUT_SEC = 0.2
-local POP_OVERSHOOT = 1.12
--- After Plot Size leads, other bubbles pop in at random times in this window (seconds).
-local OTHER_POP_IN_DELAY_MIN = 0.22
-local OTHER_POP_IN_DELAY_MAX = 0.82
-local UNLOCK_SETTLE_SEC = 1
-local UNLOCK_SETTLE_INFO = TweenInfo.new(UNLOCK_SETTLE_SEC, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+local POP_IN_WINDOW = 0.55 -- bg fade on open
+local POP_OUT_WINDOW = 0.55 -- stagger window on close
+-- Rise from bottom into seat / up off-screen on close (Plot Size leads on open).
+local RISE_IN_SEC = 1.16 -- half prior speed
+local RISE_OUT_SEC = 1.05
+local RISE_RATE_MIN = 0.82 -- per-bubble duration mult
+local RISE_RATE_MAX = 1.22
+local OTHER_RISE_DELAY_MIN = 0.04
+local OTHER_RISE_DELAY_MAX = 0.36
+local RISE_START_EXTRA_PX = 36
+local RISE_SWAY_AMP_MIN = 5
+local RISE_SWAY_AMP_MAX = 13
+local RISE_SWAY_CYCLES_MIN = 0.7
+local RISE_SWAY_CYCLES_MAX = 1.35
+-- Synthetic "?" seat (not a real skill yet).
+local FUTURE_SKILL_ID = "FutureSkill"
+local FUTURE_SKILL_BTN = "_OceanTD_FutureSkillBTN"
 -- Extra bubble + label size on 720p+ (on top of HUD scale baked into bubble Size).
 local HUD_BUBBLE_TEXT_BOOST = 1.5
 local HUD_BUBBLE_SIZE_MULT = 1.42 -- slightly larger bubbles overall
@@ -125,6 +137,7 @@ type BgFade = {
 local bubbles: { Bubble } = {}
 local drags: { [InputObject]: Drag } = {}
 local dragged: { [Bubble]: boolean } = {}
+local rising: { [Bubble]: boolean } = {} -- open intro: ignore phys / bob
 local mouseDragInput: InputObject? = nil
 local running = false
 local suppressed = false
@@ -139,7 +152,16 @@ local physAcc = 0
 local bobTime = 0
 local stopToken = 0
 local bgFade: BgFade? = nil
+local bgAlpha = 0 -- live veil opacity (0 hidden → 1 studio)
+-- Frozen once from Studio (never re-read after a fade, or close looks like a pop).
+local studioBgTrans = 0
+local studioImgTrans: number? = nil
+local studioGradTrans: NumberSequence? = nil
+local studioBaselineReady = false
 local bgTweenConn: RBXScriptConnection? = nil
+local bgTweenGen = 0
+local outroConn: RBXScriptConnection? = nil
+local pendingStopDone: (() -> ())? = nil
 local gamepadFocus = 0 -- 1-based; 0 = none
 local focusStroke: UIStroke? = nil
 local onBubbleActivated: ((buttonName: string) -> ())? = nil
@@ -200,8 +222,122 @@ local function clearOrbitLocks()
 end
 
 local function skillIdForBubble(b: Bubble): string?
+	if b.btn.Name == FUTURE_SKILL_BTN then
+		return FUTURE_SKILL_ID
+	end
 	local def = SkillStages.fromButtonName(b.btn.Name)
 	return if def then def.id else nil
+end
+
+local function isFutureSkillBubble(b: Bubble): boolean
+	return b.btn.Name == FUTURE_SKILL_BTN
+end
+
+local function activateBubble(b: Bubble)
+	if isFutureSkillBubble(b) then
+		SkillsBubbleSim.playLockedRejectFx(FUTURE_SKILL_ID)
+		return
+	end
+	if onBubbleActivated then
+		onBubbleActivated(b.btn.Name)
+	end
+end
+
+local function playOneShotSound(name: string, soundId: string, volume: number, maxLife: number)
+	local s = Instance.new("Sound")
+	s.Name = name
+	s.SoundId = soundId
+	s.Volume = volume
+	s.Parent = SoundService
+	s:Play()
+	s.Ended:Once(function()
+		s:Destroy()
+	end)
+	task.delay(maxLife, function()
+		if s.Parent then
+			s:Destroy()
+		end
+	end)
+	return s
+end
+
+-- Loud many-bubbles first; when it finishes, play the softer many-bubbles once.
+local function playManyBubblesSound()
+	local loud = playOneShotSound("OceanTD_SkillsLoudManyBubbles", LOUD_MANY_BUBBLES_SOUND_ID, 1, 10)
+	local followed = false
+	local function playFollowUp()
+		if followed then
+			return
+		end
+		followed = true
+		playOneShotSound("OceanTD_SkillsManyBubbles", MANY_BUBBLES_SOUND_ID, 0.85, 6)
+	end
+	loud.Ended:Once(playFollowUp)
+	-- Fallback if Ended never fires: wait for load + clip length, then follow.
+	task.spawn(function()
+		local t0 = os.clock()
+		while loud.Parent and not loud.IsLoaded and (os.clock() - t0) < 2 do
+			task.wait()
+		end
+		local dur = 1.4
+		if loud.Parent and loud.TimeLength > 0.05 then
+			dur = loud.TimeLength / math.max(loud.PlaybackSpeed, 0.01) + 0.05
+		end
+		task.wait(dur)
+		playFollowUp()
+	end)
+end
+
+-- Match Studio skill bubble art + outer stroke (not the red lock stroke).
+local function copySkillBubbleChrome(dst: GuiButton, src: GuiButton)
+	if dst:IsA("ImageButton") and src:IsA("ImageButton") then
+		local d = dst :: ImageButton
+		local s = src :: ImageButton
+		d.Image = s.Image
+		d.ImageColor3 = s.ImageColor3
+		d.ImageTransparency = s.ImageTransparency
+		d.ImageRectOffset = s.ImageRectOffset
+		d.ImageRectSize = s.ImageRectSize
+		d.ScaleType = s.ScaleType
+		d.SliceCenter = s.SliceCenter
+		d.SliceScale = s.SliceScale
+		d.TileSize = s.TileSize
+		d.BackgroundColor3 = s.BackgroundColor3
+		d.BackgroundTransparency = s.BackgroundTransparency
+		d.BorderSizePixel = s.BorderSizePixel
+	elseif dst:IsA("GuiObject") and src:IsA("GuiObject") then
+		dst.BackgroundColor3 = src.BackgroundColor3
+		dst.BackgroundTransparency = src.BackgroundTransparency
+	end
+	for _, ch in ipairs(dst:GetChildren()) do
+		if ch:IsA("UIStroke") and ch.Name ~= LOCK_STROKE_NAME and ch.Name ~= "_OceanTD_GamepadFocus" then
+			ch:Destroy()
+		elseif ch.Name == "Circle" then
+			ch:Destroy()
+		end
+	end
+	for _, ch in ipairs(src:GetChildren()) do
+		if ch:IsA("UIStroke") and ch.Name ~= LOCK_STROKE_NAME and ch.Name ~= "_OceanTD_GamepadFocus" then
+			ch:Clone().Parent = dst
+		end
+	end
+	-- Many skill BTNs put fill/stroke on a child Circle.
+	local srcCircle = src:FindFirstChild("Circle")
+	if srcCircle and srcCircle:IsA("GuiObject") then
+		local c = srcCircle:Clone()
+		c.Active = false
+		for _, d in ipairs(c:GetDescendants()) do
+			if d:IsA("TextLabel") or d:IsA("TextButton") or (d:IsA("ImageLabel") and d.Name ~= "Circle") then
+				-- Keep nested strokes/corners; drop skill text/icons.
+				if d:IsA("TextLabel") or d:IsA("TextButton") then
+					d:Destroy()
+				elseif d:IsA("ImageLabel") and string.find(string.lower(d.Name), "icon") then
+					d:Destroy()
+				end
+			end
+		end
+		c.Parent = dst
+	end
 end
 
 local function clearLockedStrokes()
@@ -287,11 +423,9 @@ local function clearGamepadFocusVisual()
 	end
 end
 
-local POP_IN_INFO = TweenInfo.new(0.32, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
-local POP_SETTLE_INFO = TweenInfo.new(0.15, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
-local POP_OUT_INFO = TweenInfo.new(POP_OUT_SEC, Enum.EasingStyle.Back, Enum.EasingDirection.In)
-local BG_FADE_IN_INFO = TweenInfo.new(POP_IN_WINDOW, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
-local BG_FADE_OUT_INFO = TweenInfo.new(POP_OUT_WINDOW, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
+local BG_FADE_IN_SEC = POP_IN_WINDOW
+local BG_SLIDE_OUT_SEC = 0.55 -- slide veil off to the right on close
+local BG_SLIDE_OFF_X = 1.15 -- Anchor 0.5: fully past the right edge
 
 -- GetMouseLocation is inset-inclusive. With IgnoreGuiInset/ScreenInsets.None, Abs matches it.
 local function pointerPos(_input: InputObject?): (number, number)
@@ -1022,7 +1156,19 @@ local function needsScreenLayout(): boolean
 	return false
 end
 
--- Plot Size at screen center; other skill bubbles on a ring around it (all viewports).
+-- Compass seats around Plot Size (screen y+ is down). Angle 0 = right, -π/2 = top.
+local SKILL_SEAT_ANGLE: { [string]: number } = {
+	FutureSkill = -math.pi * 0.75, -- top left (?)
+	AutoRoll = -math.pi * 0.5, -- top center
+	WaveSpeed = -math.pi * 0.25, -- top right
+	Skip = 0, -- right
+	PlaceMore = math.pi * 0.25, -- bottom right
+	RHealth = math.pi * 0.5, -- bottom
+	EarnMore = math.pi * 0.75, -- bottom left
+	ReloadSpeed = math.pi, -- left
+}
+
+-- Plot Size center; others on fixed compass seats (all viewports).
 local function layoutBubblesOnScreen()
 	if #bubbles == 0 then
 		return
@@ -1041,7 +1187,6 @@ local function layoutBubblesOnScreen()
 			table.insert(ring, b)
 		end
 	end
-	-- Fallback: if Plot Size is missing, keep previous even-ring layout.
 	if not centerBubble then
 		centerBubble = bubbles[1]
 		table.clear(ring)
@@ -1067,7 +1212,6 @@ local function layoutBubblesOnScreen()
 		return
 	end
 
-	-- Keep outer bubbles clear of the center bubble and each other, within the view.
 	local gap = 18
 	local minRing = centerR + maxOuterR + gap
 	local minChord = maxOuterR * 2 + 14
@@ -1076,9 +1220,23 @@ local function layoutBubblesOnScreen()
 	local maxRing = math.max(minRing, math.min(sw, sh) * 0.5 - margin)
 	local spread = math.clamp(math.max(minRing, chordRing), minRing, maxRing)
 
-	for i, b in ipairs(ring) do
-		-- Start at top and go clockwise so the ring reads evenly around Plot Size.
-		local a = ((i - 1) / n) * math.pi * 2 - math.pi * 0.5
+	local unseated: { Bubble } = {}
+	for _, b in ipairs(ring) do
+		local id = skillIdForBubble(b)
+		local ang = if id then SKILL_SEAT_ANGLE[id] else nil
+		if typeof(ang) == "number" then
+			b.x = cx + math.cos(ang) * spread
+			b.y = cy + math.sin(ang) * spread
+			b.vx = 0
+			b.vy = 0
+			clampBubble(b, ox, oy, sw, sh)
+		else
+			table.insert(unseated, b)
+		end
+	end
+	-- Any unknown skills: fill leftover even steps on the ring.
+	for i, b in ipairs(unseated) do
+		local a = ((i - 1) / math.max(#unseated, 1)) * math.pi * 2 - math.pi * 0.5
 		b.x = cx + math.cos(a) * spread
 		b.y = cy + math.sin(a) * spread
 		b.vx = 0
@@ -1127,10 +1285,26 @@ local function ensureScale(btn: GuiButton): UIScale
 end
 
 local function stopBgTween()
+	bgTweenGen += 1
 	if bgTweenConn then
 		bgTweenConn:Disconnect()
 		bgTweenConn = nil
 	end
+end
+
+local function easeQuad(u: number, direction: Enum.EasingDirection): number
+	local t = math.clamp(u, 0, 1)
+	if direction == Enum.EasingDirection.In then
+		return t * t
+	elseif direction == Enum.EasingDirection.InOut then
+		if t < 0.5 then
+			return 2 * t * t
+		end
+		return 1 - ((-2 * t + 2) ^ 2) / 2
+	end
+	-- Out
+	local inv = 1 - t
+	return 1 - inv * inv
 end
 
 local function findBackgroundGradient(panel: Instance): BgFade?
@@ -1202,70 +1376,110 @@ local function findBackgroundGradient(panel: Instance): BgFade?
 	}
 end
 
-local function applyBgFade(fade: BgFade, alpha: number)
-	-- alpha 0 = fully hidden, 1 = studio look
-	local a = math.clamp(alpha, 0, 1)
-	local inv = 1 - a
-	if fade.gui then
-		fade.gui.BackgroundTransparency = fade.bgTrans + (1 - fade.bgTrans) * inv
-		if fade.imgTrans ~= nil and (fade.gui:IsA("ImageLabel") or fade.gui:IsA("ImageButton")) then
-			(fade.gui :: ImageLabel).ImageTransparency = fade.imgTrans + (1 - fade.imgTrans) * inv
-		end
+local function rememberStudioBaseline(fade: BgFade)
+	if studioBaselineReady then
+		return
 	end
-	if fade.gradient then
-		-- Uniform veil over Studio sequence while fading; restore exact sequence at full.
-		if a >= 0.999 and fade.gradTrans then
-			fade.gradient.Transparency = fade.gradTrans
-		else
-			local base = 0
-			if fade.gradTrans then
-				local k = fade.gradTrans.Keypoints
-				if #k > 0 then
-					base = k[1].Value
-				end
-			end
-			fade.gradient.Transparency = NumberSequence.new(base + (1 - base) * inv)
+	studioBgTrans = fade.bgTrans
+	studioImgTrans = fade.imgTrans
+	studioGradTrans = fade.gradTrans
+	studioBaselineReady = true
+end
+
+-- Full studio look (opaque veil) parked on-screen center.
+local function applyBgStudioLook(fade: BgFade)
+	local bgTrans = if studioBaselineReady then studioBgTrans else fade.bgTrans
+	local imgTrans = if studioBaselineReady then studioImgTrans else fade.imgTrans
+	local gradTrans = if studioBaselineReady then studioGradTrans else fade.gradTrans
+	if fade.gui then
+		fade.gui.AnchorPoint = Vector2.new(0.5, 0.5)
+		fade.gui.Position = UDim2.fromScale(0.5, 0.5)
+		fade.gui.Size = UDim2.fromScale(1, 1)
+		fade.gui.BackgroundTransparency = bgTrans
+		if imgTrans ~= nil and (fade.gui:IsA("ImageLabel") or fade.gui:IsA("ImageButton")) then
+			(fade.gui :: ImageLabel).ImageTransparency = imgTrans
 		end
+		fade.gui.Visible = true
+	end
+	if fade.gradient and gradTrans then
+		fade.gradient.Transparency = gradTrans
+	end
+	bgAlpha = 1
+end
+
+-- t=0 on-screen center, t=1 fully off the right edge.
+local function applyBgSlide(fade: BgFade, t: number)
+	local u = math.clamp(t, 0, 1)
+	bgAlpha = 1 - u
+	if not fade.gui then
+		return
+	end
+	fade.gui.AnchorPoint = Vector2.new(0.5, 0.5)
+	fade.gui.Size = UDim2.fromScale(1, 1)
+	fade.gui.Position = UDim2.fromScale(0.5 + BG_SLIDE_OFF_X * u, 0.5)
+	if u >= 0.999 then
+		fade.gui.Visible = false
+	else
+		fade.gui.Visible = true
 	end
 end
 
-local function tweenBgFade(fade: BgFade, fromAlpha: number, toAlpha: number, info: TweenInfo, token: number)
+-- Open: slide in from the right onto center.
+local function tweenBgSlideIn(fade: BgFade, duration: number, token: number)
 	stopBgTween()
-	applyBgFade(fade, fromAlpha)
-	local proxy = Instance.new("NumberValue")
-	proxy.Value = fromAlpha
-	local tw = TweenService:Create(proxy, info, { Value = toAlpha })
-	bgTweenConn = proxy:GetPropertyChangedSignal("Value"):Connect(function()
-		if token ~= stopToken then
+	if not fade.gui then
+		return
+	end
+	applyBgStudioLook(fade)
+	applyBgSlide(fade, 1) -- start off-screen right
+	fade.gui.Visible = true
+	local gen = bgTweenGen
+	local t0 = os.clock()
+	bgTweenConn = RunService.RenderStepped:Connect(function()
+		if gen ~= bgTweenGen or token ~= stopToken then
+			if bgTweenConn then
+				bgTweenConn:Disconnect()
+				bgTweenConn = nil
+			end
 			return
 		end
-		applyBgFade(fade, proxy.Value)
-	end)
-	tw.Completed:Once(function()
-		if token == stopToken then
-			applyBgFade(fade, toAlpha)
+		local u = math.clamp((os.clock() - t0) / math.max(duration, 1e-4), 0, 1)
+		applyBgSlide(fade, 1 - easeQuad(u, Enum.EasingDirection.Out))
+		if u >= 1 then
+			applyBgSlide(fade, 0)
+			applyBgStudioLook(fade)
+			if bgTweenConn then
+				bgTweenConn:Disconnect()
+				bgTweenConn = nil
+			end
 		end
-		stopBgTween()
-		proxy:Destroy()
 	end)
-	tw:Play()
 end
 
 local function clearBgFadeKeepHidden()
 	stopBgTween()
 	local fade = bgFade
+	if fade then
+		applyBgSlide(fade, 1)
+	end
 	bgFade = nil
+	bgAlpha = 0
 	return fade
 end
 
 local function restoreBgFadeStudio(fade: BgFade?)
 	if fade then
-		applyBgFade(fade, 1)
+		applyBgStudioLook(fade)
+		if fade.gui then
+			fade.gui.Visible = false
+		end
 	end
 end
 
 -- Pre-hide icons + background before the panel is shown (avoids one-frame flash).
 -- Use Visible (not UIScale) so AbsoluteSize stays valid for spawn.
+-- IMPORTANT: capture studio veil baselines once — never re-sample after a fade-out
+-- (that baked Transparency=1 as "studio" and made close look like an instant pop).
 function SkillsBubbleSim.preHide(panel: Instance)
 	for _, d in ipairs(panel:GetDescendants()) do
 		if d:IsA("GuiButton") and SkillStages.isSkillButtonName(d.Name) then
@@ -1274,10 +1488,21 @@ function SkillsBubbleSim.preHide(panel: Instance)
 			d.Visible = false
 		end
 	end
-	local fade = findBackgroundGradient(panel)
-	bgFade = fade
-	if fade then
-		applyBgFade(fade, 0)
+	if not bgFade then
+		bgFade = findBackgroundGradient(panel)
+		if bgFade then
+			rememberStudioBaseline(bgFade)
+		end
+	else
+		-- Refresh instance refs only; keep frozen studio baselines.
+		local again = findBackgroundGradient(panel)
+		if again then
+			bgFade.gui = again.gui
+			bgFade.gradient = again.gradient
+		end
+	end
+	if bgFade then
+		applyBgSlide(bgFade, 1) -- park off-screen right before open slide-in
 	end
 end
 
@@ -1288,7 +1513,7 @@ local function writeBubble(b: Bubble)
 	end
 	local bobX = 0
 	local bobY = 0
-	if not dragged[b] then
+	if not dragged[b] and not rising[b] then
 		bobX = math.sin(bobTime * BOB_FREQ * math.pi * 2 + b.phase) * BOB_AMP
 		bobY = math.cos(bobTime * BOB_FREQ * 0.91 * math.pi * 2 + b.phase * 1.17) * BOB_AMP
 	end
@@ -1300,6 +1525,9 @@ local function writeBubble(b: Bubble)
 end
 
 local function softSeparate(a: Bubble, b: Bubble)
+	if rising[a] or rising[b] then
+		return
+	end
 	local aHeld = dragged[a] == true
 	local bHeld = dragged[b] == true
 	if aHeld and bHeld then
@@ -1363,7 +1591,7 @@ local function physStep(dt: number)
 	bobTime += dt
 
 	for _, b in ipairs(bubbles) do
-		if dragged[b] then
+		if dragged[b] or rising[b] then
 			continue
 		end
 		b.vx *= DAMPING
@@ -1382,6 +1610,11 @@ local function physStep(dt: number)
 	end
 
 	for _, b in ipairs(bubbles) do
+		if rising[b] then
+			-- Rise tween owns position; still write in case parent Abs moved.
+			writeBubble(b)
+			continue
+		end
 		if not dragged[b] then
 			clampBubble(b, ox, oy, w, h)
 		end
@@ -1430,8 +1663,8 @@ local function finishDrag(input: InputObject)
 	d.bubble.vy *= RELEASE_VEL_SCALE
 	clampSpeed(d.bubble)
 	-- Drag steals GuiButton Activated on many clients — treat a tap as skill open.
-	if not d.moved and not closing and not suppressed and onBubbleActivated then
-		onBubbleActivated(d.bubble.btn.Name)
+	if not d.moved and not closing and not suppressed then
+		activateBubble(d.bubble)
 	end
 end
 
@@ -1492,6 +1725,7 @@ end
 local function clearSimState()
 	table.clear(drags)
 	table.clear(dragged)
+	table.clear(rising)
 	mouseDragInput = nil
 	physAcc = 0
 	bobTime = 0
@@ -1521,8 +1755,14 @@ local function restoreBubbles()
 		if gateStroke then
 			gateStroke:Destroy()
 		end
+		if isFutureSkillBubble(b) then
+			btn:Destroy()
+			continue
+		end
 		if btn.Parent then
-			btn.Visible = true
+			-- Stay hidden: ScreenGui is still up during ambient outro; Visible=true
+			-- flashed every skill bubble back at Studio center positions.
+			btn.Visible = false
 			btn.Parent = b.origParent
 			btn.Position = b.origPos
 			btn.Size = b.origSize
@@ -1534,63 +1774,86 @@ local function restoreBubbles()
 	table.clear(bubbles)
 end
 
-local function playUnlockSettle(token: number)
-	for _, b in ipairs(bubbles) do
-		if token ~= stopToken or not running or closing or not b.btn.Parent then
-			return
-		end
-		if b.maxPopScale <= 1.001 then
-			continue
-		end
-		local tw = TweenService:Create(b.scale, UNLOCK_SETTLE_INFO, { Scale = b.settledScale })
-		tw:Play()
-	end
+local function riseSwayX(a: number, targetX: number, amp: number, cycles: number, phase: number): number
+	-- Tiny side-to-side that eases out as they arrive / leave.
+	local envelope = math.sin(math.clamp(a, 0, 1) * math.pi) -- 0 at ends, peak mid-travel
+	return targetX + math.sin(a * math.pi * cycles + phase) * amp * envelope
 end
 
-local function playPopInOneBubble(b: Bubble, delay: number, token: number, onDone: () -> ())
-	b.scale.Scale = 0
-	local peak = math.max(b.maxPopScale, b.settledScale)
-	local overshoot = POP_OVERSHOOT * peak
+local function playRiseInOneBubble(b: Bubble, delay: number, token: number, onDone: () -> ())
+	local rng = Random.new()
+	local targetX = b.x
+	local targetY = b.y
+	local ox, oy = playOrigin()
+	local sh = screenSize().Y
+	local startY = oy + sh + b.radius + RISE_START_EXTRA_PX + rng:NextNumber(0, 70)
+	local dur = RISE_IN_SEC * rng:NextNumber(RISE_RATE_MIN, RISE_RATE_MAX)
+	local swayAmp = rng:NextNumber(RISE_SWAY_AMP_MIN, RISE_SWAY_AMP_MAX)
+	local swayCycles = rng:NextNumber(RISE_SWAY_CYCLES_MIN, RISE_SWAY_CYCLES_MAX)
+	local swayPhase = rng:NextNumber(0, math.pi * 2)
+	b.x = targetX
+	b.y = startY
+	b.vx = 0
+	b.vy = 0
+	b.scale.Scale = b.settledScale
+	rising[b] = true
+	b.btn.Visible = false
+	writeBubble(b)
+
 	task.delay(delay, function()
 		if token ~= stopToken or not running or closing or not b.btn.Parent then
+			rising[b] = nil
 			onDone()
 			return
 		end
-		local tw = TweenService:Create(b.scale, POP_IN_INFO, { Scale = overshoot })
-		tw:Play()
-		tw.Completed:Once(function()
-			if token ~= stopToken or not running or closing or not b.btn.Parent then
-				onDone()
+		b.btn.Visible = true
+		b.scale.Scale = b.settledScale
+		writeBubble(b)
+
+		local proxy = Instance.new("NumberValue")
+		proxy.Value = 0
+		local info = TweenInfo.new(dur, Enum.EasingStyle.Quart, Enum.EasingDirection.Out)
+		local tw = TweenService:Create(proxy, info, { Value = 1 })
+		local propConn: RBXScriptConnection? = nil
+		propConn = proxy:GetPropertyChangedSignal("Value"):Connect(function()
+			if token ~= stopToken or not b.btn.Parent then
 				return
 			end
-			local settleTw = TweenService:Create(b.scale, POP_SETTLE_INFO, { Scale = peak })
-			settleTw:Play()
-			settleTw.Completed:Once(onDone)
+			local a = proxy.Value
+			b.x = riseSwayX(a, targetX, swayAmp, swayCycles, swayPhase)
+			b.y = startY + (targetY - startY) * a
+			b.vx = 0
+			b.vy = 0
+			writeBubble(b)
 		end)
+		tw.Completed:Once(function()
+			if propConn then
+				propConn:Disconnect()
+			end
+			proxy:Destroy()
+			if token == stopToken and b.btn.Parent then
+				b.x = targetX
+				b.y = targetY
+				b.vx = 0
+				b.vy = 0
+				b.scale.Scale = b.settledScale
+				writeBubble(b)
+			end
+			rising[b] = nil
+			onDone()
+		end)
+		tw:Play()
 	end)
 end
 
 local function playPopIn()
 	local token = stopToken
+	playManyBubblesSound()
 	if bgFade then
-		tweenBgFade(bgFade, 0, 1, BG_FADE_IN_INFO, token)
+		tweenBgSlideIn(bgFade, BG_FADE_IN_SEC, token)
 	end
 	local rng = Random.new()
-	local popInTotal = #bubbles
-	local popInDone = 0
-	local settleStarted = false
-	local function tryStartUnlockSettle()
-		if settleStarted or popInDone < popInTotal then
-			return
-		end
-		settleStarted = true
-		playUnlockSettle(token)
-	end
-	local function onPopInBubbleDone()
-		popInDone += 1
-		tryStartUnlockSettle()
-	end
-	if popInTotal == 0 then
+	if #bubbles == 0 then
 		return
 	end
 
@@ -1604,84 +1867,195 @@ local function playPopIn()
 		end
 	end
 
-	-- Plot Size always leads; remaining bubbles enter on random delays.
+	local function noopDone() end
+
+	-- Plot Size always leads; remaining bubbles rise on short random delays.
 	if plotSizeBubble then
-		playPopInOneBubble(plotSizeBubble, 0, token, onPopInBubbleDone)
+		playRiseInOneBubble(plotSizeBubble, 0, token, noopDone)
 	else
-		-- Fallback if Plot Size is missing from the layer.
-		playPopInOneBubble(bubbles[1], 0, token, onPopInBubbleDone)
+		playRiseInOneBubble(bubbles[1], 0, token, noopDone)
 		for i = 2, #bubbles do
-			local delay = rng:NextNumber(OTHER_POP_IN_DELAY_MIN, OTHER_POP_IN_DELAY_MAX)
-			playPopInOneBubble(bubbles[i], delay, token, onPopInBubbleDone)
+			local delay = rng:NextNumber(OTHER_RISE_DELAY_MIN, OTHER_RISE_DELAY_MAX)
+			playRiseInOneBubble(bubbles[i], delay, token, noopDone)
 		end
-		tryStartUnlockSettle()
 		return
 	end
 
 	for _, b in ipairs(others) do
-		local delay = rng:NextNumber(OTHER_POP_IN_DELAY_MIN, OTHER_POP_IN_DELAY_MAX)
-		playPopInOneBubble(b, delay, token, onPopInBubbleDone)
+		local delay = rng:NextNumber(OTHER_RISE_DELAY_MIN, OTHER_RISE_DELAY_MAX)
+		playRiseInOneBubble(b, delay, token, noopDone)
 	end
-	tryStartUnlockSettle()
 end
 
+local function stopOutroConn()
+	if outroConn then
+		outroConn:Disconnect()
+		outroConn = nil
+	end
+end
+
+-- Rise-out + BG veil share one RenderStepped timeline so teardown can't beat the anim.
 local function playPopOut(done: () -> ())
 	closing = true
 	local token = stopToken
-	if bgFade then
-		tweenBgFade(bgFade, 1, 0, BG_FADE_OUT_INFO, token)
-	end
-	local left = #bubbles
-	if left == 0 then
-		done()
-		return
-	end
-	local reported = false
-	local finished = 0
-	local function oneDone()
-		finished += 1
-		if finished >= left and not reported then
-			reported = true
-			done()
+	playManyBubblesSound()
+	-- Re-resolve veil if we lost the ref.
+	if not bgFade and hostPanel then
+		bgFade = findBackgroundGradient(hostPanel)
+		if bgFade then
+			rememberStudioBaseline(bgFade)
+			applyBgStudioLook(bgFade)
 		end
 	end
-	local rng = Random.new()
-	for i, b in ipairs(bubbles) do
-		-- First bubble scales out immediately (no 1s+ dead wait).
-		local delay = if i == 1 then 0 else rng:NextNumber(0, POP_OUT_WINDOW)
-		task.delay(delay, function()
-			if token ~= stopToken then
-				oneDone()
-				return
-			end
-			if not b.btn.Parent then
-				oneDone()
-				return
-			end
-			local tw = TweenService:Create(b.scale, POP_OUT_INFO, { Scale = 0 })
-			tw:Play()
-			tw.Completed:Once(oneDone)
-		end)
+	SkillsAmbientBubbles.beginExit()
+	stopBgTween()
+	stopOutroConn()
+
+	if bgFade then
+		applyBgStudioLook(bgFade) -- on-screen, then slide right
+		applyBgSlide(bgFade, 0)
 	end
-	task.delay(POP_OUT_WINDOW + POP_OUT_SEC + 0.2, function()
-		if token == stopToken and not reported then
-			reported = true
-			done()
+	local _, oy = playOrigin()
+	local rng = Random.new()
+	local outs: {
+		{
+			b: Bubble,
+			delay: number,
+			dur: number,
+			startX: number,
+			startY: number,
+			endY: number,
+			swayAmp: number,
+			swayCycles: number,
+			swayPhase: number,
+			finished: boolean,
+		}
+	} = {}
+	local maxEnd = BG_SLIDE_OUT_SEC
+	for i, b in ipairs(bubbles) do
+		local delay = if i == 1 then 0 else rng:NextNumber(0, POP_OUT_WINDOW * 0.55)
+		local dur = RISE_OUT_SEC * rng:NextNumber(RISE_RATE_MIN, RISE_RATE_MAX)
+		local endY = oy - b.radius - RISE_START_EXTRA_PX - rng:NextNumber(40, 120)
+		rising[b] = true
+		b.vx = 0
+		b.vy = 0
+		table.insert(outs, {
+			b = b,
+			delay = delay,
+			dur = dur,
+			startX = b.x,
+			startY = b.y,
+			endY = endY,
+			swayAmp = rng:NextNumber(RISE_SWAY_AMP_MIN, RISE_SWAY_AMP_MAX),
+			swayCycles = rng:NextNumber(RISE_SWAY_CYCLES_MIN, RISE_SWAY_CYCLES_MAX),
+			swayPhase = rng:NextNumber(0, math.pi * 2),
+			finished = false,
+		})
+		maxEnd = math.max(maxEnd, delay + dur)
+	end
+	maxEnd = math.max(maxEnd, BG_SLIDE_OUT_SEC) + 0.05
+
+	local t0 = os.clock()
+	local reported = false
+	local function finishOutro()
+		if reported then
+			return
+		end
+		reported = true
+		stopOutroConn()
+		if bgFade then
+			applyBgSlide(bgFade, 1)
+		end
+		done()
+	end
+
+	if #outs == 0 and not bgFade then
+		task.delay(0.85, function()
+			if token == stopToken then
+				finishOutro()
+			end
+		end)
+		return
+	end
+
+	outroConn = RunService.RenderStepped:Connect(function()
+		if token ~= stopToken then
+			stopOutroConn()
+			return
+		end
+		local elapsed = os.clock() - t0
+
+		if bgFade then
+			local u = math.clamp(elapsed / BG_SLIDE_OUT_SEC, 0, 1)
+			applyBgSlide(bgFade, easeQuad(u, Enum.EasingDirection.In))
+		end
+
+		local allBubblesDone = true
+		for _, o in ipairs(outs) do
+			if o.finished then
+				continue
+			end
+			local t = elapsed - o.delay
+			if t < 0 then
+				allBubblesDone = false
+				continue
+			end
+			local a = math.clamp(t / math.max(o.dur, 1e-4), 0, 1)
+			local eased = easeQuad(a, Enum.EasingDirection.In)
+			local b = o.b
+			if b.btn.Parent then
+				b.btn.Visible = true
+				b.x = riseSwayX(eased, o.startX, o.swayAmp, o.swayCycles, o.swayPhase)
+				b.y = o.startY + (o.endY - o.startY) * eased
+				b.vx = 0
+				b.vy = 0
+				writeBubble(b)
+			end
+			if a >= 1 then
+				o.finished = true
+				rising[b] = nil
+				if b.btn.Parent then
+					b.btn.Visible = false
+				end
+			else
+				allBubblesDone = false
+			end
+		end
+
+		local bgDone = (not bgFade) or elapsed >= BG_SLIDE_OUT_SEC
+		if allBubblesDone and bgDone and elapsed >= maxEnd then
+			finishOutro()
 		end
 	end)
 end
 
 function SkillsBubbleSim.stop(onDone: (() -> ())?)
+	-- A second stop() during outro must not bump stopToken (that cancelled the rise/fade).
+	if closing then
+		if onDone then
+			local prev = pendingStopDone
+			pendingStopDone = function()
+				if prev then
+					prev()
+				end
+				onDone()
+			end
+		end
+		return
+	end
+
 	stopToken += 1
 	rejectFxToken += 1
+	closing = true
 	suppressed = false
+	pendingStopDone = onDone
 	local my = stopToken
 	local function finish()
 		if my ~= stopToken then
 			return
 		end
+		stopOutroConn()
 		running = false
-		closing = false
 		if conn then
 			conn:Disconnect()
 			conn = nil
@@ -1690,18 +2064,46 @@ function SkillsBubbleSim.stop(onDone: (() -> ())?)
 		clearSimState()
 		restoreBubbles()
 		clearDebugHitBoxes()
-		local faded = clearBgFadeKeepHidden()
 		if layer then
 			layer:Destroy()
 			layer = nil
 		end
-		hostGui = nil
-		hostPanel = nil
-		if onDone then
-			onDone()
+
+		local function teardownUi()
+			if my ~= stopToken then
+				return
+			end
+			local faded = clearBgFadeKeepHidden()
+			-- Ambient beginExit owns its teardown; only hard-stop if still around.
+			if SkillsAmbientBubbles.isRunning() then
+				SkillsAmbientBubbles.stop()
+			end
+			hostGui = nil
+			hostPanel = nil
+			closing = false
+			local cb = pendingStopDone
+			pendingStopDone = nil
+			if cb then
+				cb()
+			end
+			restoreBgFadeStudio(faded)
 		end
-		-- Restore Studio transparencies after the panel is hidden (no end-of-close flash).
-		restoreBgFadeStudio(faded)
+
+		-- Keep ScreenGui enabled until ambient bubbles finish rushing off the top.
+		if SkillsAmbientBubbles.isExiting() or SkillsAmbientBubbles.isRunning() then
+			if not SkillsAmbientBubbles.isExiting() then
+				SkillsAmbientBubbles.beginExit()
+			end
+			task.spawn(function()
+				local t0 = os.clock()
+				while SkillsAmbientBubbles.isRunning() and os.clock() - t0 < 1.6 do
+					RunService.Heartbeat:Wait()
+				end
+				teardownUi()
+			end)
+		else
+			teardownUi()
+		end
 	end
 
 	if not running and #bubbles == 0 then
@@ -1724,6 +2126,9 @@ function SkillsBubbleSim.start(panel: Instance)
 	suppressed = false
 	running = false
 	closing = false
+	pendingStopDone = nil
+	stopOutroConn()
+	stopBgTween()
 	if conn then
 		conn:Disconnect()
 		conn = nil
@@ -1731,13 +2136,14 @@ function SkillsBubbleSim.start(panel: Instance)
 	disconnectInputs()
 	clearSimState()
 	restoreBubbles()
-	-- restoreBubbles forces Visible=true; hide again before any layout wait (prevents flash).
+	-- restoreBubbles leaves buttons hidden; preHide again before any layout wait.
 	SkillsBubbleSim.preHide(panel)
-	-- Keep bgFade from preHide (already at alpha 0); re-resolve if missing.
+	-- Keep bgFade from preHide (parked off-screen); re-resolve if missing.
 	if not bgFade then
 		bgFade = findBackgroundGradient(panel)
 		if bgFade then
-			applyBgFade(bgFade, 0)
+			rememberStudioBaseline(bgFade)
+			applyBgSlide(bgFade, 1)
 		end
 	end
 	local sg: ScreenGui? = if panel:IsA("ScreenGui") then panel else panel:FindFirstAncestorOfClass("ScreenGui")
@@ -1798,11 +2204,11 @@ function SkillsBubbleSim.start(panel: Instance)
 	end
 
 	-- Stage → Studio template size/label placement (skill text stays on the skill BTN).
-	-- Stay Visible=false until reparented at scale 0 (avoids half-second flash at Studio positions).
+	-- Stay Visible=false until rise-in (avoids flash at Studio positions).
 	applyStageLayoutsToSkillButtons(panel, buttons)
 	for _, btn in ipairs(buttons) do
 		btn.Visible = false
-		ensureScale(btn).Scale = 0
+		ensureScale(btn).Scale = 1
 	end
 
 	-- Layer AbsoluteSize only — keep skill buttons hidden during this wait.
@@ -1831,7 +2237,7 @@ function SkillsBubbleSim.start(panel: Instance)
 		end
 		local r = math.max(w, h) * 0.5
 		local scale = ensureScale(btn)
-		scale.Scale = 0
+		scale.Scale = 1
 		local maxPopScale = maxPopScaleForButton(panel, btn)
 		local b: Bubble = {
 			btn = btn,
@@ -1859,7 +2265,7 @@ function SkillsBubbleSim.start(panel: Instance)
 			btnHudScale:Destroy()
 		end
 		btn.Parent = bubbleLayer
-		btn.Visible = false -- still hidden until centered + scale 0
+		btn.Visible = false -- revealed when rise-in starts
 		btn.AutoButtonColor = false
 		-- Native GuiButton hits (Roblox handles inset). Children must not steal taps.
 		btn.Active = true
@@ -1887,14 +2293,12 @@ function SkillsBubbleSim.start(panel: Instance)
 			be.Parent = btn
 			press = be
 		end
-		local skillName = btn.Name
+		local bubbleRef = b
 		local pressEv = press :: BindableEvent
 		if pressEv:GetAttribute("_OceanTD_SkillPressBound") ~= true then
 			pressEv:SetAttribute("_OceanTD_SkillPressBound", true)
 			pressEv.Event:Connect(function()
-				if onBubbleActivated then
-					onBubbleActivated(skillName)
-				end
+				activateBubble(bubbleRef)
 			end)
 		end
 		table.insert(bubbles, b)
@@ -1905,14 +2309,113 @@ function SkillsBubbleSim.start(panel: Instance)
 		warn("[SkillsBubbles] No laid-out ImageButtons (zero AbsoluteSize)")
 		return
 	end
+
+	-- Placeholder "?" (top-left seat) — same chrome as peers; tap = locked reject flash.
+	do
+		local peer: GuiButton? = nil
+		for _, preferId in ipairs({ "EarnMore", "ReloadSpeed", "AutoRoll", "Skip" }) do
+			for _, ob in ipairs(bubbles) do
+				if skillIdForBubble(ob) == preferId then
+					peer = ob.btn
+					break
+				end
+			end
+			if peer then
+				break
+			end
+		end
+		if not peer then
+			peer = bubbles[1].btn
+		end
+		local refR = 36
+		for _, ob in ipairs(bubbles) do
+			if skillIdForBubble(ob) ~= "PlotSize" then
+				refR = ob.radius
+				break
+			end
+		end
+		local sizePx = math.max(48, math.floor(refR * 2 + 0.5))
+		local btn = Instance.new("ImageButton")
+		btn.Name = FUTURE_SKILL_BTN
+		btn.AutoButtonColor = false
+		btn.BorderSizePixel = 0
+		btn.AnchorPoint = Vector2.new(0.5, 0.5)
+		btn.Size = UDim2.fromOffset(sizePx, sizePx)
+		btn.Active = true
+		btn.Selectable = false
+		btn.Visible = false
+		btn.Parent = bubbleLayer
+		copySkillBubbleChrome(btn, peer)
+		local corner = btn:FindFirstChildOfClass("UICorner")
+		if not corner then
+			corner = Instance.new("UICorner")
+			corner.Parent = btn
+		end
+		corner.CornerRadius = UDim.new(1, 0)
+		-- Drop skill labels/icons only; keep Circle fill + outer strokes.
+		for _, d in ipairs(btn:GetDescendants()) do
+			if d:IsA("TextLabel") or d:IsA("TextButton") then
+				d:Destroy()
+			elseif d:IsA("ImageLabel") and d.Name ~= "Circle" then
+				d:Destroy()
+			end
+		end
+		local q = Instance.new("TextLabel")
+		q.Name = "Question"
+		q.BackgroundTransparency = 1
+		q.Size = UDim2.fromScale(1, 1)
+		q.Font = Enum.Font.GothamBold
+		q.Text = "?"
+		q.TextColor3 = Color3.fromRGB(245, 250, 255)
+		q.TextScaled = true
+		q.Active = false
+		q.ZIndex = btn.ZIndex + 2
+		q.Parent = btn
+		local qPad = Instance.new("UIPadding")
+		qPad.PaddingTop = UDim.new(0.14, 0)
+		qPad.PaddingBottom = UDim.new(0.14, 0)
+		qPad.PaddingLeft = UDim.new(0.14, 0)
+		qPad.PaddingRight = UDim.new(0.14, 0)
+		qPad.Parent = q
+		local scale = ensureScale(btn)
+		scale.Scale = 1
+		setBubbleZ(btn, 20 + #bubbles + 1)
+		local press = Instance.new("BindableEvent")
+		press.Name = "_OceanTD_SkillPress"
+		press.Parent = btn
+		local fut: Bubble = {
+			btn = btn,
+			scale = scale,
+			radius = sizePx * 0.5,
+			mass = sizePx * 0.5,
+			x = seedX,
+			y = seedY,
+			vx = 0,
+			vy = 0,
+			phase = (#bubbles * 1.6180339887) % (math.pi * 2),
+			origParent = bubbleLayer,
+			origPos = btn.Position,
+			origSize = btn.Size,
+			origAnchor = btn.AnchorPoint,
+			origZ = btn.ZIndex,
+			settledScale = 1,
+			maxPopScale = 1,
+		}
+		press.Event:Connect(function()
+			activateBubble(fut)
+		end)
+		table.insert(bubbles, fut)
+		writeBubble(fut)
+	end
+
 	refreshBubbleRadii(true)
-	-- Always center Plot Size with others around it (all viewport widths).
+	-- Plot Size center + fixed compass seats (incl. "?" top-left).
 	layoutBubblesOnScreen()
 	for _, b in ipairs(bubbles) do
-		b.scale.Scale = 0
+		-- Full size; playPopIn parks them below and rises into these seats.
+		b.scale.Scale = b.settledScale
+		b.btn.Visible = false
 		writeBubble(b)
-		-- Reveal only after correct position + scale 0 (pop-in grows from here).
-		b.btn.Visible = true
 	end
 
 	-- Native button press → drag/tap. No manual GuiInset hit math.
@@ -1921,7 +2424,7 @@ function SkillsBubbleSim.start(panel: Instance)
 		table.insert(
 			inputConns,
 			bubble.btn.InputBegan:Connect(function(input)
-				if not running or closing or suppressed then
+				if not running or closing or suppressed or rising[bubble] then
 					return
 				end
 				local isTouch = input.UserInputType == Enum.UserInputType.Touch
@@ -1988,6 +2491,10 @@ function SkillsBubbleSim.start(panel: Instance)
 		refreshDebugHitBoxes()
 	end)
 
+	-- Soft ambient rises sit behind BackgroundGradient (skill bubbles stay on ZIndex 10).
+	local bgGui = if bgFade then bgFade.gui else nil
+	SkillsAmbientBubbles.start(sg, bgGui)
+
 	syncOrbitLocks()
 	playPopIn()
 	print("[SkillsBubbles] Started", #bubbles, "bubbles")
@@ -1999,6 +2506,7 @@ end
 
 -- When opening a power-up, pass skillId to keep that bubble visible at +20% size.
 function SkillsBubbleSim.setSuppressed(value: boolean, keepSkillId: string?)
+	local wasSuppressed = suppressed
 	suppressed = value == true
 	if suppressed then
 		-- Cancel in-flight drags without firing bubble activate (was stealing Close/UNLOCK clicks).
@@ -2044,8 +2552,10 @@ function SkillsBubbleSim.setSuppressed(value: boolean, keepSkillId: string?)
 	if bgFade and bgFade.gui and bgFade.gui.Parent then
 		-- Keep the full-height blue veil up while a power-up is open.
 		bgFade.gui.Visible = true
-		if not suppressed then
-			applyBgFade(bgFade, 1)
+		-- Only snap on-screen when leaving power-up suppress — never while skills are closing
+		-- (SkillPowerUpUI.close → setSuppressed(false) runs before playPopOut).
+		if wasSuppressed and not suppressed and not closing and running then
+			applyBgStudioLook(bgFade)
 		end
 	end
 	if suppressed then
@@ -2257,6 +2767,15 @@ function SkillsBubbleSim.playLockedRejectFx(skillId: string)
 			stroke.Thickness = LOCK_STROKE_THICKNESS
 			stroke.Transparency = LOCK_STROKE_TRANSPARENCY
 			stroke.Color = LOCK_STROKE_COLOR
+			-- Placeholder isn't a real gated skill — don't leave the lock ring on.
+			if skillId == FUTURE_SKILL_ID then
+				stroke:Destroy()
+			end
+		end
+
+		-- Future "?" only flashes red; don't pulse Plot Size.
+		if skillId == FUTURE_SKILL_ID then
+			return
 		end
 
 		local plot = plotBubble
@@ -2291,21 +2810,12 @@ function SkillsBubbleSim.activateGamepadFocus(): boolean
 	if gamepadFocus < 1 or gamepadFocus > #bubbles then
 		return false
 	end
-	local btn = bubbles[gamepadFocus].btn
-	if not btn.Parent then
+	local b = bubbles[gamepadFocus]
+	if not b.btn.Parent then
 		return false
 	end
-	local name = btn.Name
-	if onBubbleActivated then
-		onBubbleActivated(name)
-		return true
-	end
-	local proxy = btn:FindFirstChild("_OceanTD_SkillPress")
-	if proxy and proxy:IsA("BindableEvent") then
-		(proxy :: BindableEvent):Fire()
-		return true
-	end
-	return false
+	activateBubble(b)
+	return true
 end
 
 return SkillsBubbleSim

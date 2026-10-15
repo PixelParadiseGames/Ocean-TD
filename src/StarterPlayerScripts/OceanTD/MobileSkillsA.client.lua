@@ -22,6 +22,7 @@ local SkillsBubbleSim = require(script.Parent:WaitForChild("SkillsBubbleSim"))
 local SkillPowerUpUI = require(script.Parent:WaitForChild("SkillPowerUpUI"))
 local InventoryState = require(script.Parent:WaitForChild("InventoryState"))
 local SkillsAvatarCam = require(script.Parent:WaitForChild("SkillsAvatarCam"))
+local WaveSim = require(script.Parent:WaitForChild("WaveSim"))
 
 local oceanRoot = game:GetService("ReplicatedStorage"):WaitForChild("OceanTD")
 local LeftHudLayout = require(oceanRoot:WaitForChild("Shared"):WaitForChild("LeftHudLayout"))
@@ -92,7 +93,8 @@ local function stretchSkillsBackground(panel: Instance)
 	bg.AnchorPoint = Vector2.new(0.5, 0.5)
 	bg.Position = UDim2.fromScale(0.5, 0.5)
 	bg.Size = UDim2.fromScale(1, 1)
-	bg.ZIndex = math.min(bg.ZIndex, 1)
+	-- Above ambient rise bubbles (ZIndex 0), below skill bubble layer (10).
+	bg.ZIndex = 1
 end
 
 local function applySkillsViewportScale(panel: Instance)
@@ -106,7 +108,11 @@ local function applySkillsViewportScale(panel: Instance)
 			continue
 		end
 		local lower = string.lower(ch.Name)
-		if ch.Name == "_OceanTD_BubbleLayer" or lower == "background" or lower == "backgroundgradient" then
+		if ch.Name == "_OceanTD_BubbleLayer"
+			or ch.Name == "_OceanTD_AmbientRiseLayer"
+			or lower == "background"
+			or lower == "backgroundgradient"
+		then
 			continue
 		end
 		UiPopupScale.attachHud(ch)
@@ -449,8 +455,10 @@ local function syncMovementFreeze(skillsOpen: boolean)
 	else
 		bindLeftUiDPadSink(false)
 		lockForeignSelectables(false)
-		setSkillsOpenHud(false)
+		-- Camera restore tween first (sets OceanTD_SkillsAvatarCamBusy) so FreeCam
+		-- doesn't resume and snap the lens the moment the skills flag clears.
 		SkillsAvatarCam.stop()
+		setSkillsOpenHud(false)
 		bindMoveSink(false)
 		clearGuiSelection()
 		setBubbleModeGuiNav(false)
@@ -731,21 +739,13 @@ task.spawn(function()
 		openToken += 1
 		local myToken = openToken
 
-		if leftGui and panelGui then
-			if want then
-				-- Bubbles under left HUD (Skills close must stay clickable), above seed wheel.
-				panelGui.DisplayOrder = math.max(panelGui.DisplayOrder, 50)
-				leftGui.DisplayOrder = math.max(leftOrderBase, panelGui.DisplayOrder + 10)
-				local wheel = playerGui:FindFirstChild("OceanTD_SeedWheel")
-				if wheel and wheel:IsA("ScreenGui") then
-					wheel.DisplayOrder = math.min(wheel.DisplayOrder, panelGui.DisplayOrder - 1)
-				end
-			else
-				leftGui.DisplayOrder = leftOrderBase
-				local wheel = playerGui:FindFirstChild("OceanTD_SeedWheel")
-				if wheel and wheel:IsA("ScreenGui") then
-					wheel.DisplayOrder = math.max(0, leftOrderBase - 1)
-				end
+		if want and leftGui and panelGui then
+			-- Bubbles under left HUD (Skills close must stay clickable), above seed wheel.
+			panelGui.DisplayOrder = math.max(panelGui.DisplayOrder, 50)
+			leftGui.DisplayOrder = math.max(leftOrderBase, panelGui.DisplayOrder + 10)
+			local wheel = playerGui:FindFirstChild("OceanTD_SeedWheel")
+			if wheel and wheel:IsA("ScreenGui") then
+				wheel.DisplayOrder = math.min(wheel.DisplayOrder, panelGui.DisplayOrder - 1)
 			end
 		end
 
@@ -775,10 +775,10 @@ task.spawn(function()
 			destroyCloseChrome()
 			local reportOpen = playerGui:GetAttribute("OceanTD_ReefReportOpen") == true
 			local storeOpen = playerGui:GetAttribute("OceanTD_StoreOpen") == true
-			if skillsBtn then
-				-- Report / store own left HUD while open — don't force Skills back on.
-				skillsBtn.Visible = not reportOpen and not storeOpen
-			end
+			local waveRunning = WaveSim.isRunning()
+			-- Start camera return immediately (parallel with bubble/BG/ambient outro).
+			SkillsAvatarCam.stop()
+			-- Keep HUD frozen + skills ScreenGui up until rise/fade outro finishes.
 			SkillsBubbleSim.stop(function()
 				if myToken ~= openToken then
 					return
@@ -788,13 +788,26 @@ task.spawn(function()
 				else
 					(panel :: GuiObject).Visible = false
 				end
+				if leftGui then
+					leftGui.DisplayOrder = leftOrderBase
+				end
+				local wheel = playerGui:FindFirstChild("OceanTD_SeedWheel")
+				if wheel and wheel:IsA("ScreenGui") then
+					wheel.DisplayOrder = math.max(0, leftOrderBase - 1)
+				end
+				-- Avatar cam already stopping; this clears skills HUD flag + movement.
+				syncMovementFreeze(false)
+				local reportNow = playerGui:GetAttribute("OceanTD_ReefReportOpen") == true
+				local storeNow = playerGui:GetAttribute("OceanTD_StoreOpen") == true
+				if skillsBtn then
+					skillsBtn.Visible = not reportNow and not storeNow and not WaveSim.isRunning()
+				end
+				hideSkillsBtnContent(false)
 			end)
-			syncMovementFreeze(false)
-			-- Belt-and-suspenders: cinematic ForceClose can race HUD restore.
 			if skillsBtn then
-				skillsBtn.Visible = not reportOpen and not storeOpen
+				-- Hide close target while outro plays (chrome already destroyed).
+				skillsBtn.Visible = not reportOpen and not storeOpen and not waveRunning
 			end
-			hideSkillsBtnContent(false)
 		end
 	end
 
@@ -808,6 +821,10 @@ task.spawn(function()
 	end
 
 	local function toggle()
+		-- Hide Skills during waves; still allow close if bubbles are open.
+		if not open and WaveSim.isRunning() then
+			return
+		end
 		if not canToggle() then
 			return
 		end
@@ -824,6 +841,9 @@ task.spawn(function()
 		if InventoryState.isOpen() then
 			return
 		end
+		if WaveSim.isRunning() then
+			return
+		end
 		-- DPad Right opens only; B closes.
 		if open then
 			return
@@ -835,6 +855,33 @@ task.spawn(function()
 	end
 
 	applyOpen(false)
+
+	do
+		local lastWaveRunning = WaveSim.isRunning()
+		if lastWaveRunning and skillsBtn and not open then
+			skillsBtn.Visible = false
+		end
+		WaveSim.onHud(function(snap)
+			if snap.running == lastWaveRunning then
+				return
+			end
+			lastWaveRunning = snap.running
+			if not skillsBtn then
+				return
+			end
+			if snap.running then
+				if not open then
+					skillsBtn.Visible = false
+				end
+			else
+				local reportOpen = playerGui:GetAttribute("OceanTD_ReefReportOpen") == true
+				local storeOpen = playerGui:GetAttribute("OceanTD_StoreOpen") == true
+				if not open and not reportOpen and not storeOpen and not InventoryState.isOpen() then
+					skillsBtn.Visible = true
+				end
+			end
+		end)
+	end
 
 	playerGui:GetAttributeChangedSignal("OceanTD_ForceCloseSkills"):Connect(function()
 		closeOnly()
@@ -869,7 +916,7 @@ task.spawn(function()
 	playerGui:GetAttributeChangedSignal("OceanTD_SkillsUiRestore"):Connect(function()
 		closeOnly()
 		if skillsBtn then
-			skillsBtn.Visible = true
+			skillsBtn.Visible = not WaveSim.isRunning()
 		end
 		hideSkillsBtnContent(false)
 		playerGui:SetAttribute(SKILLS_OPEN_ATTR, false)

@@ -605,6 +605,79 @@ function PlotCam2.applyViewSnapshot(snap: ViewSnapshot): boolean
 	return true
 end
 
+-- Seat focus + zoom so the given world points (e.g. path W1 + reef heart) fit
+-- the current yaw: span along screen-right fills the horizontal FOV (no rotate).
+function PlotCam2.frameWorldPoints(points: { Vector3 }, pad: number?): boolean
+	if not active or typeof(points) ~= "table" or #points < 1 then
+		return false
+	end
+	local plotCf, plotSize = getPlot()
+	if not plotCf or not plotSize then
+		return false
+	end
+	local a = points[1]
+	local b = points[#points]
+	local mid = (a + b) * 0.5
+	if #points > 2 then
+		local sum = points[1]
+		for i = 2, #points do
+			sum += points[i]
+		end
+		mid = sum / #points
+	end
+
+	focus = clampFocus(Vector3.new(mid.X, groundY(plotCf, plotSize), mid.Z), plotCf, plotSize)
+
+	local cam = Workspace.CurrentCamera
+	local fovDeg = if cam then math.clamp(cam.FieldOfView, 20, 90) else 70
+	local halfFov = math.rad(fovDeg) * 0.5
+	local aspect = 1.6
+	if cam and cam.ViewportSize.Y > 1 then
+		aspect = cam.ViewportSize.X / cam.ViewportSize.Y
+	end
+	local halfHFov = math.atan(math.tan(halfFov) * aspect)
+	-- ~1.0 = points on the edges; tiny pad keeps them just inside.
+	local cover = math.clamp(if typeof(pad) == "number" then pad else 1.05, 1.0, 1.5)
+
+	local fwd = lookFlat(plotCf)
+	local right = Vector3.new(-fwd.Z, 0, fwd.X)
+	local delta = b - a
+	local spanRight = math.abs(delta.X * right.X + delta.Z * right.Z)
+	local span = math.max(spanRight, 8)
+	-- Lateral offset at the look-at plane scales with full camera distance.
+	local wantDist = math.clamp((span * 0.5 * cover) / math.tan(halfHFov), DIST_MIN, DIST_MAX)
+
+	local base = baselineDist(plotCf, plotSize)
+	tune.distOffset = math.clamp(wantDist - base, DIST_OFFSET_MIN, DIST_OFFSET_MAX)
+	liveDist = wantDist
+	syncDistOffsetAchievable(plotCf, plotSize)
+	liveDist = targetDist(plotCf, plotSize)
+	persistTune()
+	return true
+end
+
+-- Nudge focus along screen-right (positive = right, negative = left).
+-- One step uses the same stud magnitude as a DistOff zoom notch.
+function PlotCam2.panFocusBySteps(rightSteps: number): boolean
+	if not active or typeof(rightSteps) ~= "number" or rightSteps == 0 then
+		return false
+	end
+	local plotCf, plotSize = getPlot()
+	if not plotCf or not plotSize then
+		return false
+	end
+	local fwd = lookFlat(plotCf)
+	local right = Vector3.new(-fwd.Z, 0, fwd.X)
+	if right.Magnitude < 1e-4 then
+		return false
+	end
+	right = right.Unit
+	local step = PlotCam2.distOffsetZoomStep()
+	focus = clampFocus(focus + right * (rightSteps * step), plotCf, plotSize)
+	persistTune()
+	return true
+end
+
 function PlotCam2.formatTune(): string
 	local base = PlotCam2.getBaseYawDeg()
 	return string.format(

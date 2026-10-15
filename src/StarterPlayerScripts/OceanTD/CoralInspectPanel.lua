@@ -1388,14 +1388,16 @@ do
 	local hueRangeHideToken = 0
 
 	local function zoomHueCloseup(part: BasePart, fromCf: CFrame): CFrame
-		local look = part.Position + Vector3.new(0, math.min(part.Size.Y * 0.25, 2), 0)
+		-- Look lower on the coral so world PLANT chrome sits higher in the frame.
+		local lookY = math.min(part.Size.Y * Consts.HUE_CAM_LOOK_Y_FRAC, Consts.HUE_CAM_LOOK_Y_MAX)
+		local look = part.Position + Vector3.new(0, lookY, 0)
 		local origin = fromCf.Position
 		local delta = look - origin
 		local mag = delta.Magnitude
 		if mag < 0.05 then
 			return fromCf
 		end
-		local dist = math.clamp(mag * Consts.HUE_CAM_DIST_FRAC, 3.5, 32)
+		local dist = math.clamp(mag * Consts.HUE_CAM_DIST_FRAC, 4.5, 36)
 		return CFrame.lookAt(look - delta.Unit * dist, look)
 	end
 
@@ -4537,9 +4539,8 @@ function CoralInspectPanel.bind(panel: GuiObject, catalogFrame: GuiObject)
 		end
 		local pad = 6
 		local cellW = math.floor((w - pad * 2) / 3)
-		-- Circles fill ~80% of each column.
-		-- Circles ~10% smaller than prior 80% column fill.
-		local circle = math.max(32, math.floor(cellW * 0.72))
+		-- Circles fill ~80% of each column, then −15% for a tighter S/M/L row.
+		local circle = math.max(28, math.floor(cellW * 0.72 * 0.85))
 		-- Fit "Medium" to circle width so S/M/L don't clip; shared TextSize.
 		local wordSize = textSizeToFitWidth("Medium", circle, math.floor(circle * 0.55), 10)
 		local wordH = math.floor(wordSize * 1.25)

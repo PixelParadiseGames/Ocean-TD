@@ -34,6 +34,7 @@ return {
 	SharkCam = require(parent:WaitForChild("SharkCam")),
 	UrchinCam = require(parent:WaitForChild("UrchinCam")),
 	TangCam = require(parent:WaitForChild("TangCam")),
+	PlotCam2 = require(parent:WaitForChild("PlotCam2")),
 	ReefDefeatCam = require(parent:WaitForChild("ReefDefeatCam")),
 	WaveEndVfx = require(parent:WaitForChild("WaveEndVfx")),
 	WaveStartVfx = require(parent:WaitForChild("WaveStartVfx")),

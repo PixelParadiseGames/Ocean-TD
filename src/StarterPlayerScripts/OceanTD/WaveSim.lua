@@ -2760,66 +2760,38 @@ local function beginWave(wave: number)
 			L.WaveArrowPreview.playWaveAdvanceSound()
 		end
 	end
-	-- Wave 1: enter Fish Cam first so UI/lock/crosshair match; L.TangCam then drives a short overview.
-	-- Skip on Retry/Continue — FreeCam restores the cam the player had before defeat.
-	if wave == C.TANG_FIRST_WAVE and not joinIntroDemo and not suppressWaveStartCamForce then
+	-- Waves 1–2: always Plot Cam (no Fish Cam / Tang overview), including Retry.
+	-- Frame W1 (path start) + reef heart so the full early route stays in view.
+	if wave <= 2 and not joinIntroDemo then
 		local pg = Players.LocalPlayer and Players.LocalPlayer:FindFirstChildOfClass("PlayerGui")
-		local function forceFishCam()
-			if not pg then
-				return
-			end
-			pg:SetAttribute("OceanTD_ForceCamMode", "fishcam")
+		if pg then
+			pg:SetAttribute("OceanTD_ForceCamMode", "plotcam")
 			pg:SetAttribute("OceanTD_ForceCamStamp", os.clock())
 		end
-		forceFishCam()
-		L.TangCam.play({
-			getPathLen = function(): number
-				return if pathData then pathData.totalLen else 0
-			end,
-			samplePath = function(dist: number): Vector3?
-				if not pathData then
-					return nil
+		local pathForFrame = pathData
+		task.defer(function()
+			for _ = 1, 12 do
+				if L.PlotCam2.isActive() then
+					break
 				end
-				local pos = Path.samplePath(pathData, dist)
-				return pos
-			end,
-			getHeartPos = function(): Vector3?
-				return L.WaveEndVfx.getEndHeartWorldPos()
-					or (if pathData then pathData.endPos else nil)
-			end,
-			getArenaCenter = function(): Vector3?
-				local mir = ClientPlot.get()
-				return if mir then mir.cframe.Position else nil
-			end,
-			haveFishStarted = function(): boolean
-				-- Kick fish cam early so the blend is mid-flight when they appear.
-				if waveFishSpawned > 0 then
-					return true
-				end
-				return waveSpawning and spawnDelay <= C.TANG_CAM_FISH_TRANSITION_LEAD_SEC
-			end,
-			getFishPositions = function(): { Vector3 }
-				local pts: { Vector3 } = {}
-				for _, f in ipairs(fishList) do
-					if f.finished or f.isCrab or f.isUrchin or f.isShark then
-						continue
-					end
-					table.insert(pts, f.lastWorld)
-				end
-				return pts
-			end,
-			areFishFed = function(): boolean
-				if waveSpawning or spawnQueue > 0 then
-					return false
-				end
-				if waveFishExpected < 1 then
-					return true
-				end
-				return waveFishFullyFed >= waveFishExpected
-			end,
-		})
-		-- L.TangCam sets busy synchronously; re-stamp so Fish Cam wins over Plot Cam UI.
-		task.defer(forceFishCam)
+				task.wait()
+			end
+			if not L.PlotCam2.isActive() or not pathForFrame then
+				return
+			end
+			local w1 = Path.samplePath(pathForFrame, 0)
+			local heart = L.WaveEndVfx.getEndHeartWorldPos() or pathForFrame.endPos
+			if typeof(w1) ~= "Vector3" or typeof(heart) ~= "Vector3" then
+				return
+			end
+			L.PlotCam2.frameWorldPoints({ w1, heart }, 1.05)
+			-- Two DistOff notches out from the edge fit (same as wheel zoom-out ×2).
+			for _ = 1, 2 do
+				L.PlotCam2.nudge("distOffset", L.PlotCam2.distOffsetZoomStep())
+			end
+			-- Then pan left two notches (same step size as DistOff).
+			L.PlotCam2.panFocusBySteps(-2)
+		end)
 	end
 	waveSpawning = true
 	spawnQueue = waveFishCount(wave)

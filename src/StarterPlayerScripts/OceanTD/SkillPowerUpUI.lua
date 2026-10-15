@@ -3512,8 +3512,28 @@ function SkillPowerUpUI.getCloseButton(): GuiObject?
 	return closeBtn
 end
 
+local CLOSE_BUBBLE_SOUND_ID = "rbxassetid://5852470908"
+
+local function playPowerUpCloseBubbleSound()
+	local s = Instance.new("Sound")
+	s.Name = "OceanTD_PowerUpCloseBubble"
+	s.SoundId = CLOSE_BUBBLE_SOUND_ID
+	s.Volume = 0.8
+	s.Parent = SoundService
+	s:Play()
+	s.Ended:Once(function()
+		s:Destroy()
+	end)
+	task.delay(3, function()
+		if s.Parent then
+			s:Destroy()
+		end
+	end)
+end
+
 function SkillPowerUpUI.close()
 	hideConfirm()
+	local wasOpen = popupOpen
 	popupOpen = false
 	activeSkillId = nil
 	playStageIntroOnNextRefresh = false
@@ -3521,6 +3541,9 @@ function SkillPowerUpUI.close()
 	stopUnlockDescPulse()
 	stopUnlockBtnPulse()
 	stopNextUnlockPulse()
+	if wasOpen then
+		playPowerUpCloseBubbleSound()
+	end
 	SkillsBubbleSim.setSuppressed(false)
 	playerGui:SetAttribute(POWERUP_OPEN_ATTR, false)
 	endGamepadNav()

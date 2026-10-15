@@ -42,6 +42,7 @@ local WaveSlot = require(script.Parent:WaitForChild("WaveSlot"))
 local SkipWaveSlot = require(script.Parent:WaitForChild("SkipWaveSlot"))
 local WaveSpeedSlot = require(script.Parent:WaitForChild("WaveSpeedSlot"))
 local WaveSign = require(script.Parent:WaitForChild("WaveSign"))
+local WaveSim = require(script.Parent:WaitForChild("WaveSim"))
 local SeedWheelRevealApi = require(script.Parent:WaitForChild("SeedWheelRevealApi"))
 local PlaceRaycast = require(script.Parent:WaitForChild("PlaceRaycast"))
 
@@ -150,7 +151,12 @@ local function setLeftUiHiddenForBackpack(hide: boolean)
 		end
 		for _, entry in ipairs(hiddenLeftUiForBackpack) do
 			if entry.gui.Parent then
-				entry.gui.Visible = entry.wasVisible
+				-- Don't resurrect Skills while a wave session is running.
+				if entry.gui.Name == "Skills" and WaveSim.isRunning() then
+					entry.gui.Visible = false
+				else
+					entry.gui.Visible = entry.wasVisible
+				end
 			end
 		end
 		table.clear(hiddenLeftUiForBackpack)
@@ -2520,10 +2526,74 @@ local function playClose()
 	animating = false
 end
 
+local function skillsBtnGui(): GuiObject?
+	local left = playerGui:FindFirstChild("MobileLeftUI")
+	local dPad = left and left:FindFirstChild("dPad")
+	local skills = dPad and dPad:FindFirstChild("Skills")
+	if skills and skills:IsA("GuiObject") then
+		return skills
+	end
+	return nil
+end
+
+-- BUILD (Slot4) + Skills stay hidden for the whole wave session (incl. NEXT WAVE).
+local function syncWaveHideBuildAndSkills(running: boolean)
+	local skillsOpen = playerGui:GetAttribute("OceanTD_SkillsBubblesOpen") == true
+	local backpackOpen = InventoryState.isOpen()
+	if running then
+		if not backpackOpen and not skillsOpen then
+			for _, hostSlot in ipairs(backpackLockHosts) do
+				hostSlot.Visible = false
+			end
+			slot4.Visible = false
+		end
+		local skills = skillsBtnGui()
+		if skills and not skillsOpen then
+			skills.Visible = false
+		end
+	else
+		if not skillsOpen then
+			for _, hostSlot in ipairs(backpackLockHosts) do
+				hostSlot.Visible = true
+			end
+			slot4.Visible = true
+		end
+		local skills = skillsBtnGui()
+		if skills
+			and not skillsOpen
+			and not backpackOpen
+			and playerGui:GetAttribute(REPORT_OPEN_ATTR) ~= true
+			and playerGui:GetAttribute("OceanTD_StoreOpen") ~= true
+		then
+			skills.Visible = true
+		end
+	end
+end
+
+do
+	local lastWaveRunning = WaveSim.isRunning()
+	syncWaveHideBuildAndSkills(lastWaveRunning)
+	WaveSim.onHud(function(snap)
+		if snap.running == lastWaveRunning then
+			return
+		end
+		lastWaveRunning = snap.running
+		syncWaveHideBuildAndSkills(snap.running)
+	end)
+	WaveSim.onStopped(function()
+		lastWaveRunning = false
+		syncWaveHideBuildAndSkills(false)
+	end)
+end
+
 InventoryState.onOpenChanged(function(isOpen)
 	setLeftUiHiddenForBackpack(isOpen)
 	-- ReefReport / Store cart chrome (info “i” vs shop glyph) must refresh with build mode.
 	playerGui:SetAttribute("OceanTD_SyncCartChrome", os.clock())
+	-- Closing build mid-wave: keep BUILD + Skills hidden.
+	if not isOpen then
+		syncWaveHideBuildAndSkills(WaveSim.isRunning())
+	end
 	if isOpen then
 		if SkipWaveSlot.isConfirmActive() then
 			SkipWaveSlot.cancelConfirm()
@@ -2586,10 +2656,8 @@ playerGui:GetAttributeChangedSignal("OceanTD_SkillsBubblesOpen"):Connect(functio
 			task.spawn(SavePlotSlot.playHide)
 			task.spawn(ClearPlotSlot.playHide)
 			task.spawn(UndoSlot.playHide)
-			local left = playerGui:FindFirstChild("MobileLeftUI")
-			local dPad = left and left:FindFirstChild("dPad")
-			local skills = dPad and dPad:FindFirstChild("Skills")
-			if skills and skills:IsA("GuiObject") then
+			local skills = skillsBtnGui()
+			if skills then
 				skills.Visible = true
 				for i = #hiddenLeftUiForBackpack, 1, -1 do
 					if hiddenLeftUiForBackpack[i].gui == skills then
@@ -2600,7 +2668,8 @@ playerGui:GetAttributeChangedSignal("OceanTD_SkillsBubblesOpen"):Connect(functio
 			end
 		end
 	else
-		slot4.Visible = true
+		-- Stay hidden while a wave session is running.
+		slot4.Visible = not WaveSim.isRunning()
 		refreshHelpSlotBadge()
 		if InventoryState.isOpen() and playerGui:GetAttribute(REPORT_OPEN_ATTR) ~= true then
 			host.Visible = true
@@ -2609,12 +2678,12 @@ playerGui:GetAttributeChangedSignal("OceanTD_SkillsBubblesOpen"):Connect(functio
 			task.spawn(ClearPlotSlot.playReveal)
 			task.spawn(UndoSlot.playReveal)
 			-- Re-hide Skills with the rest of left UI while backpack stays open.
-			local left = playerGui:FindFirstChild("MobileLeftUI")
-			local dPad = left and left:FindFirstChild("dPad")
-			local skills = dPad and dPad:FindFirstChild("Skills")
-			if skills and skills:IsA("GuiObject") then
+			local skills = skillsBtnGui()
+			if skills then
 				rememberHideLeftForBackpack(skills)
 			end
+		else
+			syncWaveHideBuildAndSkills(WaveSim.isRunning())
 		end
 	end
 end)
@@ -2670,6 +2739,10 @@ local function toggleFromUser(fromGamepad: boolean?)
 	if backpackToggleBlockedBySkills() then
 		return
 	end
+	-- No BUILD during waves (allow close if somehow still open).
+	if WaveSim.isRunning() and not InventoryState.isOpen() then
+		return
+	end
 	if animating then
 		return
 	end
@@ -2717,6 +2790,8 @@ do
 		end)
 		table.insert(backpackLockHosts, otherSlot4)
 		task.defer(syncBackpackGate)
+		-- ensureSlot4GuiButton forces Visible; re-apply wave hide if mid-session.
+		syncWaveHideBuildAndSkills(WaveSim.isRunning())
 		log("Also bound Slot4 on", otherHud.Name)
 	end
 end

@@ -40,9 +40,13 @@ return {
 
 	-- Hue paint: quick close-up so the color change is readable, then restore.
 	HUE_CAM_IN_SEC = 0.28,
-	HUE_CAM_HOLD_SEC = 3,
+	HUE_CAM_HOLD_SEC = 2,
 	HUE_CAM_OUT_SEC = 0.4,
-	HUE_CAM_DIST_FRAC = 0.42, -- fraction of current cam→coral distance (lower = closer)
+	-- Slightly farther than before (~2 zoom steps out) so PLANT chrome stays readable.
+	HUE_CAM_DIST_FRAC = 0.55, -- fraction of current cam→coral distance (lower = closer)
+	-- Look lower on the coral so PLANT chrome sits higher in frame (more on-screen).
+	HUE_CAM_LOOK_Y_FRAC = 0.08,
+	HUE_CAM_LOOK_Y_MAX = 1.0,
 	HUE_RANGE_HIDE_SEC = 5, -- hide range preview while the hue close-up reads
 
 	DEFAULT_PALETTE_SWATCH = 0,

@@ -24,7 +24,8 @@ local ATTR_CAM = "OceanTD_CamCycleMode"
 local DASH_SEC = 0.95
 local WORK_SEC = 3
 local DIG_CAM_IN_SEC = 0.55 -- ease into dig close-up during dash → dig
-local DIG_CAM_OUT_SEC = 0.45 -- restore prior view after dig
+local DIG_CAM_OUT_SEC = 0.675 -- restore prior view after dig (50% slower than 0.45)
+local DIG_CAM_OUT_HOLD_SEC = 1 -- linger on dig close-up before restore tween
 -- Another 10% farther than the prior close-up (less aggressive zoom).
 local DIG_CAM_DIST = 11.314
 local DIG_CAM_HEIGHT = 4.0
@@ -1296,9 +1297,15 @@ local function finish(
 		burstHeartFirework(digCamPlantPos)
 	end
 	local digTok = digCamToken
-	endDigCamZoom(digTok)
-	-- Hold busy through dig-cam restore so FreeCam / next place don't fight the zoom-out.
-	task.delay(DIG_CAM_OUT_SEC + 0.05, function()
+	-- Hold on the dig close-up, then tween back to the prior view.
+	task.delay(DIG_CAM_OUT_HOLD_SEC, function()
+		if token ~= playToken or digTok ~= digCamToken then
+			return
+		end
+		endDigCamZoom(digTok)
+	end)
+	-- Hold busy through linger + restore so FreeCam / next place don't fight the zoom-out.
+	task.delay(DIG_CAM_OUT_HOLD_SEC + DIG_CAM_OUT_SEC + 0.05, function()
 		if token ~= playToken then
 			return
 		end

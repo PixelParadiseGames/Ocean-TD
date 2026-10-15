@@ -56,9 +56,15 @@ function PlaceSoftPlant.measureCoralHeight(part: BasePart?): number?
 	return math.max(top - bot, part.Size.Y)
 end
 
+-- PlotCam place-focus (lean-in on coral) — disabled in build mode.
+local PLACE_ZOOM_ENABLED = false
+
 -- PlotCam: stash pre-place view, lean in on the coral, restore on PLANT / cancel.
 -- heightStuds: mesh/ball height so S/M/L pullback matches real size (short vs tall species).
 function PlaceSoftPlant.beginCamZoom(worldPos: Vector3?, sizeClass: number?, heightStuds: number?, speciesId: string?)
+	if not PLACE_ZOOM_ENABLED then
+		return
+	end
 	-- Studio / avatar-cam place: PlotCam2 may be inactive — start it and ask FreeCam
 	-- to drive plotcam so the close-up tween actually runs (mobile is usually already on plotcam).
 	if not PlotCam2.isActive() then
@@ -74,6 +80,9 @@ function PlaceSoftPlant.beginCamZoom(worldPos: Vector3?, sizeClass: number?, hei
 end
 
 function PlaceSoftPlant.retargetCamZoom(worldPos: Vector3?, sizeClass: number?, heightStuds: number?, speciesId: string?)
+	if not PLACE_ZOOM_ENABLED then
+		return
+	end
 	if not PlotCam2.isPlaceZoomActive() then
 		PlaceSoftPlant.beginCamZoom(worldPos, sizeClass, heightStuds, speciesId)
 		return
@@ -82,13 +91,18 @@ function PlaceSoftPlant.retargetCamZoom(worldPos: Vector3?, sizeClass: number?, 
 end
 
 function PlaceSoftPlant.updateCamZoom(worldPos: Vector3?)
+	if not PLACE_ZOOM_ENABLED then
+		return
+	end
 	if PlotCam2.isPlaceZoomActive() then
 		PlotCam2.updatePlaceZoom(worldPos)
 	end
 end
 
 function PlaceSoftPlant.endCamZoom()
-	PlotCam2.endPlaceZoom()
+	if PlotCam2.isPlaceZoomActive() then
+		PlotCam2.endPlaceZoom()
+	end
 	PlotCam2Tune.setPlaceZoomDebug(false)
 end
 

@@ -68,7 +68,7 @@ type SkillsResume = {
 }
 local skillsResume: SkillsResume? = nil
 local skillsResumeToken = 0
-local SKILLS_RESTORE_WAIT = 0.55 -- after SkillsAvatarCam TWEEN_OUT_SEC (0.45)
+local SKILLS_RESTORE_WAIT = 0.7 -- after SkillsAvatarCam TWEEN_OUT_SEC + busy clear
 local camPos = Vector3.zero
 local lookYaw = 0
 local lookPitch = 0
@@ -407,12 +407,12 @@ local function applyIconChrome(icon: ModeIcon, relativeTo: CamMode, collapsed: b
 	if camModeIconsSuppressed() then
 		icon.root.Visible = false
 		interactive = false
-	elseif camModeIconsBackpackOnly() then
-		-- Build mode: only the active cam circle (Plot Cam sits above its 4 quick buttons).
+	elseif camModeIconsBackpackOnly() and collapsed then
+		-- Build mode collapsed: only the active cam circle (above Plot Cam quick pads).
 		icon.root.Visible = isActive
 		interactive = isActive
 	else
-		-- Collapsed = only the active mode circle (normal left HUD). Expanded carousel shows all.
+		-- Expanded carousel (incl. build-mode cycle): show all; collapsed HUD: active only.
 		icon.root.Visible = isActive or not collapsed
 	end
 	icon.stroke.Enabled = true
@@ -559,17 +559,11 @@ local function playCamCarousel(fromMode: CamMode, toMode: CamMode, animate: bool
 		end
 		return
 	end
-	if camModeIconsBackpackOnly() then
-		-- Build: stay on the single active icon — no full diamond expand.
-		carouselToken += 1
-		carouselCollapsed = true
-		setCarouselCollapsedAttr(true)
-		snapIconsToLayout(toMode, true)
-		return
-	end
 	carouselToken += 1
 	local my = carouselToken
 	-- Expanding / revolving — hide Plot Cam quick pad until collapse finishes again.
+	-- Backpack build mode still expands so inactive cams cycle visibly, then
+	-- scheduleCollapse tucks back to the single active icon.
 	setCarouselCollapsedAttr(false)
 
 	if not animate or fromMode == toMode then
@@ -2048,6 +2042,9 @@ local function startRenderLoop()
 		if skillsBubblesOpen() then
 			return
 		end
+		if playerGui:GetAttribute("OceanTD_SkillsAvatarCamBusy") == true then
+			return
+		end
 		if playerGui:GetAttribute("OceanTD_PlotSizeCinematicBusy") == true then
 			return
 		end
@@ -3045,6 +3042,14 @@ local function bindMobileLeftUi(left: Instance)
 				end
 				task.spawn(function()
 					task.wait(SKILLS_RESTORE_WAIT)
+					if my ~= skillsResumeToken or skillsBubblesOpen() then
+						return
+					end
+					-- Wait out avatar-cam restore tween so we don't snap over it.
+					local busyT0 = os.clock()
+					while playerGui:GetAttribute("OceanTD_SkillsAvatarCamBusy") == true and os.clock() - busyT0 < 1.5 do
+						task.wait()
+					end
 					if my ~= skillsResumeToken or skillsBubblesOpen() then
 						return
 					end

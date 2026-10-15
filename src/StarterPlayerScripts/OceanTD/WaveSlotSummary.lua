@@ -493,11 +493,9 @@ function WaveSlotSummary.hide()
 	local pg = Players.LocalPlayer:FindFirstChild("PlayerGui")
 	if pg and pg:IsA("PlayerGui") then
 		if not wasDefeat then
-			local resume = pg:GetAttribute("OceanTD_WaveResumeCamMode")
-			if resume == "off" or resume == "plotcam" or resume == "fishcam" or resume == "dronecam" then
-				pg:SetAttribute("OceanTD_ForceCamMode", resume)
-				pg:SetAttribute("OceanTD_ForceCamStamp", os.clock())
-			end
+			-- END WAVES: always return to Plot Cam (not whatever mode waves started in).
+			pg:SetAttribute("OceanTD_ForceCamMode", "plotcam")
+			pg:SetAttribute("OceanTD_ForceCamStamp", os.clock())
 		end
 		pg:SetAttribute("OceanTD_WaveResumeCamMode", "")
 		pg:SetAttribute("OceanTD_TutorialSummaryWasDefeat", wasDefeat)
@@ -582,11 +580,17 @@ local function continueFromSummary()
 	ReefDefeatCam.releaseHeldPose()
 	h.clearWaveCameraOffset()
 	if WaveSim.continueWithHearts(CONTINUE_HEARTS, retrySame) then
-		-- Defeat RETRY: Fish Cam should start at path W1 with the school, not the defeat end.
-		if retrySame then
-			h.playerGui:SetAttribute("OceanTD_ResetFishCamPathStart", os.clock())
+		-- Waves 1–2 use Plot Cam; later waves resume Fish Cam at path start after defeat.
+		local waveNum = if retrySame then summaryRetryWave else math.max(1, summaryRetryWave + 1)
+		if waveNum <= 2 then
+			h.playerGui:SetAttribute("OceanTD_ForceCamMode", "plotcam")
+			h.playerGui:SetAttribute("OceanTD_ForceCamStamp", os.clock())
+		else
+			if retrySame then
+				h.playerGui:SetAttribute("OceanTD_ResetFishCamPathStart", os.clock())
+			end
+			h.playerGui:SetAttribute("OceanTD_ResumeDefeatCam", os.clock())
 		end
-		h.playerGui:SetAttribute("OceanTD_ResumeDefeatCam", os.clock())
 		h.applyIcon(true)
 		h.setHudVisible(true)
 		h.clearWaveCameraOffset()
