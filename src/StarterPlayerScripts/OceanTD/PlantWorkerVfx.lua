@@ -1,8 +1,8 @@
 --!strict
 --[[
-	Client-only Lego-style plant worker (Plot / Fish / Free cam).
-	Dash beside coral → dig 3s with dust + bubbles → coral rises from underground.
-	Camera zooms in on the digger for the dig, then restores the prior view.
+	Client-only plant dig VFX.
+	Worker cams (Plot / Fish / Free): dash beside coral → dig 3s → coral rises; dig cam zoom.
+	Player Cam: same dust / bubbles / hearts / coral rise at the plant — avatar stays under player control.
 ]]
 
 local KeyframeSequenceProvider = game:GetService("KeyframeSequenceProvider")
@@ -42,6 +42,9 @@ local DIG_ANIM_VERSION = 2 -- Action4 dig track primary again (Motor6D-only was 
 local RUN_ANIM_VERSION = 1
 local LAND_SQUASH_SEC = 0.14
 local LAND_DIP_STUDS = 0.22
+-- Dig torso: upright ↔ lean forward while arms keep flailing.
+local DIG_BEND_DEG = 22
+local DIG_BEND_CYCLE_SEC = 1.15
 local RAY_UP = 60
 local RAY_DOWN = 180
 local CORAL_BURY_MIN = 2.8
@@ -60,10 +63,12 @@ local ICE_BUBBLE_BLAST_SPEED_MIN = 6.5
 local ICE_BUBBLE_BLAST_SPEED_MAX = 11
 local RUN_SOUND_ID = "rbxassetid://75773150278794"
 local WORK_SOUND_ID = "rbxassetid://76312376951471"
+local WOW_SOUND_ID = "rbxassetid://109783075001296"
 local RUN_FADE_IN_SEC = 0.2
 local WORK_FADE_OUT_SEC = 0.5
 local RUN_VOL = 0.9
 local WORK_VOL = 0.9
+local WOW_VOL = 0.95
 
 local PlantWorkerVfx = {}
 
@@ -71,6 +76,17 @@ local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui") :: PlayerGui
 
 local playToken = 0
+-- Concurrent plant-only digs (ADD MAX batch); avatar dig still uses playToken.
+local plantOnlySerial = 0
+local plantOnlyBusy = 0
+-- Batch VFX budgets (ADD MAX). wowLeft < 0 means unlimited.
+local batchBubbleScale = 1
+local batchBubblesPerCoral: number? = nil -- hard cap total ice bubbles per dig (e.g. 3 when N>40)
+local batchHeartsPerCoral: number? = nil -- fixed heart count per dig (e.g. 5 when N>40)
+local batchWowLeft = -1
+local batchDustChance = 1 -- fraction of digs that spawn dust hosts
+local batchWorkVolScale = 1 -- dig/run loop volume multiplier
+local batchWorkSecScale = 1 -- plant-only dig duration multiplier (ADD MAX speed)
 local digAnimId: string? = nil
 local digAnimVersionRegistered: number? = nil
 local digTrack: AnimationTrack? = nil
@@ -107,11 +123,60 @@ local digHeldShovel = false
 export type PlayOpts = {
 	coralPart: BasePart?,
 	onDone: (() -> ())?,
+	-- Force plant-only VFX (no avatar dash). Default: auto when not in a worker cam.
+	skipAvatar: boolean?,
+	-- Multiply ice-bubble emission (ADD MAX uses 0.5 when planting >40).
+	bubbleScale: number?,
+	-- When false, skip the build-complete "wow" SFX (hearts still play).
+	playWow: boolean?,
 }
+
+-- ADD MAX batch budgets: bubbles / hearts / wow SFX / dust / dig duration / volume.
+function PlantWorkerVfx.beginBatchVfx(opts: {
+	bubbleScale: number?,
+	bubblesPerCoral: number?,
+	heartsPerCoral: number?,
+	wowCap: number?,
+	dustChance: number?,
+	workVolScale: number?,
+	workSecScale: number?,
+})
+	local scale = tonumber(opts and opts.bubbleScale)
+	batchBubbleScale = if typeof(scale) == "number" and scale > 0 then scale else 1
+	local bpc = tonumber(opts and opts.bubblesPerCoral)
+	batchBubblesPerCoral = if typeof(bpc) == "number" and bpc >= 0 then math.floor(bpc) else nil
+	local hpc = tonumber(opts and opts.heartsPerCoral)
+	batchHeartsPerCoral = if typeof(hpc) == "number" and hpc >= 0 then math.floor(hpc) else nil
+	local wowCap = tonumber(opts and opts.wowCap)
+	batchWowLeft = if typeof(wowCap) == "number" and wowCap >= 0 then math.floor(wowCap) else -1
+	local dust = tonumber(opts and opts.dustChance)
+	batchDustChance = if typeof(dust) == "number" then math.clamp(dust, 0, 1) else 1
+	local workVol = tonumber(opts and opts.workVolScale)
+	batchWorkVolScale = if typeof(workVol) == "number" and workVol >= 0 then math.clamp(workVol, 0, 1) else 1
+	local workSec = tonumber(opts and opts.workSecScale)
+	batchWorkSecScale = if typeof(workSec) == "number" and workSec > 0 then math.clamp(workSec, 0.25, 1) else 1
+end
+
+function PlantWorkerVfx.endBatchVfx()
+	batchBubbleScale = 1
+	batchBubblesPerCoral = nil
+	batchHeartsPerCoral = nil
+	batchWowLeft = -1
+	batchDustChance = 1
+	batchWorkVolScale = 1
+	batchWorkSecScale = 1
+end
 
 local function isWorkerCam(): boolean
 	local m = playerGui:GetAttribute(ATTR_CAM)
 	return m == "plotcam" or m == "fishcam" or m == "dronecam"
+end
+
+local function shouldSkipAvatar(opts: PlayOpts?): boolean
+	if opts and opts.skipAvatar == true then
+		return true
+	end
+	return not isWorkerCam()
 end
 
 local function setBusy(on: boolean)
@@ -391,12 +456,20 @@ local function findBodyPart(character: Model, names: { string }): BasePart?
 	return nil
 end
 
+-- Smooth 0→1→0 over DIG_BEND_CYCLE_SEC (upright ↔ lean forward).
+local function digBendAlpha(elapsed: number): number
+	local u = (elapsed / DIG_BEND_CYCLE_SEC) % 1
+	local tri = if u < 0.5 then u * 2 else 2 - u * 2
+	return tri * tri * (3 - 2 * tri)
+end
+
 -- Disable Animator entirely for dig — welds own the limbs (works Studio + live/mobile).
 local function playDigFallback(token: number, hum: Humanoid)
 	local character = player.Character
 	if not character then
 		return
 	end
+	local lowerTorso = findBodyPart(character, { "LowerTorso" })
 	local torso = findBodyPart(character, { "UpperTorso", "Torso" })
 	local rUpper = findBodyPart(character, { "RightUpperArm", "Right Arm" })
 	local lUpper = findBodyPart(character, { "LeftUpperArm", "Left Arm" })
@@ -430,7 +503,7 @@ local function playDigFallback(token: number, hum: Humanoid)
 		end)
 	end
 
-	-- Freeze arm motors so Animator / physics cannot fight dig welds.
+	-- Freeze arm (+ waist) motors so Animator / physics cannot fight dig welds.
 	local limbSet: { [BasePart]: boolean } = {}
 	if rUpper then
 		limbSet[rUpper] = true
@@ -444,12 +517,31 @@ local function playDigFallback(token: number, hum: Humanoid)
 	if lLower then
 		limbSet[lLower] = true
 	end
+	if lowerTorso and torso.Name == "UpperTorso" then
+		limbSet[torso] = true
+	end
 	for _, d in ipairs(character:GetDescendants()) do
 		if d:IsA("Motor6D") and d.Part1 and limbSet[d.Part1] then
 			d.Enabled = false
 			d.Transform = CFrame.new()
 			table.insert(digDisabledMotors, d)
 		end
+	end
+
+	-- R15: weld UpperTorso → LowerTorso so we can pitch the chest forward.
+	local wWaist: Weld? = nil
+	local restWaist = CFrame.new()
+	if lowerTorso and torso.Name == "UpperTorso" then
+		local w = Instance.new("Weld")
+		w.Name = "OceanTD_PlantDigWeldWaist"
+		w.Part0 = lowerTorso
+		w.Part1 = torso
+		w.C0 = lowerTorso.CFrame:ToObjectSpace(torso.CFrame)
+		w.C1 = CFrame.new()
+		w.Parent = lowerTorso
+		table.insert(digWelds, w)
+		wWaist = w
+		restWaist = w.C0
 	end
 
 	local function makeWeld(part: BasePart): Weld
@@ -511,7 +603,13 @@ local function playDigFallback(token: number, hum: Humanoid)
 			stopDigFallback()
 			return
 		end
-		local phase = ((os.clock() - t0) / DIG_CYCLE_SEC) % 1
+		local elapsed = os.clock() - t0
+		local bendRad = math.rad(DIG_BEND_DEG) * digBendAlpha(elapsed)
+		-- Negative pitch = lean forward (shovel into the sand).
+		if wWaist and wWaist.Parent then
+			wWaist.C0 = restWaist * CFrame.Angles(-bendRad, 0, 0)
+		end
+		local phase = (elapsed / DIG_CYCLE_SEC) % 1
 		local rightUp = 0.5 + 0.5 * math.cos(phase * math.pi * 2)
 		local leftUp = 0.5 + 0.5 * math.cos((phase + 0.5) * math.pi * 2)
 		if wRight and wRight.Parent then
@@ -1048,12 +1146,12 @@ local function startRunSound()
 	s.Looped = true
 	runSound = s
 	s:Play()
-	fadeSoundTo(s, RUN_VOL, RUN_FADE_IN_SEC, false)
+	fadeSoundTo(s, RUN_VOL * batchWorkVolScale, RUN_FADE_IN_SEC, false)
 end
 
 local function startWorkSound()
 	stopWorkSound(false)
-	local s = makeSfx("OceanTD_PlantWorkerWork", WORK_SOUND_ID, WORK_VOL)
+	local s = makeSfx("OceanTD_PlantWorkerWork", WORK_SOUND_ID, WORK_VOL * batchWorkVolScale)
 	s.Looped = true
 	workSound = s
 	s:Play()
@@ -1181,10 +1279,36 @@ local function feetWorldPos(standCF: CFrame, hum: Humanoid): Vector3
 	return standCF.Position - Vector3.new(0, hip * 0.92, 0)
 end
 
-local function burstHeartFirework(at: Vector3)
+local function playWowSound()
+	if batchWowLeft >= 0 then
+		if batchWowLeft <= 0 then
+			return
+		end
+		batchWowLeft -= 1
+	end
+	local s = makeSfx("OceanTD_PlantWorkerWow", WOW_SOUND_ID, WOW_VOL)
+	s.Looped = false
+	s:Play()
+	s.Ended:Once(function()
+		if s.Parent then
+			s:Destroy()
+		end
+	end)
+	-- Safety cleanup if Ended never fires (load fail / muted).
+	task.delay(8, function()
+		if s.Parent then
+			s:Destroy()
+		end
+	end)
+end
+
+local function burstHeartFirework(at: Vector3, playWow: boolean?)
 	local cam = Workspace.CurrentCamera
 	if not cam then
 		return
+	end
+	if playWow ~= false then
+		playWowSound()
 	end
 	local folder = cam:FindFirstChild("OceanTD_LocalFX")
 	if not folder then
@@ -1194,7 +1318,9 @@ local function burstHeartFirework(at: Vector3)
 	end
 	local origin = at + Vector3.new(0, 2.2, 0)
 	local rng = Random.new()
-	local count = rng:NextInteger(HEART_FIREWORK_MIN, HEART_FIREWORK_MAX)
+	local count = if typeof(batchHeartsPerCoral) == "number"
+		then batchHeartsPerCoral
+		else rng:NextInteger(HEART_FIREWORK_MIN, HEART_FIREWORK_MAX)
 	for i = 1, count do
 		local delaySec = rng:NextNumber(0, 0.1)
 		task.delay(delaySec, function()
@@ -1316,16 +1442,132 @@ local function finish(
 	end)
 end
 
+-- Player Cam / skipAvatar: dig FX at the plant without taking the avatar.
+-- Plant-side dig only (no avatar). Safe to run many at once (ADD MAX).
+local function playAtPlantOnly(worldPos: Vector3, opts: PlayOpts?): boolean
+	plantOnlySerial += 1
+	local myId = plantOnlySerial
+	local bindName = "OceanTD_PlantOnly_" .. tostring(myId)
+	local coralPart = if opts then opts.coralPart else nil
+	local onDone = if opts then opts.onDone else nil
+	local optBubble = if opts then tonumber(opts.bubbleScale) else nil
+	local bubbleScale = if typeof(optBubble) == "number" and optBubble > 0
+		then optBubble
+		else batchBubbleScale
+	local playWow = if opts and opts.playWow == false then false else true
+	local hardBubbleCap = batchBubblesPerCoral
+	local function bubbles(n: number): number
+		return math.max(1, math.floor(n * bubbleScale + 0.5))
+	end
+
+	local riseP: BasePart? = nil
+	local buriedCF: CFrame? = nil
+	local finalCF: CFrame? = nil
+	if coralPart and coralPart.Parent then
+		coralPart.LocalTransparencyModifier = 0
+		finalCF = coralPart.CFrame
+		buriedCF = finalCF - Vector3.new(0, buryDepthFor(coralPart), 0)
+		coralPart.CFrame = buriedCF
+		riseP = coralPart
+	end
+
+	plantOnlyBusy += 1
+	if plantOnlyBusy == 1 then
+		setBusy(true)
+	end
+
+	-- Hard per-coral bubble budget (ADD MAX >40): one blast, no periodic extras.
+	if typeof(hardBubbleCap) == "number" then
+		if hardBubbleCap > 0 then
+			blastIceBubbles(worldPos, hardBubbleCap)
+		end
+	else
+		blastIceBubbles(worldPos, bubbles(ICE_BUBBLE_DASH_BLAST))
+	end
+	local useDust = batchDustChance >= 1 or math.random() <= batchDustChance
+	local dustHost: BasePart? = nil
+	local dustPe: ParticleEmitter? = nil
+	if useDust then
+		local host, pe = makeDustHost(worldPos)
+		dustHost = host
+		dustPe = pe
+		pe:Emit(if typeof(hardBubbleCap) == "number" then 1 else bubbles(12))
+	end
+	if typeof(hardBubbleCap) ~= "number" then
+		spawnIceBubbles(worldPos, bubbles(6))
+	end
+	-- One shared work loop sound while any plant-only dig is active.
+	if plantOnlyBusy == 1 then
+		startWorkSound()
+	end
+
+	local workSec = WORK_SEC * batchWorkSecScale
+	local phaseT0 = os.clock()
+	local lastDustBucket = -1
+	local finished = false
+	local function finishOne()
+		if finished then
+			return
+		end
+		finished = true
+		pcall(function()
+			RunService:UnbindFromRenderStep(bindName)
+		end)
+		destroyDust(dustHost)
+		if riseP and riseP.Parent and finalCF then
+			riseP.CFrame = finalCF
+		end
+		burstHeartFirework(worldPos, playWow)
+		plantOnlyBusy = math.max(0, plantOnlyBusy - 1)
+		if plantOnlyBusy == 0 then
+			stopWorkSound(true)
+			setBusy(false)
+		end
+		if onDone then
+			onDone()
+		end
+	end
+
+	RunService:BindToRenderStep(bindName, Enum.RenderPriority.Last.Value, function()
+		local now = os.clock()
+		local workU = math.clamp((now - phaseT0) / workSec, 0, 1)
+		if riseP and riseP.Parent and buriedCF and finalCF then
+			setCoralRiseAlpha(riseP, buriedCF, finalCF, workU)
+		end
+		if dustHost and dustHost.Parent then
+			dustHost.CFrame = CFrame.new(worldPos)
+		end
+		local bucket = math.floor((now - phaseT0) / (DIG_CYCLE_SEC * 0.5))
+		if dustPe and bucket ~= lastDustBucket then
+			lastDustBucket = bucket
+			dustPe:Emit(if typeof(hardBubbleCap) == "number" then 1 else bubbles(8))
+			if typeof(hardBubbleCap) ~= "number" then
+				spawnIceBubbles(worldPos, bubbles(3))
+			end
+		elseif not dustPe and bucket ~= lastDustBucket then
+			lastDustBucket = bucket
+			if typeof(hardBubbleCap) ~= "number" then
+				spawnIceBubbles(worldPos, bubbles(3))
+			end
+		end
+		if workU >= 1 then
+			finishOne()
+		end
+	end)
+	return true
+end
+
 function PlantWorkerVfx.playAt(worldPos: Vector3, opts: PlayOpts?): boolean
 	if typeof(worldPos) ~= "Vector3" then
 		return false
 	end
-	if not isWorkerCam() then
-		return false
+	if shouldSkipAvatar(opts) then
+		return playAtPlantOnly(worldPos, opts)
 	end
 	local character, hum, hrp = getCharacterParts()
 	if not character or not hum or not hrp then
-		return false
+		-- No avatar available — still play plant-side dig FX.
+		return playAtPlantOnly(worldPos, opts)
 	end
 
 	playToken += 1
@@ -1441,16 +1683,20 @@ function PlantWorkerVfx.playAt(worldPos: Vector3, opts: PlayOpts?): boolean
 			setCoralRiseAlpha(riseP, buriedCF, finalCF, workU)
 			base = standOnCoralCF(riseP, hum, lookAtPlant)
 		end
-		hrp.CFrame = base
+		-- R6 (no waist weld): lean the whole root. R15 waist bend runs in dig pose.
+		local hasUpper = hrp.Parent and hrp.Parent:FindFirstChild("UpperTorso") ~= nil
+		local bendRad = if hasUpper then 0 else math.rad(DIG_BEND_DEG) * digBendAlpha(now - phaseT0)
+		local standCF = if bendRad > 1e-4 then base * CFrame.Angles(-bendRad, 0, 0) else base
+		hrp.CFrame = standCF
 		if dustHost and dustHost.Parent then
-			dustHost.CFrame = CFrame.new(feetWorldPos(base, hum))
+			dustHost.CFrame = CFrame.new(feetWorldPos(standCF, hum))
 		end
 
 		local bucket = math.floor((now - phaseT0) / (DIG_CYCLE_SEC * 0.5))
 		if dustPe and bucket ~= lastDustBucket then
 			lastDustBucket = bucket
 			dustPe:Emit(8)
-			spawnIceBubbles(feetWorldPos(base, hum), 3)
+			spawnIceBubbles(feetWorldPos(standCF, hum), 3)
 		end
 
 		if workU >= 1 then

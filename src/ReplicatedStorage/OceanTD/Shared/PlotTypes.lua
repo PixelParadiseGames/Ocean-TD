@@ -110,6 +110,9 @@ export type PlayerProfile = {
 	lifetimePlaySec: number,
 	-- Lifetime wave-economy telemetry (see EconomyStats / EconomyStatsService).
 	economyStats: EconomyStats.PlayerEconomy,
+	-- Auto-plant: toggle (default off) unlocks after manualPlantCount >= 3.
+	autoPlantEnabled: boolean,
+	manualPlantCount: number,
 }
 
 local Constants = require(script.Parent.Constants)
@@ -164,6 +167,8 @@ function PlotTypes.defaultProfile(): PlayerProfile
 		lifetimeSandDollarsEarned = 0,
 		lifetimePlaySec = 0,
 		economyStats = EconomyStats.defaultPlayer(),
+		autoPlantEnabled = false,
+		manualPlantCount = 0,
 	}
 end
 

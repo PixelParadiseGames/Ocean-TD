@@ -36,6 +36,11 @@ local REMOTE_EVENTS = {
 	"HideUiSync",
 	"JoinIntroSync",
 	"JoinIntroComplete",
+	"AutoPlantSync",
+	"AutoPlantPlaced",
+	"AutoPlantShuffleApplied",
+	"AutoPlantAddMaxApplied",
+	"AutoPlantRevealCoral",
 }
 
 local REMOTE_FUNCTIONS = {
@@ -63,6 +68,10 @@ local REMOTE_FUNCTIONS = {
 	"RequestMarkJoinIntroSeen",
 	"RequestGetJoinIntro",
 	"RequestGetSandDollarStats",
+	"RequestSetAutoPlant",
+	"RequestAutoPlantShuffle",
+	"RequestAutoPlantAddMax",
+	"RequestGetAutoPlantState",
 }
 
 local function getRoot(): Instance

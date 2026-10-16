@@ -30,8 +30,10 @@ local UrchinStingService = require(Services:WaitForChild("UrchinStingService"))
 local FriendPlotPreviewService = require(Services:WaitForChild("FriendPlotPreviewService"))
 local JoinIntroPackageService = require(Services:WaitForChild("JoinIntroPackageService"))
 local EconomyStatsService = require(Services:WaitForChild("EconomyStatsService"))
+local AutoPlantService = require(Services:WaitForChild("AutoPlantService"))
 
 local Constants = require(oceanRoot:WaitForChild("Shared"):WaitForChild("Constants"))
+local AutoPlantSpots = require(oceanRoot:WaitForChild("Shared"):WaitForChild("AutoPlantSpots"))
 
 Remotes.initServer()
 PersistenceService.init()
@@ -43,6 +45,7 @@ pcall(function()
 end)
 PlacementService.init()
 PlotSaveService.init()
+AutoPlantService.init()
 WaveWatchService.init()
 UrchinStingService.init()
 FriendPlotPreviewService.init()
@@ -223,11 +226,17 @@ local function onCharacterAdded(player: Player, _character: Model)
 end
 
 local function savePlayer(player: Player, reason: string)
-	if PlayerSession.isPlotLoading(player) or PlayerSession.getPlotOp(player) ~= "idle" then
-		print("[PERSIST] Skip save (" .. reason .. ") — plot op in progress for", player.Name)
+	if PlayerSession.isPlotLoading(player) then
+		print("[PERSIST] Skip save (" .. reason .. ") — plot loading for", player.Name)
 		return
 	end
-	if not PlayerSession.canSave(player) then
+	local plotOp = PlayerSession.getPlotOp(player)
+	-- Allow leave/autosave during shuffle apply — skipping was dropping shuffled layouts.
+	if plotOp ~= "idle" and plotOp ~= "shuffling" then
+		print("[PERSIST] Skip save (" .. reason .. ") — plot op in progress for", player.Name, "op=", plotOp)
+		return
+	end
+	if not PlayerSession.canSave(player) and plotOp ~= "shuffling" then
 		print("[PERSIST] Skip save (" .. reason .. ") — session not ready for", player.Name)
 		return
 	end
@@ -323,6 +332,7 @@ local function onPlayerAdded(player: Player)
 	end
 	-- Seed wheel auto-roll off until the player presses START (StopAutoRoll button).
 	PersistenceService.syncSeedWheelAutoRollToClient(player)
+	AutoPlantService.syncToClient(player)
 	-- Joiner first (race-safe), then everyone.
 	WaveWatchService.broadcastRoster(player)
 	WaveWatchService.broadcastRoster(nil)
@@ -419,7 +429,52 @@ requestPlace.OnServerInvoke = function(player: Player, itemId: any, worldPos: an
 	if typeof(itemId) ~= "string" or typeof(worldPos) ~= "Vector3" then
 		return { ok = false, errorCode = "BadRequest" }
 	end
-	return PlacementService.place(player, itemId, worldPos, true, diameter)
+	local result = PlacementService.place(player, itemId, worldPos, true, diameter)
+	if result.ok then
+		-- Unlock Auto Plant from live on-plot count (not a per-session plant counter).
+		AutoPlantService.syncToClient(player)
+	end
+	return result
+end
+
+local requestSetAutoPlant = Remotes.getFunction("RequestSetAutoPlant")
+requestSetAutoPlant.OnServerInvoke = function(player: Player, enabled: any)
+	return AutoPlantService.setEnabled(player, enabled == true)
+end
+
+local requestAutoPlantShuffle = Remotes.getFunction("RequestAutoPlantShuffle")
+requestAutoPlantShuffle.OnServerInvoke = function(player: Player)
+	return AutoPlantService.shuffle(player)
+end
+
+local requestAutoPlantAddMax = Remotes.getFunction("RequestAutoPlantAddMax")
+requestAutoPlantAddMax.OnServerInvoke = function(player: Player, count: any)
+	return AutoPlantService.addMax(player, tonumber(count) or 0)
+end
+
+local autoPlantRevealCoral = Remotes.get("AutoPlantRevealCoral")
+autoPlantRevealCoral.OnServerEvent:Connect(function(player: Player, placeId: any)
+	if typeof(placeId) ~= "string" or placeId == "" then
+		return
+	end
+	PlacementService.revealVisualAwaitOrbForPlayer(player, placeId)
+end)
+
+local requestGetAutoPlantState = Remotes.getFunction("RequestGetAutoPlantState")
+requestGetAutoPlantState.OnServerInvoke = function(player: Player)
+	-- isUnlocked latches lifetime unlock; capacity is always live.
+	local unlocked = AutoPlantService.isUnlocked(player)
+	local plotId = PlotService.getOwnerPlotId(player)
+	local onPlot = if plotId then GridService.getPlotCount(plotId) else 0
+	local capacity = AutoPlantService.getAddMaxCapacity(player)
+	return {
+		ok = true,
+		unlocked = unlocked,
+		enabled = unlocked and PersistenceService.isAutoPlantEnabled(player),
+		plotCoralCount = onPlot,
+		manualPlantCount = onPlot,
+		addMaxCapacity = capacity,
+	}
 end
 
 local requestMove = Remotes.getFunction("RequestMove")
@@ -442,6 +497,9 @@ requestRecycle.OnServerInvoke = function(player: Player, placeId: any, worldPos:
 	end
 	local result = PlacementService.recycle(player, placeId, worldPos)
 	PlayerSession.endPlotOp(player)
+	if result.ok then
+		AutoPlantService.syncToClient(player)
+	end
 	return result
 end
 
@@ -461,6 +519,7 @@ requestClearPlot.OnServerInvoke = function(player: Player)
 	end
 	local result = PlacementService.clearPlot(player)
 	PlayerSession.endPlotOp(player)
+	AutoPlantService.syncToClient(player)
 	return result
 end
 

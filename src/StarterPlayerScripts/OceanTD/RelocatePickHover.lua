@@ -125,6 +125,12 @@ local pickDebugConn: RBXScriptConnection? = nil
 local pickDebugFolder: Folder? = nil
 -- Eye (HideUI) in build mode toggles this; does not affect real pick hit tests.
 local pickDebugUserHidden = false
+-- ADD MAX / bulk plant: force-hide green pick discs, then fade back in.
+local pickDebugForcedHidden = false
+local pickDebugFadeT0: number? = nil
+local PICK_DEBUG_FADE_SEC = 0.55
+local PICK_DEBUG_FILL_TRANS = 0.86
+local PICK_DEBUG_STROKE_TRANS = 0.625
 
 -- Screen-pick probe at the plant point (terrain contact), not mesh tip / mid-body.
 local function pickProbeWorld(coral: BasePart): Vector3
@@ -171,13 +177,42 @@ function RelocatePickHover.setPickDebugVisible(on: boolean)
 end
 
 function RelocatePickHover.isPickDebugVisible(): boolean
-	return not pickDebugUserHidden
+	return not pickDebugUserHidden and not pickDebugForcedHidden
 end
 
 -- Returns whether circles are visible after the toggle.
 function RelocatePickHover.togglePickDebugVisible(): boolean
 	pickDebugUserHidden = not pickDebugUserHidden
-	return not pickDebugUserHidden
+	return RelocatePickHover.isPickDebugVisible()
+end
+
+-- Instantly hide green pick discs (ADD MAX planting). Does not change eye-toggle preference.
+function RelocatePickHover.setPickDebugForcedHidden(on: boolean)
+	pickDebugForcedHidden = on == true
+	pickDebugFadeT0 = nil
+	if pickDebugForcedHidden then
+		clearPickDebugHitboxes()
+	end
+end
+
+-- Show discs again and ease fill/stroke from invisible → normal.
+function RelocatePickHover.fadeInPickDebug()
+	pickDebugForcedHidden = false
+	pickDebugFadeT0 = os.clock()
+end
+
+local function pickDebugFadeAlpha(): number
+	local t0 = pickDebugFadeT0
+	if not t0 then
+		return 1
+	end
+	local u = math.clamp((os.clock() - t0) / PICK_DEBUG_FADE_SEC, 0, 1)
+	if u >= 1 then
+		pickDebugFadeT0 = nil
+		return 1
+	end
+	-- Smoothstep
+	return u * u * (3 - 2 * u)
 end
 
 local function syncPickDebugHitboxes()
@@ -186,7 +221,7 @@ local function syncPickDebugHitboxes()
 		return
 	end
 	local h = host
-	if not h or not InventoryState.isOpen() or pickDebugUserHidden then
+	if not h or not InventoryState.isOpen() or pickDebugUserHidden or pickDebugForcedHidden then
 		clearPickDebugHitboxes()
 		return
 	end
@@ -216,8 +251,9 @@ local function syncPickDebugHitboxes()
 	local primary = h.getPrimary()
 	local discGreen = Color3.fromRGB(80, 255, 120)
 	local discCyan = Color3.fromRGB(80, 200, 255)
-	local fillTrans = 0.86
-	local strokeTrans = 0.625
+	local fade = pickDebugFadeAlpha()
+	local fillTrans = 1 - (1 - PICK_DEBUG_FILL_TRANS) * fade
+	local strokeTrans = 1 - (1 - PICK_DEBUG_STROKE_TRANS) * fade
 
 	for _, inst in ipairs(folder:GetChildren()) do
 		local coral = isPlacedCoralPart(inst)

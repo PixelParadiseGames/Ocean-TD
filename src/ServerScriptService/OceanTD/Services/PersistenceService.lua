@@ -535,6 +535,9 @@ local function sanitizeProfile(raw: any): PlayerProfile
 	profile.hideUiUnlocked = true
 	profile.hasSeenJoinIntro = raw.hasSeenJoinIntro == true
 	profile.hasLostWaveRound = raw.hasLostWaveRound == true
+	profile.autoPlantEnabled = raw.autoPlantEnabled == true
+	local mpc = tonumber(raw.manualPlantCount)
+	profile.manualPlantCount = if mpc and mpc > 0 then math.floor(mpc) else 0
 	local lifeEarn = tonumber(raw.lifetimeSandDollarsEarned)
 	profile.lifetimeSandDollarsEarned = if lifeEarn and lifeEarn > 0 then math.floor(lifeEarn) else 0
 	local lifePlay = tonumber(raw.lifetimePlaySec)
@@ -1127,6 +1130,11 @@ function PersistenceService.tryUnlockCoralColor(player: Player, itemId: string, 
 	HueSeeds.credit(inv, itemId, idx, 1)
 	PersistenceService.syncSandDollarsAttribute(player)
 	PersistenceService.syncInventoryToClient(player)
+	-- Newly purchased hue seed may auto-plant when toggle is on.
+	task.defer(function()
+		local AutoPlantService = require(script.Parent:WaitForChild("AutoPlantService"))
+		AutoPlantService.tryPlaceGrantedSeed(player, itemId, idx)
+	end)
 	task.spawn(function()
 		PersistenceService.save(player)
 	end)
@@ -1233,13 +1241,7 @@ function PersistenceService.grantHueSeed(player: Player, itemId: string, colorIn
 		return false
 	end
 	local idx = PlotOutlineColors.clampCoralIndex(colorIndex)
-	local inv = profile.inventory
-	if typeof(inv) ~= "table" then
-		inv = {}
-		profile.inventory = inv
-	end
-	HueSeeds.credit(inv, itemId, idx, amount)
-	PersistenceService.syncInventoryToClient(player)
+	PersistenceService.tryGrantHueSeed(player, itemId, idx, amount)
 	task.spawn(function()
 		PersistenceService.save(player)
 	end)
@@ -1595,6 +1597,75 @@ function PersistenceService.creditHueSeed(
 	return nextCount
 end
 
+function PersistenceService.isAutoPlantEnabled(player: Player): boolean
+	local profile = profiles[player]
+	return profile ~= nil and profile.autoPlantEnabled == true
+end
+
+function PersistenceService.setAutoPlantEnabled(player: Player, enabled: boolean)
+	local profile = profiles[player]
+	if not profile then
+		return
+	end
+	profile.autoPlantEnabled = enabled == true
+	task.spawn(function()
+		PersistenceService.save(player)
+	end)
+end
+
+function PersistenceService.getManualPlantCount(player: Player): number
+	local profile = profiles[player]
+	if not profile then
+		return 0
+	end
+	return math.max(0, math.floor(tonumber(profile.manualPlantCount) or 0))
+end
+
+-- Latch Auto Plant unlock once the player has earned it (survives clear / empty load).
+function PersistenceService.ensureAutoPlantUnlocked(player: Player, minCount: number)
+	local profile = profiles[player]
+	if not profile then
+		return
+	end
+	local need = math.max(1, math.floor(tonumber(minCount) or 1))
+	local cur = math.max(0, math.floor(tonumber(profile.manualPlantCount) or 0))
+	if cur < need then
+		profile.manualPlantCount = need
+	end
+end
+
+function PersistenceService.noteManualPlant(player: Player)
+	local profile = profiles[player]
+	if not profile then
+		return
+	end
+	profile.manualPlantCount = math.max(0, math.floor(tonumber(profile.manualPlantCount) or 0)) + 1
+	task.spawn(function()
+		local AutoPlantService = require(script.Parent:WaitForChild("AutoPlantService"))
+		AutoPlantService.syncToClient(player)
+		PersistenceService.save(player)
+	end)
+end
+
+--[[
+	Play grants (wheel / unlock / admin): credit then try auto-plant.
+	Recycle/clear must keep using creditHueSeed only (never this).
+]]
+function PersistenceService.tryGrantHueSeed(
+	player: Player,
+	itemId: string,
+	colorIndex: number,
+	amount: number?
+)
+	local add = math.max(1, math.floor(tonumber(amount) or 1))
+	local hue = PlotOutlineColors.clampCoralIndex(colorIndex)
+	local AutoPlantService = require(script.Parent:WaitForChild("AutoPlantService"))
+	for _ = 1, add do
+		PersistenceService.creditHueSeed(player, itemId, hue, 1)
+		AutoPlantService.tryPlaceGrantedSeed(player, itemId, hue)
+	end
+end
+
 -- Back-compat wrapper: credits default teal when hue omitted (avoid in new code).
 function PersistenceService.creditItem(
 	player: Player,
@@ -1693,7 +1764,7 @@ end
 
 local function fulfillSeedWheel(player: Player, pending: SeedWheelPending)
 	clearSeedWheelPending(player.UserId)
-	PersistenceService.creditHueSeed(player, pending.itemId, pending.colorIndex, pending.amount)
+	PersistenceService.tryGrantHueSeed(player, pending.itemId, pending.colorIndex, pending.amount)
 	log("SeedWheel grant", pending.itemId, "hue", pending.colorIndex, "x", pending.amount, "for", player.Name)
 	if not isSeedWheelAutoRollEnabled(player.UserId) then
 		return
@@ -2191,6 +2262,8 @@ function PersistenceService.save(player: Player, layoutOverride: { LayoutObject 
 		discoveredCorals = profile.discoveredCorals or {},
 		hideUiUnlocked = profile.hideUiUnlocked == true,
 		hasSeenJoinIntro = profile.hasSeenJoinIntro == true,
+		autoPlantEnabled = profile.autoPlantEnabled == true,
+		manualPlantCount = math.max(0, math.floor(tonumber(profile.manualPlantCount) or 0)),
 		hasLostWaveRound = profile.hasLostWaveRound == true,
 		lifetimeSandDollarsEarned = math.max(0, math.floor(profile.lifetimeSandDollarsEarned or 0)),
 		lifetimePlaySec = math.max(0, math.floor(profile.lifetimePlaySec or 0)),

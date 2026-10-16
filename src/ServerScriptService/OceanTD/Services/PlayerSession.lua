@@ -4,7 +4,7 @@
 
 local PlayerSession = {}
 
-export type PlotOp = "idle" | "clearing" | "saving" | "loading" | "recycling"
+export type PlotOp = "idle" | "clearing" | "saving" | "loading" | "recycling" | "shuffling"
 
 export type Session = {
 	userId: number,
@@ -111,14 +111,22 @@ function PlayerSession.canSave(player: Player): boolean
 		and session.plotLoading ~= true
 end
 
--- Mutations while holding clear/load/recycle lock (or idle for legacy callers).
+-- Mutations while holding clear/load/recycle/shuffle lock (or idle for legacy callers).
 function PlayerSession.canMutatePlot(player: Player): boolean
 	local session = sessions[player]
 	if not session or session.layoutLoaded ~= true then
 		return false
 	end
 	local op = session.plotOp
-	return op == "idle" or op == "loading" or op == "clearing" or op == "recycling"
+	return op == "idle" or op == "loading" or op == "clearing" or op == "recycling" or op == "shuffling"
+end
+
+-- Place/move during auto-plant shuffle (exclusive plotOp).
+function PlayerSession.canShuffleMutate(player: Player): boolean
+	local session = sessions[player]
+	return session ~= nil
+		and session.layoutLoaded == true
+		and session.plotOp == "shuffling"
 end
 
 function PlayerSession.setPlotLoading(player: Player, loading: boolean)

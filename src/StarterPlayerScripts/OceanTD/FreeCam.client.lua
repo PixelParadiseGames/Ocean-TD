@@ -2085,6 +2085,9 @@ local function startRenderLoop()
 		if playerGui:GetAttribute("OceanTD_PlotSizeCinematicBusy") == true then
 			return
 		end
+		if playerGui:GetAttribute("OceanTD_AddMaxCamBusy") == true then
+			return
+		end
 		if playerGui:GetAttribute("OceanTD_SharkCamBusy") == true then
 			return
 		end
@@ -2964,6 +2967,7 @@ do
 			or playerGui:GetAttribute("OceanTD_SharkCamBusy") == true
 			or playerGui:GetAttribute("OceanTD_UrchinCamBusy") == true
 			or playerGui:GetAttribute("OceanTD_PlotSizeCinematicBusy") == true
+			or playerGui:GetAttribute("OceanTD_AddMaxCamBusy") == true
 			or playerGui:GetAttribute("OceanTD_PlantDigCamBusy") == true
 			or playerGui:GetAttribute("OceanTD_PlantWorkerBusy") == true
 			or playerGui:GetAttribute("OceanTD_HueCamBusy") == true

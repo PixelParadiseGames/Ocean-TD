@@ -64,6 +64,8 @@ local active = false
 local focus = Vector3.zero
 local wheelConn: RBXScriptConnection? = nil
 local liveDist = DEFAULT_DIST_FRONT -- smoothed effective distance
+-- ADD MAX / cinematic: ignore pan/zoom wish while an external shot drives yaw.
+local cinematicLock = false
 -- Until the player opens BUILD once this session, keep the pulled-back start zoom.
 local awaitingBuildZoom = true
 -- TouchPinch: distance at gesture Begin (BaseCamera-style scale apply).
@@ -395,7 +397,7 @@ end
 
 -- Same as DistOff +/- quick buttons: scroll up zooms in (-DistOff), down zooms out.
 local function applyWheelZoom(wheelZ: number): boolean
-	if not active or wheelZ == 0 or wheelZ ~= wheelZ then
+	if cinematicLock or not active or wheelZ == 0 or wheelZ ~= wheelZ then
 		return false
 	end
 	if zoomBlockedByBackpack() then
@@ -408,7 +410,7 @@ end
 
 -- Roblox BaseCamera pinch: newDist = beginDist / clamp(scale). Spread → zoom in.
 function PlotCam2.applyPinchGesture(phase: string, scale: number): boolean
-	if not active then
+	if cinematicLock or not active then
 		return false
 	end
 	if zoomBlockedByBackpack() then
@@ -453,7 +455,7 @@ end
 
 -- PointerAction pinch delta: positive → zoom in (lower DistOff).
 function PlotCam2.applyPinchDelta(pinchDelta: number): boolean
-	if not active or typeof(pinchDelta) ~= "number" or pinchDelta ~= pinchDelta or pinchDelta == 0 then
+	if cinematicLock or not active or typeof(pinchDelta) ~= "number" or pinchDelta ~= pinchDelta or pinchDelta == 0 then
 		return false
 	end
 	if zoomBlockedByBackpack() then
@@ -541,6 +543,10 @@ function PlotCam2.getTune(): Tune
 	return copyTune(tune)
 end
 
+function PlotCam2.getDefaultYawDeg(): number
+	return DEFAULT_YAW_DEG
+end
+
 function PlotCam2.getPlotId(): string
 	return activePlotId
 end
@@ -603,6 +609,51 @@ function PlotCam2.applyViewSnapshot(snap: ViewSnapshot): boolean
 	liveDist = math.clamp(snap.liveDist, DIST_MIN, DIST_MAX)
 	syncDistOffsetAchievable(plotCf, plotSize)
 	return true
+end
+
+function PlotCam2.setCinematicLock(on: boolean)
+	cinematicLock = on == true
+end
+
+function PlotCam2.isCinematicLocked(): boolean
+	return cinematicLock
+end
+
+function PlotCam2.setYawDeg(yaw: number)
+	if not active then
+		return
+	end
+	tune.yawDeg = yaw
+end
+
+function PlotCam2.setFocusToPlotCenter()
+	if not active then
+		return
+	end
+	local plotCf, plotSize = getPlot()
+	if not plotCf or not plotSize then
+		return
+	end
+	-- Lock XZ to plot center without yaw-relative clamp (clamp would fight orbits).
+	focus = Vector3.new(plotCf.Position.X, groundY(plotCf, plotSize), plotCf.Position.Z)
+end
+
+-- Apply yaw + center focus and return the resulting camera CFrame (for cinematic drivers).
+-- Optional distOverride sets liveDist for slow zoom-out during orbits.
+function PlotCam2.cinematicPose(yawDeg: number, distOverride: number?): CFrame?
+	if not active then
+		return nil
+	end
+	local plotCf, plotSize = getPlot()
+	if not plotCf or not plotSize then
+		return nil
+	end
+	tune.yawDeg = yawDeg
+	focus = Vector3.new(plotCf.Position.X, groundY(plotCf, plotSize), plotCf.Position.Z)
+	if typeof(distOverride) == "number" and distOverride == distOverride then
+		liveDist = math.clamp(distOverride, DIST_MIN, DIST_MAX)
+	end
+	return cameraCFrame(plotCf)
 end
 
 -- Seat focus + zoom so the given world points (e.g. path W1 + reef heart) fit
@@ -699,6 +750,9 @@ function PlotCam2.formatTune(): string
 end
 
 function PlotCam2.nudge(key: string, delta: number): boolean
+	if cinematicLock then
+		return false
+	end
 	local before: number
 	local after: number
 	if key == "yawDeg" then
@@ -1203,7 +1257,7 @@ function PlotCam2.tick(dt: number, input: TickInput): CFrame?
 		syncDistOffsetAchievable(plotCf, plotSize)
 	end
 
-	local wish = input.wish
+	local wish = if cinematicLock then Vector3.zero else input.wish
 	-- E/Q keyboard zoom (wheel applies DistOff immediately via nudge).
 	local zoom = -wish.Y * input.panSpeed * dt * 0.85
 	if math.abs(zoom) > 1e-4 and not placeZoomTween then

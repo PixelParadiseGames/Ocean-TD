@@ -288,6 +288,10 @@ function PlotSaveService.loadSlot(player: Player, slotIndex: number): any
 	PlayerSession.endPlotOp(player)
 	log("Persist load-slot-" .. tostring(idx), "ok=", ok, player.Name)
 
+	-- Refresh Auto Plant unlock + ADD MAX capacity after layout swap.
+	local AutoPlantService = require(script.Parent:WaitForChild("AutoPlantService"))
+	AutoPlantService.syncToClient(player)
+
 	log("Loaded slot", idx, "for", player.Name, "placed=", applied.placed, "wasSaved=", target.saved)
 	local state = PlotSaveService.getClientState(player)
 	state.loadedIndex = idx

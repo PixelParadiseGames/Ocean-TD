@@ -21,6 +21,8 @@ local PlotOutlineColors = require(oceanShared:WaitForChild("PlotOutlineColors"))
 local BrainStack = require(oceanShared:WaitForChild("BrainStack"))
 local HueSeeds = require(oceanShared:WaitForChild("HueSeeds"))
 
+local Remotes = require(ReplicatedStorage:WaitForChild("OceanTD"):WaitForChild("Remotes"))
+
 local PlotService = require(script.Parent:WaitForChild("PlotService"))
 local GridService = require(script.Parent:WaitForChild("GridService"))
 local PlayerSession = require(script.Parent:WaitForChild("PlayerSession"))
@@ -71,6 +73,10 @@ export type PlaceOpts = {
 	parentPlaceId: string?,
 	-- Hue stack to debit when placing (client shuffle selection).
 	placementHue: number?,
+	-- Optional forced placeId (ADD MAX pre-notifies client before visuals spawn).
+	placeId: string?,
+	-- Spawn fully invisible until planter orb lands (ADD MAX).
+	hideAwaitOrb: boolean?,
 }
 
 export type PlaceResult = {
@@ -91,8 +97,40 @@ export type PlaceResult = {
 local PlacementService = {}
 
 local ROOT_NAME = "OceanTD_Placed"
--- While true, successful ops don't push undo (used during undo itself).
+-- While true, successful ops don't push undo (used during undo itself / bulk shuffle).
 local suppressUndoRecord = false
+-- While true, move() updates grid only — client tweens the visual (shuffle).
+local suppressVisualMove = false
+-- Block stacked undo/shuffle while client stagger VFX is still playing.
+local shuffleVisualBusyUntil: { [number]: number } = {}
+local SHUFFLE_VISUAL_LOCK_SEC = 2.9
+
+function PlacementService.setSuppressUndo(on: boolean)
+	suppressUndoRecord = on == true
+end
+
+function PlacementService.setSuppressVisualMove(on: boolean)
+	suppressVisualMove = on == true
+end
+
+function PlacementService.markShuffleVisualBusy(player: Player, lockSec: number?)
+	local sec = tonumber(lockSec)
+	if typeof(sec) ~= "number" or sec <= 0 then
+		sec = SHUFFLE_VISUAL_LOCK_SEC
+	end
+	local untilT = os.clock() + sec
+	local prev = shuffleVisualBusyUntil[player.UserId]
+	if typeof(prev) == "number" and prev > untilT then
+		return
+	end
+	shuffleVisualBusyUntil[player.UserId] = untilT
+end
+
+function PlacementService.isShuffleVisualBusy(player: Player): boolean
+	local untilT = shuffleVisualBusyUntil[player.UserId]
+	return typeof(untilT) == "number" and untilT > os.clock()
+end
+
 -- Debounce DataStore writes while players spam dice rolls (grid/visual still update live).
 local colorSaveTokenByUser: { [number]: number } = {}
 -- Serialize hue paints per player so parallel RequestCoralColor invokes cannot race the cap check.
@@ -549,6 +587,176 @@ local function findVisualByPlaceId(plotId: string, placeId: string): BasePart?
 		end
 	end
 	return nil
+end
+
+-- TEMP debug: mark a placed coral whose hue collapsed missing/invalid → teal.
+function PlacementService.tagHueDefaultedByPlaceId(plotId: string, placeId: string, reason: string?)
+	local visual = findVisualByPlaceId(plotId, placeId)
+	if not visual then
+		return
+	end
+	-- Force-tag (caller already verified the raw index was missing).
+	if not PlotOutlineColors.DEBUG_HUE_DEFAULT_DOT then
+		return
+	end
+	visual:SetAttribute(PlotOutlineColors.ATTR_DEBUG_HUE_DEFAULTED, true)
+	warn(
+		"[OceanTD HueDebug] missing/invalid color → teal",
+		"reason=",
+		reason or "placeId",
+		"placeId=",
+		placeId,
+		"on",
+		visual:GetFullName()
+	)
+end
+
+-- After a deferred-visual shuffle tween, snap the server part to the final world pos.
+function PlacementService.snapVisualWorld(plotId: string, placeId: string, worldPos: Vector3)
+	if typeof(plotId) ~= "string" or typeof(placeId) ~= "string" or typeof(worldPos) ~= "Vector3" then
+		return
+	end
+	local visual = findVisualByPlaceId(plotId, placeId)
+	if not visual then
+		return
+	end
+	local yawAttr = visual:GetAttribute("OceanTD_FacingYaw")
+	local yaw = if typeof(yawAttr) == "number" then yawAttr else nil
+	local sid = visual:GetAttribute("OceanTD_SpeciesId")
+	if CoralVisual.isMeshSpecies(sid) then
+		local slotCf = PlotService.getSlot(plotId)
+		CoralVisual.alignMeshToSurface(visual, worldPos, yaw, nil, if slotCf then slotCf.cframe else nil)
+	else
+		local rot = visual.CFrame - visual.CFrame.Position
+		visual.CFrame = CFrame.new(worldPos) * rot
+	end
+end
+
+--[[
+	Bulk shuffle relocate: vacate every participant first, then occupy destinations.
+	One-by-one PlacementService.move fails mid-permutation with SpotTaken (A wants B's
+	old seat while B hasn't moved yet) — that was truncating shuffle undo.
+	Returns applied moves, failed moves. Does not touch visuals (client tweens; snap later).
+]]
+function PlacementService.applyShuffleMoveBatch(
+	player: Player,
+	moves: { any }
+): ({ any }, { any })
+	local applied: { any } = {}
+	local failed: { any } = {}
+	if typeof(moves) ~= "table" or #moves == 0 then
+		return applied, failed
+	end
+	local plotId = PlotService.getOwnerPlotId(player)
+	if not plotId then
+		for _, mv in ipairs(moves) do
+			table.insert(failed, mv)
+		end
+		return applied, failed
+	end
+
+	type Entry = { mv: any, cell: any, toLocal: Vector3 }
+	local entries: { Entry } = {}
+	for _, mv in ipairs(moves) do
+		if typeof(mv) ~= "table"
+			or typeof(mv.placeId) ~= "string"
+			or typeof(mv.toWorldPos) ~= "Vector3"
+		then
+			table.insert(failed, mv)
+			continue
+		end
+		local cell = GridService.findCellByPlaceId(plotId, mv.placeId)
+		if not cell or cell.ownerUserId ~= player.UserId then
+			table.insert(failed, mv)
+			continue
+		end
+		local toLocal = worldToPlotLocal(plotId, mv.toWorldPos)
+		if not toLocal then
+			table.insert(failed, mv)
+			continue
+		end
+		table.insert(entries, { mv = mv, cell = cell, toLocal = toLocal })
+	end
+
+	-- Phase 1: clear every participant so destinations can't block each other.
+	for _, e in ipairs(entries) do
+		GridService.vacateCell(e.cell)
+	end
+
+	-- Phase 2: re-seat at targets (cell object still holds identity / paint / extras).
+	for _, e in ipairs(entries) do
+		local cell = e.cell
+		local toLocal = e.toLocal
+		local tgx, tgy, tgz = GridMath.worldToGrid(toLocal, Vector3.zero)
+		local occupied, _occupyErr = GridService.tryOccupy(
+			plotId,
+			player.UserId,
+			cell.id,
+			toLocal.X,
+			toLocal.Y,
+			toLocal.Z,
+			tgx,
+			tgy,
+			tgz,
+			cell.diameter,
+			cell.sizeTier,
+			cell.sizeClass,
+			cell.colorIndex,
+			cell.colorR,
+			cell.colorG,
+			cell.colorB,
+			cell.variantIndex,
+			cell.scaleMult
+		)
+		if not occupied then
+			-- Restore at the pre-vacate VisualPos so the coral isn't lost.
+			local okBack = GridService.tryOccupy(
+				plotId,
+				player.UserId,
+				cell.id,
+				cell.lx,
+				cell.ly,
+				cell.lz,
+				cell.gx,
+				cell.gy,
+				cell.gz,
+				cell.diameter,
+				cell.sizeTier,
+				cell.sizeClass,
+				cell.colorIndex,
+				cell.colorR,
+				cell.colorG,
+				cell.colorB,
+				cell.variantIndex,
+				cell.scaleMult
+			)
+			if okBack then
+				local rolled = GridService.getCellAtGrid(plotId, cell.gx, cell.gy, cell.gz)
+				if rolled then
+					GridService.copyCellMeta(cell, rolled)
+				end
+			end
+			table.insert(failed, e.mv)
+			continue
+		end
+
+		local newCell = GridService.getCellAtGrid(plotId, tgx, tgy, tgz)
+		if newCell then
+			GridService.copyCellMeta(cell, newCell)
+			if typeof(e.mv.toFacingYaw) == "number" and e.mv.toFacingYaw == e.mv.toFacingYaw then
+				newCell.facingYaw = e.mv.toFacingYaw
+			end
+		end
+
+		local visual = findVisualByPlaceId(plotId, e.mv.placeId)
+		if visual and typeof(e.mv.toFacingYaw) == "number" then
+			visual:SetAttribute("OceanTD_FacingYaw", e.mv.toFacingYaw)
+		end
+
+		table.insert(applied, e.mv)
+	end
+
+	return applied, failed
 end
 
 local function findVisualAtGrid(plotId: string, worldPos: Vector3): BasePart?
@@ -1071,6 +1279,8 @@ local function parsePlaceOpts(raw: any): PlaceOpts
 			facingYaw = tonumber(raw.facingYaw),
 			parentPlaceId = if typeof(parentId) == "string" and parentId ~= "" then parentId else nil,
 			placementHue = if typeof(raw.placementHue) == "number" then raw.placementHue else nil,
+			placeId = if typeof(raw.placeId) == "string" and raw.placeId ~= "" then raw.placeId else nil,
+			hideAwaitOrb = raw.hideAwaitOrb == true,
 		}
 	end
 	return {}
@@ -1266,13 +1476,22 @@ function PlacementService.place(
 	end
 
 	local placeIdAttr = visual:GetAttribute("OceanTD_PlaceId")
-	local placeId = if typeof(placeIdAttr) == "string" then placeIdAttr else HttpService:GenerateGUID(false)
+	local forcedPlaceId = opts.placeId
+	local placeId = if typeof(forcedPlaceId) == "string" and forcedPlaceId ~= ""
+		then forcedPlaceId
+		elseif typeof(placeIdAttr) == "string"
+		then placeIdAttr
+		else HttpService:GenerateGUID(false)
 	visual:SetAttribute("OceanTD_PlaceId", placeId)
 	visual:SetAttribute("OceanTD_ItemId", itemId)
 	visual:SetAttribute("OceanTD_SpeciesId", species.speciesId)
 	syncDefaultVisualPaintToCell(plotId, gx, gy, gz, visual)
 	if seedHue then
 		stampSeedHue(plotId, gx, gy, gz, visual, seedHue)
+	end
+	-- TEMP: red-dot debug when placementHue was missing/invalid → teal default.
+	if shouldConsume then
+		PlotOutlineColors.tagHueDefaulted(visual, opts.placementHue, "place.placementHue")
 	end
 	if brainHostCell then
 		local slot = PlotService.getSlot(plotId)
@@ -1333,8 +1552,12 @@ function PlacementService.place(
 
 	log("Placed", itemId, "for", player.Name, "at", worldPos, "consume=", shouldConsume, "yaw=", facingYaw)
 	-- Persist facing yaw immediately — don't wait for autosave / leave.
-	if CoralVisual.needsFacingYaw(species.speciesId) then
+	-- Skip during bulk ops (ADD MAX) — one snapshot save runs after the batch.
+	if CoralVisual.needsFacingYaw(species.speciesId) and not suppressUndoRecord then
 		PersistenceService.save(player, PlacementService.snapshotLayout(plotId))
+	end
+	if opts.hideAwaitOrb == true then
+		PlacementService.hideVisualAwaitOrb(plotId, placeId)
 	end
 	return {
 		ok = true,
@@ -1375,7 +1598,7 @@ function PlacementService.move(
 	if typeof(fromWorldPos) ~= "Vector3" or typeof(toWorldPos) ~= "Vector3" then
 		return { ok = false, errorCode = "BadPosition" }
 	end
-	if not PlayerSession.canSave(player) then
+	if not PlayerSession.canSave(player) and not PlayerSession.canShuffleMutate(player) then
 		return { ok = false, errorCode = "NotReady" }
 	end
 	local plotId = PlotService.getOwnerPlotId(player)
@@ -1456,11 +1679,13 @@ function PlacementService.move(
 			local attr = visual:GetAttribute("OceanTD_FacingYaw")
 			yaw = if typeof(attr) == "number" then attr else nil
 		end
-		if CoralVisual.isMeshSpecies(fromCell.id) or CoralVisual.isMeshSpecies(visual:GetAttribute("OceanTD_SpeciesId")) then
-			local slotCf = PlotService.getSlot(plotId)
-			CoralVisual.alignMeshToSurface(visual, toWorldPos, yaw, nil, if slotCf then slotCf.cframe else nil)
-		else
-			visual.CFrame = CFrame.new(toWorldPos)
+		if not suppressVisualMove then
+			if CoralVisual.isMeshSpecies(fromCell.id) or CoralVisual.isMeshSpecies(visual:GetAttribute("OceanTD_SpeciesId")) then
+				local slotCf = PlotService.getSlot(plotId)
+				CoralVisual.alignMeshToSurface(visual, toWorldPos, yaw, nil, if slotCf then slotCf.cframe else nil)
+			else
+				visual.CFrame = CFrame.new(toWorldPos)
+			end
 		end
 		-- Keep cell VisualPos in sync when sliding within the same key.
 		fromCell.lx = toLocal.X
@@ -1617,11 +1842,13 @@ function PlacementService.move(
 		local attr = visual:GetAttribute("OceanTD_FacingYaw")
 		yaw = if typeof(attr) == "number" then attr else nil
 	end
-	if species and CoralVisual.isMeshSpecies(species.speciesId) then
-		local slotCf = PlotService.getSlot(plotId)
-		CoralVisual.alignMeshToSurface(visual, toWorldPos, yaw, nil, if slotCf then slotCf.cframe else nil)
-	else
-		visual.CFrame = CFrame.new(toWorldPos)
+	if not suppressVisualMove then
+		if species and CoralVisual.isMeshSpecies(species.speciesId) then
+			local slotCf = PlotService.getSlot(plotId)
+			CoralVisual.alignMeshToSurface(visual, toWorldPos, yaw, nil, if slotCf then slotCf.cframe else nil)
+		else
+			visual.CFrame = CFrame.new(toWorldPos)
+		end
 	end
 
 	if not suppressUndoRecord then
@@ -2090,6 +2317,7 @@ export type UndoResult = {
 	ok: boolean,
 	errorCode: string?,
 	kind: string?,
+	shuffleMoves: { any }?,
 }
 
 local function removePlacedAndCredit(player: Player, placeId: string, itemId: string, worldPos: Vector3): boolean
@@ -2123,6 +2351,9 @@ function PlacementService.undoLast(player: Player): UndoResult
 	if not PlayerSession.canSave(player) then
 		return { ok = false, errorCode = "NotReady" }
 	end
+	if PlacementService.isShuffleVisualBusy(player) then
+		return { ok = false, errorCode = "Busy" }
+	end
 	-- Wait out an in-flight hue paint so we pop THAT step, not an older one while
 	-- the paint still commits afterward and re-greys / recolors the coral.
 	local uid = player.UserId
@@ -2140,6 +2371,7 @@ function PlacementService.undoLast(player: Player): UndoResult
 	suppressUndoRecord = true
 	local ok = false
 	local err: string? = nil
+	local undoShuffleMoves: { any }? = nil
 
 	if step.kind == "place" then
 		local worldPos = step.worldPos
@@ -2231,6 +2463,116 @@ function PlacementService.undoLast(player: Player): UndoResult
 				err = "UndoFail"
 			end
 		end
+	elseif step.kind == "addMax" then
+		local entries = step.entries
+		if typeof(entries) ~= "table" or #entries == 0 then
+			err = "BadStep"
+		else
+			local removed = 0
+			local remaining: { any } = {}
+			for _, entry in ipairs(entries) do
+				if typeof(entry) ~= "table"
+					or typeof(entry.placeId) ~= "string"
+					or typeof(entry.itemId) ~= "string"
+					or typeof(entry.worldPos) ~= "Vector3"
+				then
+					table.insert(remaining, entry)
+					continue
+				end
+				if removePlacedAndCredit(player, entry.placeId, entry.itemId, entry.worldPos) then
+					removed += 1
+				else
+					table.insert(remaining, entry)
+				end
+			end
+			if removed > 0 then
+				ok = true
+				if #remaining > 0 then
+					UndoService.push(player, {
+						kind = "addMax",
+						placeId = "addMax",
+						itemId = "addMax",
+						entries = remaining,
+					})
+				end
+				-- Refresh ADD MAX capacity (free spots + seeds) for the backpack header.
+				task.defer(function()
+					local AutoPlantService = require(script.Parent:WaitForChild("AutoPlantService"))
+					AutoPlantService.syncToClient(player)
+				end)
+			else
+				err = "UndoFail"
+			end
+		end
+	elseif step.kind == "shuffle" then
+		local moves = step.shuffleMoves
+		if typeof(moves) ~= "table" or #moves == 0 then
+			err = "BadStep"
+		else
+			local reverseMoves: { any } = {}
+			for _, mv in ipairs(moves) do
+				if typeof(mv.placeId) == "string"
+					and typeof(mv.fromWorldPos) == "Vector3"
+					and typeof(mv.toWorldPos) == "Vector3"
+				then
+					table.insert(reverseMoves, {
+						placeId = mv.placeId,
+						itemId = mv.itemId,
+						fromWorldPos = mv.toWorldPos,
+						toWorldPos = mv.fromWorldPos,
+						fromFacingYaw = mv.toFacingYaw,
+						toFacingYaw = mv.fromFacingYaw,
+					})
+				end
+			end
+			if #reverseMoves > 0 then
+				PlacementService.markShuffleVisualBusy(player)
+				Remotes.get("AutoPlantShuffleApplied"):FireClient(player, {
+					moves = reverseMoves,
+				})
+			end
+			suppressUndoRecord = true
+			-- Vacate-all then re-seat — one-by-one move() SpotTaken mid-cycle left half the plot behind.
+			local applied, remaining = PlacementService.applyShuffleMoveBatch(player, reverseMoves)
+			suppressUndoRecord = false
+			local restored = #applied
+			if restored > 0 then
+				ok = true
+				local settleMoves = applied
+				local settlePlotId = PlotService.getOwnerPlotId(player)
+				if settlePlotId then
+					task.delay(2.8, function()
+						for _, mv in ipairs(settleMoves) do
+							PlacementService.snapVisualWorld(settlePlotId, mv.placeId, mv.toWorldPos)
+						end
+					end)
+				end
+				if #remaining > 0 then
+					-- Map failed reverse entries back to original shuffle-step shape for a retry undo.
+					local remainingForward: { any } = {}
+					for _, mv in ipairs(remaining) do
+						table.insert(remainingForward, {
+							placeId = mv.placeId,
+							itemId = mv.itemId,
+							fromWorldPos = mv.toWorldPos,
+							toWorldPos = mv.fromWorldPos,
+							fromFacingYaw = mv.toFacingYaw,
+							toFacingYaw = mv.fromFacingYaw,
+						})
+					end
+					UndoService.push(player, {
+						kind = "shuffle",
+						placeId = "shuffle",
+						itemId = "shuffle",
+						shuffleMoves = remainingForward,
+					})
+					warnPlace("Shuffle undo partial", player.Name, "left=", #remaining)
+				end
+				undoShuffleMoves = applied
+			else
+				err = "UndoFail"
+			end
+		end
 	else
 		err = "BadStep"
 	end
@@ -2239,7 +2581,7 @@ function PlacementService.undoLast(player: Player): UndoResult
 
 	if ok then
 		log("Undid", step.kind, "for", player.Name, "remaining=", UndoService.count(player))
-		return { ok = true, kind = step.kind }
+		return { ok = true, kind = step.kind, shuffleMoves = undoShuffleMoves }
 	end
 
 	UndoService.push(player, step)
@@ -2806,6 +3148,100 @@ function PlacementService.clearCoralHue(player: Player, placeId: string, skipCap
 	return { ok = true, colorR = defaultColor.R, colorG = defaultColor.G, colorB = defaultColor.B }
 end
 
+local ATTR_AWAIT_ORB = "OceanTD_AwaitOrb"
+local ATTR_AWAIT_ORB_T = "OceanTD_AwaitOrbT"
+
+local function eachCoralPart(visual: BasePart, fn: (BasePart) -> ())
+	local model = visual:FindFirstAncestorOfClass("Model")
+	local root: Instance = if model then model else visual
+	if root:IsA("BasePart") then
+		fn(root)
+	end
+	for _, d in ipairs(root:GetDescendants()) do
+		if d:IsA("BasePart") then
+			fn(d)
+		end
+	end
+end
+
+-- Fully invisible until the planter's orb lands (Transparency replicates to all clients).
+function PlacementService.hideVisualAwaitOrb(plotId: string, placeId: string)
+	local visual = findVisualByPlaceId(plotId, placeId)
+	if not visual then
+		return
+	end
+	visual:SetAttribute(ATTR_AWAIT_ORB, true)
+	eachCoralPart(visual, function(p)
+		if p:GetAttribute(ATTR_AWAIT_ORB_T) == nil then
+			p:SetAttribute(ATTR_AWAIT_ORB_T, p.Transparency)
+		end
+		p.Transparency = 1
+	end)
+end
+
+function PlacementService.revealVisualAwaitOrb(plotId: string, placeId: string)
+	local visual = findVisualByPlaceId(plotId, placeId)
+	if not visual then
+		return
+	end
+	visual:SetAttribute(ATTR_AWAIT_ORB, nil)
+	eachCoralPart(visual, function(p)
+		local t = p:GetAttribute(ATTR_AWAIT_ORB_T)
+		p.Transparency = if typeof(t) == "number" then t else 0
+		p:SetAttribute(ATTR_AWAIT_ORB_T, nil)
+	end)
+end
+
+function PlacementService.revealVisualAwaitOrbForPlayer(player: Player, placeId: string)
+	local plotId = PlotService.getOwnerPlotId(player)
+	if not plotId or typeof(placeId) ~= "string" or placeId == "" then
+		return
+	end
+	PlacementService.revealVisualAwaitOrb(plotId, placeId)
+end
+
+-- Bulk ADD MAX paint: no busy-lock / task.wait / undo. Caller snapshots once after the batch.
+function PlacementService.paintPlacedHueFast(player: Player, placeId: string, colorIndex: number): boolean
+	if typeof(placeId) ~= "string" or placeId == "" then
+		return false
+	end
+	local plotId = PlotService.getOwnerPlotId(player)
+	if not plotId then
+		return false
+	end
+	local visual = findVisualByPlaceId(plotId, placeId)
+	if not visual then
+		return false
+	end
+	local idx = PlotOutlineColors.clampCoralIndex(colorIndex)
+	local paint = PlotOutlineColors.resolveCoralPaint(idx, nil, nil, nil)
+	local cell = GridService.findCellByPlaceId(plotId, placeId)
+	if not cell then
+		return false
+	end
+	if typeof(visual:GetAttribute("OceanTD_DefaultRestR")) ~= "number" then
+		CoralVisual.snapshotDefaultRestLook(visual)
+	end
+	if not GridService.setColorAtGrid(plotId, cell.gx, cell.gy, cell.gz, idx, paint.R, paint.G, paint.B) then
+		return false
+	end
+	visual:SetAttribute("OceanTD_ColorIndex", idx)
+	PlotOutlineColors.tagHueDefaulted(visual, colorIndex, "paintPlacedHueFast")
+	local sid = visual:GetAttribute("OceanTD_SpeciesId")
+	if CoralVisual.isSeaFan(sid) then
+		local webPaint = PlotOutlineColors.randomHueVariant(idx)
+		CoralVisual.setRestColor(visual, paint, webPaint, idx)
+		GridService.setSeaFanExtras(plotId, cell.gx, cell.gy, cell.gz, nil, nil, nil, webPaint.R, webPaint.G, webPaint.B)
+	elseif CoralVisual.isMainAccentMesh(sid) then
+		local webPaint = PlotOutlineColors.randomBrightAccent()
+		CoralVisual.setRestColor(visual, paint, webPaint, nil)
+		GridService.setSeaFanExtras(plotId, cell.gx, cell.gy, cell.gz, nil, nil, nil, webPaint.R, webPaint.G, webPaint.B)
+	else
+		CoralVisual.setRestColor(visual, paint)
+	end
+	return true
+end
+
 function PlacementService.setCoralColor(
 	player: Player,
 	placeId: string,
@@ -2858,6 +3294,7 @@ function PlacementService.setCoralColor(
 	end
 	local idx = PlotOutlineColors.clampCoralIndex(colorIndex)
 	local paint = PlotOutlineColors.resolveCoralPaint(idx, colorR, colorG, colorB)
+	PlotOutlineColors.tagHueDefaulted(visual, colorIndex, "setCoralColor")
 	local itemId = visual:GetAttribute("OceanTD_ItemId")
 	local prevAttr = visual:GetAttribute("OceanTD_ColorIndex")
 	local prevIdx = if typeof(prevAttr) == "number" then PlotOutlineColors.clampCoralIndex(prevAttr) else nil

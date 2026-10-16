@@ -42,6 +42,16 @@ function InventoryState.getSeedCount(itemId: string): number
 	return HueSeeds.getSpeciesTotal(hueCounts, itemId)
 end
 
+function InventoryState.getTotalSeedCount(): number
+	local sum = 0
+	for itemId, _ in pairs(hueCounts) do
+		if typeof(itemId) == "string" then
+			sum += HueSeeds.getSpeciesTotal(hueCounts, itemId)
+		end
+	end
+	return sum
+end
+
 function InventoryState.hasDiscoveredSpecies(itemId: string): boolean
 	if discoveredCorals[itemId] == true then
 		return true

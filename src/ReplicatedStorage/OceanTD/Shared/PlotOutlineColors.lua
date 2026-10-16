@@ -11,6 +11,10 @@ PlotOutlineColors.DEFAULT_INDEX = 2 -- teal
 PlotOutlineColors.MIN_INDEX = 1
 PlotOutlineColors.MAX_INDEX = 15
 
+-- TEMP debug: red-dot markers when missing/invalid index collapses to teal.
+PlotOutlineColors.DEBUG_HUE_DEFAULT_DOT = false
+PlotOutlineColors.ATTR_DEBUG_HUE_DEFAULTED = "OceanTD_DebugHueDefaulted"
+
 export type Swatch = {
 	index: number,
 	name: string,
@@ -57,9 +61,34 @@ end
 -- Coral paint uses solid swatches only (excludes no-stroke).
 PlotOutlineColors.CORAL_MAX_INDEX = 14
 
+-- True when input cannot be read as a number → clampCoralIndex uses DEFAULT_INDEX (teal).
+function PlotOutlineColors.isMissingCoralIndex(n: any): boolean
+	return tonumber(n) == nil
+end
+
 function PlotOutlineColors.clampCoralIndex(n: any): number
 	local v = math.floor(tonumber(n) or PlotOutlineColors.DEFAULT_INDEX)
 	return math.clamp(v, PlotOutlineColors.MIN_INDEX, PlotOutlineColors.CORAL_MAX_INDEX)
+end
+
+-- Tag a coral visual when its hue was forced to teal because the raw index was missing/invalid.
+function PlotOutlineColors.tagHueDefaulted(inst: Instance?, rawIndex: any, reason: string?)
+	if not PlotOutlineColors.DEBUG_HUE_DEFAULT_DOT then
+		return
+	end
+	if not inst or not PlotOutlineColors.isMissingCoralIndex(rawIndex) then
+		return
+	end
+	inst:SetAttribute(PlotOutlineColors.ATTR_DEBUG_HUE_DEFAULTED, true)
+	warn(
+		"[OceanTD HueDebug] missing/invalid color → teal",
+		"reason=",
+		reason or "clamp",
+		"raw=",
+		rawIndex,
+		"on",
+		inst:GetFullName()
+	)
 end
 
 function PlotOutlineColors.coralSwatches(): { Swatch }

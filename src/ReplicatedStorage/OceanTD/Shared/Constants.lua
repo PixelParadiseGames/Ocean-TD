@@ -27,7 +27,7 @@ local Constants = {
 	DATASTORE_NAME = "OceanTD_Player_v2",
 	-- OrderedDataStore: key = userId string, value = Reef Report score (int).
 	REEF_SCORE_ORDERED_STORE = "OceanTD_ReefScore_v2",
-	PROFILE_VERSION = 13,
+	PROFILE_VERSION = 14,
 
 	AUTOSAVE_INTERVAL_SEC = 60,
 

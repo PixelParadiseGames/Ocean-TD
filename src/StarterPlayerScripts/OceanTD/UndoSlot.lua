@@ -16,6 +16,7 @@ local Remotes = require(oceanRoot:WaitForChild("Remotes"))
 
 local InventoryState = require(script.Parent:WaitForChild("InventoryState"))
 local RelocateController = require(script.Parent:WaitForChild("RelocateController"))
+local AutoPlantUI = require(script.Parent:WaitForChild("AutoPlantUI"))
 
 local UndoSlot = {}
 
@@ -35,6 +36,8 @@ local UNDO_FLASH_FADE = 0.35
 local UNDO_GLOW = Color3.fromRGB(255, 140, 40)
 local UNDO_FAIL_GLOW = Color3.fromRGB(220, 45, 45)
 local ORANGE = Color3.fromRGB(230, 120, 40)
+local COOLDOWN_GREY = Color3.fromRGB(70, 78, 90)
+local SHUFFLE_UNDO_FALLBACK_SEC = 2.9
 
 export type Deps = {
 	mainHUD: ScreenGui,
@@ -53,6 +56,7 @@ local slot3Button: GuiButton? = nil
 local slot3Circle: GuiObject? = nil
 local slot3Stroke: UIStroke? = nil
 local slot3UndoLabel: TextLabel? = nil
+local slot3CdLabel: TextLabel? = nil
 local slot3IdleStop: UiIdleCycle.StopFn? = nil
 local slot3OriginalImage = ""
 local slot3OriginalBg = Color3.fromRGB(20, 30, 45)
@@ -64,6 +68,8 @@ local helpSlot3HomePos: UDim2? = nil
 local slot3SlideToken = 0
 local slot3PressToken = 0
 local undoBusy = false
+local undoCooldownActive = false
+local undoCdToken = 0
 local undoLastPressAt = 0
 local undoPitchStreak = 0
 
@@ -241,6 +247,76 @@ local function playSlot3UndoFailFeedback()
 	playSlot3PressFlash(UNDO_FAIL_GLOW)
 end
 
+local function clearUndoCooldownVisual()
+	undoCooldownActive = false
+	if slot3CdLabel then
+		slot3CdLabel.Visible = false
+	end
+	if slot3Circle and not undoBusy then
+		if slot3Circle:IsA("ImageLabel") or slot3Circle:IsA("ImageButton") then
+			(slot3Circle :: any).Image = slot3OriginalImage
+		end
+		slot3Circle.BackgroundColor3 = slot3OriginalBg
+		slot3Circle.BackgroundTransparency = slot3OriginalBgTrans
+	end
+end
+
+local function paintUndoCooldownVisual(secondsLeft: number)
+	if not slot3Circle then
+		return
+	end
+	undoCooldownActive = true
+	stopSlot3IdleCycle()
+	slot3PressToken += 1 -- cancel orange/red press flash
+	if slot3Circle:IsA("ImageLabel") or slot3Circle:IsA("ImageButton") then
+		(slot3Circle :: any).Image = ""
+	end
+	slot3Circle.BackgroundColor3 = COOLDOWN_GREY
+	slot3Circle.BackgroundTransparency = 0
+	if slot3UndoLabel then
+		slot3UndoLabel.Visible = false
+	end
+	if slot3CdLabel then
+		slot3CdLabel.Text = string.format("%.0f", math.max(1, math.ceil(secondsLeft)))
+		slot3CdLabel.Visible = true
+	end
+	if slot3Stroke then
+		slot3Stroke.Enabled = true
+		slot3Stroke.Color = Color3.fromRGB(140, 145, 155)
+		slot3Stroke.Thickness = 2
+	end
+end
+
+local function runUndoCooldownWatch(fallbackEndsAt: number?)
+	undoCdToken += 1
+	local token = undoCdToken
+	task.spawn(function()
+		while token == undoCdToken do
+			local animLeft = if AutoPlantUI.getShuffleAnimSecondsLeft
+				then AutoPlantUI.getShuffleAnimSecondsLeft()
+				else 0
+			local animBusy = AutoPlantUI.isShuffleAnimBusy and AutoPlantUI.isShuffleAnimBusy()
+			local fallbackLeft = if typeof(fallbackEndsAt) == "number"
+				then math.max(0, fallbackEndsAt - os.clock())
+				else 0
+			local left = math.max(animLeft, fallbackLeft)
+			local locked = undoBusy or animBusy or left > 0.05
+			if not locked then
+				clearUndoCooldownVisual()
+				if slot3Stroke and InventoryState.isOpen() and slot3 and slot3.Visible then
+					slot3Stroke.Color = Color3.new(1, 1, 1)
+				end
+				if InventoryState.isOpen() and slot3 and slot3.Visible then
+					startSlot3IdleCycle()
+				end
+				break
+			end
+			paintUndoCooldownVisual(if left > 0.05 then left else 0.2)
+			task.wait(0.1)
+		end
+	end)
+end
+
 function UndoSlot.refreshHelpBadge()
 	if not helpSlot3 or not helpSlot3.Visible then
 		return
@@ -257,7 +333,12 @@ function UndoSlot.requestUndo()
 	if InventoryState.isSavePlotsBlocking() or InventoryState.isClearPlotBlocking() then
 		return
 	end
-	if undoBusy then
+	if undoBusy or undoCooldownActive then
+		return
+	end
+	-- Block until shuffle / unshuffle stagger VFX finishes.
+	if AutoPlantUI.isShuffleAnimBusy and AutoPlantUI.isShuffleAnimBusy() then
+		runUndoCooldownWatch(nil)
 		return
 	end
 	undoBusy = true
@@ -285,7 +366,13 @@ function UndoSlot.requestUndo()
 		local ok, result = pcall(function()
 			return Remotes.getFunction("RequestUndo"):InvokeServer()
 		end)
-		undoBusy = false
+		local isShuffleUndo = ok
+			and typeof(result) == "table"
+			and result.ok == true
+			and result.kind == "shuffle"
+		if not isShuffleUndo then
+			undoBusy = false
+		end
 		if ok and typeof(result) == "table" and result.ok then
 			deps.log("Undo", result.kind)
 			-- Relocate flash caches rest color; refresh after server hue restore.
@@ -295,6 +382,25 @@ function UndoSlot.requestUndo()
 				task.defer(function()
 					RelocateController.syncSelectedRestColor()
 				end)
+			elseif isShuffleUndo then
+				-- Grey + countdown until corals finish sliding home.
+				local fallbackEnds = os.clock() + SHUFFLE_UNDO_FALLBACK_SEC
+				runUndoCooldownWatch(fallbackEnds)
+				local deadline = os.clock() + 3.5
+				for _ = 1, 30 do
+					if AutoPlantUI.isShuffleAnimBusy() then
+						break
+					end
+					if os.clock() >= deadline then
+						break
+					end
+					task.wait(0.05)
+				end
+				while AutoPlantUI.isShuffleAnimBusy() and os.clock() < deadline do
+					task.wait(0.05)
+				end
+				undoBusy = false
+				-- Watcher clears grey when anim + fallback end.
 			end
 			return
 		end
@@ -303,6 +409,8 @@ function UndoSlot.requestUndo()
 		if code == "NothingToUndo" then
 			-- Override optimistic orange with red + fail sound.
 			playSlot3UndoFailFeedback()
+		elseif code == "Busy" then
+			runUndoCooldownWatch(os.clock() + SHUFFLE_UNDO_FALLBACK_SEC)
 		end
 	end)
 end
@@ -472,8 +580,54 @@ function UndoSlot.mount(d: Deps)
 			pad.Parent = lbl
 			slot3UndoLabel = lbl
 		end
+
+		local existingCd = slot3Circle:FindFirstChild("_OceanTD_UndoCdLabel")
+		if existingCd and existingCd:IsA("TextLabel") then
+			slot3CdLabel = existingCd
+		else
+			if existingCd then
+				existingCd:Destroy()
+			end
+			local cd = Instance.new("TextLabel")
+			cd.Name = "_OceanTD_UndoCdLabel"
+			cd.BackgroundTransparency = 1
+			cd.Size = UDim2.fromScale(1, 1)
+			cd.Font = UiTheme.Font
+			cd.Text = "3"
+			cd.TextColor3 = Color3.new(1, 1, 1)
+			cd.TextStrokeTransparency = 0.35
+			cd.TextScaled = true
+			cd.Visible = false
+			cd.ZIndex = slot3Circle.ZIndex + 3
+			cd.Active = false
+			cd.Parent = slot3Circle
+			local cdPad = Instance.new("UIPadding")
+			cdPad.PaddingTop = UDim.new(0.18, 0)
+			cdPad.PaddingBottom = UDim.new(0.18, 0)
+			cdPad.PaddingLeft = UDim.new(0.12, 0)
+			cdPad.PaddingRight = UDim.new(0.12, 0)
+			cdPad.Parent = cd
+			slot3CdLabel = cd
+		end
+
 		slot3.Visible = false
 		d.log("Slot3 undo button ready")
+
+		-- Keep Slot3 grey+countdown in sync when a shuffle/unshuffle is already running.
+		task.spawn(function()
+			while true do
+				task.wait(0.2)
+				if not slot3 or not slot3.Visible then
+					continue
+				end
+				if undoCooldownActive then
+					continue
+				end
+				if AutoPlantUI.isShuffleAnimBusy and AutoPlantUI.isShuffleAnimBusy() then
+					runUndoCooldownWatch(nil)
+				end
+			end
+		end)
 	else
 		warn("[INV] MainHUD.Quickbar.Slot3 missing — undo button unavailable")
 	end

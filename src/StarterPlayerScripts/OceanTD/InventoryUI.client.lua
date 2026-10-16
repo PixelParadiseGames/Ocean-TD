@@ -2089,6 +2089,9 @@ local function makeSection(title: string, layoutOrder: number): (Frame, Frame)
 	return section, gridHost
 end
 
+local AutoPlantUI = require(script.Parent:WaitForChild("AutoPlantUI"))
+local autoPlantBound = false
+
 local function rebuildItems()
 	for _, child in ipairs(scroll:GetChildren()) do
 		if child:IsA("GuiObject") and child.Name ~= "UIPadding" then
@@ -2102,6 +2105,15 @@ local function rebuildItems()
 	table.clear(itemButtons)
 	table.clear(sectionGrids)
 	clearAllPulses()
+
+	-- Auto Plant + shuffle above coral sections / LONG RANGE.
+	AutoPlantUI.mount(scroll)
+	if not autoPlantBound then
+		autoPlantBound = true
+		AutoPlantUI.bind()
+	else
+		AutoPlantUI.refreshFromServer()
+	end
 
 	if TEMP_BRAIN_CORAL_SLOT_COUNT > 0 then
 		local brain = ItemCatalog.get("BrainCoral")
