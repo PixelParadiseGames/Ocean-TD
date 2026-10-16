@@ -39,11 +39,13 @@ local PlacedCoralIndex = require(script.Parent:WaitForChild("PlacedCoralIndex"))
 local RelocateController = require(script.Parent:WaitForChild("RelocateController"))
 local RelocateMultiSelect = require(script.Parent:WaitForChild("RelocateMultiSelect"))
 local StoreUI = require(script.Parent:WaitForChild("StoreUI"))
+local SandDollarReportUI = require(script.Parent:WaitForChild("SandDollarReportUI"))
 
 local REPORT_OPEN_ATTR = "OceanTD_ReefReportOpen"
 local FORCE_CLOSE_ATTR = "OceanTD_ForceCloseReefReport"
 local SKILLS_OPEN_ATTR = "OceanTD_SkillsBubblesOpen"
 local STORE_OPEN_ATTR = "OceanTD_StoreOpen"
+local SAND_DOLLAR_REPORT_ATTR = "OceanTD_SandDollarReportOpen"
 local INFO_BG = Color3.fromRGB(0, 0, 0)
 local INFO_HOVER = Color3.fromRGB(58, 58, 62)
 local TOGGLE_COOLDOWN = 0.35
@@ -82,6 +84,7 @@ local scroll: ScrollingFrame? = nil
 local columnsHost: Frame? = nil
 local scoreLabel: TextLabel? = nil
 local helpBtn: GuiButton? = nil
+local dollarBtn: GuiButton? = nil
 local helpGui: ScreenGui? = nil
 local helpPanel: Frame? = nil
 local helpCloseBtn: TextButton? = nil
@@ -397,6 +400,36 @@ local function ensureCloseChrome()
 	closeScale = scale
 	syncCloseLabel()
 	startClosePulse()
+	if playerGui:GetAttribute(SAND_DOLLAR_REPORT_ATTR) == true then
+		destroyCloseChrome(false)
+		if cartBtn then
+			cartBtn.Visible = false
+		end
+	end
+end
+
+local function syncCloseChromeForEconomy()
+	local economyOpen = playerGui:GetAttribute(SAND_DOLLAR_REPORT_ATTR) == true
+	if economyOpen then
+		-- Tear down reef close entirely — Visible=false still left a clickable red cart hit.
+		if closeChrome then
+			destroyCloseChrome(false)
+		end
+		if cartBtn then
+			cartBtn.Visible = false
+		end
+		return
+	end
+	if open then
+		if cartBtn then
+			cartBtn.Visible = true
+		end
+		if not closeChrome or not closeChrome.Parent then
+			ensureCloseChrome()
+		else
+			closeChrome.Visible = true
+		end
+	end
 end
 
 local function clearInfoHoverConns()
@@ -551,8 +584,19 @@ syncCartChrome = function()
 		end
 		return
 	end
+	if playerGui:GetAttribute(SAND_DOLLAR_REPORT_ATTR) == true then
+		destroyInfoChrome(false)
+		destroyCloseChrome(false)
+		if cartBtn then
+			cartBtn.Visible = false
+		end
+		return
+	end
 	if open then
 		destroyInfoChrome(false)
+		if cartBtn then
+			cartBtn.Visible = true
+		end
 		ensureCloseChrome()
 		return
 	end
@@ -1659,6 +1703,10 @@ local function buildTitleRow(parent: Instance): Frame
 	if oldHelp and oldHelp.Parent == parent then
 		oldHelp:Destroy()
 	end
+	local oldDollar = parent:FindFirstChild("ReefScoreDollar")
+	if oldDollar and oldDollar.Parent == parent then
+		oldDollar:Destroy()
+	end
 
 	local row = Instance.new("Frame")
 	row.Name = "TitleRow"
@@ -1741,6 +1789,36 @@ local function buildTitleRow(parent: Instance): Frame
 	help.Activated:Connect(showHelpPopup)
 	helpBtn = help
 
+	local dollar = Instance.new("TextButton")
+	dollar.Name = "ReefScoreDollar"
+	dollar.Text = "$D"
+	dollar.Font = Enum.Font.GothamBold
+	dollar.TextScaled = true
+	dollar.TextColor3 = Color3.fromRGB(235, 255, 240)
+	dollar.BackgroundColor3 = Color3.fromRGB(20, 160, 140)
+	dollar.BorderSizePixel = 0
+	dollar.AutoButtonColor = true
+	dollar.Selectable = true
+	dollar.Size = UDim2.fromOffset(42, 34)
+	dollar.LayoutOrder = 4
+	dollar.ZIndex = 3
+	dollar.Parent = row
+	local dollarCorner = Instance.new("UICorner")
+	dollarCorner.CornerRadius = UDim.new(1, 0)
+	dollarCorner.Parent = dollar
+	local dollarPad = Instance.new("UIPadding")
+	dollarPad.PaddingTop = UDim.new(0.1, 0)
+	dollarPad.PaddingBottom = UDim.new(0.1, 0)
+	dollarPad.PaddingLeft = UDim.new(0.08, 0)
+	dollarPad.PaddingRight = UDim.new(0.08, 0)
+	dollarPad.Parent = dollar
+	-- open() not toggle(): a double-bound toggle() opens then closes on one click.
+	dollar:SetAttribute("_OceanTD_DollarBound", "open_v2")
+	dollar.Activated:Connect(function()
+		SandDollarReportUI.open()
+	end)
+	dollarBtn = dollar
+
 	refreshReefScore()
 	return row
 end
@@ -1769,6 +1847,15 @@ local function ensureReportGui(): ScreenGui
 				local help = row:FindFirstChild("ReefScoreHelp")
 				if help and help:IsA("GuiButton") then
 					helpBtn = help
+				end
+				local dollar = row:FindFirstChild("ReefScoreDollar")
+				local bindVer = dollar and dollar:GetAttribute("_OceanTD_DollarBound")
+				if not dollar or bindVer ~= "open_v2" then
+					-- Missing $D or stale double-toggle binds — rebuild title row.
+					row:Destroy()
+					buildTitleRow(root)
+				else
+					dollarBtn = dollar :: GuiButton
 				end
 				refreshReefScore()
 			end
@@ -1901,6 +1988,10 @@ applyOpen = function(want: boolean)
 			end
 			raiseCloseLayer()
 			hideLeftUiExceptCart()
+			syncCloseChromeForEconomy()
+			if playerGui:GetAttribute(SAND_DOLLAR_REPORT_ATTR) == true then
+				return
+			end
 			if cartBtn then
 				cartBtn.Visible = true
 			end
@@ -1912,10 +2003,12 @@ applyOpen = function(want: boolean)
 			if open then
 				raiseCloseLayer()
 				hideSkillsButton()
+				syncCloseChromeForEconomy()
 			end
 		end)
 	else
 		dismissHelpImmediate()
+		SandDollarReportUI.close()
 		stopIntroScroll()
 		bindStickScroll(false)
 		bindLiveRefresh(false)
@@ -1943,6 +2036,11 @@ end
 
 -- Cart / DPadUp: build mode → reef report; otherwise → store. Same control closes whichever is open.
 local function toggle()
+	-- While $D Economy is up, cart must not close reef report underneath.
+	if playerGui:GetAttribute(SAND_DOLLAR_REPORT_ATTR) == true then
+		SandDollarReportUI.close()
+		return
+	end
 	if StoreUI.isOpen() then
 		if not canToggle() then
 			return
@@ -2050,6 +2148,10 @@ playerGui:GetAttributeChangedSignal(FORCE_CLOSE_ATTR):Connect(function()
 	closeOnly()
 end)
 
+playerGui:GetAttributeChangedSignal(SAND_DOLLAR_REPORT_ATTR):Connect(function()
+	syncCloseChromeForEconomy()
+end)
+
 playerGui:GetAttributeChangedSignal(SKILLS_OPEN_ATTR):Connect(function()
 	if playerGui:GetAttribute(SKILLS_OPEN_ATTR) == true then
 		closeOnly()
@@ -2098,6 +2200,10 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
 		if playerGui:GetAttribute(SKILLS_OPEN_ATTR) == true then
 			return
 		end
+		if SandDollarReportUI.isOpen() then
+			SandDollarReportUI.close()
+			return
+		end
 		if helpOpen then
 			hideHelpPopup()
 			return
@@ -2107,6 +2213,15 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
 			return
 		end
 		openFromDPadUp()
+		return
+	end
+	if SandDollarReportUI.isOpen() then
+		if input.KeyCode == Enum.KeyCode.X
+			or input.KeyCode == Enum.KeyCode.ButtonB
+			or input.KeyCode == Enum.KeyCode.Escape
+		then
+			SandDollarReportUI.close()
+		end
 		return
 	end
 	if not open then

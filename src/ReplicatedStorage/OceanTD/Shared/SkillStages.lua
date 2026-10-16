@@ -186,9 +186,93 @@ function SkillStages.sanitizeActiveMap(rawActive: any, unlockedMap: { [string]: 
 	return m
 end
 
--- $D cost to unlock `stage` (the stage being purchased).
-function SkillStages.stageCost(_skillId: string, _stage: number): number
-	return 1
+-- $D cost to unlock `stage` (the stage being purchased). Stage 1 is free (owned at start).
+-- Plot Size stage 2 is free (not priced); first paid Plot Size unlock is stage 3.
+local STAGE_COST: { [string]: { [number]: number } } = {
+	PlotSize = {
+		[2] = 0,
+		[3] = 60,
+		[4] = 90,
+		[5] = 120,
+		[6] = 160,
+		[7] = 190,
+		[8] = 230,
+	},
+	ReloadSpeed = {
+		[2] = 20,
+		[3] = 30,
+		[4] = 40,
+		[5] = 50,
+		[6] = 75,
+		[7] = 100,
+		[8] = 200,
+	},
+	AutoRoll = {
+		[2] = 20,
+		[3] = 30,
+		[4] = 40,
+		[5] = 50,
+		[6] = 60,
+		[7] = 70,
+		[8] = 80,
+	},
+	Skip = {
+		[2] = 40,
+		[3] = 60,
+		[4] = 80,
+		[5] = 100,
+		[6] = 120,
+		[7] = 160,
+		[8] = 1000,
+	},
+	WaveSpeed = {
+		[2] = 100,
+		[3] = 150,
+		[4] = 200,
+	},
+	PlaceMore = {
+		[2] = 30,
+		[3] = 60,
+		[4] = 100,
+		[5] = 200,
+		[6] = 300,
+		[7] = 400,
+		[8] = 600,
+	},
+	RHealth = {
+		[2] = 30,
+		[3] = 60,
+		[4] = 90,
+		[5] = 120,
+		[6] = 160,
+		[7] = 200,
+		[8] = 250,
+	},
+	EarnMore = {
+		[2] = 200,
+		[3] = 300,
+		[4] = 400,
+		[5] = 500,
+		[6] = 700,
+		[7] = 900,
+		[8] = 1000,
+	},
+}
+
+function SkillStages.stageCost(skillId: string, stage: number): number
+	local s = math.floor(tonumber(stage) or 0)
+	if s <= SkillStages.MIN_STAGE then
+		return 0
+	end
+	local byStage = STAGE_COST[skillId]
+	if not byStage then
+		return 0
+	end
+	local cost = byStage[s]
+	if typeof(cost) ~= "number" or cost ~= cost or cost < 0 then
+		return 0
+	end
+	return math.floor(cost)
 end
 
 -- Total $D spent to reach the unlocked stages in `unlockedMap` (stage 1 is free).

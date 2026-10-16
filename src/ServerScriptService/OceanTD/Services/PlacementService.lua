@@ -778,18 +778,19 @@ function PlacementService.placeFromSave(
 
 	local debitHueForSave: number? = nil
 	if shouldConsume then
-		-- Same stack recycle/clear credit (resolveRecycleHue prefers seedHue).
-		if typeof(seedHue) == "number" then
-			debitHueForSave = PlotOutlineColors.clampCoralIndex(seedHue)
-		elseif typeof(colorIndex) == "number" then
-			debitHueForSave = PlotOutlineColors.clampCoralIndex(colorIndex)
-		else
-			debitHueForSave = PlotOutlineColors.DEFAULT_INDEX
-		end
-		local debited = select(1, PersistenceService.tryDebitHueSeed(player, itemId, debitHueForSave, 1))
-		if not debited then
+		-- Preferred stack: seedHue, else legacy colorIndex, else default.
+		-- Flexible debit may spend another owned hue of this species if preferred is empty
+		-- (scrambled seedHue metadata must not block layout load when species total is enough).
+		local preferred = if typeof(seedHue) == "number"
+			then PlotOutlineColors.clampCoralIndex(seedHue)
+			elseif typeof(colorIndex) == "number"
+			then PlotOutlineColors.clampCoralIndex(colorIndex)
+			else PlotOutlineColors.DEFAULT_INDEX
+		local debited, usedHue = PersistenceService.tryDebitHueSeedFlexible(player, itemId, preferred, 1)
+		if not debited or typeof(usedHue) ~= "number" then
 			return { ok = false, errorCode = "NoSeeds" }
 		end
+		debitHueForSave = usedHue
 	end
 
 	-- exactPos = plot.CFrame:PointToWorldSpace(VisualPos) — never re-snap to terrain/grid center.
@@ -1894,6 +1895,8 @@ export type ApplyLayoutResult = {
 }
 
 local function layoutDebitHue(obj: LayoutObject): number
+	-- Preferred debit hint only (placeFromSave / canAfford use flexible fallback).
+	-- seedHue first; colorIndex next for pre-seedHue saves where paint was the spent stack.
 	if typeof(obj.seedHue) == "number" then
 		return PlotOutlineColors.clampCoralIndex(obj.seedHue)
 	end
@@ -1903,27 +1906,49 @@ local function layoutDebitHue(obj: LayoutObject): number
 	return PlotOutlineColors.DEFAULT_INDEX
 end
 
+type LayoutAffordFail = {
+	itemId: string,
+	preferredHue: number,
+	speciesRemaining: number,
+}
+
 -- Simulate credit-live + debit-target on a copy. Abort load if any coral would fail NoSeeds.
-local function canAffordLayoutSwap(player: Player, plotId: string, layout: { LayoutObject }): boolean
+-- Credits use the same resolveRecycleHue(visual, cell) path as clearPlot.
+-- Debits are flexible across hues of the same species so legacy seedHue=paint metadata
+-- cannot block a layout the player still has enough seeds for.
+local function canAffordLayoutSwap(
+	player: Player,
+	plotId: string,
+	layout: { LayoutObject }
+): (boolean, LayoutAffordFail?)
 	local payload = PersistenceService.getInventoryPayload(player)
 	local inv = HueSeeds.sanitize(payload, false)
 	GridService.forEachCell(plotId, function(cell)
 		if cell.ownerUserId ~= player.UserId then
 			return
 		end
-		local hue = resolveRecycleHue(nil, cell)
+		local visual: BasePart? = nil
+		if typeof(cell.placeId) == "string" and cell.placeId ~= "" then
+			visual = findVisualByPlaceId(plotId, cell.placeId)
+		end
+		local hue = resolveRecycleHue(visual, cell)
 		HueSeeds.credit(inv, cell.id, hue, 1)
 	end)
 	for _, obj in ipairs(layout) do
 		if typeof(obj) ~= "table" or typeof(obj.id) ~= "string" then
 			continue
 		end
-		local ok = select(1, HueSeeds.tryDebit(inv, obj.id, layoutDebitHue(obj), 1))
+		local preferred = layoutDebitHue(obj)
+		local ok = select(1, HueSeeds.tryDebitFlexible(inv, obj.id, preferred, 1))
 		if not ok then
-			return false
+			return false, {
+				itemId = obj.id,
+				preferredHue = preferred,
+				speciesRemaining = HueSeeds.getSpeciesTotal(inv, obj.id),
+			}
 		end
 	end
-	return true
+	return true, nil
 end
 
 -- Wipe live plot (credit seeds, no undo) then place layout objects (debit seeds).
@@ -1941,8 +1966,23 @@ function PlacementService.applyLayout(player: Player, layout: { LayoutObject }):
 	end
 
 	-- Never burn paid hues: refuse the whole swap if post-credit inventory can't place target.
-	if not canAffordLayoutSwap(player, plotId, layout) then
-		warnPlace("applyLayout blocked — not enough hue seeds after credit for", player.Name)
+	local affordable, fail = canAffordLayoutSwap(player, plotId, layout)
+	if not affordable then
+		if fail then
+			warnPlace(
+				"applyLayout blocked — not enough hue seeds after credit",
+				"player=",
+				player.Name,
+				"itemId=",
+				fail.itemId,
+				"preferredHue=",
+				fail.preferredHue,
+				"speciesRemainingAfterPartialSim=",
+				fail.speciesRemaining
+			)
+		else
+			warnPlace("applyLayout blocked — not enough hue seeds after credit", "player=", player.Name)
+		end
 		return { ok = false, errorCode = "NeedSeeds" }
 	end
 
@@ -1958,7 +1998,7 @@ function PlacementService.applyLayout(player: Player, layout: { LayoutObject }):
 			continue
 		end
 		local visualLocal = LayoutRestore.resolveVisualLocal(obj, slot.cframe)
-		local seedHue = if typeof(obj.seedHue) == "number" then obj.seedHue else obj.colorIndex
+		-- Preferred stack only; placeFromSave flex-debits another owned hue if needed.
 		-- fromSave: world-anchored VisualPos — never re-raycast; ignore stale grid keys.
 		local result = PlacementService.placeFromSave(
 			player,
@@ -1972,7 +2012,7 @@ function PlacementService.applyLayout(player: Player, layout: { LayoutObject }):
 			obj.sizeTier,
 			obj.sizeClass,
 			obj.colorIndex,
-			seedHue,
+			obj.seedHue,
 			obj.colorR,
 			obj.colorG,
 			obj.colorB,

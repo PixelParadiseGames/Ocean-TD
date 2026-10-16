@@ -99,6 +99,7 @@ local C = {
 	-- Early waves: larger tap hitbox so feeding is easier.
 	TAP_FEED_RADIUS_MULT_W1_10 = 1.32, -- was 1.2; +10% again for waves 1–10
 	TAP_FEED_RADIUS_MULT_W11_20 = 1.1,
+	TAP_FEED_RADIUS_MULT_SHARK = 2, -- sharks are large / fast — easier tap target
 	-- Fallback only; live cooldown comes from SkillStages ReloadSpeed.
 	TAP_FEED_COOLDOWN_SEC = 1,
 	TAP_FEED_FULL_AUTO_MISS_SFX_SEC = 1, -- full-auto: miss/fail SFX at most once per second

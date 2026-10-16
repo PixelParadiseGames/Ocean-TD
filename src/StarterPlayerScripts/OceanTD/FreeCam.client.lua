@@ -1199,6 +1199,42 @@ local function moveSpeedForWish(): number
 	return speed
 end
 
+-- Plant a normal follow-cam pose so Custom doesn't inherit Plot/Fish/Scriptable CFrame
+-- (that often leaves the lens in the ground looking up at the avatar's feet).
+local function seatThirdPersonCamera(camera: Camera, char: Model)
+	local hrp = char:FindFirstChild("HumanoidRootPart")
+	local hum = char:FindFirstChildOfClass("Humanoid")
+	if not (hrp and hrp:IsA("BasePart") and hum) then
+		return
+	end
+	local flat = Vector3.new(hrp.CFrame.LookVector.X, 0, hrp.CFrame.LookVector.Z)
+	if flat.Magnitude < 1e-3 then
+		flat = Vector3.new(0, 0, -1)
+	else
+		flat = flat.Unit
+	end
+	local focus = hrp.Position + Vector3.new(0, 1.6, 0)
+	local dist = 14
+	local height = 4
+	local pos = focus - flat * dist + Vector3.new(0, height, 0)
+	camera.CameraType = Enum.CameraType.Scriptable
+	camera.CameraSubject = hum
+	camera.Focus = CFrame.new(focus)
+	camera.CFrame = CFrame.lookAt(pos, focus)
+
+	-- Nudge PlayerModule's zoom to match so the next Custom frame doesn't collapse to 0.
+	local minZ = player.CameraMinZoomDistance
+	local maxZ = player.CameraMaxZoomDistance
+	local target = math.clamp(dist, math.max(minZ, 8), math.max(maxZ, 8))
+	player.CameraMinZoomDistance = target
+	player.CameraMaxZoomDistance = target
+	camera.CameraType = Enum.CameraType.Custom
+	task.defer(function()
+		player.CameraMinZoomDistance = minZ
+		player.CameraMaxZoomDistance = maxZ
+	end)
+end
+
 local function restoreDefaultCamera()
 	stopRender()
 	PlotCam2.stop()
@@ -1230,14 +1266,15 @@ local function restoreDefaultCamera()
 
 	local camera = getCamera()
 	if camera then
-		local restore = savedCameraType or Enum.CameraType.Custom
-		if restore == Enum.CameraType.Scriptable then
-			restore = Enum.CameraType.Custom
-		end
-		camera.CameraType = restore
-		local hum = player.Character and player.Character:FindFirstChildOfClass("Humanoid")
-		if hum then
-			camera.CameraSubject = hum
+		local char = player.Character
+		if char then
+			seatThirdPersonCamera(camera, char)
+		else
+			local restore = savedCameraType or Enum.CameraType.Custom
+			if restore == Enum.CameraType.Scriptable then
+				restore = Enum.CameraType.Custom
+			end
+			camera.CameraType = restore
 		end
 	end
 	savedCameraType = nil

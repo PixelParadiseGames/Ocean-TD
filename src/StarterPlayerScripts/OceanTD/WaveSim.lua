@@ -2060,6 +2060,9 @@ local function attachTapFeedDebug(agent: FishAgent)
 		then (C.TAP_FEED_RADIUS_MULT_W1_10 or 1.32)
 		elseif waveIndex <= 20 then (C.TAP_FEED_RADIUS_MULT_W11_20 or 1.1)
 		else 1
+	if agent.isShark then
+		mult *= (C.TAP_FEED_RADIUS_MULT_SHARK or 2)
+	end
 	local diam = math.max(2, baseR * mult * 2)
 	local ball = Instance.new("Part")
 	ball.Name = "OceanTD_TapFeedDebug"
@@ -2711,18 +2714,14 @@ local function tryOfferWave2FullAutoTrial()
 		return
 	end
 	wave2FullAutoTrialOffered = true
-	-- Long safety cap; we end the trial when wave 2 finishes / waves stop.
-	if L.SkillPowerUpUI.beginReloadFullAutoTrial(600) then
+	-- 1 minute of full-auto (HUD countdown); ends on timer or when the run stops.
+	if L.SkillPowerUpUI.beginReloadFullAutoTrial(60) then
 		wave2FullAutoTrialActive = true
 		L.TutorialVo.playWhenIdle(L.VO_TRY_FULL_AUTO_RELOAD, "OceanTD_TryFullAutoReload")
 	end
 end
 
 local function beginWave(wave: number)
-	-- Leaving wave 2 ends the tutorial full-auto grant (manual UI trials are untouched).
-	if wave2FullAutoTrialActive and wave ~= 2 then
-		endWave2FullAutoTrial()
-	end
 	pruneFinishedFish()
 	waveIndex = wave
 	waveFishExpected = waveFishCount(wave)
@@ -2761,7 +2760,8 @@ local function beginWave(wave: number)
 		end
 	end
 	-- Waves 1–2: always Plot Cam (no Fish Cam / Tang overview), including Retry.
-	-- Frame W1 (path start) + reef heart so the full early route stays in view.
+	-- Frame W1 → Plot Size stage-2 heart (W4) for every plot size so zoom/seat
+	-- matches the stage-2 look instead of pulling out to a far late-stage heart.
 	if wave <= 2 and not joinIntroDemo then
 		local pg = Players.LocalPlayer and Players.LocalPlayer:FindFirstChildOfClass("PlayerGui")
 		if pg then
@@ -2780,7 +2780,16 @@ local function beginWave(wave: number)
 				return
 			end
 			local w1 = Path.samplePath(pathForFrame, 0)
-			local heart = L.WaveEndVfx.getEndHeartWorldPos() or pathForFrame.endPos
+			-- Stage 2 ends at the same waypoint as stage 1 (W4); use that for framing.
+			local frameEndWp = L.SkillStages.plotSizeFinalWaypoint(2)
+			local heart = pathForFrame.endPos
+			local dists = pathForFrame.waypointDists
+			if typeof(dists) == "table" and #dists >= frameEndWp then
+				local at = dists[frameEndWp]
+				if typeof(at) == "number" then
+					heart = Path.samplePath(pathForFrame, at)
+				end
+			end
 			if typeof(w1) ~= "Vector3" or typeof(heart) ~= "Vector3" then
 				return
 			end
@@ -4239,6 +4248,7 @@ function WaveSim.tryTapFeedAtScreen(screenPos: Vector2): TapFeedResult
 		elseif waveIndex <= 20 then (C.TAP_FEED_RADIUS_MULT_W11_20 or 1.1)
 		else 1
 	local radius = baseRadius * radiusMult
+	local sharkRadius = radius * (C.TAP_FEED_RADIUS_MULT_SHARK or 2)
 	local right = cam.CFrame.RightVector
 	local bestHungry: FishAgent? = nil
 	local bestHungryScore = math.huge
@@ -4254,7 +4264,8 @@ function WaveSim.tryTapFeedAtScreen(screenPos: Vector2): TapFeedResult
 		end
 		local fishScreen = Vector2.new(sp.X, sp.Y)
 		local dPx = (fishScreen - screenPos).Magnitude
-		local edgeSp = cam:WorldToViewportPoint(f.root.Position + right * radius)
+		local useR = if f.isShark then sharkRadius else radius
+		local edgeSp = cam:WorldToViewportPoint(f.root.Position + right * useR)
 		local rPx = (Vector2.new(edgeSp.X, edgeSp.Y) - fishScreen).Magnitude
 		if rPx < 6 then
 			rPx = 6

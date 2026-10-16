@@ -15,6 +15,8 @@ local HideUiUnlock = require(game:GetService("ReplicatedStorage"):WaitForChild("
 local SkillStages = require(game:GetService("ReplicatedStorage"):WaitForChild("OceanTD"):WaitForChild("Shared"):WaitForChild("SkillStages"))
 local SeedWheel = require(game:GetService("ReplicatedStorage"):WaitForChild("OceanTD"):WaitForChild("Shared"):WaitForChild("SeedWheel"))
 local ReefScore = require(game:GetService("ReplicatedStorage"):WaitForChild("OceanTD"):WaitForChild("Shared"):WaitForChild("ReefScore"))
+local IntroPad = require(game:GetService("ReplicatedStorage"):WaitForChild("OceanTD"):WaitForChild("Shared"):WaitForChild("IntroPad"))
+local EconomyStats = require(game:GetService("ReplicatedStorage"):WaitForChild("OceanTD"):WaitForChild("Shared"):WaitForChild("EconomyStats"))
 local Remotes = require(game:GetService("ReplicatedStorage"):WaitForChild("OceanTD"):WaitForChild("Remotes"))
 
 type PlayerProfile = PlotTypes.PlayerProfile
@@ -34,6 +36,20 @@ local loadFailed: { [Player]: boolean } = {}
 -- Anti-spam for client-reported fish fills (count this second).
 local feedRate: { [Player]: { t0: number, count: number } } = {}
 local FEED_MAX_PER_SEC = 40
+
+-- Session $D / play-time tracking (lifetime totals live on the profile).
+type SandDollarSession = {
+	joinedAt: number, -- os.time()
+	lastFlushAt: number, -- os.clock() when lifetimePlaySec last flushed
+	earned: number,
+	earnedFromFeed: number,
+	earnedOther: number,
+	fishFed: number,
+	firstEarnAt: number?, -- os.time()
+	milestoneSec: { [number]: number }, -- earned threshold → session seconds when hit
+}
+local sandSessions: { [Player]: SandDollarSession } = {}
+local EARN_MILESTONES = { 1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000 }
 
 local function log(...: any)
 	print("[PERSIST]", ...)
@@ -363,12 +379,18 @@ local function sanitizePlotSaves(raw: any, legacyLayout: { LayoutObject }): Plot
 			layout = cloneLayout(legacyLayout)
 			saved = true
 		end
-		local plotSizeStage = tonumber(src.plotSizeStage)
+		local plotSizeStage: number? = nil
+		if typeof(src) == "table" then
+			local rawStage = tonumber(src.plotSizeStage)
+			if rawStage then
+				plotSizeStage = math.floor(rawStage)
+			end
+		end
 		table.insert(slots, {
 			name = name,
 			saved = saved,
 			layout = layout,
-			plotSizeStage = if plotSizeStage then math.floor(plotSizeStage) else nil,
+			plotSizeStage = plotSizeStage,
 		})
 	end
 
@@ -513,8 +535,82 @@ local function sanitizeProfile(raw: any): PlayerProfile
 	profile.hideUiUnlocked = true
 	profile.hasSeenJoinIntro = raw.hasSeenJoinIntro == true
 	profile.hasLostWaveRound = raw.hasLostWaveRound == true
+	local lifeEarn = tonumber(raw.lifetimeSandDollarsEarned)
+	profile.lifetimeSandDollarsEarned = if lifeEarn and lifeEarn > 0 then math.floor(lifeEarn) else 0
+	local lifePlay = tonumber(raw.lifetimePlaySec)
+	profile.lifetimePlaySec = if lifePlay and lifePlay > 0 then math.floor(lifePlay) else 0
+	profile.economyStats = EconomyStats.sanitizePlayer(raw.economyStats)
 	profile.version = math.max(profile.version, Constants.PROFILE_VERSION)
 	return profile
+end
+
+local function Economy()
+	return require(script.Parent:WaitForChild("EconomyStatsService"))
+end
+
+local function beginSandDollarSession(player: Player)
+	local nowClock = os.clock()
+	sandSessions[player] = {
+		joinedAt = os.time(),
+		lastFlushAt = nowClock,
+		earned = 0,
+		earnedFromFeed = 0,
+		earnedOther = 0,
+		fishFed = 0,
+		firstEarnAt = nil,
+		milestoneSec = {},
+	}
+end
+
+local function flushSessionPlayTime(player: Player)
+	local profile = profiles[player]
+	local sess = sandSessions[player]
+	if not profile or not sess then
+		return
+	end
+	local now = os.clock()
+	local dt = math.max(0, now - sess.lastFlushAt)
+	sess.lastFlushAt = now
+	if dt > 0 then
+		profile.lifetimePlaySec = math.floor((profile.lifetimePlaySec or 0) + dt)
+	end
+end
+
+local function noteSandDollarEarn(player: Player, amount: number, fromFeed: boolean, fishCount: number?)
+	local grant = math.max(0, math.floor(tonumber(amount) or 0))
+	if grant <= 0 then
+		return
+	end
+	local profile = profiles[player]
+	local sess = sandSessions[player]
+	if not profile then
+		return
+	end
+	if not sess then
+		beginSandDollarSession(player)
+		sess = sandSessions[player]
+	end
+	if not sess then
+		return
+	end
+	local before = sess.earned
+	sess.earned += grant
+	if fromFeed then
+		sess.earnedFromFeed += grant
+		sess.fishFed += math.max(0, math.floor(tonumber(fishCount) or 0))
+	else
+		sess.earnedOther += grant
+	end
+	profile.lifetimeSandDollarsEarned = math.floor((profile.lifetimeSandDollarsEarned or 0) + grant)
+	if sess.firstEarnAt == nil then
+		sess.firstEarnAt = os.time()
+	end
+	local sessionSec = math.max(0, os.time() - sess.joinedAt)
+	for _, threshold in ipairs(EARN_MILESTONES) do
+		if before < threshold and sess.earned >= threshold and sess.milestoneSec[threshold] == nil then
+			sess.milestoneSec[threshold] = sessionSec
+		end
+	end
 end
 
 local function layoutCount(layout: { LayoutObject }): number
@@ -538,6 +634,83 @@ function PersistenceService.init()
 	getStore()
 	log("Using DataStore", Constants.DATASTORE_NAME)
 	PersistenceService.initSeedWheel()
+	-- Intro pad markers + occupancy (PlotService must be init'd — Bootstrap calls syncIntroPads).
+	local acc = 0
+	RunService.Heartbeat:Connect(function(dt)
+		acc += dt
+		if acc < 0.2 then
+			return
+		end
+		acc = 0
+		for _, plr in ipairs(Players:GetPlayers()) do
+			local plotId = plr:GetAttribute(Constants.PLOT_ID_ATTR)
+			if typeof(plotId) == "string" then
+				local marker = IntroPad.getPlotMarker(plotId)
+				if marker then
+					local pos = marker.Position
+					local prev = plr:GetAttribute(IntroPad.PAD_POS_ATTR)
+					if prev ~= pos then
+						plr:SetAttribute(IntroPad.PAD_POS_ATTR, pos)
+					end
+				end
+			end
+			local on = IntroPad.isPlayerOnPad(plr)
+			if plr:GetAttribute(IntroPad.ON_PAD_ATTR) ~= on then
+				plr:SetAttribute(IntroPad.ON_PAD_ATTR, on)
+			end
+		end
+	end)
+	Players.PlayerRemoving:Connect(function(plr)
+		plr:SetAttribute(IntroPad.ON_PAD_ATTR, nil)
+		plr:SetAttribute(IntroPad.PAD_POS_ATTR, nil)
+	end)
+end
+
+-- Clone IntroElements.IntroPosition → Plots.OceanTD_IntroPadMarkers.PlotN (Plot1 remap).
+function PersistenceService.syncIntroPads()
+	local ok, PlotService = pcall(function()
+		return require(script.Parent:WaitForChild("PlotService"))
+	end)
+	if not ok or not PlotService then
+		warn("[IntroPad] PlotService unavailable — cannot sync per-plot markers")
+		return
+	end
+
+	-- Must match ClientPlot/JoinIntro (MasterTerrain), not Plot1.ring alone — otherwise
+	-- remapped pads land on plot spawn and FX sticks under the avatar.
+	local plot1Cf = PlotService.getPlot1CFrame()
+	if typeof(plot1Cf) ~= "CFrame" then
+		warn("[IntroPad] No Plot1 CFrame — skip marker sync (PlotService slots=", PlotService.getPlotCount(), ")")
+		return
+	end
+
+	local slots: { { plotId: string, ringCFrame: CFrame } } = {}
+	local count = math.max(PlotService.getPlotCount(), Constants.PLOT_COUNT)
+	for i = 1, count do
+		local slot = PlotService.getSlotByIndex(i)
+		if slot then
+			table.insert(slots, { plotId = slot.plotId, ringCFrame = slot.ringCFrame })
+		end
+	end
+	if #slots == 0 then
+		warn("[IntroPad] PlotService has 0 slots — skip marker sync")
+		return
+	end
+
+	local n = IntroPad.syncPlotMarkers(plot1Cf, slots)
+	if n < 1 then
+		warn("[IntroPad] syncPlotMarkers wrote 0 markers (authored pose missing?)")
+	end
+
+	for _, plr in ipairs(Players:GetPlayers()) do
+		local plotId = PlotService.getOwnerPlotId(plr)
+		if plotId then
+			local marker = IntroPad.getPlotMarker(plotId)
+			if marker then
+				plr:SetAttribute(IntroPad.PAD_POS_ATTR, marker.Position)
+			end
+		end
+	end
 end
 
 function PersistenceService.getProfile(player: Player): PlayerProfile?
@@ -710,6 +883,7 @@ function PersistenceService.syncSandDollarsAttribute(player: Player)
 end
 
 -- Spend $D if the player can afford it. Returns ok, newBalance, errorCode?.
+-- Standing on Plots.IntroElements.IntroPosition → free (no debit).
 function PersistenceService.trySpendSandDollars(
 	player: Player,
 	amount: number
@@ -721,6 +895,10 @@ function PersistenceService.trySpendSandDollars(
 	local cost = math.max(0, math.floor(tonumber(amount) or 0))
 	local cash = clampSandDollars(profile.currencies.sandDollars)
 	if cost <= 0 then
+		return true, cash, nil
+	end
+	if IntroPad.isPlayerOnPad(player) then
+		Economy().noteIntroPadFreeBuy(player)
 		return true, cash, nil
 	end
 	if cash < cost then
@@ -748,7 +926,12 @@ function PersistenceService.stealSandDollars(player: Player, maxAmount: number):
 end
 
 -- Credit $D (orb pickups, etc.). Returns ok, granted, newBalance.
-function PersistenceService.creditSandDollars(player: Player, amount: number): (boolean, number, number)
+-- countAsEarn (default true): include in $D collection / play-time stats. Pass false for refunds.
+function PersistenceService.creditSandDollars(
+	player: Player,
+	amount: number,
+	countAsEarn: boolean?
+): (boolean, number, number)
 	local profile = profiles[player]
 	if not profile or loadFailed[player] == true then
 		return false, 0, 0
@@ -759,6 +942,9 @@ function PersistenceService.creditSandDollars(player: Player, amount: number): (
 	end
 	profile.currencies.sandDollars = clampSandDollars(profile.currencies.sandDollars + grant)
 	PersistenceService.syncSandDollarsAttribute(player)
+	if countAsEarn ~= false then
+		noteSandDollarEarn(player, grant, false, nil)
+	end
 	return true, grant, profile.currencies.sandDollars
 end
 
@@ -848,7 +1034,8 @@ function PersistenceService.tryUnlockSkillStage(player: Player, skillId: string)
 	end
 	local cost = math.max(0, math.floor(SkillStages.stageCost(skillId, nextStage)))
 	local cash = clampSandDollars(profile.currencies.sandDollars)
-	if cash < cost then
+	local freePad = IntroPad.isPlayerOnPad(player)
+	if not freePad and cash < cost then
 		return { ok = false, stage = current, prevStage = current, errorCode = "CantAfford", sandDollars = cash }
 	end
 	-- All other skills require Plot Size stage 2+ (first Plot Size purchase).
@@ -861,12 +1048,18 @@ function PersistenceService.tryUnlockSkillStage(player: Player, skillId: string)
 			sandDollars = cash,
 		}
 	end
-	profile.currencies.sandDollars = cash - cost
+	if freePad then
+		Economy().noteIntroPadFreeBuy(player)
+	else
+		profile.currencies.sandDollars = cash - cost
+	end
 	profile.skillStages[skillId] = nextStage
 	-- Newly unlocked stage becomes the enabled stage.
 	profile.skillActiveStages = SkillStages.sanitizeActiveMap(profile.skillActiveStages, profile.skillStages)
 	profile.skillActiveStages[skillId] = nextStage
 	PersistenceService.syncSandDollarsAttribute(player)
+	Economy().noteSkillStagesChanged(player)
+	Economy().queuePublish(player)
 	return {
 		ok = true,
 		stage = nextStage,
@@ -922,10 +1115,15 @@ function PersistenceService.tryUnlockCoralColor(player: Player, itemId: string, 
 	end
 	local cost = HueSeeds.SEED_COST
 	local cash = clampSandDollars(profile.currencies.sandDollars)
-	if cash < cost then
+	local freePad = IntroPad.isPlayerOnPad(player)
+	if not freePad and cash < cost then
 		return { ok = false, errorCode = "CantAfford", sandDollars = cash, colorIndex = idx, itemId = itemId }
 	end
-	profile.currencies.sandDollars = cash - cost
+	if freePad then
+		Economy().noteIntroPadFreeBuy(player)
+	else
+		profile.currencies.sandDollars = cash - cost
+	end
 	HueSeeds.credit(inv, itemId, idx, 1)
 	PersistenceService.syncSandDollarsAttribute(player)
 	PersistenceService.syncInventoryToClient(player)
@@ -1066,7 +1264,7 @@ function PersistenceService.resetSkillStages(player: Player): {
 	profile.skillStages = SkillStages.defaultMap()
 	profile.skillActiveStages = SkillStages.defaultMap()
 	if refund > 0 then
-		PersistenceService.creditSandDollars(player, refund)
+		PersistenceService.creditSandDollars(player, refund, false)
 	else
 		PersistenceService.syncSandDollarsAttribute(player)
 	end
@@ -1159,9 +1357,13 @@ function PersistenceService.grantSandDollarsFromReceipt(
 	return "failed", 0
 end
 
--- Credit $D for fish whose hunger bars filled (client reports count only).
+-- Credit $D for fish whose hunger bars filled (client reports count + optional wave speed).
 -- Amount comes from persisted EarnMore stage. In-memory; autosave/leave persist.
-function PersistenceService.creditSandDollarsFromFeed(player: Player, fishCount: any): (boolean, number, number)
+function PersistenceService.creditSandDollarsFromFeed(
+	player: Player,
+	fishCount: any,
+	speedMult: any?
+): (boolean, number, number)
 	local profile = profiles[player]
 	if not profile or loadFailed[player] == true then
 		return false, 0, 0
@@ -1193,7 +1395,14 @@ function PersistenceService.creditSandDollarsFromFeed(player: Player, fishCount:
 	end
 	profile.currencies.sandDollars = clampSandDollars(profile.currencies.sandDollars + grant)
 	PersistenceService.syncSandDollarsAttribute(player)
+	noteSandDollarEarn(player, grant, true, n)
+	Economy().noteFeed(player, grant, n, tonumber(speedMult) or 1)
 	return true, grant, profile.currencies.sandDollars
+end
+
+function PersistenceService.getSandDollarStats(player: Player): any
+	flushSessionPlayTime(player)
+	return Economy().getPayload(player)
 end
 
 function PersistenceService.getActiveSlotIndex(player: Player): number
@@ -1247,21 +1456,85 @@ function PersistenceService.writeSlotLayout(player: Player, index: number, layou
 	return true
 end
 
--- Rewrite every saved slot layout when Plot Size stage changes CFrame (world positions preserved).
-function PersistenceService.reframeAllPlotSaveLayouts(player: Player, oldCf: CFrame, newCf: CFrame)
+--[[
+	Bring every non-empty plot-save slot into `toStage` local space.
+	Each slot reframes from ITS OWN plotSizeStage → toStage (not one live CFrame delta).
+	fromStageHint: only for legacy slots with nil plotSizeStage (coords assumed in that space).
+	Safe for dial up/down. Does not touch inventory / hue seeds.
+]]
+function PersistenceService.normalizePlotSaveLayoutsToStage(
+	player: Player,
+	ringSlot: any,
+	toStage: number,
+	fromStageHint: number?
+): number
 	local profile = profiles[player]
-	if not profile or oldCf == newCf then
-		return
+	if not profile or typeof(ringSlot) ~= "table" then
+		return 0
 	end
+	local PlotService = require(script.Parent:WaitForChild("PlotService"))
 	local LayoutRestore = require(game:GetService("ReplicatedStorage"):WaitForChild("OceanTD"):WaitForChild("Shared"):WaitForChild("LayoutRestore"))
-	local stage = PersistenceService.getSkillStage(player, "PlotSize")
-	for _, slot in ipairs(profile.plotSaves.slots) do
-		if #slot.layout > 0 then
-			slot.layout = LayoutRestore.reframeLayout(slot.layout, oldCf, newCf)
-			slot.plotSizeStage = stage
-		end
+	local target = SkillStages.clampStageFor("PlotSize", toStage)
+	local hint: number? = if typeof(fromStageHint) == "number"
+		then SkillStages.clampStageFor("PlotSize", fromStageHint)
+		else nil
+	local newCf, _ = PlotService.getStageWorldPose(ringSlot, target)
+	if not newCf then
+		return 0
 	end
-	profile.layout = cloneLayout(profile.plotSaves.slots[profile.plotSaves.activeIndex].layout)
+	local changed = 0
+	for _, slot in ipairs(profile.plotSaves.slots) do
+		if #slot.layout == 0 then
+			-- Still stamp empty slots so future writes know the active basis.
+			slot.plotSizeStage = target
+			continue
+		end
+		local fromStage = if typeof(slot.plotSizeStage) == "number"
+			then SkillStages.clampStageFor("PlotSize", slot.plotSizeStage)
+			else hint
+		if typeof(fromStage) ~= "number" then
+			-- Unknown basis: do not invent a reframe; label as current so load won't double-shift.
+			slot.plotSizeStage = target
+			continue
+		end
+		if fromStage == target then
+			slot.plotSizeStage = target
+			continue
+		end
+		local oldCf, _ = PlotService.getStageWorldPose(ringSlot, fromStage)
+		if oldCf and oldCf ~= newCf then
+			slot.layout = LayoutRestore.reframeLayout(slot.layout, oldCf, newCf)
+			changed += 1
+		end
+		slot.plotSizeStage = target
+	end
+	local active = profile.plotSaves.slots[profile.plotSaves.activeIndex]
+	if active then
+		profile.layout = cloneLayout(active.layout)
+	end
+	return changed
+end
+
+-- Back-compat name used by PlotService size changes.
+function PersistenceService.reframeAllPlotSaveLayouts(
+	player: Player,
+	_oldCf: CFrame,
+	_newCf: CFrame,
+	ringSlot: any?,
+	toStage: number?,
+	fromStageHint: number?
+)
+	local plotId = nil
+	local slot = ringSlot
+	if typeof(slot) ~= "table" then
+		local PlotService = require(script.Parent:WaitForChild("PlotService"))
+		plotId = PlotService.getOwnerPlotId(player)
+		slot = if plotId then PlotService.getSlot(plotId) else nil
+	end
+	local stage = if typeof(toStage) == "number"
+		then toStage
+		else PersistenceService.getSkillStage(player, "PlotSize")
+	PersistenceService.normalizePlotSaveLayoutsToStage(player, slot, stage, fromStageHint)
 end
 
 function PersistenceService.renameSlot(player: Player, index: number, name: string): boolean
@@ -1548,6 +1821,27 @@ function PersistenceService.tryDebitHueSeed(
 	return true, nextCount
 end
 
+-- Layout restore: prefer saved seedHue, else any owned stack for that species (no free seeds).
+function PersistenceService.tryDebitHueSeedFlexible(
+	player: Player,
+	itemId: string,
+	preferredHue: number?,
+	amount: number?
+): (boolean, number?)
+	local profile = profiles[player]
+	if not profile or typeof(itemId) ~= "string" or itemId == "" then
+		return false, nil
+	end
+	local inv = ensureInventory(profile)
+	local ok, hueUsed, nextCount = HueSeeds.tryDebitFlexible(inv, itemId, preferredHue, amount)
+	if not ok or typeof(hueUsed) ~= "number" then
+		return false, nil
+	end
+	log("TryDebitFlexible hue", itemId, "preferred", preferredHue, "used", hueUsed, "→", nextCount, "for", player.Name)
+	PersistenceService.syncInventoryToClient(player)
+	return true, hueUsed
+end
+
 function PersistenceService.tryDebitItem(
 	player: Player,
 	itemId: string,
@@ -1802,6 +2096,7 @@ function PersistenceService.load(player: Player): PlayerProfile
 		warnPersist("GetAsync failed for", userId, result)
 		loadFailed[player] = true
 		profiles[player] = profile
+		beginSandDollarSession(player)
 		log("Load fallback empty profile userId=", userId, "layout=0 — SAVES BLOCKED (protect $D)")
 		return profile
 	end
@@ -1809,12 +2104,14 @@ function PersistenceService.load(player: Player): PlayerProfile
 	loadFailed[player] = nil
 	if result == nil then
 		profiles[player] = profile
+		beginSandDollarSession(player)
 		log("Load new profile userId=", userId, "layout=0", "seeds=0")
 		return profile
 	end
 
 	profile = sanitizeProfile(result)
 	profiles[player] = profile
+	beginSandDollarSession(player)
 	log(
 		"Load userId=",
 		userId,
@@ -1844,6 +2141,11 @@ function PersistenceService.save(player: Player, layoutOverride: { LayoutObject 
 		return false
 	end
 
+	flushSessionPlayTime(player)
+	pcall(function()
+		Economy().queuePublish(player)
+	end)
+
 	if layoutOverride ~= nil then
 		profile.layout = layoutOverride
 		syncActiveLayout(profile)
@@ -1854,10 +2156,15 @@ function PersistenceService.save(player: Player, layoutOverride: { LayoutObject 
 	local userId = player.UserId
 	local slotsOut = {}
 	for i, slot in ipairs(profile.plotSaves.slots) do
+		local stageOut: number? = nil
+		if typeof(slot.plotSizeStage) == "number" then
+			stageOut = SkillStages.clampStageFor("PlotSize", slot.plotSizeStage)
+		end
 		slotsOut[i] = {
 			name = slot.name,
 			saved = slot.saved == true,
 			layout = cloneLayout(slot.layout),
+			plotSizeStage = stageOut,
 		}
 	end
 	local toWrite = {
@@ -1885,6 +2192,9 @@ function PersistenceService.save(player: Player, layoutOverride: { LayoutObject 
 		hideUiUnlocked = profile.hideUiUnlocked == true,
 		hasSeenJoinIntro = profile.hasSeenJoinIntro == true,
 		hasLostWaveRound = profile.hasLostWaveRound == true,
+		lifetimeSandDollarsEarned = math.max(0, math.floor(profile.lifetimeSandDollarsEarned or 0)),
+		lifetimePlaySec = math.max(0, math.floor(profile.lifetimePlaySec or 0)),
+		economyStats = EconomyStats.sanitizePlayer(profile.economyStats),
 	}
 
 	local saved = false
@@ -1956,6 +2266,11 @@ function PersistenceService.save(player: Player, layoutOverride: { LayoutObject 
 end
 
 function PersistenceService.release(player: Player)
+	flushSessionPlayTime(player)
+	pcall(function()
+		Economy().flushPublish(player)
+	end)
+	sandSessions[player] = nil
 	profiles[player] = nil
 	loadFailed[player] = nil
 	feedRate[player] = nil

@@ -77,6 +77,7 @@ FreeCamConfig.ATTR_FISH_CAM_POV = "OceanTD_FishCamPov"
 -- PlotCam cycle: 1 = legacy SkyCam free-fly (Plot Cam 1), 2 = locked RTS god-cam (Plot Cam 2).
 FreeCamConfig.PLOT_CAM_VARIANT = 2
 
+-- Cycle order: Player → Plot → Fish → Free. Free Cam (dronecam) stays last.
 FreeCamConfig.MODE_ORDER = { "off", "plotcam", "fishcam", "dronecam" } :: { CamMode }
 
 FreeCamConfig.MODE_GRAPHICS = {

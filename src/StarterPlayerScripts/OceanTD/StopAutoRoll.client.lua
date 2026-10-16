@@ -39,6 +39,8 @@ local CORAL_NAME = "_OceanTD_StopAutoRollCoral"
 local LABEL_NAME = "_OceanTD_StopAutoRollLabel"
 local HELP_TIP_NAME = "_OceanTD_RollHelpTip"
 local HELP_LETTER_NAME = "_OceanTD_HelpLetter"
+local KEEP_ROLLIN_GUI_NAME = "OceanTD_KeepRollin"
+local KEEP_ROLLIN_NAME = "_OceanTD_KeepRollin"
 local BUTTON_SCALE_NAME = "_OceanTD_StopAutoRollScale"
 local LABEL_SCALE_NAME = "_OceanTD_StopAutoRollLabelScale"
 local DICE_IMAGE = "rbxassetid://77867192113507"
@@ -123,6 +125,10 @@ local coralIcon: ImageLabel? = nil
 local label: TextLabel? = nil
 local helpTip: Frame? = nil
 local helpLetter: TextLabel? = nil
+local keepRollinGui: ScreenGui? = nil
+local keepRollinHost: Frame? = nil
+local keepRollinArrow: TextLabel? = nil
+local keepRollinSlideConn: RBXScriptConnection? = nil
 local iconSwapConn: RBXScriptConnection? = nil
 local flashToken = 0
 local showDice = true
@@ -136,6 +142,8 @@ local fountainRng = Random.new()
 local countAnimToken = 0
 local pressHolding = false
 local pressGen = 0
+local KEEP_ROLLIN_SLIDE_PX = 10
+local KEEP_ROLLIN_SLIDE_HZ = 1.35
 
 local function uiHidesRoll(): boolean
 	return playerGui:GetAttribute(SKILLS_OPEN_ATTR) == true
@@ -167,6 +175,223 @@ local function refreshHelpTip()
 	end
 end
 
+local function shouldShowKeepRollin(): boolean
+	if not anchor or not anchor.Visible or not anchor.Parent then
+		return false
+	end
+	if uiHidesRoll() then
+		return false
+	end
+	if SeedWheelAutoRollState.isEnabled() then
+		return false
+	end
+	if presenting or busyAnim then
+		return false
+	end
+	if playerGui:GetAttribute("OceanTD_JoinIntroBusy") == true then
+		return false
+	end
+	-- Tutorial finger owns the first-roll prompt.
+	local finger = playerGui:GetAttribute(ROLL_FINGER_ATTR)
+	if finger == true or finger == "roll" then
+		return false
+	end
+	-- Button fully shrunk away (mid roll-once hide).
+	if buttonScale and buttonScale.Scale < 0.05 then
+		return false
+	end
+	return true
+end
+
+local function stopKeepRollinSlide()
+	if keepRollinSlideConn then
+		keepRollinSlideConn:Disconnect()
+		keepRollinSlideConn = nil
+	end
+end
+
+local function layoutKeepRollin()
+	local host = keepRollinHost
+	local btn = anchor
+	if not host or not btn or not btn.Parent then
+		return
+	end
+	-- Overlay uses IgnoreGuiInset=true; AbsolutePosition is inset-relative.
+	local inset = GuiService:GetGuiInset()
+	local right = btn.AbsolutePosition.X + btn.AbsoluteSize.X + inset.X + 10
+	local midY = btn.AbsolutePosition.Y + btn.AbsoluteSize.Y * 0.5 + inset.Y
+	host.Position = UDim2.fromOffset(right, midY)
+end
+
+local function ensureKeepRollin(): Frame?
+	local btn = anchor
+	if not btn then
+		return nil
+	end
+	local sg = keepRollinGui
+	if not (sg and sg.Parent) then
+		local existingGui = playerGui:FindFirstChild(KEEP_ROLLIN_GUI_NAME)
+		if existingGui and existingGui:IsA("ScreenGui") then
+			sg = existingGui
+		else
+			if existingGui then
+				existingGui:Destroy()
+			end
+			sg = Instance.new("ScreenGui")
+			sg.Name = KEEP_ROLLIN_GUI_NAME
+			sg.ResetOnSpawn = false
+			sg.IgnoreGuiInset = true
+			sg.DisplayOrder = 85
+			sg.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+			sg.Parent = playerGui
+		end
+		keepRollinGui = sg
+	end
+	sg.Enabled = true
+
+	local existing = sg:FindFirstChild(KEEP_ROLLIN_NAME)
+	local host: Frame
+	if existing and existing:IsA("Frame") then
+		host = existing
+	else
+		if existing then
+			existing:Destroy()
+		end
+		host = Instance.new("Frame")
+		host.Name = KEEP_ROLLIN_NAME
+		host.BackgroundTransparency = 1
+		host.BorderSizePixel = 0
+		host.AnchorPoint = Vector2.new(0, 0.5)
+		host.AutomaticSize = Enum.AutomaticSize.XY
+		host.Size = UDim2.fromOffset(0, 0)
+		host.ZIndex = 10
+		host.Active = false
+		host.Visible = false
+		host.Parent = sg
+		local lay = Instance.new("UIListLayout")
+		lay.FillDirection = Enum.FillDirection.Horizontal
+		lay.HorizontalAlignment = Enum.HorizontalAlignment.Left
+		lay.VerticalAlignment = Enum.VerticalAlignment.Center
+		lay.SortOrder = Enum.SortOrder.LayoutOrder
+		lay.Padding = UDim.new(0, 6)
+		lay.Parent = host
+
+		local arrowSlot = Instance.new("Frame")
+		arrowSlot.Name = "ArrowSlot"
+		arrowSlot.BackgroundTransparency = 1
+		arrowSlot.BorderSizePixel = 0
+		arrowSlot.Size = UDim2.fromOffset(48, 48)
+		arrowSlot.LayoutOrder = 1
+		arrowSlot.ZIndex = 10
+		arrowSlot.Active = false
+		arrowSlot.ClipsDescendants = false
+		arrowSlot.Parent = host
+
+		local arrow = Instance.new("TextLabel")
+		arrow.Name = "Arrow"
+		arrow.BackgroundTransparency = 1
+		arrow.AnchorPoint = Vector2.new(0.5, 0.5)
+		arrow.Position = UDim2.fromScale(0.5, 0.5)
+		arrow.Size = UDim2.fromOffset(48, 48)
+		arrow.Font = Enum.Font.SourceSansBold
+		arrow.Text = "←"
+		arrow.TextColor3 = Color3.fromRGB(90, 255, 110)
+		arrow.TextScaled = true
+		arrow.ZIndex = 11
+		arrow.Active = false
+		arrow.Parent = arrowSlot
+		local arrowStroke = Instance.new("UIStroke")
+		arrowStroke.Color = Color3.fromRGB(0, 60, 20)
+		arrowStroke.Thickness = 2
+		arrowStroke.Parent = arrow
+		keepRollinArrow = arrow
+
+		local text = Instance.new("TextLabel")
+		text.Name = "Label"
+		text.BackgroundTransparency = 1
+		text.AutomaticSize = Enum.AutomaticSize.XY
+		text.Size = UDim2.fromOffset(0, 42)
+		text.Font = UiTheme.Font
+		text.Text = "Keep Rollin'!"
+		text.TextColor3 = Color3.fromRGB(240, 255, 245)
+		text.TextSize = 34
+		text.TextXAlignment = Enum.TextXAlignment.Left
+		text.TextYAlignment = Enum.TextYAlignment.Center
+		text.LayoutOrder = 2
+		text.ZIndex = 11
+		text.Active = false
+		text.Parent = host
+		local textStroke = Instance.new("UIStroke")
+		textStroke.Color = Color3.fromRGB(0, 40, 20)
+		textStroke.Thickness = 1.8
+		textStroke.Parent = text
+	end
+	keepRollinHost = host
+	-- Resize if an older smaller instance is still around.
+	local slot = host:FindFirstChild("ArrowSlot")
+	if slot and slot:IsA("GuiObject") then
+		slot.Size = UDim2.fromOffset(48, 48)
+		local a = slot:FindFirstChild("Arrow")
+		if a and a:IsA("TextLabel") then
+			a.Size = UDim2.fromOffset(48, 48)
+			keepRollinArrow = a
+		end
+	end
+	local label = host:FindFirstChild("Label")
+	if label and label:IsA("TextLabel") then
+		label.TextSize = 34
+		label.Size = UDim2.fromOffset(0, 42)
+	end
+	if not keepRollinArrow or not keepRollinArrow.Parent then
+		local a = if slot then slot:FindFirstChild("Arrow") else nil
+		if a and a:IsA("TextLabel") then
+			keepRollinArrow = a
+		end
+	end
+	return host
+end
+
+local function startKeepRollinSlide()
+	if keepRollinSlideConn then
+		return
+	end
+	keepRollinSlideConn = RunService.RenderStepped:Connect(function()
+		if not keepRollinHost or not keepRollinHost.Visible then
+			return
+		end
+		layoutKeepRollin()
+		local arrow = keepRollinArrow
+		if arrow then
+			local x = math.sin(os.clock() * math.pi * 2 * KEEP_ROLLIN_SLIDE_HZ) * KEEP_ROLLIN_SLIDE_PX
+			arrow.Position = UDim2.new(0.5, x, 0.5, 0)
+		end
+	end)
+end
+
+local function refreshKeepRollin()
+	local show = shouldShowKeepRollin()
+	if not show then
+		stopKeepRollinSlide()
+		if keepRollinHost then
+			keepRollinHost.Visible = false
+		end
+		if keepRollinGui then
+			keepRollinGui.Enabled = false
+		end
+		return
+	end
+	local host = ensureKeepRollin()
+	if not host then
+		return
+	end
+	if keepRollinGui then
+		keepRollinGui.Enabled = true
+	end
+	host.Visible = true
+	layoutKeepRollin()
+	startKeepRollinSlide()
+end
+
 local function refreshRollButtonVisibility()
 	if not anchor then
 		return
@@ -185,6 +410,7 @@ local function refreshRollButtonVisibility()
 		end)
 	end
 	refreshHelpTip()
+	refreshKeepRollin()
 end
 
 local function buttonScreenCenter(): Vector2?
@@ -537,6 +763,7 @@ local function applyVisualRunning(skipCountCancel: boolean?)
 		setRunningLabel("OFF")
 	end
 	refreshIconSwap()
+	refreshKeepRollin()
 end
 
 local function applyVisualStopped()
@@ -555,6 +782,7 @@ local function applyVisualStopped()
 		label.TextTransparency = 0
 	end
 	refreshIconSwap()
+	refreshKeepRollin()
 end
 
 local function optimisticAutoRollBudget(): number?
@@ -1174,6 +1402,7 @@ local function startAutoRoll()
 		SeedWheelAutoRollState._setRemaining(budget)
 	end
 	busyAnim = true
+	refreshKeepRollin()
 	applyVisualRunning(true)
 	-- Optimistic enable so intro countdown can restore OFF afterward.
 	SeedWheelAutoRollState._setEnabled(true)
@@ -1201,6 +1430,7 @@ local function stopAutoRoll()
 	end
 	presenting = true
 	busyAnim = true
+	refreshKeepRollin()
 	SeedWheelAutoRollState._setEnabled(false)
 	Remotes.get("SeedWheelAutoRoll"):FireServer(false)
 	local isBusy = SeedWheelRevealApi.isBusy
@@ -1262,6 +1492,7 @@ local function rollOnce(fromPressSound: boolean?)
 	end
 	presenting = true
 	busyAnim = true
+	refreshKeepRollin()
 	spinVisibleIcon()
 	SeedWheelAutoRollState.armManual()
 	Remotes.get("SeedWheelRollOnce"):FireServer()
@@ -1395,6 +1626,11 @@ local function wireStopAutoRoll(leftOpt: Instance?)
 	end
 
 	anchor = host
+	-- Drop any leftover nudge parented under MobileLeftUI from an older build.
+	local stale = host.Parent and host.Parent:FindFirstChild(KEEP_ROLLIN_NAME)
+	if stale then
+		stale:Destroy()
+	end
 	refreshRollButtonVisibility()
 	host.Active = not uiHidesRoll()
 	pcall(function()
@@ -1412,6 +1648,7 @@ local function wireStopAutoRoll(leftOpt: Instance?)
 		applyVisualStopped()
 	end
 	refreshRollButtonVisibility()
+	refreshKeepRollin()
 end
 
 Remotes.get("SeedWheelAutoRollSync").OnClientEvent:Connect(function(enabled: any, remaining: any)
@@ -1464,6 +1701,12 @@ playerGui:GetAttributeChangedSignal(POWERUP_OPEN_ATTR):Connect(onOverlayUiAttrCh
 playerGui:GetAttributeChangedSignal(REPORT_OPEN_ATTR):Connect(onOverlayUiAttrChanged)
 playerGui:GetAttributeChangedSignal(STORE_OPEN_ATTR):Connect(onOverlayUiAttrChanged)
 playerGui:GetAttributeChangedSignal(HIDE_UI_ACTIVE_ATTR):Connect(onOverlayUiAttrChanged)
+playerGui:GetAttributeChangedSignal(ROLL_FINGER_ATTR):Connect(function()
+	refreshKeepRollin()
+end)
+playerGui:GetAttributeChangedSignal("OceanTD_JoinIntroBusy"):Connect(function()
+	refreshKeepRollin()
+end)
 InventoryState.onOpenChanged(function()
 	refreshRollButtonVisibility()
 end)

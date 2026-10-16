@@ -105,9 +105,15 @@ export type PlayerProfile = {
 	hasSeenJoinIntro: boolean,
 	-- Unlocks plot outline color picker after first wave-round defeat.
 	hasLostWaveRound: boolean,
+	-- Lifetime $D earn / play-time tracking (session rates computed live).
+	lifetimeSandDollarsEarned: number,
+	lifetimePlaySec: number,
+	-- Lifetime wave-economy telemetry (see EconomyStats / EconomyStatsService).
+	economyStats: EconomyStats.PlayerEconomy,
 }
 
 local Constants = require(script.Parent.Constants)
+local EconomyStats = require(script.Parent.EconomyStats)
 local SkillStages = require(script.Parent.SkillStages)
 
 local PlotTypes = {}
@@ -155,6 +161,9 @@ function PlotTypes.defaultProfile(): PlayerProfile
 		hideUiUnlocked = true, -- free for all players from the start
 		hasSeenJoinIntro = false,
 		hasLostWaveRound = false,
+		lifetimeSandDollarsEarned = 0,
+		lifetimePlaySec = 0,
+		economyStats = EconomyStats.defaultPlayer(),
 	}
 end
 

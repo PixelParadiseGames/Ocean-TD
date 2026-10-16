@@ -11,6 +11,7 @@ local SoundService = game:GetService("SoundService")
 local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
 local RunService = game:GetService("RunService")
+local Workspace = game:GetService("Workspace")
 
 local oceanRoot = ReplicatedStorage:WaitForChild("OceanTD")
 local Remotes = require(oceanRoot:WaitForChild("Remotes"))
@@ -563,38 +564,52 @@ end
 
 -- Session-only Reload Speed stage-8 demo (IIFE keeps helpers out of main-chunk locals).
 local ReloadTrialUI = (function()
-	local SEC = 120
+	local SEC = 60
+	local TAIL_SEC = 5 -- last N display-seconds stretch + flash
 	local ATTR = "OceanTD_ReloadFullAutoTrial"
 	local LABEL = "Try Full Auto"
+	local HUD_GUI = "OceanTD_FullAutoReloadHud"
+	local TICK_SOUND_ID = "rbxassetid://128707491647978"
+	local WHITE = Color3.new(1, 1, 1)
+	local FLASH_RED = Color3.fromRGB(255, 55, 60)
 	local st = {
-		endsAt = nil :: number?,
+		displayLeft = 0,
+		nextTickAt = 0,
 		btn = nil :: TextButton?,
 		lbl = nil :: TextLabel?,
+		hudGui = nil :: ScreenGui?,
+		hudLabel = nil :: TextLabel?,
+		hudScale = nil :: UIScale?,
 		conn = nil :: RBXScriptConnection?,
 		token = 0,
 	}
+	local tickSound = Instance.new("Sound")
+	tickSound.Name = "OceanTD_FullAutoReloadTick"
+	tickSound.SoundId = TICK_SOUND_ID
+	tickSound.Volume = 0.85
+	tickSound.Parent = SoundService
 	local api = {}
 
 	local function active(): boolean
-		local ends = st.endsAt
-		return ends ~= nil and os.clock() < ends
-	end
-
-	local function remaining(): number
-		local ends = st.endsAt
-		if not ends then
-			return 0
-		end
-		return math.max(0, ends - os.clock())
+		return st.displayLeft > 0
 	end
 
 	local function formatCountdown(sec: number): string
-		local s = math.max(0, math.ceil(sec))
+		local s = math.max(0, math.floor(sec + 1e-6))
 		return string.format("%d:%02d", math.floor(s / 60), s % 60)
 	end
 
+	-- Last 5 display-seconds draw out: 1.0s → ~1.48s per tick.
+	local function tickIntervalForLeft(left: number): number
+		if left > TAIL_SEC then
+			return 1
+		end
+		local idx = math.max(0, TAIL_SEC - left) -- 0 at 0:05, 4 at 0:01
+		return 1 + 0.12 * idx
+	end
+
 	local function publish()
-		playerGui:SetAttribute(ATTR, if active() then (st.endsAt :: number) else 0)
+		playerGui:SetAttribute(ATTR, if active() then os.clock() + st.displayLeft else 0)
 	end
 
 	local function stopTimer()
@@ -605,11 +620,121 @@ local ReloadTrialUI = (function()
 		end
 	end
 
+	local function destroyHud()
+		if st.hudGui then
+			st.hudGui:Destroy()
+			st.hudGui = nil
+		end
+		st.hudLabel = nil
+		st.hudScale = nil
+	end
+
+	local function hudTextSize(): number
+		local cam = Workspace.CurrentCamera
+		local vp = if cam then cam.ViewportSize else Vector2.new(1280, 720)
+		-- Phones / short viewports: keep clear of the wave N bar.
+		if vp.X <= 900 or vp.Y <= 500 then
+			return 20
+		end
+		return 26
+	end
+
+	-- Bottom-right corner, flush to the right edge.
+	local function layoutHud(lab: TextLabel)
+		lab.Position = UDim2.new(1, -4, 1, -10)
+		lab.TextSize = hudTextSize()
+	end
+
+	local function ensureHud(): TextLabel?
+		if st.hudLabel and st.hudLabel.Parent and st.hudGui and st.hudGui.Parent then
+			layoutHud(st.hudLabel)
+			return st.hudLabel
+		end
+		destroyHud()
+		local sg = Instance.new("ScreenGui")
+		sg.Name = HUD_GUI
+		sg.ResetOnSpawn = false
+		sg.IgnoreGuiInset = true
+		sg.DisplayOrder = 95
+		sg.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+		sg.Parent = playerGui
+		st.hudGui = sg
+		local lab = Instance.new("TextLabel")
+		lab.Name = "Countdown"
+		lab.BackgroundTransparency = 1
+		lab.AnchorPoint = Vector2.new(1, 1)
+		lab.AutomaticSize = Enum.AutomaticSize.XY
+		lab.Size = UDim2.fromOffset(0, 0)
+		lab.Font = UI_FONT
+		lab.TextSize = hudTextSize()
+		lab.TextColor3 = WHITE
+		lab.TextXAlignment = Enum.TextXAlignment.Right
+		lab.TextYAlignment = Enum.TextYAlignment.Bottom
+		lab.ZIndex = 10
+		lab.Active = false
+		lab.Parent = sg
+		local stroke = Instance.new("UIStroke")
+		stroke.Color = Color3.fromRGB(20, 20, 20)
+		stroke.Thickness = 1.5
+		stroke.Parent = lab
+		local scale = Instance.new("UIScale")
+		scale.Scale = 1
+		scale.Parent = lab
+		st.hudLabel = lab
+		st.hudScale = scale
+		layoutHud(lab)
+		return lab
+	end
+
+	local function playTick()
+		local snd = tickSound:Clone()
+		snd.Name = "OceanTD_FullAutoReloadTickHit"
+		snd.Parent = SoundService
+		snd:Play()
+		task.delay(1.2, function()
+			pcall(function()
+				snd:Stop()
+				snd:Destroy()
+			end)
+		end)
+	end
+
+	local function refreshHud()
+		local lab = ensureHud()
+		if not lab then
+			return
+		end
+		local left = st.displayLeft
+		lab.Text = "Full Auto Reload " .. formatCountdown(left)
+		lab.Visible = left > 0
+		if st.hudGui then
+			st.hudGui.Enabled = left > 0
+		end
+		layoutHud(lab)
+		local inTail = left > 0 and left <= TAIL_SEC
+		if inTail then
+			-- Flash red ↔ white + gentle scale pulse (driven by clock).
+			local t = os.clock() * 6.5
+			local pulse = 0.5 + 0.5 * math.sin(t)
+			lab.TextColor3 = FLASH_RED:Lerp(WHITE, pulse * 0.35)
+			if st.hudScale then
+				st.hudScale.Scale = 1.04 + 0.08 * pulse
+			end
+		else
+			lab.TextColor3 = WHITE
+			if st.hudScale then
+				st.hudScale.Scale = 1
+			end
+		end
+	end
+
 	local syncButton: () -> ()
 
 	local function endTrial()
 		stopTimer()
-		st.endsAt = nil
+		st.displayLeft = 0
+		st.nextTickAt = 0
+		destroyHud()
 		publish()
 		syncButton()
 	end
@@ -628,7 +753,7 @@ local ReloadTrialUI = (function()
 			return
 		end
 		if active() then
-			lbl.Text = formatCountdown(remaining())
+			lbl.Text = formatCountdown(st.displayLeft)
 			btn.AutoButtonColor = false
 		else
 			lbl.Text = LABEL
@@ -673,24 +798,49 @@ local ReloadTrialUI = (function()
 		if unlockedStage("ReloadSpeed") >= SkillStages.RELOAD_SPEED_FULL_AUTO_STAGE then
 			return false
 		end
-		local dur = if typeof(durationSec) == "number" and durationSec > 0 then durationSec else SEC
-		st.endsAt = os.clock() + dur
-		publish()
+		local dur = math.max(1, math.floor(if typeof(durationSec) == "number" and durationSec > 0 then durationSec else SEC))
 		stopTimer()
+		st.displayLeft = dur
+		st.nextTickAt = os.clock() + tickIntervalForLeft(dur)
+		publish()
+		refreshHud()
 		st.token += 1
 		local token = st.token
 		st.conn = RunService.Heartbeat:Connect(function()
 			if token ~= st.token then
 				return
 			end
-			if not active() then
+			if st.displayLeft <= 0 then
 				endTrial()
 				return
 			end
-			local lbl = st.lbl
-			if lbl and lbl.Parent then
-				lbl.Text = formatCountdown(remaining())
+			local now = os.clock()
+			if now >= st.nextTickAt then
+				playTick()
+				st.displayLeft -= 1
+				publish()
+				if st.displayLeft <= 0 then
+					refreshHud()
+					local btnLbl = st.lbl
+					if btnLbl and btnLbl.Parent then
+						btnLbl.Text = formatCountdown(0)
+					end
+					-- Brief beat on 0:00, then clear.
+					task.delay(0.35, function()
+						if token == st.token then
+							endTrial()
+						end
+					end)
+					st.nextTickAt = math.huge
+				else
+					st.nextTickAt = now + tickIntervalForLeft(st.displayLeft)
+					local btnLbl = st.lbl
+					if btnLbl and btnLbl.Parent then
+						btnLbl.Text = formatCountdown(st.displayLeft)
+					end
+				end
 			end
+			refreshHud()
 		end)
 		syncButton()
 		return true

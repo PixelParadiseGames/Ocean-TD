@@ -29,6 +29,7 @@ local WaveWatchService = require(Services:WaitForChild("WaveWatchService"))
 local UrchinStingService = require(Services:WaitForChild("UrchinStingService"))
 local FriendPlotPreviewService = require(Services:WaitForChild("FriendPlotPreviewService"))
 local JoinIntroPackageService = require(Services:WaitForChild("JoinIntroPackageService"))
+local EconomyStatsService = require(Services:WaitForChild("EconomyStatsService"))
 
 local Constants = require(oceanRoot:WaitForChild("Shared"):WaitForChild("Constants"))
 
@@ -36,6 +37,10 @@ Remotes.initServer()
 PersistenceService.init()
 EconomyService.init()
 PlotService.init()
+-- IntroPosition (Plot1-authored) → invisible marker under each Plots.PlotN.
+pcall(function()
+	PersistenceService.syncIntroPads()
+end)
 PlacementService.init()
 PlotSaveService.init()
 WaveWatchService.init()
@@ -257,6 +262,14 @@ local function onPlayerAdded(player: Player)
 	-- Clear any friend-preview reef on this seat before size apply / hydrate.
 	FriendPlotPreviewService.evictPreview(payload.plotId)
 	markIntroPending(player)
+	-- Per-plot IntroPosition marker → player attribute for free-$D FX / spend checks.
+	do
+		local IntroPad = require(oceanRoot:WaitForChild("Shared"):WaitForChild("IntroPad"))
+		local marker = IntroPad.getPlotMarker(payload.plotId)
+		if marker then
+			player:SetAttribute(IntroPad.PAD_POS_ATTR, marker.Position)
+		end
+	end
 
 	-- Early plot + intro sync (provisional hasSeen=false; corrected after profile load).
 	plotAssignedRemote:FireClient(player, payload)
@@ -279,23 +292,13 @@ local function onPlayerAdded(player: Player)
 		end
 	end
 
-	local LayoutRestore = require(game:GetService("ReplicatedStorage"):WaitForChild("OceanTD"):WaitForChild("Shared"):WaitForChild("LayoutRestore"))
+	-- Normalize ALL save slots into the active Plot Size stage (per-slot stage→stage).
+	-- Previously only the active slot was reframed; inactive slots kept stale locals and
+	-- plotSizeStage was not persisted — load/swap then slid every coral the same way.
 	local ringSlot = PlotService.getSlot(payload.plotId)
-	local activeIdx = profile.plotSaves.activeIndex
-	local activeSlot = profile.plotSaves.slots[activeIdx]
-	if ringSlot and activeSlot and #activeSlot.layout > 0 then
-		local currentStage = PersistenceService.getSkillStage(player, "PlotSize")
-		local savedStage = activeSlot.plotSizeStage
-		if typeof(savedStage) == "number" and savedStage ~= currentStage then
-			local oldCf, _ = PlotService.getStageWorldPose(ringSlot, savedStage)
-			local newCf, _ = PlotService.getStageWorldPose(ringSlot, currentStage)
-			if oldCf and newCf and oldCf ~= newCf then
-				local reframed = LayoutRestore.reframeLayout(activeSlot.layout, oldCf, newCf)
-				profile.layout = reframed
-				activeSlot.layout = reframed
-				activeSlot.plotSizeStage = currentStage
-			end
-		end
+	local currentStage = PersistenceService.getSkillStage(player, "PlotSize")
+	if ringSlot then
+		PersistenceService.normalizePlotSaveLayoutsToStage(player, ringSlot, currentStage, nil)
 	end
 
 	GridService.hydrate(payload.plotId, player.UserId, profile.layout, payload.cframe)
@@ -491,12 +494,31 @@ requestRenamePlotSave.OnServerInvoke = function(player: Player, slotIndex: any, 
 end
 
 local reportFishFed = Remotes.get("ReportFishFed")
-reportFishFed.OnServerEvent:Connect(function(player: Player, fishCount: any)
+reportFishFed.OnServerEvent:Connect(function(player: Player, fishCount: any, speedMult: any?)
 	local session = PlayerSession.get(player)
 	if not session or session.layoutLoaded ~= true then
 		return
 	end
-	PersistenceService.creditSandDollarsFromFeed(player, fishCount)
+	PersistenceService.creditSandDollarsFromFeed(player, fishCount, speedMult)
+end)
+
+local reportWaveEconomy = Remotes.get("ReportWaveEconomy")
+reportWaveEconomy.OnServerEvent:Connect(function(player: Player, payload: any)
+	local session = PlayerSession.get(player)
+	if not session or session.layoutLoaded ~= true then
+		return
+	end
+	if typeof(payload) ~= "table" then
+		return
+	end
+	EconomyStatsService.noteWavePlay(player, payload.playBySpeed, payload.waveEnded == true)
+	local complete = payload.waveComplete
+	if typeof(complete) == "table" then
+		EconomyStatsService.noteWaveDuration(player, complete.wave, complete.durationSec)
+	end
+	if payload.waveEnded == true then
+		EconomyStatsService.queuePublish(player)
+	end
 end)
 
 local reportCoralLifeStats = Remotes.get("ReportCoralLifeStats")
@@ -559,6 +581,11 @@ end
 local requestGetSkillStages = Remotes.getFunction("RequestGetSkillStages")
 requestGetSkillStages.OnServerInvoke = function(player: Player)
 	return PersistenceService.getSkillStagesPayload(player)
+end
+
+local requestGetSandDollarStats = Remotes.getFunction("RequestGetSandDollarStats")
+requestGetSandDollarStats.OnServerInvoke = function(player: Player)
+	return PersistenceService.getSandDollarStats(player)
 end
 
 local requestSetSkillActiveStage = Remotes.getFunction("RequestSetSkillActiveStage")

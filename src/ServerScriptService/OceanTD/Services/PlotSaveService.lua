@@ -104,13 +104,16 @@ local function prepareLayoutForLoad(
 	savedPlotSizeStage: number?,
 	currentPlotSizeStage: number
 ): { LayoutObject }
+	-- Per-slot stage poses (same contract as PersistenceService.normalizePlotSaveLayoutsToStage).
+	-- Missing plotSizeStage → assume already in current space (never invent a basis).
 	local savedStage = if typeof(savedPlotSizeStage) == "number" then math.floor(savedPlotSizeStage) else nil
-	if savedStage and savedStage ~= currentPlotSizeStage then
-		local oldCf, _ = PlotService.getStageWorldPose(ringSlot, savedStage)
-		local newCf, _ = PlotService.getStageWorldPose(ringSlot, currentPlotSizeStage)
-		if oldCf and newCf and oldCf ~= newCf then
-			return LayoutRestore.reframeLayout(layout, oldCf, newCf)
-		end
+	if not savedStage or savedStage == currentPlotSizeStage then
+		return layout
+	end
+	local oldCf, _ = PlotService.getStageWorldPose(ringSlot, savedStage)
+	local newCf, _ = PlotService.getStageWorldPose(ringSlot, currentPlotSizeStage)
+	if oldCf and newCf and oldCf ~= newCf then
+		return LayoutRestore.reframeLayout(layout, oldCf, newCf)
 	end
 	return layout
 end

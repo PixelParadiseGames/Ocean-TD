@@ -127,8 +127,15 @@ local function flush()
 	if n <= 0 then
 		return
 	end
+	local speed = 1
+	pcall(function()
+		local WaveSim = require(script.Parent:WaitForChild("WaveSim"))
+		if typeof(WaveSim.getSpeedMult) == "function" then
+			speed = WaveSim.getSpeedMult()
+		end
+	end)
 	local ok, err = pcall(function()
-		getRemote():FireServer(n)
+		getRemote():FireServer(n, speed)
 	end)
 	if not ok then
 		warn("[ECONOMY] ReportFishFed failed", err)

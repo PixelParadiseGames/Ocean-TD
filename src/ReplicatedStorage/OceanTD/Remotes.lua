@@ -20,6 +20,7 @@ local REMOTE_EVENTS = {
 	"SkillStagesSync",
 	"InventorySync",
 	"ReportFishFed",
+	"ReportWaveEconomy",
 	"ReportCoralLifeStats",
 	"PlotSizeChanged",
 	"ReportPlotSizeCinematicDone",
@@ -61,6 +62,7 @@ local REMOTE_FUNCTIONS = {
 	"RequestUnlockHideUi",
 	"RequestMarkJoinIntroSeen",
 	"RequestGetJoinIntro",
+	"RequestGetSandDollarStats",
 }
 
 local function getRoot(): Instance

@@ -300,6 +300,11 @@ local function resolvePlot1CFrame(): CFrame?
 	return nil
 end
 
+-- Same origin ClientPlot / JoinIntro use for Plot1-authored remaps (MasterTerrainBox).
+function PlotService.getPlot1CFrame(): CFrame?
+	return resolvePlot1CFrame()
+end
+
 local function buildPayload(slot: PlotSlot): PlotBoundsPayload
 	return {
 		plotId = slot.plotId,
@@ -646,8 +651,26 @@ function PlotService.getStageWorldPose(slot: PlotSlot, stage: number): (CFrame?,
 	return worldCf, template.Size
 end
 
+-- Which Plot Size stage pose best matches this world CFrame (nil if none within contract drift).
+function PlotService.inferStageFromCFrame(slot: PlotSlot, worldCf: CFrame): number?
+	for stage = SkillStages.MIN_STAGE, SkillStages.maxStageFor("PlotSize") do
+		local pose, _ = PlotService.getStageWorldPose(slot, stage)
+		if pose and PlotFrameContract.passes(worldCf, pose) then
+			return stage
+		end
+	end
+	return nil
+end
+
 -- Apply Studio PlotSizes box (CFrame + Size) for this player's stage.
-function PlotService.setOwnerPlotSize(player: Player, size: Vector3, boundsCf: CFrame?): PlotBoundsPayload?
+-- toStage / fromStageHint drive per-slot save-layout normalize (not a single live CFrame delta).
+function PlotService.setOwnerPlotSize(
+	player: Player,
+	size: Vector3,
+	boundsCf: CFrame?,
+	toStage: number?,
+	fromStageHint: number?
+): PlotBoundsPayload?
 	local plotId = ownerToPlot[player]
 	if not plotId then
 		return nil
@@ -662,6 +685,12 @@ function PlotService.setOwnerPlotSize(player: Player, size: Vector3, boundsCf: C
 	local newSize = Vector3.new(sx, sy, sz)
 	local newCf = boundsCf or slot.cframe
 	local oldCf = slot.cframe
+	local inferredFrom = if typeof(fromStageHint) == "number"
+		then fromStageHint
+		else PlotService.inferStageFromCFrame(slot, oldCf)
+	local targetStage = if typeof(toStage) == "number"
+		then SkillStages.clampStageFor("PlotSize", toStage)
+		else nil
 	slot.size = newSize
 	slot.cframe = newCf
 	-- Keep spawn remapped from ring (avatar start), not the size-box center.
@@ -673,10 +702,12 @@ function PlotService.setOwnerPlotSize(player: Player, size: Vector3, boundsCf: C
 		local PlacementService = require(script.Parent:WaitForChild("PlacementService"))
 		local PersistenceService = require(script.Parent:WaitForChild("PersistenceService"))
 		local PlayerSession = require(script.Parent:WaitForChild("PlayerSession"))
+		-- Live grid: always map through the actual old/new bounds (authoritative for placed cells).
 		GridService.reframe(plotId, oldCf, newCf)
 		PlacementService.hydrateVisuals(plotId, newCf)
 		if PlayerSession.canSave(player) then
-			PersistenceService.reframeAllPlotSaveLayouts(player, oldCf, newCf)
+			local stage = targetStage or PersistenceService.getSkillStage(player, "PlotSize")
+			PersistenceService.normalizePlotSaveLayoutsToStage(player, slot, stage, inferredFrom)
 			local layout = PlacementService.snapshotLayout(plotId)
 			local activeIdx = PersistenceService.getActiveSlotIndex(player)
 			PersistenceService.writeSlotLayout(player, activeIdx, layout, true)
@@ -688,7 +719,7 @@ function PlotService.setOwnerPlotSize(player: Player, size: Vector3, boundsCf: C
 	return buildPayload(slot)
 end
 
-function PlotService.applyOwnerPlotSizeStage(player: Player, stage: number): PlotBoundsPayload?
+function PlotService.applyOwnerPlotSizeStage(player: Player, stage: number, fromStageHint: number?): PlotBoundsPayload?
 	local plotId = ownerToPlot[player]
 	if not plotId then
 		return nil
@@ -702,7 +733,7 @@ function PlotService.applyOwnerPlotSizeStage(player: Player, stage: number): Plo
 		warnPlot("PlotSizes template missing for stage", stage)
 		return PlotService.getBoundsPayload(player)
 	end
-	return PlotService.setOwnerPlotSize(player, size, worldCf)
+	return PlotService.setOwnerPlotSize(player, size, worldCf, stage, fromStageHint)
 end
 
 return PlotService

@@ -187,4 +187,41 @@ function HueSeeds.pickFirstOwnedHue(inv: HueInventory, itemId: string): number?
 	return owned[1]
 end
 
+--[[
+	Debit preferred hue when possible; otherwise any owned hue of that species.
+	Used for layout load so scrambled seedHue metadata (paint written as seed) cannot
+	block restore when the species total is still sufficient. Never invents seeds.
+	Returns ok, hueUsed, nextCountForThatHue.
+]]
+function HueSeeds.tryDebitFlexible(
+	inv: HueInventory,
+	itemId: string,
+	preferredHue: number?,
+	amount: number?
+): (boolean, number?, number)
+	local tried: { [number]: boolean } = {}
+	local function tryOne(hue: number): (boolean, number)
+		local idx = PlotOutlineColors.clampCoralIndex(hue)
+		if tried[idx] then
+			return false, 0
+		end
+		tried[idx] = true
+		local ok, nextCount = HueSeeds.tryDebit(inv, itemId, idx, amount)
+		return ok, nextCount
+	end
+	if typeof(preferredHue) == "number" then
+		local ok, nextCount = tryOne(preferredHue)
+		if ok then
+			return true, PlotOutlineColors.clampCoralIndex(preferredHue), nextCount
+		end
+	end
+	for _, hue in ipairs(HueSeeds.ownedHueIndices(inv, itemId)) do
+		local ok, nextCount = tryOne(hue)
+		if ok then
+			return true, hue, nextCount
+		end
+	end
+	return false, nil, 0
+end
+
 return HueSeeds
