@@ -291,6 +291,8 @@ local simClock = 0 -- advances with dt * speedMult (ammo/combat); HUD clock free
 local speedMult = 1 -- 1 | 1.5 | 2 | 0 (pause); session-only, player-controlled
 local pauseWallT0: number? = nil -- wall clock when speed-pause began
 local pausedWallAccum = 0 -- total wall time spent paused this run
+local cinematicResumeSpeed: number? = nil -- speed to restore after intro cinematic pause
+local PATH_TOUR_PLAY_SEC = 3 -- let the wave run before pausing into the path cam tour
 local waveSpawning = false
 local moveConn: RBXScriptConnection? = nil
 local combatAcc = 0
@@ -343,6 +345,7 @@ local function resetSpeedState()
 	speedMult = 1
 	pauseWallT0 = nil
 	pausedWallAccum = 0
+	cinematicResumeSpeed = nil
 end
 
 -- Skip / next-wave while paused → resume at 1x.
@@ -881,6 +884,18 @@ L.WavePathLines.bind({
 			or WaveUrchin.expectedCount() > 0
 			or WaveCrab.spawnedCount() > 0
 			or WaveUrchin.spawnedCount() > 0
+	end,
+	getSharkPath = function()
+		return pathDataShark
+	end,
+	sampleSharkPath = function(path, dist)
+		return WaveShark.sample(path, dist)
+	end,
+	waveShowsSharkPath = function()
+		if not running or joinIntroDemo then
+			return false
+		end
+		return WaveShark.shouldSpawn(waveIndex) or WaveShark.liveCount() > 0
 	end,
 })
 
@@ -2080,7 +2095,26 @@ local function countAliveWaveBlockers(): number
 	return n
 end
 
+local function syncGroundPathHearts()
+	local ends: { [string]: Vector3 } = {}
+	local scales: { [string]: number } = {}
+	for _, f in ipairs(fishList) do
+		if (f.isCrab or f.isUrchin) and not f.finished and f.groundPath then
+			local e = f.groundPath.endPos
+			local key = string.format("%.0f_%.0f_%.0f", e.X, e.Y, e.Z)
+			ends[key] = e
+		elseif f.isShark and not f.finished and pathDataShark then
+			local e = pathDataShark.endPos
+			local key = "shark_" .. string.format("%.0f_%.0f_%.0f", e.X, e.Y, e.Z)
+			ends[key] = e
+			scales[key] = L.WaveEndVfx.SHARK_HEART_SCALE or (1 / 3)
+		end
+	end
+	L.WaveEndVfx.syncGroundPathHearts(ends, scales)
+end
+
 local function destroyFish(agent: FishAgent)
+	local wasPathHeart = agent.isCrab or agent.isUrchin or agent.isShark
 	agent.finished = true
 	agent.pulseToken += 1
 	agent.dangerToken += 1
@@ -2100,6 +2134,9 @@ local function destroyFish(agent: FishAgent)
 		WaveEntityPool.releaseFish(WaveEntityPool.FISH_SHARK, agent.model)
 	else
 		WaveEntityPool.releaseFish(WaveEntityPool.FISH_TANG, agent.model)
+	end
+	if wasPathHeart then
+		syncGroundPathHearts()
 	end
 end
 
@@ -2451,6 +2488,7 @@ local function spawnOneCrab(startDist: number?)
 	setFishCFrame(agent, pos, tang, 1)
 	table.insert(fishList, agent)
 	attachTapFeedDebug(agent)
+	syncGroundPathHearts()
 	if not joinIntroDemo and not firstVoPlayed.crab then
 		firstVoPlayed.crab = true
 		L.TutorialVo.play(L.VO_FIRST_CRAB, "OceanTD_FirstCrab", {
@@ -2587,6 +2625,7 @@ local function spawnOneUrchin(startDist: number?)
 	captureUrchinRigLocals(agent)
 	table.insert(fishList, agent)
 	attachTapFeedDebug(agent)
+	syncGroundPathHearts()
 	if not joinIntroDemo and not firstVoPlayed.urchin then
 		firstVoPlayed.urchin = true
 		L.TutorialVo.play(L.VO_FIRST_URCHIN, "OceanTD_FirstUrchin", {
@@ -2597,16 +2636,46 @@ local function spawnOneUrchin(startDist: number?)
 		})
 	end
 
-	-- Wave 5 only: cinematic zoom onto the first urchin (same beat as shark wave 10).
-	if waveIndex == C.URCHIN_FIRST_WAVE and WaveUrchin.spawnedCount() == 1 then
+	-- Wave 5 only: play ~3s, then pause → path POV tour → unpause after cam restore.
+	if not joinIntroDemo and waveIndex == C.URCHIN_FIRST_WAVE and WaveUrchin.spawnedCount() == 1 then
 		local urchinId = agent.id
-		L.UrchinCam.play(function(): (Vector3?, Vector3?)
-			for _, f in ipairs(fishList) do
-				if f.id == urchinId and not f.finished then
-					return f.lastWorld, f.smoothTang
-				end
+		local tourPath = path
+		task.defer(function()
+			local t0 = os.clock()
+			while running and (os.clock() - t0) < PATH_TOUR_PLAY_SEC do
+				task.wait()
 			end
-			return nil, nil
+			if not running or L.UrchinCam.isBusy() or not tourPath then
+				return
+			end
+			-- Skip W1–W2 and the final waypoint: ride W3 → penultimate.
+			local wps = tourPath.waypointDists
+			local startDist = if typeof(wps) == "table" and #wps >= 3 then wps[3] else (if typeof(wps) == "table" and #wps >= 2 then wps[2] else 0)
+			local endDist = if typeof(wps) == "table" and #wps >= 4
+				then wps[#wps - 1]
+				else math.max(startDist + 1, tourPath.totalLen * 0.85)
+			if endDist <= startDist + 1 then
+				endDist = math.max(startDist + 1, tourPath.totalLen * 0.85)
+			end
+			WaveSim.setCinematicPaused(true)
+			L.UrchinCam.playPathTour({
+				sample = function(dist: number): (Vector3, Vector3)
+					return WaveUrchin.sample(tourPath, dist)
+				end,
+				startDist = startDist,
+				endDist = endDist,
+				getFocusPose = function(): (Vector3?, Vector3?)
+					for _, f in ipairs(fishList) do
+						if f.id == urchinId and not f.finished then
+							return f.lastWorld, f.smoothTang
+						end
+					end
+					return nil, nil
+				end,
+				onEnd = function()
+					WaveSim.setCinematicPaused(false, 1)
+				end,
+			})
 		end)
 	end
 end
@@ -2706,6 +2775,7 @@ local function spawnOneShark()
 	setFishCFrame(agent, pos, tang, 1)
 	table.insert(fishList, agent)
 	attachTapFeedDebug(agent)
+	syncGroundPathHearts()
 	if not joinIntroDemo and not firstVoPlayed.shark then
 		firstVoPlayed.shark = true
 		L.TutorialVo.play(L.VO_FIRST_SHARK, "OceanTD_FirstShark", {
@@ -2716,16 +2786,51 @@ local function spawnOneShark()
 		})
 	end
 
-	-- Wave 10 only: cinematic zoom onto the shark.
-	if waveIndex == C.SHARK_FIRST_WAVE then
+	-- Wave 10 only: play ~3s, then pause → path POV tour → unpause after cam restore.
+	if not joinIntroDemo and waveIndex == C.SHARK_FIRST_WAVE then
 		local sharkId = agent.id
-		L.SharkCam.play(function(): (Vector3?, Vector3?)
-			for _, f in ipairs(fishList) do
-				if f.id == sharkId and not f.finished then
-					return f.lastWorld, f.smoothTang
-				end
+		local tourPath = path
+		task.defer(function()
+			local t0 = os.clock()
+			while running and (os.clock() - t0) < PATH_TOUR_PLAY_SEC do
+				task.wait()
 			end
-			return nil, nil
+			if not running or L.UrchinCam.isBusy() or L.SharkCam.isBusy() or not tourPath then
+				return
+			end
+			L.WavePathLines.syncHostilePaths()
+			local wps = tourPath.waypointDists
+			local startDist = if typeof(wps) == "table" and #wps >= 2 then wps[2] else 0
+			-- Ride through the final waypoint (don't cut the last WN out of the tour).
+			local endDist = if typeof(wps) == "table" and #wps >= 1
+				then wps[#wps]
+				else tourPath.totalLen
+			if endDist <= startDist + 1 then
+				endDist = math.max(startDist + 1, tourPath.totalLen)
+			end
+			WaveSim.setCinematicPaused(true)
+			L.UrchinCam.playPathTour({
+				sample = function(dist: number): (Vector3, Vector3)
+					return WaveShark.sample(tourPath, dist)
+				end,
+				startDist = startDist,
+				endDist = endDist,
+				-- Shark route drops hard early — look at the next WN so pitch follows the hill.
+				lookNextWaypoint = true,
+				waypointDists = tourPath.waypointDists,
+				pathHeight = 2,
+				getFocusPose = function(): (Vector3?, Vector3?)
+					for _, f in ipairs(fishList) do
+						if f.id == sharkId and not f.finished then
+							return f.lastWorld, f.smoothTang
+						end
+					end
+					return nil, nil
+				end,
+				onEnd = function()
+					WaveSim.setCinematicPaused(false, 1)
+				end,
+			})
 		end)
 	end
 end
@@ -2814,6 +2919,31 @@ local function beginWave(wave: number)
 	restoreStunnedCorals(wave > 1)
 	if wave == 2 then
 		tryOfferWave2FullAutoTrial()
+	end
+	-- Wave 3: pause until cam tap → Fish Cam POV, then fish spawn/swim.
+	if not joinIntroDemo then
+		local pg = Players.LocalPlayer and Players.LocalPlayer:FindFirstChildOfClass("PlayerGui")
+		if pg then
+			local skippedTutorial = pg:GetAttribute("OceanTD_FingerTutorialSkipped") == true
+			if wave == 3 and not skippedTutorial then
+				pg:SetAttribute("OceanTD_TutorialGateCam", false)
+				pg:SetAttribute("OceanTD_Wave3FishCamHint", true)
+				pg:SetAttribute("OceanTD_Wave3CamHoldPause", true)
+				pg:SetAttribute("OceanTD_RollFingerHint", "cam")
+				WaveSim.setCinematicPaused(true)
+			else
+				if pg:GetAttribute("OceanTD_Wave3FishCamHint") == true then
+					pg:SetAttribute("OceanTD_Wave3FishCamHint", nil)
+					if pg:GetAttribute("OceanTD_RollFingerHint") == "cam" then
+						pg:SetAttribute("OceanTD_RollFingerHint", false)
+					end
+				end
+				if pg:GetAttribute("OceanTD_Wave3CamHoldPause") == true then
+					pg:SetAttribute("OceanTD_Wave3CamHoldPause", nil)
+					WaveSim.setCinematicPaused(false)
+				end
+			end
+		end
 	end
 	-- After W20: roll 20–40% of this wave's Tang onto A2.
 	fishA2Remaining = 0
@@ -4044,6 +4174,24 @@ local function hardCleanup(preserveAmmoFade: boolean?, preserveCritterFade: bool
 		end
 		table.clear(fishList)
 	end
+	L.WaveEndVfx.clearGroundPathHearts()
+	do
+		local pg = Players.LocalPlayer and Players.LocalPlayer:FindFirstChildOfClass("PlayerGui")
+		if pg then
+			if pg:GetAttribute("OceanTD_Wave3FishCamHint") == true then
+				pg:SetAttribute("OceanTD_Wave3FishCamHint", nil)
+				if pg:GetAttribute("OceanTD_RollFingerHint") == "cam" then
+					pg:SetAttribute("OceanTD_RollFingerHint", false)
+				end
+			end
+			if pg:GetAttribute("OceanTD_Wave3CamHoldPause") == true then
+				pg:SetAttribute("OceanTD_Wave3CamHoldPause", nil)
+			end
+			pg:SetAttribute("OceanTD_CinematicSpeedPause", nil)
+			pg:SetAttribute("OceanTD_PathTourPending", nil)
+		end
+		WaveSim.setCinematicPaused(false, 1)
+	end
 	table.clear(stingReportAt)
 	restoreStunnedCorals(false, false)
 	for _, c in ipairs(coralList) do
@@ -4723,8 +4871,9 @@ function WaveSim.stop(opts: { silent: boolean?, preserveAmmoFade: boolean?, pres
 	table.clear(hostilePreviewPaths)
 	table.clear(hostilePathQueue)
 	hostileDisplayIndex = 1
-	-- Drop red crab/urchin path ribbons with the wave.
+	-- Drop red crab/urchin path ribbons + mini end hearts with the wave.
 	L.WavePathLines.syncHostilePaths()
+	L.WaveEndVfx.clearGroundPathHearts()
 	demoCoralParts = nil
 	joinIntroDemo = false
 	lastHudWave = -1
@@ -5309,6 +5458,49 @@ end
 
 function WaveSim.isSpeedPaused(): boolean
 	return speedMult <= 1e-6
+end
+
+local function setCinematicSpeedPauseAttr(on: boolean)
+	local pg = Players.LocalPlayer and Players.LocalPlayer:FindFirstChildOfClass("PlayerGui")
+	if pg then
+		pg:SetAttribute("OceanTD_CinematicSpeedPause", if on then true else nil)
+	end
+end
+
+-- Intro cinematics (urchin/shark path tours): pause without requiring Wave Speed stage 4.
+-- resumeMult (optional): speed to restore on unpause (path tours pass 1 for normal play).
+function WaveSim.setCinematicPaused(paused: boolean, resumeMult: number?)
+	if paused then
+		if speedMult > 1e-6 then
+			cinematicResumeSpeed = speedMult
+			applySpeedPauseState(true)
+			speedMult = 0
+			setCinematicSpeedPauseAttr(true)
+			notifyHud()
+		elseif cinematicResumeSpeed == nil then
+			cinematicResumeSpeed = 1
+			setCinematicSpeedPauseAttr(true)
+			notifyHud()
+		else
+			setCinematicSpeedPauseAttr(true)
+		end
+		return
+	end
+	local resume = if typeof(resumeMult) == "number" and (resumeMult :: number) > 1e-6
+		then (resumeMult :: number)
+		else (cinematicResumeSpeed or 1)
+	cinematicResumeSpeed = nil
+	setCinematicSpeedPauseAttr(false)
+	if speedMult <= 1e-6 then
+		applySpeedPauseState(false)
+		speedMult = if resume > 1e-6 then resume else 1
+		notifyHud()
+	end
+end
+
+function WaveSim.isCinematicSpeedPaused(): boolean
+	local pg = Players.LocalPlayer and Players.LocalPlayer:FindFirstChildOfClass("PlayerGui")
+	return pg ~= nil and pg:GetAttribute("OceanTD_CinematicSpeedPause") == true
 end
 
 -- Cycle within unlocked steps: 1 → 1.5 → 2 → (pause if stage 4) → 1.

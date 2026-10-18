@@ -862,6 +862,11 @@ end
 
 local function restoreHud()
 	stopHudSuppress()
+	-- Never leave the intro PLOT title behind after HUD comes back.
+	local plotTitle = playerGui:FindFirstChild("OceanTD_JoinIntroPlotTitle")
+	if plotTitle then
+		plotTitle:Destroy()
+	end
 	for sg, wasEnabled in pairs(hiddenScreens) do
 		if sg.Parent then
 			sg.Enabled = wasEnabled
@@ -1439,8 +1444,23 @@ local function destroyFolder(folder: Folder?)
 	end
 end
 
+-- Skip / abort / pcall failure can leave OceanTD_JoinIntroPlotTitle parented — always clear it.
+local function destroyPlotTitleGui()
+	local leftover = playerGui:FindFirstChild("OceanTD_JoinIntroPlotTitle")
+	if leftover then
+		leftover:Destroy()
+	end
+end
+
 -- Centered "PLOT" title: overshoots large, then bounces to rest. Returns gui to destroy later.
-local function playPlotTitlePop(): ScreenGui
+-- Caller (or destroyPlotTitleGui on Skip) must Destroy the ScreenGui — anim stops when unparented.
+local function playPlotTitlePop(shouldAbort: (() -> boolean)?): ScreenGui?
+	-- Only one title at a time (skip mid-pop + re-entry races).
+	destroyPlotTitleGui()
+	if shouldAbort and shouldAbort() then
+		return nil
+	end
+
 	local sg = Instance.new("ScreenGui")
 	sg.Name = "OceanTD_JoinIntroPlotTitle"
 	sg.IgnoreGuiInset = true
@@ -1477,21 +1497,38 @@ local function playPlotTitlePop(): ScreenGui
 	scale.Scale = 0.15
 	scale.Parent = lbl
 
+	local function aborted(): boolean
+		if shouldAbort and shouldAbort() then
+			return true
+		end
+		-- Skip / finish clears busy or unparents this gui.
+		if playerGui:GetAttribute(ATTR_BUSY) ~= true then
+			return true
+		end
+		return sg.Parent == nil
+	end
+
 	local peak = 1.55
 	local rest = 1
 	local upSec = 0.38
 	local downSec = 0.42
 	local t0 = os.clock()
-	while sg.Parent and os.clock() - t0 < upSec do
+	while not aborted() and os.clock() - t0 < upSec do
 		sg.Enabled = true
 		local u = math.clamp((os.clock() - t0) / upSec, 0, 1)
 		local e = 1 - (1 - u) ^ 3
 		scale.Scale = 0.15 + (peak - 0.15) * e
 		RunService.RenderStepped:Wait()
 	end
+	if aborted() then
+		if sg.Parent then
+			sg:Destroy()
+		end
+		return nil
+	end
 	scale.Scale = peak
 	local t1 = os.clock()
-	while sg.Parent and os.clock() - t1 < downSec do
+	while not aborted() and os.clock() - t1 < downSec do
 		sg.Enabled = true
 		local u = math.clamp((os.clock() - t1) / downSec, 0, 1)
 		-- Ease-out back into rest (small settle bounce).
@@ -1499,6 +1536,12 @@ local function playPlotTitlePop(): ScreenGui
 		local e = 1 + t * t * (2.70158 * t + 1.70158)
 		scale.Scale = peak + (rest - peak) * math.clamp(e, 0, 1.15)
 		RunService.RenderStepped:Wait()
+	end
+	if aborted() then
+		if sg.Parent then
+			sg:Destroy()
+		end
+		return nil
 	end
 	scale.Scale = rest
 	sg.Enabled = true
@@ -1933,12 +1976,20 @@ local function runIntro()
 		hideCharacterLocal(false)
 		bindFreeze(false)
 		ContextActionService:UnbindAction(SKIP_ACTION)
-		for _, name in ipairs({ "OceanTD_JoinIntro", "OceanTD_JoinIntroLoad", "OceanTD_JoinIntroLoadBubbles" }) do
+		for _, name in ipairs({
+			"OceanTD_JoinIntro",
+			"OceanTD_JoinIntroLoad",
+			"OceanTD_JoinIntroLoadBubbles",
+			"OceanTD_JoinIntroPlotTitle",
+		}) do
 			local leftover = playerGui:FindFirstChild(name)
 			if leftover then
 				leftover:Destroy()
 			end
 		end
+		pcall(function()
+			require(script.Parent:WaitForChild("JoinIntroBackpackDemo")).finish()
+		end)
 		destroyEarlyLoadBar()
 		restoreHud()
 		finishCamToPlot()
@@ -2074,6 +2125,8 @@ local function runIntro()
 		introAvatarShown = false
 		introStandCf = nil
 		playerGui:SetAttribute(ATTR_SHOW_BACKPACK, false)
+		-- Skip mid-PLOT-pop / mid-demo: destroy title immediately (don't wait for runAfterBleach return).
+		destroyPlotTitleGui()
 		pcall(function()
 			require(script.Parent:WaitForChild("JoinIntroBackpackDemo")).finish()
 		end)
@@ -2245,6 +2298,7 @@ local function runIntro()
 			playerGui:SetAttribute("OceanTD_TutorialGateWaves", true)
 			playerGui:SetAttribute("OceanTD_TutorialGateLeftHud", true)
 			playerGui:SetAttribute("OceanTD_TutorialGateCam", true)
+			playerGui:SetAttribute("OceanTD_TutorialGateFreeCam", true)
 			playerGui:SetAttribute("OceanTD_TutorialGateShop", true)
 			playerGui:SetAttribute("OceanTD_TutorialWavesSlotReady", false)
 			task.spawn(function()
@@ -2328,6 +2382,7 @@ local function runIntro()
 		playerGui:SetAttribute("OceanTD_TutorialGateWaves", true)
 		playerGui:SetAttribute("OceanTD_TutorialGateLeftHud", true)
 		playerGui:SetAttribute("OceanTD_TutorialGateCam", true)
+		playerGui:SetAttribute("OceanTD_TutorialGateFreeCam", true)
 		playerGui:SetAttribute("OceanTD_TutorialGateShop", true)
 		playerGui:SetAttribute("OceanTD_TutorialWavesSlotReady", false)
 		task.spawn(function()
@@ -2736,19 +2791,47 @@ local function runIntro()
 				end,
 				onPlotSizeOne = function()
 					-- PLOT title near end of shrink (timing from JoinIntroPlotDemo).
+					-- Skip may already have destroyed / cancelled — do not recreate.
+					if token.cancelled or finished then
+						destroyPlotTitleGui()
+						return
+					end
 					if plotTitleGui and plotTitleGui.Parent then
 						return
 					end
-					local okTitle, titleOrErr = pcall(playPlotTitlePop)
+					local okTitle, titleOrErr = pcall(function()
+						return playPlotTitlePop(function()
+							return token.cancelled or finished
+						end)
+					end)
+					if token.cancelled or finished then
+						destroyPlotTitleGui()
+						plotTitleGui = nil
+						return
+					end
 					if okTitle and typeof(titleOrErr) == "Instance" and (titleOrErr :: Instance):IsA("ScreenGui") then
 						plotTitleGui = titleOrErr :: ScreenGui
-						plotTitleGui.Enabled = true
+						if plotTitleGui.Parent then
+							plotTitleGui.Enabled = true
+						else
+							plotTitleGui = nil
+						end
+					elseif okTitle and titleOrErr == nil then
+						-- Aborted mid-pop (Skip) — nothing to keep.
+						plotTitleGui = nil
 					else
 						warn("[JoinIntro] PLOT title failed:", titleOrErr)
+						destroyPlotTitleGui()
 					end
 				end,
 			})
 		end)
+		-- Always drop PLOT chrome before any early return (Skip sets finished mid-demo).
+		if plotTitleGui and plotTitleGui.Parent then
+			plotTitleGui:Destroy()
+		end
+		plotTitleGui = nil
+		destroyPlotTitleGui()
 		if finished then
 			return
 		end
@@ -2759,15 +2842,10 @@ local function runIntro()
 		-- PLOT title ends 1s sooner than prior 1.2s hold (visible window −1.5s with later start).
 		local holdPlotUntil = os.clock() + 0.2
 		while os.clock() < holdPlotUntil and not token.cancelled and not finished do
-			if plotTitleGui and plotTitleGui.Parent then
-				plotTitleGui.Enabled = true
-			end
 			task.wait(0.05)
 		end
 	end
-	if plotTitleGui and plotTitleGui.Parent then
-		plotTitleGui:Destroy()
-	end
+	destroyPlotTitleGui()
 	if finished then
 		return
 	end
@@ -2835,6 +2913,10 @@ task.spawn(function()
 		pcall(function()
 			WaveSim.stopJoinIntroDemo()
 		end)
+		pcall(function()
+			require(script.Parent:WaitForChild("JoinIntroBackpackDemo")).finish()
+		end)
+		destroyPlotTitleGui()
 		stopEarlyCamHold()
 		destroyEarlyLoadBar()
 		hideCharacterLocal(false)

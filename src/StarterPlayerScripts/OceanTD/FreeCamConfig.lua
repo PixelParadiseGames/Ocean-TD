@@ -73,6 +73,8 @@ FreeCamConfig.ATTR_MODE = "OceanTD_CamCycleMode"
 FreeCamConfig.ATTR_CINEMATIC_RESUME_MODE = "OceanTD_CinematicResumeMode"
 -- WavePathLines fades ribbon segments while Fish Cam POV (pad toggle) is on.
 FreeCamConfig.ATTR_FISH_CAM_POV = "OceanTD_FishCamPov"
+-- Same near-cam fade for the shark route ribbon during path-tour POV.
+FreeCamConfig.ATTR_PATH_TOUR_POV = "OceanTD_PathTourPov"
 
 -- PlotCam cycle: 1 = legacy SkyCam free-fly (Plot Cam 1), 2 = locked RTS god-cam (Plot Cam 2).
 FreeCamConfig.PLOT_CAM_VARIANT = 2

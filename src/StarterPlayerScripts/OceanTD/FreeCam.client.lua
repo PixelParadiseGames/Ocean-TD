@@ -351,9 +351,18 @@ local function modeIndex(m: CamMode): number
 	return 1
 end
 
+local function freeCamTutorialLocked(): boolean
+	return playerGui:GetAttribute("OceanTD_TutorialGateFreeCam") == true
+end
+
 local function nextCamMode(m: CamMode): CamMode
 	local i = modeIndex(m)
-	return FC.MODE_ORDER[(i % #FC.MODE_ORDER) + 1]
+	local next = FC.MODE_ORDER[(i % #FC.MODE_ORDER) + 1]
+	-- Skip Free Cam (dronecam) until manual plant training + backpack close.
+	if next == "dronecam" and freeCamTutorialLocked() then
+		return FC.MODE_ORDER[(modeIndex(next) % #FC.MODE_ORDER) + 1]
+	end
+	return next
 end
 
 local function slotForIconMode(iconMode: CamMode, relativeTo: CamMode): (string, number, number)
@@ -2154,6 +2163,10 @@ setMode = function(nextMode: CamMode)
 	if not forceModeOverride and playerGui:GetAttribute("OceanTD_JoinIntroBusy") == true then
 		return
 	end
+	-- Free Cam locked through manual coral placement + backpack close.
+	if nextMode == "dronecam" and not forceModeOverride and freeCamTutorialLocked() then
+		return
+	end
 	if nextMode ~= "off" then
 		if playerGui:GetAttribute("OceanTD_PlotSizeCinematicBusy") == true then
 			return
@@ -2753,6 +2766,9 @@ local function wireModeIcon(btn: GuiObject, camMode: CamMode)
 			-- Active slot (or collapsed stack) still cycles forward.
 			if camMode ~= mode and not carouselCollapsed then
 				if playerGui:GetAttribute("OceanTD_TutorialGateCam") == true then
+					return
+				end
+				if camMode == "dronecam" and freeCamTutorialLocked() then
 					return
 				end
 				setMode(camMode)
@@ -3427,6 +3443,9 @@ local function bindMobileLeftUi(left: Instance)
 		local function applyForcedCamMode()
 			local raw = playerGui:GetAttribute("OceanTD_ForceCamMode")
 			if raw ~= "off" and raw ~= "plotcam" and raw ~= "fishcam" and raw ~= "dronecam" then
+				return
+			end
+			if raw == "dronecam" and freeCamTutorialLocked() then
 				return
 			end
 			-- During join intro the cinematic owns Scriptable framing (CamStart→CamEnd / path VO).

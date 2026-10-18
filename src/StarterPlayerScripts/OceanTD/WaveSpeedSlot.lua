@@ -168,13 +168,22 @@ local function openWaveSpeedSkillUi()
 	deps.log("Wave speed locked — opened Skills / Wave Speed")
 end
 
+local function cinematicSpeedPause(): boolean
+	local pg = game:GetService("Players").LocalPlayer:FindFirstChild("PlayerGui")
+	return pg ~= nil and pg:GetAttribute("OceanTD_CinematicSpeedPause") == true
+end
+
 local function syncSpeedLock()
 	local host: GuiObject? = if slot7Circle and slot7Circle:IsA("GuiObject") then slot7Circle else slot7
 	if not host then
 		return
 	end
-	local show = revealed == true and speedSlotLocked()
-	if show then
+	-- Training path-tour pause: floating lock only (no red overlay), even if Wave Speed is unlocked.
+	local cinePause = cinematicSpeedPause()
+	local locked = speedSlotLocked()
+	local showIcon = revealed == true and (cinePause or locked)
+	local showRed = revealed == true and locked and not cinePause
+	if showIcon then
 		local overlay = speedLockOverlay
 		if not overlay or not overlay.Parent then
 			overlay = Instance.new("Frame")
@@ -191,10 +200,9 @@ local function syncSpeedLock()
 			corner.CornerRadius = UDim.new(1, 0)
 			corner.Parent = overlay
 			speedLockOverlay = overlay
-		else
-			overlay.Visible = true
-			overlay.ZIndex = host.ZIndex + 18
 		end
+		overlay.Visible = showRed
+		overlay.ZIndex = host.ZIndex + 18
 
 		local icon = speedLockIcon
 		if not icon or not icon.Parent then
@@ -215,6 +223,7 @@ local function syncSpeedLock()
 			icon.Size = UDim2.fromOffset(SPEED_LOCK_SIZE_PX, SPEED_LOCK_SIZE_PX)
 			icon.ZIndex = host.ZIndex + 22
 		end
+		icon.Visible = true
 		startSpeedLockOrbit(host)
 	else
 		stopSpeedLockOrbit()
@@ -837,6 +846,10 @@ function WaveSpeedSlot.cycle()
 	if not WaveSim.isRunning() then
 		return false
 	end
+	-- Training cinematic pause owns the slot (show PAUSED + floating lock; no cycle).
+	if cinematicSpeedPause() then
+		return false
+	end
 	-- Plot Size stage 2 required before Wave Speed is usable (or unlockable via Skills).
 	if plotSizeBlocksSpeedSlot() then
 		return false
@@ -896,7 +909,12 @@ function WaveSpeedSlot.playReveal()
 		slot7Stroke.Color = Color3.new(1, 1, 1)
 		slot7Stroke.Thickness = 2
 	end
-	startIdleCycle()
+	-- Cinematic training pause may already be active when Slot7 slides in.
+	if cinematicSpeedPause() or WaveSim.isSpeedPaused() then
+		startPauseFlash()
+	else
+		startIdleCycle()
+	end
 	startOrbitAnim()
 
 	local showHelp = styleHelpBadge()
@@ -911,7 +929,7 @@ function WaveSpeedSlot.playReveal()
 
 	local tw = TweenService:Create(slot7, SLIDE_IN, { Position = home })
 	tw:Play()
-	tw.Completed:Wait()
+	tw.completed:Wait()
 	if token ~= slideToken then
 		return
 	end
@@ -1198,6 +1216,21 @@ function WaveSpeedSlot.mount(d: Deps)
 		WaveSim.clampSpeedToMaxStep(SkillStages.waveSpeedMaxStep(waveSpeedStage()))
 		WaveSpeedSlot.refreshIcon()
 		syncSpeedLock()
+	end)
+
+	local pg = game:GetService("Players").LocalPlayer:WaitForChild("PlayerGui")
+	pg:GetAttributeChangedSignal("OceanTD_CinematicSpeedPause"):Connect(function()
+		if not revealed then
+			return
+		end
+		syncSpeedLock()
+		if cinematicSpeedPause() or WaveSim.isSpeedPaused() then
+			startPauseFlash()
+		else
+			stopPauseFlash()
+			applyIconVisual()
+			startIdleCycle()
+		end
 	end)
 end
 

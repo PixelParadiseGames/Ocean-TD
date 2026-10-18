@@ -2160,4 +2160,95 @@ task.defer(function()
 	end
 end)
 
+-- Mini reef heart + orb at active crab/urchin (1/4) and shark (1/3) path ends.
+local GROUND_HEART_SCALE = 1 / 4
+local SHARK_HEART_SCALE = 1 / 3
+local GROUND_HEART_LIFT_STUDS = 6
+local groundHeartByKey: { [string]: Model } = {}
+
+local function destroyGroundHeart(key: string)
+	local m = groundHeartByKey[key]
+	if m then
+		groundHeartByKey[key] = nil
+		if m.Parent then
+			m:Destroy()
+		end
+	end
+end
+
+local function snapGroundHeartToEnd(model: Model, worldEnd: Vector3)
+	local heart = findHeartIn(model)
+	if not heart then
+		return
+	end
+	local target = worldEnd + Vector3.new(0, GROUND_HEART_LIFT_STUDS, 0)
+	local delta = target - heart.Position
+	if delta.Magnitude < 1e-4 then
+		return
+	end
+	setPivot(model, CFrame.new(delta) * pivotOf(model))
+end
+
+local function ensureGroundHeart(key: string, worldEnd: Vector3, scale: number?)
+	local plot = ClientPlot.get()
+	local plotId = if plot then plot.plotId else "Plot1"
+	local useScale = if typeof(scale) == "number" and (scale :: number) > 0 then scale :: number else GROUND_HEART_SCALE
+	local existing = groundHeartByKey[key]
+	if existing and existing.Parent then
+		snapGroundHeartToEnd(existing, worldEnd)
+		return
+	end
+	local cloneSrc, cloneHeartSrc = getHeartCloneSource(plotId)
+	if not cloneHeartSrc then
+		return
+	end
+	local template = cloneSrc or cloneHeartSrc
+	local model = cloneHeartOrbPackage(template, cloneHeartSrc)
+	model.Name = "OceanTD_GroundPathHeart_" .. key
+	remapHeartPackageToLocalPlot(model)
+	ensureOrbInPackage(model, cloneSrc)
+	pcall(function()
+		local native = model:GetScale()
+		if native < 0.85 then
+			model:ScaleTo(useScale)
+		else
+			model:ScaleTo(native * useScale)
+		end
+	end)
+	model.Parent = resolveFolder()
+	local heart = findHeartIn(model)
+	if heart then
+		heart.Color = END_HEART_RED
+		heart.LocalTransparencyModifier = 0
+	end
+	for _, d in ipairs(model:GetDescendants()) do
+		if d:IsA("BasePart") then
+			d.LocalTransparencyModifier = 0
+		end
+	end
+	snapGroundHeartToEnd(model, worldEnd)
+	groundHeartByKey[key] = model
+end
+
+-- `ends` keyed by stable path id → world end. Optional `scales[key]` overrides default 1/4.
+function WaveEndVfx.syncGroundPathHearts(ends: { [string]: Vector3 }, scales: { [string]: number }?)
+	for key in pairs(groundHeartByKey) do
+		if ends[key] == nil then
+			destroyGroundHeart(key)
+		end
+	end
+	for key, worldEnd in pairs(ends) do
+		local sc = if scales then scales[key] else nil
+		ensureGroundHeart(key, worldEnd, sc)
+	end
+end
+
+WaveEndVfx.SHARK_HEART_SCALE = SHARK_HEART_SCALE
+
+function WaveEndVfx.clearGroundPathHearts()
+	for key in pairs(groundHeartByKey) do
+		destroyGroundHeart(key)
+	end
+end
+
 return WaveEndVfx

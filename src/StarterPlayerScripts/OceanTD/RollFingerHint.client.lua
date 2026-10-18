@@ -797,6 +797,9 @@ local function isFingerTutorialActive(): boolean
 	if playerGui:GetAttribute("OceanTD_TutorialGateCam") == true then
 		return true
 	end
+	if playerGui:GetAttribute("OceanTD_TutorialGateFreeCam") == true then
+		return true
+	end
 	if playerGui:GetAttribute("OceanTD_TutorialGateShop") == true then
 		return true
 	end
@@ -840,6 +843,7 @@ local function skipEntireFingerTutorial()
 	playerGui:SetAttribute("OceanTD_TutorialGateWaves", false)
 	playerGui:SetAttribute("OceanTD_TutorialGateLeftHud", false)
 	playerGui:SetAttribute("OceanTD_TutorialGateCam", false)
+	playerGui:SetAttribute("OceanTD_TutorialGateFreeCam", false)
 	playerGui:SetAttribute("OceanTD_TutorialGateShop", false)
 	playerGui:SetAttribute("OceanTD_TutorialWavesSlotReady", true)
 	playerGui:SetAttribute("OceanTD_TutorialSummaryFinished", nil)
@@ -847,6 +851,15 @@ local function skipEntireFingerTutorial()
 	playerGui:SetAttribute("OceanTD_FingerTutorialLock", false)
 	playerGui:SetAttribute(CHAPTER_ATTR, nil)
 	playerGui:SetAttribute(AUTO_PLANT_DONE_ATTR, nil)
+	if playerGui:GetAttribute("OceanTD_Wave3FishCamHint") == true then
+		playerGui:SetAttribute("OceanTD_Wave3FishCamHint", nil)
+	end
+	if playerGui:GetAttribute("OceanTD_Wave3CamHoldPause") == true then
+		playerGui:SetAttribute("OceanTD_Wave3CamHoldPause", nil)
+		pcall(function()
+			require(script.Parent:WaitForChild("WaveSim")).setCinematicPaused(false)
+		end)
+	end
 	pcall(function()
 		require(script.Parent:WaitForChild("AutoPlantHudSlot")).setForcedHidden(false)
 	end)
@@ -1258,6 +1271,8 @@ local function beginCamAfterManualPlant()
 	if playerGui:GetAttribute("OceanTD_TutorialGateCam") == true then
 		playerGui:SetAttribute("OceanTD_TutorialGateCam", false)
 	end
+	-- Free Cam stays locked through manual plant; unlock only after backpack closes.
+	playerGui:SetAttribute("OceanTD_TutorialGateFreeCam", false)
 	playerGui:SetAttribute(HINT_ATTR, "cam")
 end
 
@@ -1770,11 +1785,28 @@ playerGui:GetAttributeChangedSignal(SKILLS_OPEN_ATTR):Connect(function()
 end)
 
 playerGui:GetAttributeChangedSignal("OceanTD_CamCycleMode"):Connect(function()
-	if playerGui:GetAttribute(HINT_ATTR) == "cam" then
-		playerGui:SetAttribute(HINT_ATTR, false)
-		playerGui:SetAttribute(CHAPTER_ATTR, nil)
-		onCamButtonClickedForTryWaves()
+	if playerGui:GetAttribute(HINT_ATTR) ~= "cam" then
+		return
 	end
+	local wave3FishPov = playerGui:GetAttribute("OceanTD_Wave3FishCamHint") == true
+	playerGui:SetAttribute(HINT_ATTR, false)
+	playerGui:SetAttribute(CHAPTER_ATTR, nil)
+	if wave3FishPov then
+		playerGui:SetAttribute("OceanTD_Wave3FishCamHint", nil)
+		playerGui:SetAttribute("OceanTD_Wave3CamHoldPause", nil)
+		-- Force Fish Cam + POV (pad coaster), not just the next carousel step.
+		pcall(function()
+			require(script.Parent:WaitForChild("FishCamTune")).setPovOn(true, true)
+		end)
+		playerGui:SetAttribute("OceanTD_ForceCamMode", "fishcam")
+		playerGui:SetAttribute("OceanTD_ForceCamStamp", os.clock())
+		-- Release W3 hold-pause so fish start swimming.
+		pcall(function()
+			require(script.Parent:WaitForChild("WaveSim")).setCinematicPaused(false)
+		end)
+		return
+	end
+	onCamButtonClickedForTryWaves()
 end)
 
 playerGui:GetAttributeChangedSignal(POWERUP_OPEN_ATTR):Connect(function()
@@ -1844,6 +1876,10 @@ local LEFT_CAM_LOCK_BTN: { [string]: boolean } = {
 	PlotCam = true,
 	FishCam = true,
 	OffCam = true,
+}
+-- Free Cam (DroneCam) stays locked until manual plant + backpack close.
+local LEFT_FREECAM_LOCK_BTN: { [string]: boolean } = {
+	FreeCam = true,
 }
 
 local LEFT_LOCK_OVERLAY = "_OceanTD_TutorialLeftLock"
@@ -1986,6 +2022,7 @@ end
 local function applyLeftHudGate()
 	local gate = playerGui:GetAttribute("OceanTD_TutorialGateLeftHud") == true
 	local gateCam = playerGui:GetAttribute("OceanTD_TutorialGateCam") == true
+	local gateFreeCam = playerGui:GetAttribute("OceanTD_TutorialGateFreeCam") == true
 	local gateShop = playerGui:GetAttribute("OceanTD_TutorialGateShop") == true
 	local skillsOpen = playerGui:GetAttribute(SKILLS_OPEN_ATTR) == true
 	local left = playerGui:FindFirstChild("MobileLeftUI")
@@ -2021,8 +2058,9 @@ local function applyLeftHudGate()
 		end
 		local lockHud = LEFT_HUD_LOCK_BTN[ch.Name] == true
 		local lockCam = LEFT_CAM_LOCK_BTN[ch.Name] == true
+		local lockFreeCam = LEFT_FREECAM_LOCK_BTN[ch.Name] == true
 		local lockShop = LEFT_SHOP_LOCK_BTN[ch.Name] == true
-		if not lockHud and not lockCam and not lockShop then
+		if not lockHud and not lockCam and not lockShop and not lockFreeCam then
 			continue
 		end
 		local shouldLock = false
@@ -2034,8 +2072,9 @@ local function applyLeftHudGate()
 		elseif lockHud then
 			-- Skills close must stay usable while bubbles are open (WaveSpeed/Skip ForceOpen).
 			shouldLock = gate and not (skillsOpen and ch.Name == "Skills")
-		elseif lockCam then
-			shouldLock = gateCam
+		elseif lockCam or lockFreeCam then
+			-- All cams while GateCam; Free Cam alone until manual plant + backpack close.
+			shouldLock = gateCam or (gateFreeCam and lockFreeCam)
 		end
 		if shouldLock then
 			ensureTutorialLockOn(ch)
@@ -2066,6 +2105,7 @@ end
 
 playerGui:GetAttributeChangedSignal("OceanTD_TutorialGateLeftHud"):Connect(applyLeftHudGate)
 playerGui:GetAttributeChangedSignal("OceanTD_TutorialGateCam"):Connect(applyLeftHudGate)
+playerGui:GetAttributeChangedSignal("OceanTD_TutorialGateFreeCam"):Connect(applyLeftHudGate)
 playerGui:GetAttributeChangedSignal("OceanTD_TutorialGateShop"):Connect(applyLeftHudGate)
 playerGui:GetAttributeChangedSignal(SKILLS_OPEN_ATTR):Connect(applyLeftHudGate)
 playerGui.ChildAdded:Connect(function(ch)
@@ -2074,6 +2114,7 @@ playerGui.ChildAdded:Connect(function(ch)
 		ch.ChildAdded:Connect(function()
 			if playerGui:GetAttribute("OceanTD_TutorialGateLeftHud") == true
 				or playerGui:GetAttribute("OceanTD_TutorialGateCam") == true
+				or playerGui:GetAttribute("OceanTD_TutorialGateFreeCam") == true
 				or playerGui:GetAttribute("OceanTD_TutorialGateShop") == true
 				or playerGui:GetAttribute(SKILLS_OPEN_ATTR) == true
 			then
@@ -2088,6 +2129,7 @@ do
 		existing.ChildAdded:Connect(function()
 			if playerGui:GetAttribute("OceanTD_TutorialGateLeftHud") == true
 				or playerGui:GetAttribute("OceanTD_TutorialGateCam") == true
+				or playerGui:GetAttribute("OceanTD_TutorialGateFreeCam") == true
 				or playerGui:GetAttribute("OceanTD_TutorialGateShop") == true
 				or playerGui:GetAttribute(SKILLS_OPEN_ATTR) == true
 			then
@@ -2120,5 +2162,6 @@ playerGui:GetAttributeChangedSignal("OceanTD_TutorialGateBackpack"):Connect(sync
 playerGui:GetAttributeChangedSignal("OceanTD_TutorialGateWaves"):Connect(syncSkipTutorialBtn)
 playerGui:GetAttributeChangedSignal("OceanTD_TutorialGateLeftHud"):Connect(syncSkipTutorialBtn)
 playerGui:GetAttributeChangedSignal("OceanTD_TutorialGateCam"):Connect(syncSkipTutorialBtn)
+playerGui:GetAttributeChangedSignal("OceanTD_TutorialGateFreeCam"):Connect(syncSkipTutorialBtn)
 playerGui:GetAttributeChangedSignal("OceanTD_TutorialGateShop"):Connect(syncSkipTutorialBtn)
 task.defer(syncSkipTutorialBtn)

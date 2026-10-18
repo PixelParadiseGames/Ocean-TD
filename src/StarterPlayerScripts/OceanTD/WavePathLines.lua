@@ -48,6 +48,10 @@ export type Host = {
 	getHostileDisplayPath: (() -> PathLike?)?,
 	sampleGroundPath: ((PathLike, number) -> (Vector3, Vector3))?,
 	waveShowsHostilePaths: (() -> boolean)?,
+	-- Shark route ribbon while a shark wave is live.
+	getSharkPath: (() -> PathLike?)?,
+	sampleSharkPath: ((PathLike, number) -> (Vector3, Vector3))?,
+	waveShowsSharkPath: (() -> boolean)?,
 }
 
 local FOLDER_NAME = "OceanTD_PathLines"
@@ -56,7 +60,9 @@ local BEAM_WIDTH = 1.75
 local BEAM_TRANSPARENCY = 0.28
 local GREEN = C.FILL_GREEN or Color3.fromRGB(40, 255, 90)
 local RED = C.CRAB_ARROW_COLOR or C.DANGER_RED or Color3.fromRGB(230, 45, 55)
+local SHARK_ORANGE = Color3.fromRGB(255, 140, 40)
 local GROUND_Y_LIFT = C.CRAB_ARROW_Y_LIFT or 1.35 -- seafloor paths need a little height
+local SHARK_Y_LIFT = 0.35 -- shark route already swims above the floor
 local TIP_GREEN = Color3.fromRGB(165, 255, 195)
 local TIP_HEAD_STUDS = 14
 local TIP_WIDTH = 2.55
@@ -123,12 +129,26 @@ local liveAnchors: BasePart? = nil
 local groundContainers: { Folder } = {}
 local groundBeams: { Beam } = {}
 
--- POV coaster: invisible near cam → default green far (smoothstep 10→90).
+-- Shark / urchin (hostile) ribbon caches for path-tour POV near-cam fade.
+local sharkPoints: { Vector3 } = {}
+local sharkBeams: { Beam } = {}
+local sharkBeamMids: { Vector3 } = {}
+local sharkBeamLastT: { number } = {}
+local hostilePoints: { Vector3 } = {}
+local hostileBeams: { Beam } = {}
+local hostileBeamMids: { Vector3 } = {}
+local hostileBeamLastT: { number } = {}
+
+-- Fish Cam POV: invisible near cam → default green far (smoothstep 10→90).
 local POV_NEAR_CLEAR_STUDS = 10 -- ≤ this: 100% transparent (gone)
 local POV_FAR_DEFAULT_STUDS = 90 -- ≥ this: default visible green
+-- Shark/urchin path-tour POV: same look, but ribbon becomes visible a bit closer.
+local TOUR_POV_NEAR_CLEAR_STUDS = 4
+local TOUR_POV_FAR_DEFAULT_STUDS = 70
 local POV_T_EPS = 0.01
 local povFadeConn: RBXScriptConnection? = nil
 local povFadeOn = false
+local tourPovFadeOn = false
 
 local inkToken = 0
 local inkActive = false
@@ -157,7 +177,13 @@ function WavePathLines.bind(h: Host)
 		if pg:GetAttribute(FreeCamConfig.ATTR_FISH_CAM_POV) == nil then
 			pg:SetAttribute(FreeCamConfig.ATTR_FISH_CAM_POV, false)
 		end
+		if pg:GetAttribute(FreeCamConfig.ATTR_PATH_TOUR_POV) == nil then
+			pg:SetAttribute(FreeCamConfig.ATTR_PATH_TOUR_POV, false)
+		end
 		pg:GetAttributeChangedSignal(FreeCamConfig.ATTR_FISH_CAM_POV):Connect(function()
+			syncPovFadeFromAttr()
+		end)
+		pg:GetAttributeChangedSignal(FreeCamConfig.ATTR_PATH_TOUR_POV):Connect(function()
 			syncPovFadeFromAttr()
 		end)
 		-- Defer until locals below are assigned (bind can run mid-module init).
@@ -943,33 +969,33 @@ local function clearLiveCache()
 	liveAnchors = nil
 end
 
-local function povBlendU(dist: number): number
+local function povBlendU(dist: number, nearClear: number, farDefault: number): number
 	-- 0 at/near cam, 1 at far default band.
-	if dist <= POV_NEAR_CLEAR_STUDS then
+	if dist <= nearClear then
 		return 0
 	end
-	if dist >= POV_FAR_DEFAULT_STUDS then
+	if dist >= farDefault then
 		return 1
 	end
-	local u = (dist - POV_NEAR_CLEAR_STUDS) / (POV_FAR_DEFAULT_STUDS - POV_NEAR_CLEAR_STUDS)
+	local u = (dist - nearClear) / (farDefault - nearClear)
 	u = math.clamp(u, 0, 1)
 	return u * u * (3 - 2 * u) -- smoothstep
 end
 
-local function transparencyForPovDist(dist: number): number
-	-- Close = fully invisible (1); far = default green (BEAM_TRANSPARENCY).
-	local u = povBlendU(dist)
+local function transparencyForPovDist(dist: number, nearClear: number, farDefault: number): number
+	-- Close = fully invisible (1); far = default ribbon (BEAM_TRANSPARENCY).
+	local u = povBlendU(dist, nearClear, farDefault)
 	return 1 + (BEAM_TRANSPARENCY - 1) * u
 end
 
-local function widthForPovDist(dist: number): number
-	local u = povBlendU(dist)
+local function widthForPovDist(dist: number, nearClear: number, farDefault: number): number
+	local u = povBlendU(dist, nearClear, farDefault)
 	-- Collapse near segments so they can't glow through.
 	return 0.01 + (BEAM_WIDTH - 0.01) * u
 end
 
-local function emissionForPovDist(dist: number): number
-	local u = povBlendU(dist)
+local function emissionForPovDist(dist: number, nearClear: number, farDefault: number): number
+	local u = povBlendU(dist, nearClear, farDefault)
 	return 0 + 0.55 * u
 end
 
@@ -977,6 +1003,12 @@ local function isFishCamPovAttrOn(): boolean
 	local plr = Players.LocalPlayer
 	local pg = plr and plr:FindFirstChildOfClass("PlayerGui")
 	return pg ~= nil and pg:GetAttribute(FreeCamConfig.ATTR_FISH_CAM_POV) == true
+end
+
+local function isPathTourPovAttrOn(): boolean
+	local plr = Players.LocalPlayer
+	local pg = plr and plr:FindFirstChildOfClass("PlayerGui")
+	return pg ~= nil and pg:GetAttribute(FreeCamConfig.ATTR_PATH_TOUR_POV) == true
 end
 
 local function restoreBeamDefaultTransparency()
@@ -995,34 +1027,65 @@ local function restoreBeamDefaultTransparency()
 	end
 end
 
-local function applyPovFadeToBeams()
+local function restoreRibbonBeamDefaults(beams: { Beam }, lastT: { number })
+	for i, beam in ipairs(beams) do
+		if beam.Parent then
+			beam.Transparency = NumberSequence.new(BEAM_TRANSPARENCY)
+			beam.Width0 = BEAM_WIDTH
+			beam.Width1 = BEAM_WIDTH
+			beam.LightEmission = 0.55
+			beam.Segments = 1
+			if not hiddenByUi then
+				beam.Enabled = true
+			end
+		end
+		lastT[i] = BEAM_TRANSPARENCY
+	end
+end
+
+local function restoreSharkBeamDefaultTransparency()
+	restoreRibbonBeamDefaults(sharkBeams, sharkBeamLastT)
+end
+
+local function restoreHostileBeamDefaultTransparency()
+	restoreRibbonBeamDefaults(hostileBeams, hostileBeamLastT)
+end
+
+local function applyPovFadeToBeamList(
+	beams: { Beam },
+	points: { Vector3 },
+	mids: { Vector3 },
+	lastT: { number },
+	nearClear: number,
+	farDefault: number
+)
 	local cam = Workspace.CurrentCamera
-	if not cam or #liveBeams == 0 then
+	if not cam or #beams == 0 then
 		return
 	end
 	local camPos = cam.CFrame.Position
-	for i, beam in ipairs(liveBeams) do
+	for i, beam in ipairs(beams) do
 		if not beam.Parent then
 			continue
 		end
-		-- Beams are built between livePoints[i] → livePoints[i+1].
-		local p0 = livePoints[i]
-		local p1 = livePoints[i + 1]
+		-- Beams are built between points[i] → points[i+1].
+		local p0 = points[i]
+		local p1 = points[i + 1]
 		local d0: number
 		local d1: number
 		if typeof(p0) == "Vector3" and typeof(p1) == "Vector3" then
 			d0 = (p0 - camPos).Magnitude
 			d1 = (p1 - camPos).Magnitude
-		elseif liveBeamMids[i] then
-			d0 = (liveBeamMids[i] - camPos).Magnitude
+		elseif mids[i] then
+			d0 = (mids[i] - camPos).Magnitude
 			d1 = d0
 		else
 			continue
 		end
-		local t0 = transparencyForPovDist(d0)
-		local t1 = transparencyForPovDist(d1)
+		local t0 = transparencyForPovDist(d0, nearClear, farDefault)
+		local t1 = transparencyForPovDist(d1, nearClear, farDefault)
 		local midT = (t0 + t1) * 0.5
-		local prev = liveBeamLastT[i]
+		local prev = lastT[i]
 		if typeof(prev) == "number" and math.abs(midT - prev) < POV_T_EPS then
 			continue
 		end
@@ -1030,16 +1093,41 @@ local function applyPovFadeToBeams()
 			NumberSequenceKeypoint.new(0, t0),
 			NumberSequenceKeypoint.new(1, t1),
 		})
-		beam.Width0 = widthForPovDist(d0)
-		beam.Width1 = widthForPovDist(d1)
-		beam.LightEmission = emissionForPovDist((d0 + d1) * 0.5)
+		beam.Width0 = widthForPovDist(d0, nearClear, farDefault)
+		beam.Width1 = widthForPovDist(d1, nearClear, farDefault)
+		beam.LightEmission = emissionForPovDist((d0 + d1) * 0.5, nearClear, farDefault)
 		beam.Segments = 6
 		-- Fully hide segments that are essentially invisible.
 		if not hiddenByUi then
 			beam.Enabled = midT < 0.97
 		end
-		liveBeamLastT[i] = midT
+		lastT[i] = midT
 	end
+end
+
+local function applyPovFadeToBeams()
+	-- Fish Cam POV: keep the original 10→90 band.
+	applyPovFadeToBeamList(liveBeams, livePoints, liveBeamMids, liveBeamLastT, POV_NEAR_CLEAR_STUDS, POV_FAR_DEFAULT_STUDS)
+end
+
+local function applyPovFadeToTourRibbons()
+	-- Shark + urchin tours: same fade curve, visible a little closer to cam.
+	applyPovFadeToBeamList(
+		sharkBeams,
+		sharkPoints,
+		sharkBeamMids,
+		sharkBeamLastT,
+		TOUR_POV_NEAR_CLEAR_STUDS,
+		TOUR_POV_FAR_DEFAULT_STUDS
+	)
+	applyPovFadeToBeamList(
+		hostileBeams,
+		hostilePoints,
+		hostileBeamMids,
+		hostileBeamLastT,
+		TOUR_POV_NEAR_CLEAR_STUDS,
+		TOUR_POV_FAR_DEFAULT_STUDS
+	)
 end
 
 local function ensurePovFadeWatcher()
@@ -1048,13 +1136,22 @@ local function ensurePovFadeWatcher()
 	end
 	-- Always watch: attr can flip while the ribbon already exists.
 	povFadeConn = RunService.RenderStepped:Connect(function()
-		local want = isFishCamPovAttrOn()
-		if want then
+		local wantFish = isFishCamPovAttrOn()
+		if wantFish then
 			povFadeOn = true
 			applyPovFadeToBeams()
 		elseif povFadeOn then
 			povFadeOn = false
 			restoreBeamDefaultTransparency()
+		end
+		local wantTour = isPathTourPovAttrOn()
+		if wantTour then
+			tourPovFadeOn = true
+			applyPovFadeToTourRibbons()
+		elseif tourPovFadeOn then
+			tourPovFadeOn = false
+			restoreSharkBeamDefaultTransparency()
+			restoreHostileBeamDefaultTransparency()
 		end
 	end)
 end
@@ -1071,9 +1168,43 @@ local function setPovFadeActive(on: boolean)
 	end
 end
 
+local function setTourPovFadeActive(on: boolean)
+	ensurePovFadeWatcher()
+	local want = on == true
+	if want then
+		tourPovFadeOn = true
+		applyPovFadeToTourRibbons()
+	elseif tourPovFadeOn then
+		tourPovFadeOn = false
+		restoreSharkBeamDefaultTransparency()
+		restoreHostileBeamDefaultTransparency()
+	end
+end
+
 syncPovFadeFromAttr = function()
 	ensurePovFadeWatcher()
 	setPovFadeActive(isFishCamPovAttrOn())
+	setTourPovFadeActive(isPathTourPovAttrOn())
+end
+
+local function clearSharkPovCache()
+	table.clear(sharkPoints)
+	table.clear(sharkBeams)
+	table.clear(sharkBeamMids)
+	table.clear(sharkBeamLastT)
+end
+
+local function clearHostilePovCache()
+	table.clear(hostilePoints)
+	table.clear(hostileBeams)
+	table.clear(hostileBeamMids)
+	table.clear(hostileBeamLastT)
+end
+
+local function clearTourRibbonCaches()
+	clearSharkPovCache()
+	clearHostilePovCache()
+	tourPovFadeOn = false
 end
 
 local function clearGroundRibbons()
@@ -1084,6 +1215,7 @@ local function clearGroundRibbons()
 	end
 	table.clear(groundContainers)
 	table.clear(groundBeams)
+	clearTourRibbonCaches()
 end
 
 function WavePathLines.destroy()
@@ -1091,11 +1223,15 @@ function WavePathLines.destroy()
 	inkCompleted = false
 	inkSkipSettled = false
 	povFadeOn = false
+	tourPovFadeOn = false
 	if povFadeConn then
 		povFadeConn:Disconnect()
 		povFadeConn = nil
 	end
 	restoreBeamDefaultTransparency()
+	restoreSharkBeamDefaultTransparency()
+	restoreHostileBeamDefaultTransparency()
+	clearTourRibbonCaches()
 	clearLiveCache()
 	clearGroundRibbons()
 	if linesFolder and linesFolder.Parent then
@@ -1287,7 +1423,7 @@ local function buildPolylineFromPoints(points: { Vector3 }, path: PathLike?)
 	end
 end
 
-local function buildGroundRibbonFromPoints(points: { Vector3 }, name: string)
+local function buildGroundRibbonFromPoints(points: { Vector3 }, name: string, color: Color3?, yLift: number?)
 	if #points < 2 then
 		return
 	end
@@ -1309,19 +1445,34 @@ local function buildGroundRibbonFromPoints(points: { Vector3 }, name: string)
 	anchors.CFrame = CFrame.new()
 	anchors.Parent = container
 
-	local lift = Vector3.new(0, GROUND_Y_LIFT, 0)
+	local lift = Vector3.new(0, if typeof(yLift) == "number" then yLift :: number else GROUND_Y_LIFT, 0)
+	local beamColor = color or RED
+	local trackShark = name == "SharkRoute"
+	local trackHostile = name == "HostileGround"
+	if trackShark then
+		clearSharkPovCache()
+	elseif trackHostile then
+		clearHostilePovCache()
+	end
 	local prevAtt: Attachment? = nil
+	local prevPos: Vector3? = nil
 	for i, worldPos in ipairs(points) do
+		local lifted = worldPos + lift
 		local att = Instance.new("Attachment")
 		att.Name = "P" .. tostring(i)
-		att.Position = worldPos + lift
+		att.Position = lifted
 		att.Parent = anchors
-		if prevAtt then
+		if trackShark then
+			table.insert(sharkPoints, lifted)
+		elseif trackHostile then
+			table.insert(hostilePoints, lifted)
+		end
+		if prevAtt and prevPos then
 			local beam = Instance.new("Beam")
 			beam.Name = "Seg" .. tostring(i - 1)
 			beam.Attachment0 = prevAtt
 			beam.Attachment1 = att
-			beam.Color = ColorSequence.new(RED)
+			beam.Color = ColorSequence.new(beamColor)
 			beam.Width0 = BEAM_WIDTH
 			beam.Width1 = BEAM_WIDTH
 			beam.FaceCamera = true
@@ -1332,14 +1483,29 @@ local function buildGroundRibbonFromPoints(points: { Vector3 }, name: string)
 			beam.Enabled = not hiddenByUi
 			beam.Parent = anchors
 			table.insert(groundBeams, beam)
+			if trackShark then
+				table.insert(sharkBeams, beam)
+				table.insert(sharkBeamMids, (prevPos + lifted) * 0.5)
+				table.insert(sharkBeamLastT, BEAM_TRANSPARENCY)
+			elseif trackHostile then
+				table.insert(hostileBeams, beam)
+				table.insert(hostileBeamMids, (prevPos + lifted) * 0.5)
+				table.insert(hostileBeamLastT, BEAM_TRANSPARENCY)
+			end
 		end
 		prevAtt = att
+		prevPos = lifted
+	end
+	if (trackShark or trackHostile) and (tourPovFadeOn or isPathTourPovAttrOn()) then
+		tourPovFadeOn = true
+		applyPovFadeToTourRibbons()
 	end
 end
 
 --[[
-	Show/hide red GroundA/B ribbons for waves that include crabs or urchins.
-	One ribbon at a time when multiple routes are cycling (getHostileDisplayPath).
+	Show/hide red GroundA/B ribbons for waves that include crabs or urchins,
+	plus the shark route ribbon on shark waves.
+	One ground ribbon at a time when multiple routes are cycling (getHostileDisplayPath).
 ]]
 function WavePathLines.syncHostilePaths()
 	clearGroundRibbons()
@@ -1347,31 +1513,40 @@ function WavePathLines.syncHostilePaths()
 		return
 	end
 	local h = host
-	if not h or not h.waveShowsHostilePaths then
+	if not h then
 		return
 	end
-	if h.waveShowsHostilePaths() ~= true then
-		return
-	end
-	local path: PathLike? = nil
-	if h.getHostileDisplayPath then
-		path = h.getHostileDisplayPath()
-	end
-	if not path and h.getGroundPaths then
-		local paths = h.getGroundPaths()
-		if typeof(paths) == "table" and #paths > 0 then
-			path = paths[1]
+	if h.waveShowsHostilePaths and h.waveShowsHostilePaths() == true then
+		local path: PathLike? = nil
+		if h.getHostileDisplayPath then
+			path = h.getHostileDisplayPath()
+		end
+		if not path and h.getGroundPaths then
+			local paths = h.getGroundPaths()
+			if typeof(paths) == "table" and #paths > 0 then
+				path = paths[1]
+			end
+		end
+		if path and path.totalLen > 0.5 then
+			local sampleFn = h.sampleGroundPath or h.sampleFishPath
+			local points = samplePolyline(path.totalLen, function(d)
+				local pos = sampleFn(path, d)
+				return pos
+			end)
+			buildGroundRibbonFromPoints(points, "HostileGround", RED, GROUND_Y_LIFT)
 		end
 	end
-	if not path or path.totalLen <= 0.5 then
-		return
+	if h.waveShowsSharkPath and h.waveShowsSharkPath() == true and h.getSharkPath and h.sampleSharkPath then
+		local sharkPath = h.getSharkPath()
+		if sharkPath and sharkPath.totalLen > 0.5 then
+			local sampleFn = h.sampleSharkPath
+			local points = samplePolyline(sharkPath.totalLen, function(d)
+				local pos = sampleFn(sharkPath, d)
+				return pos
+			end)
+			buildGroundRibbonFromPoints(points, "SharkRoute", SHARK_ORANGE, SHARK_Y_LIFT)
+		end
 	end
-	local sampleFn = h.sampleGroundPath or h.sampleFishPath
-	local points = samplePolyline(path.totalLen, function(d)
-		local pos = sampleFn(path, d)
-		return pos
-	end)
-	buildGroundRibbonFromPoints(points, "HostileGround")
 end
 
 paintFullPathIfPossible = function(): boolean

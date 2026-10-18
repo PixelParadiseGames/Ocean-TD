@@ -60,6 +60,10 @@ function JoinIntroBackpackUi.mount(deps: MountDeps)
 	local demoSavedActive: { [GuiObject]: boolean } = {}
 	local hiddenPlaceholders: { GuiObject } = {}
 	local demoCollapsed = false
+	-- Bumps on cleanup so an in-flight BUILD pop tween cannot leave Slot4 at Scale=2 after Skip.
+	local buildPopToken = 0
+	local buildPopUp: Tween? = nil
+	local buildPopDown: Tween? = nil
 
 	local function canvasMaxY(): number
 		local windowY = scroll.AbsoluteWindowSize.Y
@@ -69,15 +73,32 @@ function JoinIntroBackpackUi.mount(deps: MountDeps)
 		return math.max(0, scroll.AbsoluteCanvasSize.Y - windowY)
 	end
 
-	local function cleanupDemoState()
-		if demoBlocker then
-			demoBlocker:Destroy()
-			demoBlocker = nil
+	local function resetBuildPopScale()
+		buildPopToken += 1
+		if buildPopUp then
+			pcall(function()
+				(buildPopUp :: Tween):Cancel()
+			end)
+			buildPopUp = nil
+		end
+		if buildPopDown then
+			pcall(function()
+				(buildPopDown :: Tween):Cancel()
+			end)
+			buildPopDown = nil
 		end
 		local pop = circle:FindFirstChild("_OceanTD_JoinIntroBuildPop")
 		if pop and pop:IsA("UIScale") then
 			pop.Scale = 1
 		end
+	end
+
+	local function cleanupDemoState()
+		if demoBlocker then
+			demoBlocker:Destroy()
+			demoBlocker = nil
+		end
+		resetBuildPopScale()
 		pcall(function()
 			local AutoPlantUI = require(script.Parent:WaitForChild("AutoPlantUI"))
 			if AutoPlantUI.setJoinIntroDemo then
@@ -119,7 +140,12 @@ function JoinIntroBackpackUi.mount(deps: MountDeps)
 					AutoPlantUI.setJoinIntroDemo(true)
 				end
 			end)
+			resetBuildPopScale()
+			local myPop = buildPopToken
 			task.spawn(function()
+				if myPop ~= buildPopToken then
+					return
+				end
 				local scale = circle:FindFirstChild("_OceanTD_JoinIntroBuildPop") :: UIScale?
 				if not scale then
 					scale = Instance.new("UIScale")
@@ -137,10 +163,19 @@ function JoinIntroBackpackUi.mount(deps: MountDeps)
 					TweenInfo.new(0.35, Enum.EasingStyle.Quad, Enum.EasingDirection.InOut),
 					{ Scale = 1 }
 				)
+				buildPopUp = up
+				buildPopDown = down
 				up:Play()
 				up.Completed:Wait()
-				if scale.Parent and InventoryState.isJoinIntroDemo and InventoryState.isJoinIntroDemo() then
+				if myPop ~= buildPopToken or not scale.Parent then
+					return
+				end
+				if InventoryState.isJoinIntroDemo and InventoryState.isJoinIntroDemo() then
 					down:Play()
+					down.Completed:Wait()
+				end
+				if myPop == buildPopToken and scale.Parent then
+					scale.Scale = 1
 				end
 			end)
 			for _, child in ipairs(scroll:GetDescendants()) do
@@ -182,10 +217,7 @@ function JoinIntroBackpackUi.mount(deps: MountDeps)
 				demoBlocker:Destroy()
 				demoBlocker = nil
 			end
-			local pop = circle:FindFirstChild("_OceanTD_JoinIntroBuildPop")
-			if pop and pop:IsA("UIScale") then
-				pop.Scale = 1
-			end
+			resetBuildPopScale()
 			if InventoryState.isOpen() then
 				InventoryState.setOpenForced(false)
 			elseif host.Visible then
@@ -194,6 +226,9 @@ function JoinIntroBackpackUi.mount(deps: MountDeps)
 			cleanupDemoState()
 		end,
 		finish = function()
+			-- Always kill BUILD pop tweens — even if collapseAway already set demoCollapsed
+			-- (race: collapseAway marks collapsed before reset finishes / yields).
+			resetBuildPopScale()
 			if demoCollapsed then
 				if InventoryState.isOpen() then
 					InventoryState.setOpenForced(false)

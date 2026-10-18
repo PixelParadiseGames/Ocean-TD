@@ -30,6 +30,9 @@ export type State = {
 	fillTween: Tween?,
 	trailTween: Tween?,
 	trailToken: number,
+	-- Hunger fill-ahead: green catch-up delay (separate from reef-damage trailToken).
+	fillCatchUpToken: number,
+	fillCatchUpPending: boolean,
 	flyBusy: boolean,
 	pendingFrac: number?,
 	rockToken: number,
@@ -49,6 +52,8 @@ function ReefHealthBarFx.makeState(initialFrac: number?): State
 		fillTween = nil,
 		trailTween = nil,
 		trailToken = 0,
+		fillCatchUpToken = 0,
+		fillCatchUpPending = false,
 		flyBusy = false,
 		pendingFrac = nil,
 		rockToken = 0,
@@ -132,10 +137,14 @@ local function cancelFill(state: State)
 	end
 end
 
-local function cancelTrail(state: State)
+local function cancelTrail(state: State, trail: Frame?)
 	if state.trailTween then
 		state.trailTween:Cancel()
 		state.trailTween = nil
+		-- Keep trailFrac in sync with the live Size so a restart never snaps backward.
+		if trail then
+			state.trailFrac = trail.Size.X.Scale
+		end
 	end
 end
 
@@ -423,7 +432,9 @@ function ReefHealthBarFx.snapSizes(fill: Frame, trail: Frame?, frac: number, sta
 	local f = math.clamp(frac, 0, 1)
 	cancelFill(state)
 	state.trailToken += 1
-	cancelTrail(state)
+	state.fillCatchUpToken += 1
+	state.fillCatchUpPending = false
+	cancelTrail(state, trail)
 	state.visualFrac = f
 	state.targetFrac = f
 	state.trailFrac = f
@@ -435,19 +446,27 @@ function ReefHealthBarFx.snapSizes(fill: Frame, trail: Frame?, frac: number, sta
 	end
 end
 
-local function scheduleFillCatchUp(fill: Frame, state: State, targetFrac: number)
-	state.trailToken += 1
-	local my = state.trailToken
+local function scheduleFillCatchUp(fill: Frame, state: State)
+	-- Don't reset the delay on every hunger bump — green should catch the latest target
+	-- after one TRAIL_BEHIND_SEC from the first rise while feeding is continuous.
+	if state.fillCatchUpPending then
+		return
+	end
+	state.fillCatchUpPending = true
+	state.fillCatchUpToken += 1
+	local my = state.fillCatchUpToken
 	task.delay(TRAIL_BEHIND_SEC, function()
-		if my ~= state.trailToken then
+		if my ~= state.fillCatchUpToken then
 			return
 		end
+		state.fillCatchUpPending = false
 		if not fill.Parent then
 			return
 		end
 		cancelFill(state)
 		local from = state.visualFrac
-		local to = math.clamp(targetFrac, 0, 1)
+		-- Use latest target (may have risen while we waited).
+		local to = math.clamp(state.targetFrac, 0, 1)
 		if math.abs(from - to) < 0.001 then
 			state.visualFrac = to
 			fill.Size = UDim2.fromScale(to, 1)
@@ -466,6 +485,10 @@ local function scheduleFillCatchUp(fill: Frame, state: State, targetFrac: number
 				state.fillTween = nil
 				state.visualFrac = to
 				fill.Size = UDim2.fromScale(to, 1)
+				-- Target moved further while green was tweening — schedule another catch-up.
+				if state.targetFrac > state.visualFrac + 1e-4 then
+					scheduleFillCatchUp(fill, state)
+				end
 			end
 		end)
 	end)
@@ -494,33 +517,57 @@ function ReefHealthBarFx.applyFillAhead(fill: Frame, trail: Frame?, frac: number
 
 	-- White trail grows now.
 	if trail then
-		cancelTrail(state)
+		cancelTrail(state, trail)
 		local from = state.trailFrac
-		if math.abs(from - f) < 0.001 then
-			state.trailFrac = f
-			trail.Size = UDim2.fromScale(f, 1)
-		else
+		local to = f
+		if math.abs(from - to) < 0.001 then
+			state.trailFrac = to
+			trail.Size = UDim2.fromScale(to, 1)
+		elseif from < to then
 			trail.Size = UDim2.fromScale(from, 1)
 			local tw = TweenService:Create(
 				trail,
 				TweenInfo.new(FILL_TWEEN_SEC, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
-				{ Size = UDim2.fromScale(f, 1) }
+				{ Size = UDim2.fromScale(to, 1) }
 			)
 			state.trailTween = tw
 			tw:Play()
 			tw.Completed:Once(function()
-				if state.trailTween == tw then
-					state.trailTween = nil
-					state.trailFrac = f
+				if state.trailTween ~= tw then
+					return
+				end
+				state.trailTween = nil
+				state.trailFrac = math.max(to, trail.Size.X.Scale)
+				-- Progress rose again during the tween — extend without snapping down.
+				if state.targetFrac > state.trailFrac + 1e-4 then
+					local extendTo = state.targetFrac
+					local extendFrom = state.trailFrac
+					trail.Size = UDim2.fromScale(extendFrom, 1)
+					local tw2 = TweenService:Create(
+						trail,
+						TweenInfo.new(FILL_TWEEN_SEC, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+						{ Size = UDim2.fromScale(extendTo, 1) }
+					)
+					state.trailTween = tw2
+					tw2:Play()
+					tw2.Completed:Once(function()
+						if state.trailTween == tw2 then
+							state.trailTween = nil
+							state.trailFrac = math.max(extendTo, trail.Size.X.Scale)
+						end
+					end)
 				end
 			end)
+		else
+			-- from >= to after sync: keep the higher live Size; never flash backward.
+			state.trailFrac = from
 		end
 	else
 		state.trailFrac = f
 	end
 
-	-- Green fill delayed.
-	scheduleFillCatchUp(fill, state, f)
+	-- Green fill delayed (one shared timer; does not reset on each bump).
+	scheduleFillCatchUp(fill, state)
 end
 
 return ReefHealthBarFx

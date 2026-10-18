@@ -266,6 +266,17 @@ local C = {
 	SHARK_CAM_ZOOM_OUT_SEC = 3,
 	SHARK_CAM_DIST = 42,
 	SHARK_CAM_HEIGHT = 14,
+	-- First urchin (wave 5): focus on urchin, then soft POV fly once down path.
+	URCHIN_POV_FOCUS_SEC = 3, -- hold on the urchin after it enters
+	URCHIN_POV_FOCUS_IN_SEC = 0.85, -- player view → urchin focus
+	URCHIN_POV_TO_PATH_SEC = 1.25, -- focus → path POV (tween down)
+	URCHIN_POV_PATH_SEC = 10, -- half prior speed (was 5s one-way)
+	URCHIN_POV_TWEEN_OUT_SEC = 1.1,
+	URCHIN_POV_HEIGHT = 15, -- studs above the ground path line
+	URCHIN_POV_BACK = 6,
+	URCHIN_POV_LOOK_AHEAD = 18,
+	URCHIN_POV_FOLLOW_RATE = 2.4, -- soft cam lerp while riding the path
+	URCHIN_POV_FOV_MULT = 1.2, -- 20% wider FOV while on the path
 	TANG_FIRST_WAVE = 1, -- overview cam: full path + heart until fish fed
 	TANG_CAM_OVERVIEW_ZOOM_SEC = 1.6,
 	TANG_CAM_OVERVIEW_RESTORE_SEC = 1.4,
