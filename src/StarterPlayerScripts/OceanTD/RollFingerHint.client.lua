@@ -1,12 +1,16 @@
 --!strict
 --[[
-	Join-intro finger tutorial pipeline:
-	roll → await → backpack → equip → plot → upgrade (from bottom-right → UNLOCK)
-	→ hue (finger stays on swatch, cycles colors until user taps)
-	→ plant (soft-plant PLANT confirm) → closeBackpack → waves
-	(reselectCoral if inspect closes mid-upgrade / mid-hue) → …
-	→ (after first wave-session Finish) if defeat: roll again → skills; if win: skills
-	→ plotSize → plotSizeUpgrade → closePlotSize → closeSkills → cam
+	Join-intro finger tutorial pipeline (two chapters):
+
+	Auto Plant chapter (first):
+	  roll → await (+ Auto Plant HUD intro center→dock) → seed spin → auto-plant
+	  → waves
+	  → (after first wave-session Finish) if defeat: roll again → skills; if win: skills
+	  → plotSize → plotSizeUpgrade → closePlotSize → closeSkills
+
+	Manual Plant chapter (after closeSkills):
+	  roll → await → backpack → equip → plot → upgrade → hue → plant → closeBackpack → cam
+	  (reselectCoral if inspect closes mid-upgrade / mid-hue)
 
 	After join intro ends (Skip Intro gone): bottom-left Skip Training clears all finger steps + tutorial gates.
 ]]
@@ -36,6 +40,8 @@ local PlacementController = require(script.Parent:WaitForChild("PlacementControl
 local RelocatePickHover = require(script.Parent:WaitForChild("RelocatePickHover"))
 
 local HINT_ATTR = "OceanTD_RollFingerHint"
+local CHAPTER_ATTR = "OceanTD_TutorialChapter" -- "autoPlant" | "manualPlant"
+local AUTO_PLANT_DONE_ATTR = "OceanTD_TutorialAutoPlantDone"
 local HUE_PLACE_ATTR = "OceanTD_TutorialHuePlaceId"
 local GUI_NAME = "OceanTD_RollFingerHint"
 local FINGER_PATH = "Plots.IntroElements.Finger"
@@ -109,6 +115,7 @@ export type HintMode =
 	| "reselectCoral"
 	| "plant"
 	| "closeBackpack"
+	| "autoPlantWait"
 	| "waves"
 	| "skills"
 	| "plotSize"
@@ -128,6 +135,7 @@ local MODE_SET: { [string]: boolean } = {
 	reselectCoral = true,
 	plant = true,
 	closeBackpack = true,
+	autoPlantWait = true,
 	waves = true,
 	skills = true,
 	plotSize = true,
@@ -158,6 +166,7 @@ local conn: RBXScriptConnection? = nil
 local waitingWaveEnd = false
 local wavesFingerConsumed = false
 local wavesFingerDelayGen = 0
+local autoPlantWavesArmed = false
 local tapBurstRng = Random.new()
 local fingerTutorialSkipped = false
 local skipTutorialGui: ScreenGui? = nil
@@ -820,6 +829,7 @@ local function skipEntireFingerTutorial()
 	wavesFingerDelayGen += 1
 	tryWavesAgainGen += 1
 	wavesFingerConsumed = true
+	autoPlantWavesArmed = false
 	TutorialVo.stop()
 	stopHint()
 	playerGui:SetAttribute("OceanTD_FingerTutorialSkipped", true)
@@ -835,6 +845,11 @@ local function skipEntireFingerTutorial()
 	playerGui:SetAttribute("OceanTD_TutorialSummaryFinished", nil)
 	playerGui:SetAttribute("OceanTD_TutorialRollThenSkills", nil)
 	playerGui:SetAttribute("OceanTD_FingerTutorialLock", false)
+	playerGui:SetAttribute(CHAPTER_ATTR, nil)
+	playerGui:SetAttribute(AUTO_PLANT_DONE_ATTR, nil)
+	pcall(function()
+		require(script.Parent:WaitForChild("AutoPlantHudSlot")).setForcedHidden(false)
+	end)
 	-- Gates clear while the player is often still on the plot edge — suppress outline tip briefly.
 	playerGui:SetAttribute("OceanTD_SuppressPlotOutlineHintUntil", os.clock() + 6)
 	destroySkipTutorialBtn()
@@ -1166,8 +1181,17 @@ local function restOf(mode: HintMode, btn: Vector2): Vector2
 end
 
 local function beginWavesAfterCloseBackpack()
-	-- After plant → close backpack (or backpack already shut) → Slot5 / waves finger.
+	-- After Auto Plant chapter (or legacy close-backpack) → Slot5 / waves finger.
+	if autoPlantWavesArmed and playerGui:GetAttribute(CHAPTER_ATTR) == "autoPlant" then
+		return
+	end
+	if playerGui:GetAttribute(CHAPTER_ATTR) == "autoPlant" then
+		autoPlantWavesArmed = true
+	end
 	playHowManyWavesSoundOnce()
+	if playerGui:GetAttribute("OceanTD_TutorialGateWaves") == true then
+		playerGui:SetAttribute("OceanTD_TutorialGateWaves", false)
+	end
 	if playerGui:GetAttribute("OceanTD_TutorialGateCam") == true then
 		playerGui:SetAttribute("OceanTD_TutorialGateCam", false)
 	end
@@ -1192,9 +1216,61 @@ local function beginWavesAfterCloseBackpack()
 			return
 		end
 		local cur = playerGui:GetAttribute(HINT_ATTR)
-		if cur == false or cur == nil or cur == "await" then
+		if cur == false or cur == nil or cur == "await" or cur == "autoPlantWait" then
 			playerGui:SetAttribute(HINT_ATTR, "waves")
 		end
+	end)
+end
+
+local function beginManualPlantChapter()
+	autoPlantWavesArmed = false
+	playerGui:SetAttribute(CHAPTER_ATTR, "manualPlant")
+	playerGui:SetAttribute(AUTO_PLANT_DONE_ATTR, nil)
+	pcall(function()
+		local AutoPlantUI = require(script.Parent:WaitForChild("AutoPlantUI"))
+		AutoPlantUI.requestTutorialPrep(false)
+	end)
+	pcall(function()
+		require(script.Parent:WaitForChild("AutoPlantHudSlot")).setForcedHidden(false)
+	end)
+	-- Plot-size cinematic ForceClose'd FreeCam — reclaim Plot Cam before manual plant zoom.
+	-- Defer until SkillsAvatarCam restore finishes so Player Cam can't win the race.
+	playerGui:SetAttribute("OceanTD_EnsurePlotCam", os.clock())
+	task.spawn(function()
+		local deadline = os.clock() + 2
+		while os.clock() < deadline do
+			if playerGui:GetAttribute("OceanTD_SkillsAvatarCamBusy") ~= true
+				and playerGui:GetAttribute("OceanTD_PlotSizeCinematicBusy") ~= true
+				and playerGui:GetAttribute("OceanTD_PlotSizeCineSuppressTutorial") ~= true
+			then
+				break
+			end
+			task.wait()
+		end
+		playerGui:SetAttribute("OceanTD_EnsurePlotCam", os.clock())
+	end)
+	-- Teach BUILD again from a fresh roll.
+	playerGui:SetAttribute("OceanTD_TutorialGateBackpack", true)
+	playerGui:SetAttribute(HINT_ATTR, "roll")
+end
+
+local function beginCamAfterManualPlant()
+	if playerGui:GetAttribute("OceanTD_TutorialGateCam") == true then
+		playerGui:SetAttribute("OceanTD_TutorialGateCam", false)
+	end
+	playerGui:SetAttribute(HINT_ATTR, "cam")
+end
+
+local function playAutoPlantChapterIntro()
+	task.spawn(function()
+		pcall(function()
+			local AutoPlantUI = require(script.Parent:WaitForChild("AutoPlantUI"))
+			AutoPlantUI.requestTutorialPrep(true)
+		end)
+		pcall(function()
+			local AutoPlantHudSlot = require(script.Parent:WaitForChild("AutoPlantHudSlot"))
+			AutoPlantHudSlot.playTutorialIntro()
+		end)
 	end)
 end
 
@@ -1247,7 +1323,11 @@ local function startHint(mode: HintMode)
 		if not InventoryState.isOpen() then
 			task.defer(function()
 				if playerGui:GetAttribute(HINT_ATTR) == "closeBackpack" and not InventoryState.isOpen() then
-					beginWavesAfterCloseBackpack()
+					if playerGui:GetAttribute(CHAPTER_ATTR) == "manualPlant" then
+						beginCamAfterManualPlant()
+					else
+						beginWavesAfterCloseBackpack()
+					end
 				end
 			end)
 		end
@@ -1404,10 +1484,10 @@ local function startHint(mode: HintMode)
 					return
 				end
 			elseif mode == "closeSkills" and playerGui:GetAttribute(SKILLS_OPEN_ATTR) ~= true then
-				-- Same: cinematic teardown must not skip straight to cam narrator.
+				-- Same: cinematic teardown must not skip into Manual Plant early.
 				if not plotSizeCineBlocksTutorialAdvance() then
-					-- Skills fully closed after plot-size tutorial → point at camera cycle.
-					playerGui:SetAttribute(HINT_ATTR, "cam")
+					-- Skills closed after plot-size → Manual Plant chapter (roll again).
+					beginManualPlantChapter()
 					return
 				end
 			elseif mode == "cam" then
@@ -1542,6 +1622,16 @@ end
 local function applyAttr(raw: any)
 	if raw == "await" then
 		stopHint()
+		-- Auto Plant chapter: show the HUD button as they start the roll spin.
+		if playerGui:GetAttribute(CHAPTER_ATTR) == "autoPlant" and not fingerTutorialSkipped then
+			playAutoPlantChapterIntro()
+		end
+		syncSkipTutorialBtn()
+		return
+	end
+	if raw == "autoPlantWait" then
+		-- Finger hidden while auto-plant orb/dig finishes.
+		stopHint()
 		syncSkipTutorialBtn()
 		return
 	end
@@ -1554,7 +1644,7 @@ local function applyAttr(raw: any)
 	local mode = parseMode(raw)
 	if mode then
 		if mode == "backpack" then
-			-- First coral rolled → finger on BUILD: VO once.
+			-- Manual Plant chapter → finger on BUILD: VO once.
 			playPlantFirstCoralSoundOnce()
 		elseif mode == "upgrade" then
 			-- First coral planted → upgrade finger + upgrade explainer VO.
@@ -1584,8 +1674,49 @@ playerGui:GetAttributeChangedSignal(HINT_ATTR):Connect(function()
 end)
 
 SeedWheelRevealApi.connectCycleFinished(function()
-	if playerGui:GetAttribute(HINT_ATTR) == "await" then
-		playerGui:SetAttribute(HINT_ATTR, "backpack")
+	local hint = playerGui:GetAttribute(HINT_ATTR)
+	if hint ~= "await" and hint ~= "autoPlantWait" then
+		return
+	end
+	if playerGui:GetAttribute(CHAPTER_ATTR) == "autoPlant" then
+		-- Claim already fired auto-plant; wait for dig/orb done (fallback timeout below).
+		playerGui:SetAttribute(HINT_ATTR, "autoPlantWait")
+		local doneAt = playerGui:GetAttribute(AUTO_PLANT_DONE_ATTR)
+		if typeof(doneAt) == "number" then
+			beginWavesAfterCloseBackpack()
+			return
+		end
+		task.delay(10, function()
+			if fingerTutorialSkipped then
+				return
+			end
+			if playerGui:GetAttribute(CHAPTER_ATTR) ~= "autoPlant" then
+				return
+			end
+			local cur = playerGui:GetAttribute(HINT_ATTR)
+			if cur == "autoPlantWait" or cur == "await" or cur == false or cur == nil then
+				beginWavesAfterCloseBackpack()
+			end
+		end)
+		return
+	end
+	-- Manual Plant chapter (or no chapter): open BUILD next.
+	playerGui:SetAttribute(HINT_ATTR, "backpack")
+end)
+
+playerGui:GetAttributeChangedSignal(AUTO_PLANT_DONE_ATTR):Connect(function()
+	if fingerTutorialSkipped then
+		return
+	end
+	if playerGui:GetAttribute(CHAPTER_ATTR) ~= "autoPlant" then
+		return
+	end
+	if typeof(playerGui:GetAttribute(AUTO_PLANT_DONE_ATTR)) ~= "number" then
+		return
+	end
+	local cur = playerGui:GetAttribute(HINT_ATTR)
+	if cur == "autoPlantWait" or cur == "await" or cur == false or cur == nil then
+		beginWavesAfterCloseBackpack()
 	end
 end)
 
@@ -1600,7 +1731,11 @@ InventoryState.onOpenChanged(function(isOpen: boolean)
 	if v == "equip" then
 		playerGui:SetAttribute(HINT_ATTR, "backpack")
 	elseif v == "closeBackpack" then
-		beginWavesAfterCloseBackpack()
+		if playerGui:GetAttribute(CHAPTER_ATTR) == "manualPlant" then
+			beginCamAfterManualPlant()
+		else
+			beginWavesAfterCloseBackpack()
+		end
 	end
 end)
 
@@ -1625,11 +1760,8 @@ playerGui:GetAttributeChangedSignal(SKILLS_OPEN_ATTR):Connect(function()
 			return
 		end
 		if v == "closeSkills" then
-			-- After plot-size upgrade + closing skills, teach the cam cycle button.
-			if playerGui:GetAttribute("OceanTD_TutorialGateCam") == true then
-				playerGui:SetAttribute("OceanTD_TutorialGateCam", false)
-			end
-			playerGui:SetAttribute(HINT_ATTR, "cam")
+			-- After plot-size upgrade + closing skills → Manual Plant chapter.
+			beginManualPlantChapter()
 		elseif v == "plotSize" or v == "plotSizeUpgrade" or v == "closePlotSize" then
 			-- Closed skills without finishing the plot-size tutorial — back to Skills finger.
 			playerGui:SetAttribute(HINT_ATTR, "skills")
@@ -1640,6 +1772,7 @@ end)
 playerGui:GetAttributeChangedSignal("OceanTD_CamCycleMode"):Connect(function()
 	if playerGui:GetAttribute(HINT_ATTR) == "cam" then
 		playerGui:SetAttribute(HINT_ATTR, false)
+		playerGui:SetAttribute(CHAPTER_ATTR, nil)
 		onCamButtonClickedForTryWaves()
 	end
 end)

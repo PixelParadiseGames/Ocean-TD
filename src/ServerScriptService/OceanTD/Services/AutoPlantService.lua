@@ -257,6 +257,24 @@ function AutoPlantService.setEnabled(player: Player, enabled: boolean): { ok: bo
 	}
 end
 
+-- Training Auto Plant chapter: force unlock + ON so the first roll places itself.
+-- Manual Plant chapter: pass enable=false to turn OFF without revoking unlock.
+function AutoPlantService.prepareTutorial(player: Player, enable: boolean): {
+	ok: boolean,
+	unlocked: boolean,
+	enabled: boolean,
+}
+	PersistenceService.ensureAutoPlantUnlocked(player, AutoPlantSpots.MANUAL_UNLOCK_COUNT)
+	PersistenceService.setAutoPlantEnabled(player, enable == true)
+	AutoPlantService.syncToClient(player)
+	local unlocked = AutoPlantService.isUnlocked(player)
+	return {
+		ok = true,
+		unlocked = unlocked,
+		enabled = unlocked and PersistenceService.isAutoPlantEnabled(player),
+	}
+end
+
 -- After a seed grant would go to inventory: try place on a spaced empty spot.
 -- Returns true if the seed was consumed by a successful place.
 function AutoPlantService.tryPlaceGrantedSeed(player: Player, itemId: string, colorIndex: number): boolean

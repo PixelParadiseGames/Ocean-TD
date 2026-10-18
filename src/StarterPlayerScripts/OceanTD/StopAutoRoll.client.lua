@@ -67,6 +67,9 @@ local POWERUP_OPEN_ATTR = "OceanTD_SkillPowerUpOpen"
 local REPORT_OPEN_ATTR = "OceanTD_ReefReportOpen"
 local HIDE_UI_ACTIVE_ATTR = "OceanTD_HideUiActive"
 local ROLL_FINGER_ATTR = "OceanTD_RollFingerHint"
+local AUTO_PLANT_DONE_ATTR = "OceanTD_TutorialAutoPlantDone"
+local TUTORIAL_SUMMARY_ATTR = "OceanTD_TutorialSummaryFinished"
+local TUTORIAL_CHAPTER_ATTR = "OceanTD_TutorialChapter"
 local COUNT_CLIP_NAME = "_OceanTD_RollCountClip"
 -- Per digit: ~4× the old 0.55s flash, with slide in/out from the left.
 -- Infinity holds 3× longer than a normal digit.
@@ -145,6 +148,24 @@ local pressGen = 0
 local KEEP_ROLLIN_SLIDE_PX = 10
 local KEEP_ROLLIN_SLIDE_HZ = 1.35
 
+-- After first Auto Plant coral: hide roll until first wave session End Waves / summary.
+local function tutorialHidesRollUntilWaveEnd(): boolean
+	if playerGui:GetAttribute("OceanTD_FingerTutorialSkipped") == true then
+		return false
+	end
+	if playerGui:GetAttribute(TUTORIAL_CHAPTER_ATTR) ~= "autoPlant" then
+		return false
+	end
+	if typeof(playerGui:GetAttribute(AUTO_PLANT_DONE_ATTR)) ~= "number" then
+		return false
+	end
+	-- End Waves / summary finished → show again (defeat roll-then-skills, or skills).
+	if playerGui:GetAttribute(TUTORIAL_SUMMARY_ATTR) ~= nil then
+		return false
+	end
+	return true
+end
+
 local function uiHidesRoll(): boolean
 	return playerGui:GetAttribute(SKILLS_OPEN_ATTR) == true
 		or playerGui:GetAttribute(POWERUP_OPEN_ATTR) == true
@@ -152,6 +173,7 @@ local function uiHidesRoll(): boolean
 		or playerGui:GetAttribute(STORE_OPEN_ATTR) == true
 		or playerGui:GetAttribute(HIDE_UI_ACTIVE_ATTR) == true
 		or InventoryState.isOpen()
+		or tutorialHidesRollUntilWaveEnd()
 end
 
 local function isGamepadMode(): boolean
@@ -1701,8 +1723,12 @@ playerGui:GetAttributeChangedSignal(POWERUP_OPEN_ATTR):Connect(onOverlayUiAttrCh
 playerGui:GetAttributeChangedSignal(REPORT_OPEN_ATTR):Connect(onOverlayUiAttrChanged)
 playerGui:GetAttributeChangedSignal(STORE_OPEN_ATTR):Connect(onOverlayUiAttrChanged)
 playerGui:GetAttributeChangedSignal(HIDE_UI_ACTIVE_ATTR):Connect(onOverlayUiAttrChanged)
+playerGui:GetAttributeChangedSignal(AUTO_PLANT_DONE_ATTR):Connect(onOverlayUiAttrChanged)
+playerGui:GetAttributeChangedSignal(TUTORIAL_SUMMARY_ATTR):Connect(onOverlayUiAttrChanged)
+playerGui:GetAttributeChangedSignal(TUTORIAL_CHAPTER_ATTR):Connect(onOverlayUiAttrChanged)
 playerGui:GetAttributeChangedSignal(ROLL_FINGER_ATTR):Connect(function()
 	refreshKeepRollin()
+	refreshRollButtonVisibility()
 end)
 playerGui:GetAttributeChangedSignal("OceanTD_JoinIntroBusy"):Connect(function()
 	refreshKeepRollin()

@@ -36,8 +36,38 @@ local BASE_CORAL_FINAL_PX = 52
 local BAND_WIDTH_FRAC = 0.33
 local BAND_TOP_FRAC = 0.03 -- fallback when Slot4 screen pos unavailable
 local BASE_STEP_PX = 70
-local SPIN_SEC = 4.992
-local CORAL_SPIN_SEC = SPIN_SEC * 1.2 / 0.8 -- 20% longer, 20% slower than color spin
+local SPIN_SEC = 4.992 -- hue/color spin max duration
+local CORAL_SPIN_SEC = SPIN_SEC * 1.2 / 0.8 -- coral type max (~20% longer than hue)
+local SPIN_FASTER_MAX = 1.0 -- each spin may finish up to this many seconds sooner
+local tutorialFullCoralSpinUsed = false
+local tutorialFullHueSpinUsed = false
+
+local function isFingerTutorialActive(): boolean
+	if playerGui:GetAttribute("OceanTD_FingerTutorialSkipped") == true then
+		return false
+	end
+	if playerGui:GetAttribute("OceanTD_FingerTutorialLock") == true then
+		return true
+	end
+	local hint = playerGui:GetAttribute("OceanTD_RollFingerHint")
+	return typeof(hint) == "string" and hint ~= "" and hint ~= "false"
+end
+
+-- Randomize in [base - SPIN_FASTER_MAX, base]. Finger-tutorial first coral / first hue keep max for VO.
+local function pickSpinSec(baseSec: number, isCoral: boolean): number
+	if isFingerTutorialActive() then
+		if isCoral and not tutorialFullCoralSpinUsed then
+			tutorialFullCoralSpinUsed = true
+			return baseSec
+		end
+		if not isCoral and not tutorialFullHueSpinUsed then
+			tutorialFullHueSpinUsed = true
+			return baseSec
+		end
+	end
+	local faster = math.random() * SPIN_FASTER_MAX
+	return math.max(0.5, baseSec - faster)
+end
 local FLY_SEC = 1.001
 local FIREWORK_MIN = 10
 local FIREWORK_MAX = 20
@@ -241,9 +271,10 @@ local function playTick()
 	end)
 end
 
-local function playColorBurstSound()
+local function playColorBurstSound(playbackSpeed: number?)
 	local s = colorBurstTemplate:Clone()
 	s.Volume = COLOR_BURST_VOLUME
+	s.PlaybackSpeed = if typeof(playbackSpeed) == "number" then playbackSpeed else 1
 	s.Parent = SoundService
 	s:Play()
 	s.Ended:Once(function()
@@ -954,6 +985,15 @@ local function flyBundle(
 		SeedWheelAutoRollState.beginFlyRemainingTick()
 	end
 
+	-- Above MainHUD Quickbar so the slide passes in front of Auto Plant OFF / BUILD.
+	gui.DisplayOrder = UiViewportTags.RIGHT_HUD_DISPLAY_ORDER + 5
+
+	local function restoreFlyLayer()
+		if gui.Parent then
+			applySeedWheelDisplayOrder(gui)
+		end
+	end
+
 	holder.Parent = gui
 	holder.AnchorPoint = Vector2.new(0.5, 0.5)
 	holder.Position = UDim2.fromOffset(start.X, start.Y)
@@ -981,6 +1021,7 @@ local function flyBundle(
 				nameLbl:Destroy()
 			end
 			holder:Destroy()
+			restoreFlyLayer()
 			if currentClaim then
 				claim(currentClaim.itemId, currentClaim.token)
 			end
@@ -1012,6 +1053,8 @@ local function flyBundle(
 				nameLbl:Destroy()
 			end
 			holder:Destroy()
+			restoreFlyLayer()
+			SeedWheelRevealApi.fireSlideToBackpackLanded()
 			claim(itemId, token)
 			finishBusy()
 		end
@@ -1181,10 +1224,12 @@ playReveal = function(
 		end
 		coralPopStarted = true
 		earlyWinner.ZIndex = Z_CORAL + 20
+		-- With the land pop (starts CORAL_POP_LEAD_SEC before spin end), not spin onDone.
+		playColorBurstSound(0.72)
 		playCoralLandPop(earlyWinner)
 	end
 
-	runSpin(host, halfW, coralIcons, coralWinner0, coralPx, CORAL_SPIN_SEC, function()
+	runSpin(host, halfW, coralIcons, coralWinner0, coralPx, pickSpinSec(CORAL_SPIN_SEC, true), function()
 		local coralWinner = coralIcons[coralWinner0 + 1] :: ImageLabel?
 		local coralPeek1 = coralIcons[coralWinner0 + 2]
 		local coralPeek2 = coralIcons[coralWinner0 + 3]
@@ -1212,6 +1257,7 @@ playReveal = function(
 		coralWinner.ZIndex = Z_CORAL + 20
 
 		if not coralPopStarted then
+			playColorBurstSound(0.72)
 			playCoralLandPop(coralWinner)
 		end
 		local nameLabel = spawnCoralNameLabel(gui, host, coralDisplayName(itemId))
@@ -1226,7 +1272,7 @@ playReveal = function(
 			table.insert(colorIcons, f)
 		end
 
-		runSpin(host, halfW, colorIcons, colorWinner0, colorPx, SPIN_SEC, function()
+		runSpin(host, halfW, colorIcons, colorWinner0, colorPx, pickSpinSec(SPIN_SEC, false), function()
 			local colorWinner = colorIcons[colorWinner0 + 1] :: Frame?
 			local colorLeft1 = if colorWinner0 >= 1 then colorIcons[colorWinner0] else nil
 			local colorLeft2 = if colorWinner0 >= 2 then colorIcons[colorWinner0 - 1] else nil

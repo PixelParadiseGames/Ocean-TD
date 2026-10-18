@@ -14,9 +14,14 @@ local ContentProvider = game:GetService("ContentProvider")
 local Players = game:GetService("Players")
 
 local oceanRoot = ReplicatedStorage:WaitForChild("OceanTD")
-local SpeciesCatalog = require(oceanRoot:WaitForChild("Shared"):WaitForChild("SpeciesCatalog"))
-local CoralVisual = require(oceanRoot:WaitForChild("Shared"):WaitForChild("CoralVisual"))
-local CoralSize = require(oceanRoot:WaitForChild("Shared"):WaitForChild("CoralSize"))
+local oceanShared = oceanRoot:WaitForChild("Shared")
+local SpeciesCatalog = require(oceanShared:WaitForChild("SpeciesCatalog"))
+local CoralVisual = require(oceanShared:WaitForChild("CoralVisual"))
+local CoralSize = require(oceanShared:WaitForChild("CoralSize"))
+local Constants = require(oceanShared:WaitForChild("Constants"))
+local AutoPlantSpots = require(oceanShared:WaitForChild("AutoPlantSpots"))
+local PlotOutlineColors = require(oceanShared:WaitForChild("PlotOutlineColors"))
+local GridMath = require(oceanShared:WaitForChild("GridMath"))
 
 local ClientPlot = require(script.Parent:WaitForChild("ClientPlot"))
 local CoralInspectPanelConsts = require(script.Parent:WaitForChild("CoralInspectPanelConsts"))
@@ -40,7 +45,7 @@ local SPECIES_ORDER = {
 local PER_SPECIES = 2
 local DROP_HEIGHT = 70
 local DROP_TWEEN = TweenInfo.new(0.45, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
-local FOOD_DIAM = 3.6 -- oversized vs nest ammo (~1.2)
+local FOOD_DIAM = 4.32 -- 20% larger than prior 3.6; oversized vs nest ammo (~1.2)
 local FOOD_FLIGHT_SEC = 0.38
 local FOOD_INTERVAL = 0.56 -- half the prior fire rate
 local DESPAWN_SEC = 0.55
@@ -79,6 +84,66 @@ local upgradeToken = 0
 local activeFood: { BasePart } = {}
 -- Live fish tip — food homes here each frame so shots don't land on a passed waypoint.
 local feedTarget: Vector3? = nil
+
+type DemoSpot = {
+	name: string,
+	xIndex: number,
+	zIndex: number,
+	-- Authored Plot1 world position (remapped onto the local plot at pick time).
+	plot1World: Vector3,
+}
+local masterSpotsCache: { DemoSpot }? = nil
+local usedSpotKeys: { [string]: boolean } = {}
+local hueCursor = 0
+
+local function orbColorForSpecies(speciesId: string): Color3
+	local def = SpeciesCatalog.get(speciesId)
+	local idx = if def and typeof(def.defaultColorIndex) == "number"
+		then PlotOutlineColors.clampCoralIndex(def.defaultColorIndex)
+		else nil
+	if idx then
+		return PlotOutlineColors.randomHueVariant(idx)
+	end
+	hueCursor = (hueCursor % PlotOutlineColors.CORAL_MAX_INDEX) + 1
+	return PlotOutlineColors.coralColor(hueCursor)
+end
+
+local function loadMasterSpots(): { DemoSpot }
+	if masterSpotsCache then
+		return masterSpotsCache
+	end
+	local out: { DemoSpot } = {}
+	local decor = Workspace:FindFirstChild(Constants.MASTER_DECOR_NAME)
+	local folderGuides = decor and decor:FindFirstChild(AutoPlantSpots.GUIDE_FOLDER)
+	local guide = folderGuides and folderGuides:FindFirstChild(AutoPlantSpots.GUIDE_PART)
+	if not (guide and guide:IsA("BasePart")) then
+		masterSpotsCache = out
+		return out
+	end
+	for _, child in ipairs(guide:GetChildren()) do
+		if not child:IsA("Attachment") then
+			continue
+		end
+		local xIndex, zIndex = AutoPlantSpots.parseAttachmentName(child.Name)
+		if typeof(xIndex) ~= "number" or typeof(zIndex) ~= "number" then
+			continue
+		end
+		table.insert(out, {
+			name = child.Name,
+			xIndex = xIndex,
+			zIndex = zIndex,
+			plot1World = child.WorldPosition,
+		})
+	end
+	table.sort(out, function(a, b)
+		if a.zIndex == b.zIndex then
+			return a.xIndex < b.xIndex
+		end
+		return a.zIndex < b.zIndex
+	end)
+	masterSpotsCache = out
+	return out
+end
 
 local function ensureFolder(): Folder
 	if folder and folder.Parent then
@@ -226,6 +291,7 @@ function JoinIntroExampleCorals.clear()
 	feeding = false
 	feedTarget = nil
 	clearFood()
+	table.clear(usedSpotKeys)
 	for _, e in ipairs(entries) do
 		if e.model.Parent then
 			e.model:Destroy()
@@ -624,6 +690,11 @@ end
 function JoinIntroExampleCorals.beginFeeding()
 	feeding = true
 	feedToken += 1
+	-- Demo plants latch nextFireAt far ahead — reset so food orbs start immediately.
+	local now = os.clock()
+	for i, e in ipairs(entries) do
+		e.nextFireAt = now + (i - 1) * 0.08
+	end
 end
 
 function JoinIntroExampleCorals.feedToward(worldPos: Vector3)
@@ -637,12 +708,29 @@ function JoinIntroExampleCorals.feedToward(worldPos: Vector3)
 		if not e.root.Parent then
 			continue
 		end
+		-- Skip fully faded (outside PS1) corals.
+		if e.root.LocalTransparencyModifier > 0.85 then
+			continue
+		end
 		if now < e.nextFireAt then
 			continue
 		end
 		e.nextFireAt = now + FOOD_INTERVAL + (math.random() * 0.2)
-		local from = e.root.Position + Vector3.new(0, e.root.Size.Y * 0.35, 0)
-		shootFood(from, e.root.Color)
+		local from = e.root.Position + Vector3.new(0, math.max(e.root.Size.Y * 0.35, 2), 0)
+		local color = e.root.Color
+		local idx = e.root:GetAttribute("OceanTD_ColorIndex")
+		if typeof(idx) ~= "number" then
+			local def = SpeciesCatalog.get(e.speciesId)
+			if def and typeof(def.defaultColorIndex) == "number" then
+				idx = def.defaultColorIndex
+			end
+		end
+		if typeof(idx) == "number" then
+			color = PlotOutlineColors.coralColor(PlotOutlineColors.clampCoralIndex(idx))
+		elseif color.R + color.G + color.B < 0.35 then
+			color = Color3.fromRGB(80, 200, 255)
+		end
+		shootFood(from, color)
 	end
 end
 
@@ -658,6 +746,15 @@ function JoinIntroExampleCorals.scaleOutAndClear()
 	clearFood()
 	local snapshot = table.clone(entries)
 	table.clear(entries)
+	-- Parts already faded by fadeOutsidePose must never flash back (don't lower LTM).
+	local startLtm: { [BasePart]: number } = {}
+	for _, e in ipairs(snapshot) do
+		for _, p in ipairs(e.parts) do
+			if p.Parent then
+				startLtm[p] = p.LocalTransparencyModifier
+			end
+		end
+	end
 	local t0 = os.clock()
 	while os.clock() - t0 < DESPAWN_SEC do
 		local u = math.clamp((os.clock() - t0) / DESPAWN_SEC, 0, 1)
@@ -669,7 +766,8 @@ function JoinIntroExampleCorals.scaleOutAndClear()
 				end)
 				for _, p in ipairs(e.parts) do
 					if p.Parent then
-						p.LocalTransparencyModifier = u
+						local base = startLtm[p] or 0
+						p.LocalTransparencyModifier = math.max(base, u)
 					end
 				end
 			end
@@ -688,6 +786,332 @@ end
 
 function JoinIntroExampleCorals.count(): number
 	return #entries
+end
+
+local function screenToWorld(screen: Vector2, depth: number): Vector3
+	local cam = Workspace.CurrentCamera
+	if not cam then
+		return Vector3.zero
+	end
+	local ray = cam:ViewportPointToRay(screen.X, screen.Y)
+	return ray.Origin + ray.Direction * depth
+end
+
+-- Open AutoPlant spot inside the live plot footprint (opens as the plot grows to PS5).
+local function pickFreeAutoPlantSpot(): Vector3?
+	local plot = ClientPlot.get()
+	if not plot then
+		return nil
+	end
+	local spots = loadMasterSpots()
+	if #spots == 0 then
+		-- Fallback: random inset point if guide attachments aren't replicated yet.
+		local rng = Random.new()
+		for _ = 1, 48 do
+			local u = rng:NextNumber(0.12, 0.88)
+			local v = rng:NextNumber(0.12, 0.88)
+			local spanX = plot.size.X * PLOT_PLACE_INSET
+			local spanZ = plot.size.Z * PLOT_PLACE_INSET
+			local localP = Vector3.new((u - 0.5) * spanX, 0, (v - 0.5) * spanZ)
+			local world = surfaceAtXZ(plot.cframe:PointToWorldSpace(localP))
+			local ok = true
+			for _, e in ipairs(entries) do
+				if e.root.Parent and (e.surfacePos - world).Magnitude < 2.8 then
+					ok = false
+					break
+				end
+			end
+			if ok then
+				return world
+			end
+		end
+		return surfaceAtXZ(plot.cframe.Position)
+	end
+	local free: { Vector3 } = {}
+	local freeKeys: { string } = {}
+	for _, spot in ipairs(spots) do
+		local key = spot.name
+		if usedSpotKeys[key] then
+			continue
+		end
+		local world = ClientPlot.remapFromPlot1(spot.plot1World)
+		if not GridMath.isInsidePlotXZ(world, plot.cframe, plot.size) then
+			continue
+		end
+		table.insert(free, world)
+		table.insert(freeKeys, key)
+	end
+	if #free == 0 then
+		return nil
+	end
+	local occupied: { Vector3 } = {}
+	for _, e in ipairs(entries) do
+		if e.root.Parent then
+			table.insert(occupied, e.surfacePos)
+		end
+	end
+	local pick = AutoPlantSpots.pickSpacedWorld(free, occupied)
+	if not pick then
+		return nil
+	end
+	for i, w in ipairs(free) do
+		if (w - pick).Magnitude < 0.05 then
+			usedSpotKeys[freeKeys[i]] = true
+			break
+		end
+	end
+	return surfaceAtXZ(pick)
+end
+
+local onPlantedListener: ((worldPos: Vector3, coralPart: BasePart?) -> ())? = nil
+
+function JoinIntroExampleCorals.setOnPlanted(cb: ((worldPos: Vector3, coralPart: BasePart?) -> ())?)
+	onPlantedListener = cb
+end
+
+local function notifyPlanted(worldPos: Vector3, coralPart: BasePart?)
+	local cb = onPlantedListener
+	if cb then
+		pcall(cb, worldPos, coralPart)
+	end
+end
+
+local function playOrbWoosh()
+	pcall(function()
+		local AutoPlantUI = require(script.Parent:WaitForChild("AutoPlantUI"))
+		if AutoPlantUI.playOrbWooshSfx then
+			AutoPlantUI.playOrbWooshSfx()
+		end
+	end)
+end
+
+local function flyOrbTo(fromScreen: Vector2?, toWorld: Vector3, color: Color3, flySec: number, onLand: (() -> ())?)
+	local startPos = if fromScreen then screenToWorld(fromScreen, 14) else toWorld + Vector3.new(0, 10, 0)
+	local folder = Workspace.CurrentCamera and Workspace.CurrentCamera:FindFirstChild("OceanTD_LocalFX")
+	if not folder then
+		folder = Instance.new("Folder")
+		folder.Name = "OceanTD_LocalFX"
+		folder.Parent = Workspace.CurrentCamera or Workspace
+	end
+	local orb = Instance.new("Part")
+	orb.Name = "OceanTD_JoinIntroDemoOrb"
+	orb.Shape = Enum.PartType.Ball
+	orb.Anchored = true
+	orb.CanCollide = false
+	orb.CanQuery = false
+	orb.CanTouch = false
+	orb.CastShadow = false
+	orb.Material = Enum.Material.Neon
+	orb.Color = color
+	orb.Size = Vector3.new(2.2, 2.2, 2.2)
+	orb.CFrame = CFrame.new(startPos)
+	orb.Parent = folder
+	playOrbWoosh()
+	local t0 = os.clock()
+	local sec = math.max(0.2, flySec)
+	while orb.Parent and os.clock() - t0 < sec do
+		local u = math.clamp((os.clock() - t0) / sec, 0, 1)
+		local e = 1 - (1 - u) * (1 - u)
+		local mid = startPos:Lerp(toWorld, 0.5) + Vector3.new(0, 7, 0)
+		local a = startPos:Lerp(mid, e)
+		local b = mid:Lerp(toWorld, e)
+		orb.CFrame = CFrame.new(a:Lerp(b, e))
+		RunService.RenderStepped:Wait()
+	end
+	if orb.Parent then
+		orb:Destroy()
+	end
+	if onLand then
+		onLand()
+	end
+end
+
+--[[
+	Plant one species for the backpack demo: orb from slot → spot, appear small, grow to Large.
+	Fire-and-forget (returns immediately) so the demo can stagger launches tightly.
+]]
+function JoinIntroExampleCorals.plantSpeciesDemo(speciesId: string, fromScreen: Vector2?, flySec: number?): boolean
+	if not SpeciesCatalog.get(speciesId) then
+		return false
+	end
+	local spot = pickFreeAutoPlantSpot()
+	if not spot then
+		return false
+	end
+	local color = orbColorForSpecies(speciesId)
+	local fly = if typeof(flySec) == "number" then flySec else 0.45
+	-- Avatar chase starts as soon as the orb fires (not when it lands).
+	notifyPlanted(spot, nil)
+	task.spawn(function()
+		flyOrbTo(fromScreen, spot, color, fly, function()
+			local plot = ClientPlot.get()
+			local host = ensureFolder()
+			local smallD = CoralSize.randomDiameter(CoralSize.SMALL)
+			local part = CoralVisual.create(speciesId, spot, {
+				diameter = smallD,
+				sizeClass = CoralSize.SMALL,
+				scaleMult = if CoralVisual.isMeshSpecies(speciesId)
+					then CoralVisual.randomMeshScale(speciesId, CoralSize.SMALL)
+					else 1,
+				plotCFrame = if plot then plot.cframe else nil,
+				facingYaw = if CoralVisual.needsFacingYaw(speciesId) then CoralVisual.randomFacingYaw() else nil,
+			})
+			if not part then
+				return
+			end
+			part.Name = "Example_" .. speciesId
+			part:SetAttribute("OceanTD_JoinIntroExample", true)
+			part:SetAttribute("OceanTD_SpeciesId", speciesId)
+			part:SetAttribute("OceanTD_ItemId", speciesId)
+			part.Anchored = true
+			part.CanCollide = false
+			part.CanQuery = false
+			part.CanTouch = false
+			local model = Instance.new("Model")
+			model.Name = "Example_" .. speciesId
+			part.Parent = model
+			model.PrimaryPart = part
+			model.Parent = host
+			CoralSize.applyToPart(part, smallD, CoralSize.SMALL, CoralSize.SMALL)
+			plantOnSurface(part, spot, speciesId)
+			keepTemplateLook(part)
+			local entry = bindEntry(model, part, speciesId, spot, os.clock() + 99)
+			playPlaceSound(spot)
+			upgradeEntryToLarge(entry)
+		end)
+	end)
+	return true
+end
+
+--[[
+	Quick fill remaining space with Small/Medium (autoplant-max sample). No camera ownership.
+]]
+function JoinIntroExampleCorals.fillRestDemo(
+	count: number,
+	fromScreen: Vector2?,
+	cancelled: (() -> boolean)?,
+	staggerSec: number?,
+	onOrbsFired: (() -> ())?
+): number
+	local n = math.max(0, math.floor(count))
+	if n <= 0 then
+		if onOrbsFired then
+			pcall(onOrbsFired)
+		end
+		return 0
+	end
+	local gap = if typeof(staggerSec) == "number" then math.max(0.01, staggerSec) else 0.02
+	local perBurst = 5 -- fire many at once
+	local rng = Random.new()
+	local planted = 0
+	local ids = SPECIES_ORDER
+	local i = 1
+	while i <= n do
+		if cancelled and cancelled() then
+			break
+		end
+		local burst = math.min(perBurst, n - i + 1)
+		for b = 1, burst do
+			local sid = ids[((i - 1) % #ids) + 1]
+			i += 1
+			local spot = pickFreeAutoPlantSpot()
+			if not spot then
+				continue
+			end
+			local tier = if rng:NextNumber() < 0.55 then CoralSize.SMALL else CoralSize.MEDIUM
+			local color = orbColorForSpecies(sid)
+			notifyPlanted(spot, nil)
+			task.spawn(function()
+				flyOrbTo(fromScreen, spot, color, 0.38, function()
+					local plot = ClientPlot.get()
+					local host = ensureFolder()
+					local diam = CoralSize.randomDiameter(tier)
+					local part = CoralVisual.create(sid, spot, {
+						diameter = diam,
+						sizeClass = tier,
+						scaleMult = if CoralVisual.isMeshSpecies(sid) then CoralVisual.randomMeshScale(sid, tier) else 1,
+						plotCFrame = if plot then plot.cframe else nil,
+						facingYaw = if CoralVisual.needsFacingYaw(sid) then CoralVisual.randomFacingYaw() else nil,
+					})
+					if not part then
+						return
+					end
+					part.Name = "Example_" .. sid
+					part:SetAttribute("OceanTD_JoinIntroExample", true)
+					part:SetAttribute("OceanTD_SpeciesId", sid)
+					part:SetAttribute("OceanTD_ItemId", sid)
+					part.Anchored = true
+					part.CanCollide = false
+					part.CanQuery = false
+					part.CanTouch = false
+					local model = Instance.new("Model")
+					model.Name = "Example_" .. sid
+					part.Parent = model
+					model.PrimaryPart = part
+					model.Parent = host
+					CoralSize.applyToPart(part, diam, tier, tier)
+					plantOnSurface(part, spot, sid)
+					keepTemplateLook(part)
+					bindEntry(model, part, sid, spot, os.clock() + 99)
+					playPlaceSound(spot)
+				end)
+			end)
+			planted += 1
+		end
+		task.wait(gap)
+	end
+	-- Last launch fired — collapse backpack / rush digs. Caller owns any land/VO wait.
+	if onOrbsFired then
+		pcall(onOrbsFired)
+		return planted
+	end
+	-- Legacy callers: short land hold.
+	task.wait(1.2)
+	return planted
+end
+
+-- Fade sample corals whose roots fall outside the given plot pose (e.g. stage-1 footprint).
+-- Destroys them after fade so scaleOut cannot flash them back on.
+function JoinIntroExampleCorals.fadeOutsidePose(
+	plotCf: CFrame,
+	plotSize: Vector3,
+	fadeSec: number,
+	cancelled: (() -> boolean)?
+)
+	local outside: { Entry } = {}
+	local keep: { Entry } = {}
+	for _, e in ipairs(entries) do
+		if e.root.Parent and not GridMath.isInsidePlotXZ(e.surfacePos, plotCf, plotSize) then
+			table.insert(outside, e)
+		else
+			table.insert(keep, e)
+		end
+	end
+	if #outside == 0 then
+		return
+	end
+	local sec = math.max(0.15, fadeSec)
+	local t0 = os.clock()
+	while os.clock() - t0 < sec do
+		if cancelled and cancelled() then
+			break
+		end
+		local u = math.clamp((os.clock() - t0) / sec, 0, 1)
+		for _, e in ipairs(outside) do
+			for _, p in ipairs(e.parts) do
+				if p.Parent then
+					p.LocalTransparencyModifier = u
+				end
+			end
+		end
+		RunService.RenderStepped:Wait()
+	end
+	for _, e in ipairs(outside) do
+		if e.model.Parent then
+			e.model:Destroy()
+		end
+	end
+	entries = keep
 end
 
 return JoinIntroExampleCorals

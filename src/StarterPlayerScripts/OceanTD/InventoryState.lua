@@ -18,9 +18,19 @@ local hueCounts: HueSeeds.HueInventory = {}
 local placementHueByItem: { [string]: number } = {}
 -- Species the player has ever received a seed for (server + local backfill).
 local discoveredCorals: { [string]: boolean } = {}
+-- Join-intro fake-catalog showcase: blocks player toggle; UI treats all species as known.
+local joinIntroDemo = false
 
 function InventoryState.isOpen(): boolean
 	return open
+end
+
+function InventoryState.setJoinIntroDemo(on: boolean)
+	joinIntroDemo = on == true
+end
+
+function InventoryState.isJoinIntroDemo(): boolean
+	return joinIntroDemo
 end
 
 function InventoryState.getSelectedId(): string?
@@ -152,11 +162,28 @@ function InventoryState.onCountsChanged(cb: () -> ()): RBXScriptConnection
 end
 
 function InventoryState.setOpen(value: boolean)
+	-- Join-intro demo owns open/close; ignore player toggles while active.
+	if joinIntroDemo then
+		return
+	end
 	if open == value then
 		return
 	end
 	open = value
 	-- Closing backpack clears selection; PlacementController cancels place on close.
+	if not open and selectedId ~= nil then
+		selectedId = nil
+		selectionChanged:Fire(nil)
+	end
+	openChanged:Fire(open)
+end
+
+-- Bypass join-intro demo lock (demo driver only).
+function InventoryState.setOpenForced(value: boolean)
+	if open == value then
+		return
+	end
+	open = value
 	if not open and selectedId ~= nil then
 		selectedId = nil
 		selectionChanged:Fire(nil)

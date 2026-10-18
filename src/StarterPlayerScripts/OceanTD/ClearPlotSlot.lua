@@ -959,6 +959,10 @@ function ClearPlotSlot.playHide()
 end
 
 function ClearPlotSlot.syncVisibility()
+	if InventoryState.isJoinIntroDemo() then
+		ClearPlotSlot.playHide()
+		return
+	end
 	if InventoryState.isOpen() then
 		if slot2 and slot2HomePos then
 			slot2.Position = slot2HomePos

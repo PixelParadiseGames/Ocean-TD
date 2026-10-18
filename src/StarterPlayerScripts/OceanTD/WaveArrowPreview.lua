@@ -6,8 +6,11 @@
 ]]
 
 local ContentProvider = game:GetService("ContentProvider")
+local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
 local SoundService = game:GetService("SoundService")
+local Workspace = game:GetService("Workspace")
 
 local oceanRoot = ReplicatedStorage:WaitForChild("OceanTD")
 local UiTheme = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiTheme"))
@@ -42,9 +45,12 @@ export type StartOpts = {
 	includeShark: boolean?,
 	-- When true, show crab GroundA/B trains even if this wave expects 0 crabs/urchins.
 	forceGroundTrains: boolean?,
-	-- Override path billboard text (planning: "Friendly Fish" / "Dangerous Critters").
+	-- Override path billboard text (planning: "FISH PATH").
 	greenLabelText: string?,
 	redLabelText: string?,
+	-- Unique GroundA/B paths planned for this wave (cycle when more than one).
+	hostilePaths: { WaveCrab.PathData }?,
+	onHostileDisplayIndex: ((number) -> ())?,
 }
 
 type ArrowPreview = {
@@ -76,6 +82,10 @@ local crabArrowPreviews: { ArrowPreview } = {}
 local sharkArrowPreviews: { ArrowPreview } = {}
 local wavePathLabels: { WavePathLabel } = {}
 local crabPathLabels: { WavePathLabel } = {}
+local hostileCyclePaths: { WaveCrab.PathData } = {}
+local hostileCycleIndex = 1
+local hostileCycleCb: ((number) -> ())? = nil
+local hostileCycleArmed = false
 
 local arrowSound = Instance.new("Sound")
 arrowSound.Name = "OceanTD_WaveArrows"
@@ -176,6 +186,10 @@ end
 local function clearRedTrains()
 	startGeneration += 1
 	redSpawnPending = false
+	hostileCycleArmed = false
+	table.clear(hostileCyclePaths)
+	hostileCycleIndex = 1
+	hostileCycleCb = nil
 	for _, preview in ipairs(crabArrowPreviews) do
 		WaveEntityPool.releaseRedArrows(preview.model)
 	end
@@ -205,13 +219,68 @@ function WaveArrowPreview.hasActiveRedTrains(): boolean
 	return redSpawnPending or #crabArrowPreviews > 0 or #sharkArrowPreviews > 0
 end
 
+function WaveArrowPreview.hasActiveRedCrabTrains(): boolean
+	return redSpawnPending or #crabArrowPreviews > 0
+end
+
 local planningLegendSg: ScreenGui? = nil
+local planningLegendRow: Frame? = nil
+local planningLegendLabel: TextLabel? = nil
+local legendAnimToken = 0
+local legendAnimConn: RBXScriptConnection? = nil
+local legendCinematicActive = false
+local legendCinematicPlayed = false -- one hold+path run per show cycle (until hidden)
+
+local LEGEND_HOLD_SEC = 3
+local LEGEND_APPROACH_SEC = 1.05 -- bottom-center → path start (smooth, no snap)
+local LEGEND_FOLLOW_SEC = 6
+local LEGEND_HOLD_TEXT_SIZE = 42
+local LEGEND_FOLLOW_TEXT_SIZE = 34
+local LEGEND_HOLD_Y = -36
+local LEGEND_PATH_Y_LIFT = 2.4
+
+local function smoothstep(t: number): number
+	local u = math.clamp(t, 0, 1)
+	return u * u * (3 - 2 * u)
+end
+
+local function pathScreenPoint(h: Host, path: PathLike, dist: number, cam: Camera): (Vector2?, boolean)
+	local worldPos = h.sampleFishPath(path, math.clamp(dist, 0, path.totalLen))
+	local sp, onScreen = cam:WorldToViewportPoint(worldPos + Vector3.new(0, LEGEND_PATH_Y_LIFT, 0))
+	if sp.Z <= 0 then
+		return nil, false
+	end
+	return Vector2.new(sp.X, sp.Y), onScreen == true
+end
+
+local function stopPlanningLegendAnim()
+	legendAnimToken += 1
+	legendCinematicActive = false
+	if legendAnimConn then
+		legendAnimConn:Disconnect()
+		legendAnimConn = nil
+	end
+end
+
+local function resetPlanningLegendHoldLayout()
+	local row = planningLegendRow
+	local lbl = planningLegendLabel
+	if row then
+		row.AnchorPoint = Vector2.new(0.5, 1)
+		row.Position = UDim2.new(0.5, 0, 1, LEGEND_HOLD_Y)
+	end
+	if lbl then
+		lbl.TextSize = LEGEND_HOLD_TEXT_SIZE
+		lbl.TextTransparency = 0
+		lbl.TextStrokeTransparency = 0.35
+		lbl.Visible = true
+	end
+end
 
 local function ensurePlanningLegend(): ScreenGui
-	if planningLegendSg and planningLegendSg.Parent then
+	if planningLegendSg and planningLegendSg.Parent and planningLegendLabel and planningLegendRow then
 		return planningLegendSg
 	end
-	local Players = game:GetService("Players")
 	local pg = Players.LocalPlayer:WaitForChild("PlayerGui") :: PlayerGui
 	local sg = Instance.new("ScreenGui")
 	sg.Name = "OceanTD_PlanningCritterLegend"
@@ -224,47 +293,164 @@ local function ensurePlanningLegend(): ScreenGui
 	local row = Instance.new("Frame")
 	row.Name = "Row"
 	row.AnchorPoint = Vector2.new(0.5, 1)
-	row.Position = UDim2.new(0.5, 0, 1, -36)
-	row.Size = UDim2.fromOffset(0, 32)
+	row.Position = UDim2.new(0.5, 0, 1, LEGEND_HOLD_Y)
+	row.Size = UDim2.fromOffset(0, 48)
 	row.AutomaticSize = Enum.AutomaticSize.X
 	row.BackgroundTransparency = 1
 	row.Parent = sg
 
-	local layout = Instance.new("UIListLayout")
-	layout.FillDirection = Enum.FillDirection.Horizontal
-	layout.HorizontalAlignment = Enum.HorizontalAlignment.Center
-	layout.VerticalAlignment = Enum.VerticalAlignment.Center
-	layout.SortOrder = Enum.SortOrder.LayoutOrder
-	layout.Padding = UDim.new(0, 0)
-	layout.Parent = row
-
-	local function makePart(name: string, text: string, color: Color3, order: number): TextLabel
-		local lbl = Instance.new("TextLabel")
-		lbl.Name = name
-		lbl.LayoutOrder = order
-		lbl.BackgroundTransparency = 1
-		lbl.AutomaticSize = Enum.AutomaticSize.X
-		lbl.Size = UDim2.fromOffset(0, 32)
-		lbl.Font = UiTheme.Font
-		lbl.TextSize = 24
-		lbl.Text = text
-		lbl.TextColor3 = color
-		lbl.TextStrokeTransparency = 0.35
-		lbl.TextStrokeColor3 = Color3.new(0, 0, 0)
-		lbl.Parent = row
-		return lbl
-	end
-
 	-- Red / dangerous trains are off — legend is friendly-only.
-	makePart("Friendly", "FRIENDLY FISH PATH", Color3.fromRGB(40, 255, 120), 1)
+	local lbl = Instance.new("TextLabel")
+	lbl.Name = "Friendly"
+	lbl.BackgroundTransparency = 1
+	lbl.AutomaticSize = Enum.AutomaticSize.XY
+	lbl.Size = UDim2.fromOffset(0, 48)
+	lbl.Font = UiTheme.Font
+	lbl.TextSize = LEGEND_HOLD_TEXT_SIZE
+	lbl.Text = "FISH PATH"
+	lbl.TextColor3 = Color3.fromRGB(40, 255, 120)
+	lbl.TextStrokeTransparency = 0.35
+	lbl.TextStrokeColor3 = Color3.new(0, 0, 0)
+	lbl.Parent = row
 
 	planningLegendSg = sg
+	planningLegendRow = row
+	planningLegendLabel = lbl
 	return sg
+end
+
+local function startPlanningLegendPathCinematic()
+	-- Don't restart if already running or finished this empty-plot show cycle.
+	if legendCinematicActive or legendCinematicPlayed then
+		return
+	end
+	stopPlanningLegendAnim()
+	local sg = ensurePlanningLegend()
+	local row = planningLegendRow
+	local lbl = planningLegendLabel
+	if not row or not lbl then
+		return
+	end
+	sg.Enabled = true
+	legendCinematicActive = true
+	legendCinematicPlayed = false
+	resetPlanningLegendHoldLayout()
+
+	local my = legendAnimToken
+	local t0 = os.clock()
+	local holdScreen: Vector2? = nil -- captured at end of hold for smooth approach
+	legendAnimConn = RunService.RenderStepped:Connect(function()
+		if my ~= legendAnimToken then
+			return
+		end
+		local rowNow = planningLegendRow
+		local lblNow = planningLegendLabel
+		if not rowNow or not lblNow or not sg.Parent then
+			stopPlanningLegendAnim()
+			return
+		end
+
+		local elapsed = os.clock() - t0
+		local h = host
+		local path = if h then h.getFishPath() else nil
+		local cam = Workspace.CurrentCamera
+
+		if elapsed < LEGEND_HOLD_SEC then
+			-- Large bottom-center hold.
+			rowNow.AnchorPoint = Vector2.new(0.5, 1)
+			rowNow.Position = UDim2.new(0.5, 0, 1, LEGEND_HOLD_Y)
+			rowNow.Visible = true
+			lblNow.TextSize = LEGEND_HOLD_TEXT_SIZE
+			lblNow.TextTransparency = 0
+			lblNow.TextStrokeTransparency = 0.35
+			local ap = rowNow.AbsolutePosition
+			local asz = rowNow.AbsoluteSize
+			if asz.X > 1 and asz.Y > 1 then
+				holdScreen = Vector2.new(ap.X + asz.X * 0.5, ap.Y + asz.Y * 0.5)
+			end
+			return
+		end
+
+		local afterHold = elapsed - LEGEND_HOLD_SEC
+		local approachEnd = LEGEND_APPROACH_SEC
+		local followEnd = approachEnd + LEGEND_FOLLOW_SEC
+
+		-- Phase 2: ease from bottom-center to path start (W1 / dist 0).
+		if afterHold < approachEnd then
+			local a = smoothstep(afterHold / math.max(1e-3, approachEnd))
+			rowNow.AnchorPoint = Vector2.new(0.5, 0.5)
+			lblNow.TextTransparency = 0
+			lblNow.TextStrokeTransparency = 0.35
+			lblNow.TextSize = LEGEND_HOLD_TEXT_SIZE + (LEGEND_FOLLOW_TEXT_SIZE - LEGEND_HOLD_TEXT_SIZE) * a * 0.35
+			local from = holdScreen
+			if not from then
+				local vp = if cam then cam.ViewportSize else Vector2.new(1280, 720)
+				from = Vector2.new(vp.X * 0.5, vp.Y + LEGEND_HOLD_Y)
+			end
+			local to = from
+			if h and path and path.totalLen > 0.5 and cam then
+				local startPt = pathScreenPoint(h, path, 0, cam)
+				if startPt then
+					to = startPt
+				end
+			end
+			local x = from.X + (to.X - from.X) * a
+			local y = from.Y + (to.Y - from.Y) * a
+			rowNow.Visible = true
+			rowNow.Position = UDim2.fromOffset(x, y)
+			return
+		end
+
+		-- Phase 3: travel start → end along the path while fading.
+		local u = math.clamp((afterHold - approachEnd) / LEGEND_FOLLOW_SEC, 0, 1)
+		local eu = smoothstep(u)
+		if h and path and path.totalLen > 0.5 and cam then
+			local dist = eu * path.totalLen
+			local pt, onScreen = pathScreenPoint(h, path, dist, cam)
+			rowNow.AnchorPoint = Vector2.new(0.5, 0.5)
+			if pt and onScreen then
+				rowNow.Visible = true
+				rowNow.Position = UDim2.fromOffset(pt.X, pt.Y)
+			elseif pt then
+				rowNow.Visible = false
+			else
+				rowNow.Visible = false
+			end
+		else
+			rowNow.AnchorPoint = Vector2.new(0.5, 1)
+			rowNow.Position = UDim2.new(0.5, 0, 1, LEGEND_HOLD_Y)
+			rowNow.Visible = true
+		end
+
+		lblNow.TextSize = LEGEND_HOLD_TEXT_SIZE + (LEGEND_FOLLOW_TEXT_SIZE - LEGEND_HOLD_TEXT_SIZE) * (0.35 + 0.65 * u)
+		lblNow.TextTransparency = u
+		lblNow.TextStrokeTransparency = 0.35 + 0.65 * u
+
+		if afterHold >= followEnd or u >= 1 then
+			legendCinematicPlayed = true
+			stopPlanningLegendAnim()
+			sg.Enabled = false
+			resetPlanningLegendHoldLayout()
+			if rowNow then
+				rowNow.Visible = true
+			end
+		end
+	end)
 end
 
 function WaveArrowPreview.setPlanningLegendVisible(visible: boolean)
 	local sg = ensurePlanningLegend()
-	sg.Enabled = visible == true
+	if visible == true then
+		startPlanningLegendPathCinematic()
+	else
+		stopPlanningLegendAnim()
+		legendCinematicPlayed = false -- allow one fresh run next time it is shown
+		sg.Enabled = false
+		resetPlanningLegendHoldLayout()
+		if planningLegendRow then
+			planningLegendRow.Visible = true
+		end
+	end
 end
 
 function WaveArrowPreview.isPlanningLegendVisible(): boolean
@@ -332,9 +518,9 @@ local function createWavePathLabel(text: string, pos: Vector3, parent: Instance,
 	return part
 end
 
-local function startCrabArrowPreview(forceGround: boolean, redLabelText: string?)
+local function startCrabArrowPreviewOnPath(path: WaveCrab.PathData, redLabelText: string?)
 	local h = host
-	if not h then
+	if not h or path.totalLen <= 0.5 then
 		return
 	end
 	for _, preview in ipairs(crabArrowPreviews) do
@@ -342,69 +528,82 @@ local function startCrabArrowPreview(forceGround: boolean, redLabelText: string?
 	end
 	table.clear(crabArrowPreviews)
 	clearCrabPathLabels()
-	local paths = h.getGroundPaths()
+	local folderFx = h.ensureFolder()
+	local lift = Vector3.new(0, C.CRAB_ARROW_Y_LIFT, 0)
+	-- Leader at dist 0; followers queue behind the start and emerge one by one.
+	for i = 1, C.CRAB_ARROW_COUNT do
+		local d = -(i - 1) * C.CRAB_ARROW_PATH_SPACING
+		local clone = WaveEntityPool.acquireRedArrows(
+			"OceanTD_RedArrows_" .. tostring(i),
+			folderFx,
+			C.CRAB_ARROW_COLOR
+		)
+		if not clone then
+			break
+		end
+		local spin0 = (i - 1) * 0.55
+		local sampleD = math.max(0, d)
+		local pos, tang = WaveCrab.sample(path, sampleD)
+		setArrowCFrame(clone, pos + lift, tang, spin0)
+		local visible = d >= 0
+		if not visible then
+			setModelHidden(clone, true)
+		end
+		table.insert(crabArrowPreviews, {
+			model = clone,
+			dist = d,
+			spin = spin0,
+			alive = true,
+			path = path,
+			visible = visible,
+		})
+		if redLabelText and i % C.ARROW_LABEL_EVERY == 0 then
+			local part = createWavePathLabel(
+				redLabelText,
+				pos + lift,
+				folderFx,
+				C.CRAB_ARROW_COLOR,
+				Color3.fromRGB(40, 0, 0)
+			)
+			if not visible then
+				local bb = part:FindFirstChild("Label")
+				if bb and bb:IsA("BillboardGui") then
+					bb.Enabled = false
+				end
+			end
+			table.insert(crabPathLabels, {
+				part = part,
+				dist = d,
+				alive = true,
+				groundPath = path,
+				visible = visible,
+			})
+		end
+	end
+end
+
+local function notifyHostileDisplayIndex()
+	local cb = hostileCycleCb
+	if cb then
+		cb(hostileCycleIndex)
+	end
+end
+
+local function startCrabArrowPreview(forceGround: boolean, redLabelText: string?)
+	local h = host
+	if not h then
+		return
+	end
+	local paths = if #hostileCyclePaths > 0 then hostileCyclePaths else h.getGroundPaths()
 	if #paths == 0 then
 		return
 	end
 	if not forceGround and WaveCrab.expectedCount() <= 0 and WaveUrchin.expectedCount() <= 0 then
 		return
 	end
-	local folderFx = h.ensureFolder()
-	local lift = Vector3.new(0, C.CRAB_ARROW_Y_LIFT, 0)
-	local arrowI = 0
-	for _, path in ipairs(paths) do
-		-- Leader at dist 0; followers queue behind the start and emerge one by one.
-		for i = 1, C.CRAB_ARROW_COUNT do
-			arrowI += 1
-			local d = -(i - 1) * C.CRAB_ARROW_PATH_SPACING
-			local clone = WaveEntityPool.acquireRedArrows(
-				"OceanTD_RedArrows_" .. tostring(arrowI),
-				folderFx,
-				C.CRAB_ARROW_COLOR
-			)
-			if not clone then
-				break
-			end
-			local spin0 = (arrowI - 1) * 0.55
-			local sampleD = math.max(0, d)
-			local pos, tang = WaveCrab.sample(path, sampleD)
-			setArrowCFrame(clone, pos + lift, tang, spin0)
-			local visible = d >= 0
-			if not visible then
-				setModelHidden(clone, true)
-			end
-			table.insert(crabArrowPreviews, {
-				model = clone,
-				dist = d,
-				spin = spin0,
-				alive = true,
-				path = path,
-				visible = visible,
-			})
-			if redLabelText and i % C.ARROW_LABEL_EVERY == 0 then
-				local part = createWavePathLabel(
-					redLabelText,
-					pos + lift,
-					folderFx,
-					C.CRAB_ARROW_COLOR,
-					Color3.fromRGB(40, 0, 0)
-				)
-				if not visible then
-					local bb = part:FindFirstChild("Label")
-					if bb and bb:IsA("BillboardGui") then
-						bb.Enabled = false
-					end
-				end
-				table.insert(crabPathLabels, {
-					part = part,
-					dist = d,
-					alive = true,
-					groundPath = path,
-					visible = visible,
-				})
-			end
-		end
-	end
+	hostileCycleIndex = math.clamp(hostileCycleIndex, 1, #paths)
+	startCrabArrowPreviewOnPath(paths[hostileCycleIndex], redLabelText)
+	notifyHostileDisplayIndex()
 end
 
 local function startSharkArrowPreview()
@@ -522,18 +721,63 @@ function WaveArrowPreview.startGreen(opts: StartOpts?)
 	end
 end
 
-function WaveArrowPreview.startRed(_opts: StartOpts?)
-	-- Disabled: no red dangerous-critter arrow trains (friendly green only).
+function WaveArrowPreview.startRed(opts: StartOpts?)
 	startGeneration += 1
 	redSpawnPending = false
 	clearRedTrains()
+	table.clear(hostileCyclePaths)
+	hostileCycleIndex = 1
+	hostileCycleCb = if opts then opts.onHostileDisplayIndex else nil
+	hostileCycleArmed = false
+	local paths = if opts and opts.hostilePaths then opts.hostilePaths else nil
+	if paths and #paths > 0 then
+		for _, p in ipairs(paths) do
+			table.insert(hostileCyclePaths, p)
+		end
+	end
+	local force = opts ~= nil and opts.forceGroundTrains == true
+	local label = if opts then opts.redLabelText else nil
+	if #hostileCyclePaths == 0 and not force then
+		if WaveCrab.expectedCount() <= 0 and WaveUrchin.expectedCount() <= 0 then
+			return
+		end
+	end
+	if #hostileCyclePaths == 0 then
+		local h = host
+		if h then
+			for _, p in ipairs(h.getGroundPaths()) do
+				table.insert(hostileCyclePaths, p)
+			end
+		end
+	end
+	if #hostileCyclePaths == 0 then
+		return
+	end
+	hostileCycleArmed = true
+	startCrabArrowPreview(force, label)
+	if opts and opts.includeShark == true then
+		startSharkArrowPreview()
+	end
+end
+
+function WaveArrowPreview.advanceHostileCycle()
+	if not hostileCycleArmed or #hostileCyclePaths == 0 then
+		return
+	end
+	if #crabArrowPreviews > 0 or redSpawnPending then
+		return
+	end
+	if #hostileCyclePaths > 1 then
+		hostileCycleIndex = (hostileCycleIndex % #hostileCyclePaths) + 1
+	end
+	startCrabArrowPreviewOnPath(hostileCyclePaths[hostileCycleIndex], nil)
+	notifyHostileDisplayIndex()
 end
 
 function WaveArrowPreview.start(opts: StartOpts?)
 	clearGreenTrains()
 	clearRedTrains()
 	WaveArrowPreview.startGreen(opts)
-	-- Red trains intentionally omitted.
 end
 
 function WaveArrowPreview.tick(dt: number)

@@ -2014,36 +2014,39 @@ local function commitPlace(opts: { stayInConfirm: boolean? }?)
 		if typeof(result.inventory) == "table" then
 			InventoryState.setSeedCounts(result.inventory)
 		end
-		-- Join-intro place tutorial: next point at coral UPGRADE (first upgrade free).
-		-- Drag-from-backpack can skip equip→plot; accept equip/backpack/plot + free-upgrade.
+		-- Manual Plant chapter: next point at coral UPGRADE (first upgrade free).
+		-- Skip during Auto Plant chapter (server places; finger goes to waves instead).
 		do
-			local hint = playerGui:GetAttribute("OceanTD_RollFingerHint")
-			local freeUp = playerGui:GetAttribute("OceanTD_TutorialFreeUpgrade") == true
-			local pastUpgrade = hint == "hue"
-				or hint == "hueReroll"
-				or hint == "plant"
-				or hint == "closeBackpack"
-				or hint == "waves"
-				or hint == "skills"
-				or hint == "plotSize"
-				or hint == "plotSizeUpgrade"
-				or hint == "closePlotSize"
-				or hint == "closeSkills"
-				or hint == "cam"
-			local shouldUpgradeFinger = not pastUpgrade
-				and (
-					hint == "plot"
-					or hint == "equip"
-					or hint == "backpack"
-					or hint == "upgrade"
-					or hint == "reselectCoral"
-					or (freeUp and (hint == "plot" or hint == "equip" or hint == "backpack"))
-				)
-			if shouldUpgradeFinger then
-				playerGui:SetAttribute("OceanTD_RollFingerHint", "upgrade")
-				if typeof(placedId) == "string" and placedId ~= "" then
-					playerGui:SetAttribute("OceanTD_TutorialHuePlaceId", placedId)
-					playerGui:SetAttribute("OceanTD_TutorialHueResume", "upgrade")
+			local chapter = playerGui:GetAttribute("OceanTD_TutorialChapter")
+			if chapter ~= "autoPlant" then
+				local hint = playerGui:GetAttribute("OceanTD_RollFingerHint")
+				local freeUp = playerGui:GetAttribute("OceanTD_TutorialFreeUpgrade") == true
+				local pastUpgrade = hint == "hue"
+					or hint == "hueReroll"
+					or hint == "plant"
+					or hint == "closeBackpack"
+					or hint == "waves"
+					or hint == "skills"
+					or hint == "plotSize"
+					or hint == "plotSizeUpgrade"
+					or hint == "closePlotSize"
+					or hint == "closeSkills"
+					or hint == "cam"
+				local shouldUpgradeFinger = not pastUpgrade
+					and (
+						hint == "plot"
+						or hint == "equip"
+						or hint == "backpack"
+						or hint == "upgrade"
+						or hint == "reselectCoral"
+						or (freeUp and (hint == "plot" or hint == "equip" or hint == "backpack"))
+					)
+				if shouldUpgradeFinger then
+					playerGui:SetAttribute("OceanTD_RollFingerHint", "upgrade")
+					if typeof(placedId) == "string" and placedId ~= "" then
+						playerGui:SetAttribute("OceanTD_TutorialHuePlaceId", placedId)
+						playerGui:SetAttribute("OceanTD_TutorialHueResume", "upgrade")
+					end
 				end
 			end
 		end

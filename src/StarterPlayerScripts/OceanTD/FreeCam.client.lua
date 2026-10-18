@@ -1253,12 +1253,16 @@ local function restoreDefaultCamera()
 	setCharacterLocked(false)
 	setDroneLookCapture(false)
 
-	-- Intro/defeat cinematics own the camera â€” don't yank back to Custom mid-shot.
+	-- Intro/defeat/inspect/plot-size cinematics own the camera — don't yank back to Custom mid-shot.
 	if playerGui:GetAttribute("OceanTD_TangCamBusy") == true
 		or playerGui:GetAttribute("OceanTD_SharkCamBusy") == true
 		or playerGui:GetAttribute("OceanTD_UrchinCamBusy") == true
 		or playerGui:GetAttribute("OceanTD_ReefDefeatCamBusy") == true
 		or playerGui:GetAttribute("OceanTD_JoinIntroBusy") == true
+		or playerGui:GetAttribute("OceanTD_HueCamBusy") == true
+		or playerGui:GetAttribute("OceanTD_PlantDigCamBusy") == true
+		or playerGui:GetAttribute("OceanTD_PlotSizeCinematicBusy") == true
+		or RelocateController.isCinematicHold()
 	then
 		savedCameraType = nil
 		return
@@ -2112,6 +2116,10 @@ local function startRenderLoop()
 			return
 		end
 		if playerGui:GetAttribute("OceanTD_HueCamBusy") == true then
+			return
+		end
+		-- Join-intro heart / fish tip zoom punches own Scriptable cam.
+		if playerGui:GetAttribute("OceanTD_IntroCamPunchBusy") == true then
 			return
 		end
 		if playerGui:GetAttribute("OceanTD_JoinIntroBusy") == true then
@@ -2971,6 +2979,7 @@ do
 			or playerGui:GetAttribute("OceanTD_PlantDigCamBusy") == true
 			or playerGui:GetAttribute("OceanTD_PlantWorkerBusy") == true
 			or playerGui:GetAttribute("OceanTD_HueCamBusy") == true
+			or playerGui:GetAttribute("OceanTD_IntroCamPunchBusy") == true
 			or RelocateController.isCinematicHold()
 		then
 			return true
@@ -3053,7 +3062,11 @@ local function bindMobileLeftUi(left: Instance)
 	if not leftHudListenersBound then
 		leftHudListenersBound = true
 		InventoryState.onOpenChanged(function(open)
-			if open then
+			-- Join-intro fake backpack must NOT pull PlotCam to max zoom-in (floor close-up).
+			if open
+				and playerGui:GetAttribute("OceanTD_JoinIntroBusy") ~= true
+				and not InventoryState.isJoinIntroDemo()
+			then
 				PlotCam2.notifyBuildOpened()
 			end
 			syncDPadIcon()
@@ -3068,22 +3081,43 @@ local function bindMobileLeftUi(left: Instance)
 			local open = skillsBubblesOpen()
 			if open then
 				skillsResumeToken += 1
-				local cam = getCamera()
-				skillsResume = {
-					mode = mode,
-					cf = if cam then cam.CFrame else nil,
-					plotSnap = if mode == "plotcam" and PlotCam2.isActive() then PlotCam2.captureView() else nil,
-				}
+				-- Keep snap captured before PlotSize ForceCloseSkills (don't overwrite with "off").
+				if not skillsResume then
+					local cam = getCamera()
+					local captureMode: CamMode = mode
+					if captureMode == "off" then
+						local attr = playerGui:GetAttribute(FC.ATTR_MODE)
+						if attr == "plotcam" or attr == "fishcam" or attr == "dronecam" then
+							captureMode = attr :: CamMode
+						end
+					end
+					skillsResume = {
+						mode = captureMode,
+						cf = if cam then cam.CFrame else nil,
+						plotSnap = if captureMode == "plotcam" and PlotCam2.isActive()
+							then PlotCam2.captureView()
+							else nil,
+					}
+				end
 			else
+				-- Plot-size ForceCloseSkills: keep the pre-skills snap for the real close later.
+				-- Suppress is set in SkillPowerUpUI *before* ForceClose (Busy isn't true yet).
+				if playerGui:GetAttribute("OceanTD_PlotSizeCinematicBusy") == true
+					or playerGui:GetAttribute("OceanTD_PlotSizeCineSuppressTutorial") == true
+				then
+					return
+				end
 				local my = skillsResumeToken
 				local snap = skillsResume
 				skillsResume = nil
-				if not snap then
-					return
-				end
 				task.spawn(function()
 					task.wait(SKILLS_RESTORE_WAIT)
 					if my ~= skillsResumeToken or skillsBubblesOpen() then
+						return
+					end
+					if playerGui:GetAttribute("OceanTD_PlotSizeCinematicBusy") == true
+						or playerGui:GetAttribute("OceanTD_PlotSizeCineSuppressTutorial") == true
+					then
 						return
 					end
 					-- Wait out avatar-cam restore tween so we don't snap over it.
@@ -3094,13 +3128,65 @@ local function bindMobileLeftUi(left: Instance)
 					if my ~= skillsResumeToken or skillsBubblesOpen() then
 						return
 					end
-					if mode ~= snap.mode then
+					if playerGui:GetAttribute("OceanTD_PlotSizeCinematicBusy") == true
+						or playerGui:GetAttribute("OceanTD_PlotSizeCineSuppressTutorial") == true
+					then
+						return
+					end
+					local function hardReclaimPlotCam(preferCf: CFrame?)
+						-- Prefer the live/saved CF so we don't snap to default 52° top-down pitch.
 						forceModeOverride = true
-						resumePreserveView = true
-						setMode(snap.mode)
+						resumePreserveView = preferCf ~= nil
+						if mode ~= "plotcam" then
+							setMode("plotcam")
+						end
 						resumePreserveView = false
 						forceModeOverride = false
+						if preferCf then
+							PlotCam2.begin(preferCf)
+						elseif not PlotCam2.isActive() then
+							PlotCam2.begin(nil)
+						end
+						local cam = getCamera()
+						local want = if preferCf then preferCf else PlotCam2.getCFrame()
+						if cam and want then
+							cam.CameraType = Enum.CameraType.Scriptable
+							cam.CFrame = want
+							camPos = want.Position
+							syncLookFromCFrame(want)
+						elseif cam then
+							cam.CameraType = Enum.CameraType.Scriptable
+						end
+						if not renderConn then
+							startRenderLoop()
+						end
 					end
+					-- No snap (wiped mid-cinematic): still leave Plot Cam, never Player Cam.
+					if not snap then
+						local attr = playerGui:GetAttribute(FC.ATTR_MODE)
+						local cam = getCamera()
+						local stuckPlayer = cam ~= nil and cam.CameraType ~= Enum.CameraType.Scriptable
+						if attr == "plotcam" or mode == "plotcam" or mode == "off" or stuckPlayer then
+							hardReclaimPlotCam(if cam then cam.CFrame else nil)
+						end
+						return
+					end
+					-- Always restore the pre-skills seat (even if mode string already matches).
+					if snap.mode == "off" then
+						if mode ~= "off" then
+							forceModeOverride = true
+							setMode("off")
+							forceModeOverride = false
+						end
+						return
+					end
+					forceModeOverride = true
+					resumePreserveView = true
+					if mode ~= snap.mode then
+						setMode(snap.mode)
+					end
+					resumePreserveView = false
+					forceModeOverride = false
 					local cam = getCamera()
 					if snap.mode == "plotcam" then
 						if snap.plotSnap then
@@ -3110,6 +3196,8 @@ local function bindMobileLeftUi(left: Instance)
 							PlotCam2.applyViewSnapshot(snap.plotSnap)
 						elseif snap.cf then
 							PlotCam2.begin(snap.cf)
+						elseif not PlotCam2.isActive() then
+							PlotCam2.begin(nil)
 						end
 						local want = PlotCam2.getCFrame() or snap.cf
 						if cam and want then
@@ -3117,6 +3205,13 @@ local function bindMobileLeftUi(left: Instance)
 							cam.CFrame = want
 							camPos = want.Position
 							syncLookFromCFrame(want)
+						elseif cam and cam.CameraType ~= Enum.CameraType.Scriptable then
+							-- setMode early-out left Player Cam — hard reclaim.
+							hardReclaimPlotCam(snap.cf)
+							return
+						end
+						if not renderConn then
+							startRenderLoop()
 						end
 					elseif (snap.mode == "fishcam" or snap.mode == "dronecam") and snap.cf then
 						if cam then
@@ -3124,6 +3219,9 @@ local function bindMobileLeftUi(left: Instance)
 							cam.CFrame = snap.cf
 							camPos = snap.cf.Position
 							syncLookFromCFrame(snap.cf)
+						end
+						if not renderConn then
+							startRenderLoop()
 						end
 					end
 				end)
@@ -3169,10 +3267,22 @@ local function bindMobileLeftUi(left: Instance)
 				or playerGui:GetAttribute("OceanTD_UrchinCamBusy") == true
 				or playerGui:GetAttribute("OceanTD_PlotSizeCinematicBusy") == true
 			then
-				if mode ~= "off" then
-					cinematicResumeMode = mode
-					playerGui:SetAttribute(FC.ATTR_CINEMATIC_RESUME_MODE, mode)
+				local stashed = mode
+				if stashed ~= "off" then
+					cinematicResumeMode = stashed
+					playerGui:SetAttribute(FC.ATTR_CINEMATIC_RESUME_MODE, stashed)
 				end
+				-- Pause Plot/Fish drive without seating Player Cam / flipping HUD to Off Cam.
+				stopRender()
+				PlotCam2.stop()
+				PlotCam2Tune.setVisible(false)
+				FishCamTune.setVisible(false)
+				-- Internal "off" so Resume can setMode(plotcam) again; keep CamCycleMode on the stash.
+				mode = "off"
+				if stashed ~= "off" then
+					playerGui:SetAttribute(FC.ATTR_MODE, stashed)
+				end
+				return
 			elseif mode == "plotcam" then
 				return
 			else
@@ -3184,26 +3294,68 @@ local function bindMobileLeftUi(left: Instance)
 			forceModeOverride = false
 		end)
 
-		-- Soft-plant close-up: ensure PlotCam2 is ticking (Studio often places from avatar cam).
+		-- Soft-plant / inspect zoom: ensure PlotCam2 is ticking.
+		-- CRITICAL: preserve the live Scriptable CF so upgrade/hue relative zoom keeps its
+		-- side approach. Forcing begin(nil) reseats the steep default pitch (looks top-down).
 		playerGui:GetAttributeChangedSignal("OceanTD_EnsurePlotCam"):Connect(function()
 			if FC.PLOT_CAM_VARIANT ~= 2 then
 				return
 			end
+			local cam = getCamera()
 			if mode == "plotcam" then
 				if not PlotCam2.isActive() then
-					PlotCam2.begin(nil)
+					PlotCam2.begin(if cam then cam.CFrame else nil)
+				end
+				if cam and cam.CameraType ~= Enum.CameraType.Scriptable then
+					cam.CameraType = Enum.CameraType.Scriptable
+					local want = PlotCam2.getCFrame()
+					if want then
+						cam.CFrame = want
+						camPos = want.Position
+						syncLookFromCFrame(want)
+					end
 				end
 				if not renderConn then
 					startRenderLoop()
 				end
 				return
 			end
-			-- Bypass PlacementController.isActive gate so place-zoom can run mid-place.
+			-- ATTR may still say plotcam while internal mode is off (ForceClose stash).
+			local attr = playerGui:GetAttribute(FC.ATTR_MODE)
+			if mode ~= "off" and attr ~= "plotcam" and attr ~= nil and attr ~= "" and attr ~= "off" then
+				-- Fish/drone: only fix Scriptable if somehow Custom.
+				if cam and cam.CameraType ~= Enum.CameraType.Scriptable then
+					cam.CameraType = Enum.CameraType.Scriptable
+				end
+				if not renderConn then
+					startRenderLoop()
+				end
+				return
+			end
+			-- Coming from Player Cam / paused FreeCam: keep Scriptable pose when we have one.
+			local preserve = cam ~= nil and cam.CameraType == Enum.CameraType.Scriptable
 			forceModeOverride = true
+			resumePreserveView = preserve == true
 			setMode("plotcam")
+			resumePreserveView = false
 			forceModeOverride = false
 			if mode == "plotcam" and not PlotCam2.isActive() then
-				PlotCam2.begin(nil)
+				PlotCam2.begin(if preserve and cam then cam.CFrame else nil)
+			end
+			if cam and cam.CameraType ~= Enum.CameraType.Scriptable then
+				cam.CameraType = Enum.CameraType.Scriptable
+			end
+			local want = PlotCam2.getCFrame()
+			if cam and want and not preserve then
+				cam.CFrame = want
+				camPos = want.Position
+				syncLookFromCFrame(want)
+			elseif cam and preserve then
+				camPos = cam.CFrame.Position
+				syncLookFromCFrame(cam.CFrame)
+			end
+			if not renderConn then
+				startRenderLoop()
 			end
 		end)
 
@@ -3277,8 +3429,10 @@ local function bindMobileLeftUi(left: Instance)
 			if raw ~= "off" and raw ~= "plotcam" and raw ~= "fishcam" and raw ~= "dronecam" then
 				return
 			end
+			-- During join intro the cinematic owns Scriptable framing (CamStart→CamEnd / path VO).
+			-- Forcing "off" here seats avatar Player Cam and fights the intro lens.
 			if playerGui:GetAttribute("OceanTD_JoinIntroBusy") == true then
-				if raw ~= "plotcam" and raw ~= "off" then
+				if raw ~= "plotcam" then
 					return
 				end
 			end
@@ -3327,13 +3481,12 @@ local function bindMobileLeftUi(left: Instance)
 				clearPovFreeLook()
 			end
 			if resume and resume ~= "off" then
-				-- Force past TangCam/defeat busy races so Retry restores the pre-defeat cam.
+				-- Force past TangCam/defeat/inspect races so Plot Size → Plot Cam reclaims the lens.
 				task.defer(function()
-					if PlacementController.isActive() or RelocateController.isActive() then
-						return
-					end
 					local snapFishStart = wantPathStart and resume == "fishcam"
-					resumePreserveView = not snapFishStart
+					-- Fresh PlotCam seat after Plot Size (avoid avatar-seeded preserve view).
+					local freshPlot = resume == "plotcam" and not snapFishStart
+					resumePreserveView = not snapFishStart and not freshPlot
 					forceModeOverride = true
 					setMode(resume)
 					forceModeOverride = false
@@ -3344,6 +3497,15 @@ local function bindMobileLeftUi(left: Instance)
 						if snapFishStart then
 							-- setMode no-ops when already fishcam; always re-seat at W1.
 							applyFishCamWaveStartSnap(getCamera(), true)
+						elseif freshPlot then
+							local cam = getCamera()
+							local want = PlotCam2.getCFrame()
+							if cam and want then
+								cam.CameraType = Enum.CameraType.Scriptable
+								cam.CFrame = want
+								camPos = want.Position
+								syncLookFromCFrame(want)
+							end
 						else
 							local cam = getCamera()
 							if cam then

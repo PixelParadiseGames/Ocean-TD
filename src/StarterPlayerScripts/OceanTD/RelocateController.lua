@@ -451,6 +451,12 @@ local function keepCameraFrozen()
 	if cinematicHold then
 		return
 	end
+	-- Plot/Fish/Drone own Scriptable — never pin a stale Player Cam freeze CF over them.
+	if freecamOwnsCamera() then
+		savedCameraCFrame = nil
+		savedCameraType = nil
+		return
+	end
 	local pg = Players.LocalPlayer:FindFirstChildOfClass("PlayerGui")
 	if pg
 		and (
@@ -458,6 +464,8 @@ local function keepCameraFrozen()
 			or pg:GetAttribute("OceanTD_UrchinCamBusy") == true
 			or pg:GetAttribute("OceanTD_TangCamBusy") == true
 			or pg:GetAttribute("OceanTD_ReefDefeatCamBusy") == true
+			or pg:GetAttribute("OceanTD_HueCamBusy") == true
+			or pg:GetAttribute("OceanTD_PlantDigCamBusy") == true
 		)
 	then
 		return
@@ -2985,6 +2993,17 @@ end
 
 function RelocateController.begin(target: BasePart, opts: { placeConfirmBridge: boolean? }?)
 	local bridge = opts ~= nil and opts.placeConfirmBridge == true
+	-- Join-intro sample plot is visual-only — never select / drag.
+	if InventoryState.isJoinIntroDemo() then
+		return
+	end
+	local pg = Players.LocalPlayer:FindFirstChildOfClass("PlayerGui")
+	if pg and pg:GetAttribute("OceanTD_JoinIntroBusy") == true then
+		return
+	end
+	if target:GetAttribute("OceanTD_JoinIntroExample") == true then
+		return
+	end
 	-- Recover from stuck recycle-fly / intro so mid-wave picks always get chrome.
 	if recycleFlying or introAnimating then
 		recycleFlying = false

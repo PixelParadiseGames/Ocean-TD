@@ -190,6 +190,10 @@ local pathDataA2: PathData? = nil
 local pathDataGroundA: WaveCrab.PathData? = nil
 local pathDataGroundB: WaveCrab.PathData? = nil
 local pathDataShark: WaveCrab.PathData? = nil
+-- Pre-assigned GroundA/B for this wave's crabs/urchins (unique set + spawn queue).
+local hostilePreviewPaths: { WaveCrab.PathData } = {}
+local hostilePathQueue: { WaveCrab.PathData } = {}
+local hostileDisplayIndex = 1
 local fishList: { FishAgent } = {}
 local fishA2Remaining = 0
 local waveUsesFishA2 = false
@@ -835,6 +839,7 @@ L.WaveArrowPreview.bind({
 -- Always-on green friendly path ribbon (route A only).
 -- Prefer pathData from rebuildRouteForPlotSize(stage) so the line matches the moved heart
 -- even before SkillPowerUpUI stage mirrors (join-intro MAX path falls back to live stage).
+-- Red GroundA/B ribbons while the live wave includes crabs or urchins.
 L.WavePathLines.bind({
 	getFishPath = function()
 		if joinIntroDemo then
@@ -849,7 +854,74 @@ L.WavePathLines.bind({
 	getPlotSizeStage = function()
 		return L.SkillPowerUpUI.getStage("PlotSize")
 	end,
+	getGroundPaths = function()
+		if #hostilePreviewPaths > 0 then
+			return hostilePreviewPaths
+		end
+		return WaveCrab.listGroundPaths(pathDataGroundA, pathDataGroundB)
+	end,
+	getHostileDisplayPath = function()
+		if #hostilePreviewPaths == 0 then
+			return nil
+		end
+		local idx = math.clamp(hostileDisplayIndex, 1, #hostilePreviewPaths)
+		return hostilePreviewPaths[idx]
+	end,
+	sampleGroundPath = function(path, dist)
+		return WaveCrab.sample(path, dist)
+	end,
+	waveShowsHostilePaths = function()
+		if not running or joinIntroDemo then
+			return false
+		end
+		if #hostilePreviewPaths == 0 then
+			return false
+		end
+		return WaveCrab.expectedCount() > 0
+			or WaveUrchin.expectedCount() > 0
+			or WaveCrab.spawnedCount() > 0
+			or WaveUrchin.spawnedCount() > 0
+	end,
 })
+
+local function pathAlreadyInList(list: { WaveCrab.PathData }, path: WaveCrab.PathData): boolean
+	for _, p in ipairs(list) do
+		if p == path then
+			return true
+		end
+	end
+	return false
+end
+
+local function planHostilePathsForWave()
+	table.clear(hostilePreviewPaths)
+	table.clear(hostilePathQueue)
+	hostileDisplayIndex = 1
+	local n = WaveCrab.expectedCount() + WaveUrchin.expectedCount()
+	if n <= 0 then
+		return
+	end
+	local available = WaveCrab.listGroundPaths(pathDataGroundA, pathDataGroundB)
+	if #available == 0 then
+		return
+	end
+	for _ = 1, n do
+		local path = WaveCrab.pickGroundPath(pathDataGroundA, pathDataGroundB, fishRng)
+		if path then
+			table.insert(hostilePathQueue, path)
+			if not pathAlreadyInList(hostilePreviewPaths, path) then
+				table.insert(hostilePreviewPaths, path)
+			end
+		end
+	end
+end
+
+local function takePlannedGroundPath(): WaveCrab.PathData?
+	if #hostilePathQueue > 0 then
+		return table.remove(hostilePathQueue, 1)
+	end
+	return WaveCrab.pickGroundPath(pathDataGroundA, pathDataGroundB, fishRng)
+end
 
 -- UrchinMesh is a MeshPart container with RootPart + ShellHitbox children. WeldConstraints
 -- don't reliably follow Anchored RootPart teleports, so snap body/shell from stored locals.
@@ -2283,7 +2355,7 @@ local function spawnOneCrab(startDist: number?)
 	if not WaveCrab.shouldSpawn(waveIndex) then
 		return
 	end
-	local path = WaveCrab.pickGroundPath(pathDataGroundA, pathDataGroundB, fishRng)
+	local path = takePlannedGroundPath()
 	if not path then
 		return
 	end
@@ -2416,7 +2488,7 @@ local function spawnOneUrchin(startDist: number?)
 	if not WaveUrchin.shouldSpawn(waveIndex) then
 		return
 	end
-	local path = WaveCrab.pickGroundPath(pathDataGroundA, pathDataGroundB, fishRng)
+	local path = takePlannedGroundPath()
 	if not path then
 		return
 	end
@@ -2736,6 +2808,9 @@ local function beginWave(wave: number)
 		WaveCrab.beginWave(WaveCrab.rollCount(wave))
 		WaveUrchin.beginWave(WaveUrchin.rollCount(wave))
 	end
+	planHostilePathsForWave()
+	-- Red GroundA/B path ribbons when this wave includes crabs/urchins.
+	L.WavePathLines.syncHostilePaths()
 	restoreStunnedCorals(wave > 1)
 	if wave == 2 then
 		tryOfferWave2FullAutoTrial()
@@ -2749,7 +2824,7 @@ local function beginWave(wave: number)
 		fishA2Remaining = math.clamp(math.floor(n * frac + 0.5), 0, n)
 		waveUsesFishA2 = fishA2Remaining > 0
 	end
-	-- Path preview: GreenArrows race the full route; fish follow after lead (longer on wave 1).
+	-- Path preview: GreenArrows race the full route; red crab/urchin trains cycle GroundA/B.
 	if not joinIntroDemo then
 		if wave <= 1 then
 			-- Round-start sting only on 2nd+ Start Waves (first overlaps explainer VO).
@@ -2757,6 +2832,16 @@ local function beginWave(wave: number)
 		else
 			L.WaveArrowPreview.start({ playSound = false })
 			L.WaveArrowPreview.playWaveAdvanceSound()
+		end
+		if #hostilePreviewPaths > 0 then
+			L.WaveArrowPreview.startRed({
+				playSound = false,
+				hostilePaths = hostilePreviewPaths,
+				onHostileDisplayIndex = function(index: number)
+					hostileDisplayIndex = math.max(1, math.floor(index))
+					L.WavePathLines.syncHostilePaths()
+				end,
+			})
 		end
 	end
 	-- Waves 1–2: always Plot Cam (no Fish Cam / Tang overview), including Retry.
@@ -4635,6 +4720,11 @@ function WaveSim.stop(opts: { silent: boolean?, preserveAmmoFade: boolean?, pres
 	L.WaveEndVfx.setHappyExitVisible(true)
 	resetSpeedState()
 	hardCleanup(preserveAmmoFade, preserveCritterFade)
+	table.clear(hostilePreviewPaths)
+	table.clear(hostilePathQueue)
+	hostileDisplayIndex = 1
+	-- Drop red crab/urchin path ribbons with the wave.
+	L.WavePathLines.syncHostilePaths()
 	demoCoralParts = nil
 	joinIntroDemo = false
 	lastHudWave = -1
@@ -4809,6 +4899,13 @@ local function attachSimLoop(myToken: number)
 		then
 			L.WaveArrowPreview.startGreen({ playSound = false })
 		end
+		-- Crab/urchin: cycle red trains across planned GroundA/B paths.
+		if not joinIntroDemo
+			and #hostilePreviewPaths > 0
+			and not L.WaveArrowPreview.hasActiveRedCrabTrains()
+		then
+			L.WaveArrowPreview.advanceHostileCycle()
+		end
 		Feed.tickPathStamp()
 		Feed.tickAmmoArm(simClock)
 		Feed.tickAmmoFade(simClock)
@@ -4971,7 +5068,7 @@ function WaveSim.startPlanningArrowPreview(): boolean
 		playSound = false,
 		includeShark = false,
 		forceGroundTrains = false,
-		greenLabelText = "Friendly Fish",
+		greenLabelText = "FISH PATH",
 	}
 	L.WaveArrowPreview.setTickSpeedMult(0.5)
 	-- Friendly green trains only — no red dangerous-critter arrows.
@@ -5195,13 +5292,13 @@ function WaveSim.rebuildRouteForPlotSize(plotSizeStage: number?, opts: { skipPat
 			playSound = false,
 			includeShark = false,
 			forceGroundTrains = false,
-			greenLabelText = "Friendly Fish",
+			greenLabelText = "FISH PATH",
 		}
 		L.WaveArrowPreview.setTickSpeedMult(0.5)
 		if not L.WaveArrowPreview.hasActiveGreenTrains() then
 			L.WaveArrowPreview.startGreen(planningOpts)
 		end
-		syncPlanningLegendVisible(true)
+		-- Do not re-trigger FISH PATH cinematic on route rebuild.
 	end
 	return true
 end
@@ -5312,6 +5409,9 @@ task.defer(function()
 		placedCoralCount = L.PlacedCoralIndex.countLocal()
 		if placedCoralCount > 0 then
 			L.WaveArrowPreview.setPlanningLegendVisible(false)
+		elseif planningArrows then
+			-- Plot cleared while still in pre-wave planning — replay FISH PATH.
+			syncPlanningLegendVisible(true)
 		end
 	end)
 end)

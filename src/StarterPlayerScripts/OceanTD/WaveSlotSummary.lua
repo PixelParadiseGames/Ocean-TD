@@ -36,8 +36,18 @@ local SUMMARY_CORNER = 32
 local SUMMARY_STROKE_THICKNESS = 3.5
 local SUMMARY_STROKE_INSET = SUMMARY_STROKE_THICKNESS
 local SUMMARY_PANEL_W = 540
-local SUMMARY_PANEL_H = 380
+-- 10% shorter than the prior 380px box; bottom edge stays at the old mid+190 seat.
+local SUMMARY_PANEL_H = 342
+local SUMMARY_PANEL_BOTTOM_Y = 190 -- half of prior height; AnchorPoint Y=1
 local SUMMARY_RGB_HUE_PER_SEC = 1 / 12
+
+local function summaryPanelGoalPos(): UDim2
+	return UDim2.new(0.5, 0, 0.5, SUMMARY_PANEL_BOTTOM_Y)
+end
+
+local function summaryPanelGoalSize(): UDim2
+	return UDim2.fromOffset(SUMMARY_PANEL_W, SUMMARY_PANEL_H)
+end
 local TITLE_STROKE_BRIGHT = Color3.fromRGB(255, 70, 70)
 local TITLE_STROKE_DARK = Color3.fromRGB(95, 12, 18)
 local TITLE_STROKE_PERIOD_SEC = 4
@@ -538,8 +548,9 @@ function WaveSlotSummary.resumeAfterSkills()
 	if panel and panel:IsA("Frame") then
 		panel.ClipsDescendants = false
 		panel.Visible = true
-		panel.Position = UDim2.fromScale(0.5, 0.5)
-		panel.Size = UDim2.fromOffset(SUMMARY_PANEL_W, SUMMARY_PANEL_H)
+		panel.AnchorPoint = Vector2.new(0.5, 1)
+		panel.Position = summaryPanelGoalPos()
+		panel.Size = summaryPanelGoalSize()
 		local edge = panel:FindFirstChild("SummaryEdge")
 		if edge and edge:IsA("UIStroke") then
 			styleSummaryEdge(edge)
@@ -703,9 +714,9 @@ function WaveSlotSummary.show(summary: WaveSim.Summary)
 
 		local panel = Instance.new("Frame")
 		panel.Name = "Panel"
-		panel.AnchorPoint = Vector2.new(0.5, 0.5)
-		panel.Position = UDim2.fromScale(0.5, 0.5)
-		panel.Size = UDim2.fromOffset(SUMMARY_PANEL_W, SUMMARY_PANEL_H)
+		panel.AnchorPoint = Vector2.new(0.5, 1)
+		panel.Position = summaryPanelGoalPos()
+		panel.Size = summaryPanelGoalSize()
 		panel.BackgroundColor3 = Color3.fromRGB(16, 26, 38)
 		panel.BorderSizePixel = 0
 		panel.ClipsDescendants = false
@@ -759,11 +770,12 @@ function WaveSlotSummary.show(summary: WaveSim.Summary)
 		local vp = if cam then cam.ViewportSize else Vector2.new(1920, 1080)
 		local startX = if origin then origin.X / vp.X else 0.92
 		local startY = if origin then origin.Y / vp.Y else 0.55
+		panel.AnchorPoint = Vector2.new(0.5, 1)
 		panel.Position = UDim2.fromScale(startX, startY)
 		panel.Size = UDim2.fromOffset(48, 28)
 		TweenService:Create(panel, scaleInfo, {
-			Position = UDim2.fromScale(0.5, 0.5),
-			Size = UDim2.fromOffset(SUMMARY_PANEL_W, SUMMARY_PANEL_H),
+			Position = summaryPanelGoalPos(),
+			Size = summaryPanelGoalSize(),
 		}):Play()
 		-- Celebration only — defeat "Out Of Reef Health" should not leave confetti circles.
 		if not summary.defeated then

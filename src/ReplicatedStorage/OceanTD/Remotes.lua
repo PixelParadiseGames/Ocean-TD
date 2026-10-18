@@ -69,6 +69,7 @@ local REMOTE_FUNCTIONS = {
 	"RequestGetJoinIntro",
 	"RequestGetSandDollarStats",
 	"RequestSetAutoPlant",
+	"RequestTutorialAutoPlant",
 	"RequestAutoPlantShuffle",
 	"RequestAutoPlantAddMax",
 	"RequestGetAutoPlantState",

@@ -442,6 +442,11 @@ requestSetAutoPlant.OnServerInvoke = function(player: Player, enabled: any)
 	return AutoPlantService.setEnabled(player, enabled == true)
 end
 
+local requestTutorialAutoPlant = Remotes.getFunction("RequestTutorialAutoPlant")
+requestTutorialAutoPlant.OnServerInvoke = function(player: Player, enable: any)
+	return AutoPlantService.prepareTutorial(player, enable ~= false)
+end
+
 local requestAutoPlantShuffle = Remotes.getFunction("RequestAutoPlantShuffle")
 requestAutoPlantShuffle.OnServerInvoke = function(player: Player)
 	return AutoPlantService.shuffle(player)

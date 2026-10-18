@@ -13,7 +13,8 @@ local Workspace = game:GetService("Workspace")
 local player = Players.LocalPlayer
 local oceanShared = ReplicatedStorage:WaitForChild("OceanTD"):WaitForChild("Shared")
 local PlotOutlineColors = require(oceanShared:WaitForChild("PlotOutlineColors"))
-local HueDefaultDebug = require(script.Parent:WaitForChild("HueDefaultDebug"))
+-- Module must not share the LocalScript name (Rojo: HueDefaultDebug.client.lua → HueDefaultDebug).
+local HueDefaultDebug = require(script.Parent:WaitForChild("HueDefaultDebugLib"))
 
 local ATTR = PlotOutlineColors.ATTR_DEBUG_HUE_DEFAULTED
 local TOGGLE_ATTR = "OceanTD_HueDefaultDebug"

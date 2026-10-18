@@ -125,6 +125,13 @@ export type PlayOpts = {
 	onDone: (() -> ())?,
 	-- Force plant-only VFX (no avatar dash). Default: auto when not in a worker cam.
 	skipAvatar: boolean?,
+	-- Join-intro: dash/dig even when not in Plot/Fish/Drone cam.
+	forceAvatar: boolean?,
+	-- Join-intro: cinematic owns the lens — no dig close-up steal.
+	skipDigCam: boolean?,
+	-- Override dash / dig durations (intro sped-up timeline).
+	dashSec: number?,
+	workSec: number?,
 	-- Multiply ice-bubble emission (ADD MAX uses 0.5 when planting >40).
 	bubbleScale: number?,
 	-- When false, skip the build-complete "wow" SFX (hearts still play).
@@ -176,7 +183,27 @@ local function shouldSkipAvatar(opts: PlayOpts?): boolean
 	if opts and opts.skipAvatar == true then
 		return true
 	end
+	if opts and opts.forceAvatar == true then
+		return false
+	end
 	return not isWorkerCam()
+end
+
+-- Auto Plant during a live wave: avatar still dashes/digs, but PlotCam stays player-owned.
+local function shouldSkipDigCam(opts: PlayOpts?): boolean
+	if opts and opts.skipDigCam == true then
+		return true
+	end
+	local apOk, AutoPlantUI = pcall(function()
+		return require(script.Parent:WaitForChild("AutoPlantUI"))
+	end)
+	if not (apOk and AutoPlantUI and AutoPlantUI.isEnabled and AutoPlantUI.isEnabled()) then
+		return false
+	end
+	local wsOk, WaveSim = pcall(function()
+		return require(script.Parent:WaitForChild("WaveSim"))
+	end)
+	return wsOk and WaveSim and WaveSim.isRunning and WaveSim.isRunning() == true
 end
 
 local function setBusy(on: boolean)
@@ -1605,11 +1632,26 @@ function PlantWorkerVfx.playAt(worldPos: Vector3, opts: PlayOpts?): boolean
 	local lastDustBucket = -1
 	startRunSound()
 	local runAnim = ensureRunTrack(hum)
+	local runSpeed = RUN_PLAY_SPEED
+	local dashSec = DASH_SEC
+	local workSec = WORK_SEC
+	local forceAvatar = opts ~= nil and opts.forceAvatar == true
+	local skipDigCam = shouldSkipDigCam(opts)
+	if opts and typeof(opts.dashSec) == "number" and opts.dashSec > 0 then
+		dashSec = opts.dashSec
+		runSpeed = RUN_PLAY_SPEED * math.clamp(DASH_SEC / dashSec, 1, 4)
+	end
+	if opts and typeof(opts.workSec) == "number" and opts.workSec > 0 then
+		workSec = opts.workSec
+	end
 	if runAnim then
-		runAnim:Play(0.04, 1, RUN_PLAY_SPEED)
+		runAnim:Play(0.04, 1, runSpeed)
 	end
 	-- Zoom in on the digger; FreeCam yields while OceanTD_PlantDigCamBusy is set.
-	beginDigCamZoom(hrp, worldPos)
+	-- Skipped when Auto Plant is on during a wave so PlotCam lookaround stays free.
+	if not skipDigCam then
+		beginDigCamZoom(hrp, worldPos)
+	end
 
 	RunService:BindToRenderStep(DASH_BIND_NAME, Enum.RenderPriority.Last.Value, function()
 		if token ~= playToken then
@@ -1625,7 +1667,7 @@ function PlantWorkerVfx.playAt(worldPos: Vector3, opts: PlayOpts?): boolean
 			finish(token, hrp, wasAnchored, dustHost, onDone)
 			return
 		end
-		if not isWorkerCam() then
+		if not forceAvatar and not isWorkerCam() then
 			pcall(function()
 				RunService:UnbindFromRenderStep(DASH_BIND_NAME)
 			end)
@@ -1639,7 +1681,7 @@ function PlantWorkerVfx.playAt(worldPos: Vector3, opts: PlayOpts?): boolean
 			if riseP and riseP.Parent then
 				goalCF = standOnCoralCF(riseP, hum, lookAtPlant)
 			end
-			local u = math.clamp((now - phaseT0) / DASH_SEC, 0, 1)
+			local u = math.clamp((now - phaseT0) / dashSec, 0, 1)
 			local a = easeOutQuad(u)
 			local pos = startCF.Position:Lerp(goalCF.Position, a)
 			hrp.CFrame = lookFlat(pos, goalCF.Position, goalCF.LookVector)
@@ -1678,7 +1720,7 @@ function PlantWorkerVfx.playAt(worldPos: Vector3, opts: PlayOpts?): boolean
 		end
 
 		-- work: dig + dust + coral rise; avatar rides on top
-		local workU = math.clamp((now - phaseT0) / WORK_SEC, 0, 1)
+		local workU = math.clamp((now - phaseT0) / workSec, 0, 1)
 		if riseP and riseP.Parent and buriedCF and finalCF then
 			setCoralRiseAlpha(riseP, buriedCF, finalCF, workU)
 			base = standOnCoralCF(riseP, hum, lookAtPlant)

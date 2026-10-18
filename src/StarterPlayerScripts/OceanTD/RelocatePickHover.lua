@@ -29,6 +29,15 @@ local player = Players.LocalPlayer
 -- Build-mode debug: show raycast part bounds + screen-radius pick disc (PICK_SCREEN_PX).
 local DEBUG_PICK_HITBOXES = true
 
+-- Join-intro sample plot is visual-only — no green pick discs / hover / drag.
+local function introBlocksPick(): boolean
+	if InventoryState.isJoinIntroDemo() then
+		return true
+	end
+	local pg = player:FindFirstChildOfClass("PlayerGui")
+	return pg ~= nil and pg:GetAttribute("OceanTD_JoinIntroBusy") == true
+end
+
 export type Host = {
 	getPrimary: () -> BasePart?,
 	getBlockPart: () -> BasePart?,
@@ -221,7 +230,7 @@ local function syncPickDebugHitboxes()
 		return
 	end
 	local h = host
-	if not h or not InventoryState.isOpen() or pickDebugUserHidden or pickDebugForcedHidden then
+	if not h or not InventoryState.isOpen() or pickDebugUserHidden or pickDebugForcedHidden or introBlocksPick() then
 		clearPickDebugHitboxes()
 		return
 	end
@@ -373,6 +382,9 @@ function RelocatePickHover.findByPlaceId(placeIdWant: string): BasePart?
 end
 
 function RelocatePickHover.pick(screenPos: Vector2): BasePart?
+	if introBlocksPick() then
+		return nil
+	end
 	local h = host
 	local folder = getPlotFolder()
 	local cam = Workspace.CurrentCamera
@@ -678,7 +690,7 @@ function RelocatePickHover.startLoop()
 	end
 	hoverConn = RunService.RenderStepped:Connect(function()
 		if h.isActive() or h.isBusy() or not InventoryState.isOpen() or PlacementController.isActive()
-			or InventoryState.isBuildModalBlocking()
+			or InventoryState.isBuildModalBlocking() or introBlocksPick()
 		then
 			RelocatePickHover.clearHover()
 			return

@@ -311,21 +311,36 @@ local function restoreSavedCamera()
 	if not cam then
 		return
 	end
-	local char = getCharacter()
-	local hum = getHumanoid(char)
 	local cycle = savedCamCycleMode
-	if savedSubject and savedSubject.Parent then
-		cam.CameraSubject = savedSubject
-	elseif hum then
-		cam.CameraSubject = hum
+	local attr = playerGui:GetAttribute(CAM_CYCLE_ATTR)
+	-- After plot-size ForceClose, saved cycle is often cleared — prefer HUD cycle / Plot Cam.
+	local wantCycle = cycle
+	if wantCycle ~= "plotcam" and wantCycle ~= "fishcam" and wantCycle ~= "dronecam" and wantCycle ~= "freecam" then
+		if attr == "plotcam" or attr == "fishcam" or attr == "dronecam" then
+			wantCycle = attr :: string
+		else
+			wantCycle = "plotcam"
+		end
 	end
-	if cycle == "plotcam" or cycle == "fishcam" or cycle == "dronecam" or cycle == "freecam" then
+	if wantCycle == "plotcam" or wantCycle == "fishcam" or wantCycle == "dronecam" or wantCycle == "freecam" then
+		-- Restore the exact pre-skills Scriptable seat. FreeCam skills-resume restarts
+		-- PlotCam2 with the saved plotSnap — do NOT EnsurePlotCam here (that can reseat
+		-- default top-down pitch and break upgrade/hue side framing).
+		cam.CameraSubject = nil
 		cam.CameraType = Enum.CameraType.Scriptable
 		if savedCf then
 			cam.CFrame = savedCf
 		end
 		playerGui:SetAttribute("OceanTD_SyncCamCycleFromView", os.clock())
 	else
+		-- Explicit Off Cam only — never leave Player Cam after skills training by accident.
+		local char = getCharacter()
+		local hum = getHumanoid(char)
+		if savedSubject and savedSubject.Parent then
+			cam.CameraSubject = savedSubject
+		elseif hum then
+			cam.CameraSubject = hum
+		end
 		local restore = savedCamType or Enum.CameraType.Custom
 		if restore == Enum.CameraType.Scriptable then
 			restore = Enum.CameraType.Custom

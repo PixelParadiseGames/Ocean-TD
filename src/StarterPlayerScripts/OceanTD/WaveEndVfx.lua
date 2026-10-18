@@ -1022,22 +1022,40 @@ local function waitForHeartRoot(plotId: string, timeoutSec: number): (Instance?,
 	return heartVisualRoot(plotId), endHeartPart
 end
 
-local function playHeartInkSoundTwiceAndWait()
-	for _ = 1, 2 do
-		local snd = playUnduckedOneShot(HEART_INK_REVEAL_SOUND_ID, 1.6, nil, "OceanTD_HeartInkRevealPlay")
-		-- Block roughly one beat so the pair stays sequential.
-		local t0 = os.clock()
-		while snd.Parent and os.clock() - t0 < 2.5 do
-			if snd.IsPlaying and snd.TimeLength > 0.05 then
-				task.wait(math.clamp(snd.TimeLength / math.max(0.2, snd.PlaybackSpeed), 0.12, 2.5))
-				break
-			end
-			task.wait(0.05)
+local function waitOneHeartInkBeat(snd: Sound): number
+	-- Returns approximate seconds waited for this beat.
+	local t0 = os.clock()
+	while snd.Parent and os.clock() - t0 < 2.5 do
+		if snd.IsPlaying and snd.TimeLength > 0.05 then
+			local waitSec = math.clamp(snd.TimeLength / math.max(0.2, snd.PlaybackSpeed), 0.12, 2.5)
+			task.wait(waitSec)
+			return math.max(0.12, os.clock() - t0)
 		end
-		if os.clock() - t0 < 0.2 then
-			task.wait(0.35)
-		end
+		task.wait(0.05)
 	end
+	if os.clock() - t0 < 0.2 then
+		task.wait(0.35)
+		return 0.35
+	end
+	return math.max(0.12, os.clock() - t0)
+end
+
+local function playHeartInkSoundTwiceAndWait()
+	-- Quick zoom to the heart on the first beat; hold; ease back as the second beat ends.
+	local IntroCamPunch = require(script.Parent:WaitForChild("IntroCamPunch"))
+	local heartPos = WaveEndVfx.getEndHeartWorldPos()
+	-- Stronger pull from PlotCam overview so the heart zoom reads clearly.
+	local punch = IntroCamPunch.beginHold(heartPos, 0.42, 0.42, { freezeFocus = true })
+
+	local snd1 = playUnduckedOneShot(HEART_INK_REVEAL_SOUND_ID, 1.6, nil, "OceanTD_HeartInkRevealPlay")
+	local beat1Len = waitOneHeartInkBeat(snd1)
+
+	local snd2 = playUnduckedOneShot(HEART_INK_REVEAL_SOUND_ID, 1.6, nil, "OceanTD_HeartInkRevealPlay")
+	-- Ease back over most of beat 2 so we land as it finishes (use beat1 length as estimate).
+	if punch then
+		punch.release(math.max(0.22, beat1Len * 0.9))
+	end
+	waitOneHeartInkBeat(snd2)
 end
 
 local function playHeartInkSoundTwice()

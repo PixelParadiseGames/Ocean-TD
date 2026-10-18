@@ -38,15 +38,20 @@ return {
 	CINE_UNLOCK_GROW_SEC = 0.7 * CINE_TIME_SCALE,
 	CINE_BRAIN_RESIZE_SEC = 0.28 * CINE_TIME_SCALE,
 
-	-- Hue paint: quick close-up so the color change is readable, then restore.
+	-- Hue / upgrade close-up: side pitch for Balanced / Fast Reload.
+	-- Long Range keeps the older relative pull-in (HUE_CAM_DIST_FRAC).
+	INSPECT_CAM_PITCH_DEG = 16,
 	HUE_CAM_IN_SEC = 0.28,
-	HUE_CAM_HOLD_SEC = 2,
+	HUE_CAM_HOLD_SEC = 3,
 	HUE_CAM_OUT_SEC = 0.4,
-	-- Slightly farther than before (~2 zoom steps out) so PLANT chrome stays readable.
-	HUE_CAM_DIST_FRAC = 0.55, -- fraction of current cam→coral distance (lower = closer)
-	-- Look lower on the coral so PLANT chrome sits higher in frame (more on-screen).
-	HUE_CAM_LOOK_Y_FRAC = 0.08,
-	HUE_CAM_LOOK_Y_MAX = 1.0,
+	HUE_CAM_DIST_FRAC = 0.42, -- Long Range only: fraction of current cam→coral distance
+	HUE_CAM_LOOK_Y_FRAC = 0.25,
+	HUE_CAM_LOOK_Y_MAX = 2.0,
+	HUE_CAM_DIST_MIN = 3.5,
+	HUE_CAM_DIST_MAX = 32,
+	-- Absolute stud distance by SizeClass for Balanced / Fast Reload (1=S, 2=M, 3=L).
+	HUE_CAM_DIST_BY_CLASS = { [1] = 5.5, [2] = 7.0, [3] = 14.0 },
+	UPGRADE_CAM_DIST_BY_CLASS = { [1] = 6.0, [2] = 7.5, [3] = 15.0 },
 	HUE_RANGE_HIDE_SEC = 5, -- hide range preview while the hue close-up reads
 
 	DEFAULT_PALETTE_SWATCH = 0,

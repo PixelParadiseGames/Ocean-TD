@@ -1,6 +1,7 @@
 --!strict
 --[[
-	Backpack header: Auto Plant toggle, ADD MAX, shuffle dice.
+	Backpack header: Auto Plant toggle (optional), ADD MAX, shuffle dice.
+	HUD circle owns ON/OFF; set SHOW_BACKPACK_TOGGLE = true to restore the in-backpack toggle.
 	Mounted above coral sections by InventoryUI.
 ]]
 
@@ -54,6 +55,10 @@ local CONFIRM_BTN_MAX_TEXT = 18 -- ~2 sizes smaller than full button fill
 
 local AutoPlantUI = {}
 
+-- HUD Auto Plant circle owns ON/OFF. Flip true to show the backpack toggle again.
+local SHOW_BACKPACK_TOGGLE = false
+local remotesBound = false
+
 local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui") :: PlayerGui
 
@@ -66,6 +71,7 @@ local cooldownEndsAt = 0
 local hostRow: Frame? = nil
 local toggleShell: Frame? = nil
 local toggleBtn: TextButton? = nil
+local autoPlantTop: Frame? = nil
 local addMaxShell: Frame? = nil
 local addMaxBtn: TextButton? = nil
 local shuffleBtn: ImageButton? = nil
@@ -99,6 +105,7 @@ local addMaxCdToken = 0
 local slideSfxActive = 0
 local shuffleIconShowDice = true
 local shuffleIconSwapToken = 0
+local stateChangedListeners: { () -> () } = {}
 
 local confirmSound = Instance.new("Sound")
 confirmSound.Name = "OceanTD_AutoPlantShuffleConfirm"
@@ -141,16 +148,58 @@ local function playConfirmSfx()
 	confirmSound:Play()
 end
 
-local function playWooshSfx()
+local function playWooshSfx(opts: { duckUnderVo: boolean? }?)
+	local duckUnderVo = opts ~= nil and opts.duckUnderVo == true
+	local underVo = false
+	if duckUnderVo then
+		pcall(function()
+			local TutorialVo = require(script.Parent:WaitForChild("TutorialVo"))
+			underVo = TutorialVo.isPlaying() == true
+		end)
+	end
 	local s = wooshSound:Clone()
-	s.Volume = 1.6
 	s.Parent = SoundService
-	AudioSettings.markPrioritySfx(s)
+	if underVo then
+		-- Regular SFX group so TutorialVo's SFX duck applies (priority would stay loud).
+		s.Volume = 0.55
+		AudioSettings.init()
+		local g = AudioSettings.getSfxGroup()
+		if g then
+			s.SoundGroup = g
+		end
+	else
+		s.Volume = 1.6
+		AudioSettings.markPrioritySfx(s)
+	end
 	s.PlaybackSpeed = 0.85 + math.random() * 0.3
 	s:Play()
 	s.Ended:Once(function()
 		s:Destroy()
 	end)
+end
+
+-- Public: join-intro demo orbs use the same ADD MAX launch whoosh (ducked under VO).
+function AutoPlantUI.playOrbWooshSfx()
+	playWooshSfx({ duckUnderVo = true })
+end
+
+-- Join-intro backpack: keep ADD MAX, hide Auto Plant toggle + shuffle dice.
+function AutoPlantUI.setJoinIntroDemo(on: boolean)
+	local hideExtras = on == true
+	if autoPlantTop then
+		autoPlantTop.Visible = if hideExtras then false else SHOW_BACKPACK_TOGGLE
+	end
+	if shuffleBtn then
+		shuffleBtn.Visible = not hideExtras
+	end
+	if addMaxShell then
+		addMaxShell.Visible = true
+		if hideExtras then
+			addMaxShell.Size = UDim2.new(0.88, 0, 0, 40)
+		else
+			addMaxShell.Size = UDim2.new(0.55, 0, 0, 40)
+		end
+	end
 end
 
 local function playShuffleCompleteSfx()
@@ -476,6 +525,91 @@ local function applyState(payload: any)
 	refreshToggleVisual()
 	refreshShuffleVisual()
 	refreshAddMaxVisual()
+	for _, cb in ipairs(stateChangedListeners) do
+		pcall(cb)
+	end
+end
+
+function AutoPlantUI.isUnlocked(): boolean
+	return unlocked
+end
+
+function AutoPlantUI.isEnabled(): boolean
+	return enabled
+end
+
+function AutoPlantUI.onStateChanged(cb: () -> ())
+	table.insert(stateChangedListeners, cb)
+end
+
+function AutoPlantUI.requestSetEnabled(want: boolean): boolean
+	local chapter = playerGui:GetAttribute("OceanTD_TutorialChapter")
+	-- Auto Plant tutorial: ignore OFF requests from anywhere except chapter teardown
+	-- (requestTutorialPrep(false) uses RequestTutorialAutoPlant).
+	if want ~= true and chapter == "autoPlant" then
+		return false
+	end
+	-- Manual Plant tutorial: stay OFF until plant/upgrade/hue + close backpack → cam.
+	if want == true and chapter == "manualPlant" then
+		local hint = playerGui:GetAttribute("OceanTD_RollFingerHint")
+		if hint ~= "cam" and hint ~= "waves" and hint ~= "skills" and hint ~= false and hint ~= nil then
+			return false
+		end
+	end
+	local ok, result = pcall(function()
+		return Remotes.getFunction("RequestSetAutoPlant"):InvokeServer(want == true)
+	end)
+	if ok and typeof(result) == "table" then
+		applyState(result)
+		return result.ok == true
+	end
+	return false
+end
+
+-- Training: unlock + force ON (or OFF for Manual Plant chapter).
+function AutoPlantUI.requestTutorialPrep(enable: boolean?): boolean
+	local want = enable ~= false
+	local ok, result = pcall(function()
+		return Remotes.getFunction("RequestTutorialAutoPlant"):InvokeServer(want)
+	end)
+	if ok and typeof(result) == "table" then
+		applyState(result)
+		return result.ok == true
+	end
+	return false
+end
+
+function AutoPlantUI.requestToggle(): boolean
+	if not unlocked then
+		return false
+	end
+	local chapter = playerGui:GetAttribute("OceanTD_TutorialChapter")
+	-- Auto Plant tutorial chapter: stay ON (HUD also blocks presses).
+	if chapter == "autoPlant" then
+		return false
+	end
+	-- Manual Plant tutorial: stay OFF until cam handoff after close backpack.
+	if chapter == "manualPlant" then
+		local hint = playerGui:GetAttribute("OceanTD_RollFingerHint")
+		if hint ~= "cam" and hint ~= "waves" and hint ~= "skills" and hint ~= false and hint ~= nil then
+			return false
+		end
+	end
+	local ok, result = pcall(function()
+		return Remotes.getFunction("RequestSetAutoPlant"):InvokeServer(not enabled)
+	end)
+	if ok and typeof(result) == "table" and result.ok then
+		enabled = result.enabled == true
+		unlocked = true
+		refreshToggleVisual()
+		refreshShuffleVisual()
+		refreshAddMaxVisual()
+		for _, cb in ipairs(stateChangedListeners) do
+			pcall(cb)
+		end
+		return true
+	end
+	return false
 end
 
 local function ensureConfirmUi()
@@ -1122,11 +1256,20 @@ function AutoPlantUI.commitAddMax()
 	end)
 end
 
+function AutoPlantUI.getAddMaxButton(): TextButton?
+	return addMaxBtn
+end
+
+-- Visible chrome (stroke / fill); prefer this for UIScale so the whole button animates.
+function AutoPlantUI.getAddMaxShell(): Frame?
+	return addMaxShell
+end
+
 function AutoPlantUI.mount(parent: Instance): Frame
 	local wrap = Instance.new("Frame")
 	wrap.Name = "AutoPlantHeader"
 	wrap.BackgroundTransparency = 1
-	wrap.Size = UDim2.new(1, -4, 0, 108)
+	wrap.Size = UDim2.new(1, -4, 0, if SHOW_BACKPACK_TOGGLE then 108 else 56)
 	wrap.AutomaticSize = Enum.AutomaticSize.Y
 	wrap.LayoutOrder = 0
 	wrap.Parent = parent
@@ -1140,13 +1283,15 @@ function AutoPlantUI.mount(parent: Instance): Frame
 	col.SortOrder = Enum.SortOrder.LayoutOrder
 	col.Parent = wrap
 
-	-- Row 1: Auto Plant (centered, wider, same height).
+	-- Row 1: Auto Plant (centered, wider, same height). Hidden while HUD circle owns ON/OFF.
 	local top = Instance.new("Frame")
 	top.Name = "AutoPlantTop"
 	top.BackgroundTransparency = 1
-	top.Size = UDim2.new(1, 0, 0, 40)
+	top.Size = if SHOW_BACKPACK_TOGGLE then UDim2.new(1, 0, 0, 40) else UDim2.new(1, 0, 0, 0)
+	top.Visible = SHOW_BACKPACK_TOGGLE
 	top.LayoutOrder = 1
 	top.Parent = wrap
+	autoPlantTop = top
 
 	local shell = Instance.new("Frame")
 	shell.Name = "AutoPlantToggleShell"
@@ -1175,16 +1320,7 @@ function AutoPlantUI.mount(parent: Instance): Frame
 	btn.Parent = shell
 	toggleBtn = btn
 	btn.Activated:Connect(function()
-		if not unlocked then
-			return
-		end
-		local result = Remotes.getFunction("RequestSetAutoPlant"):InvokeServer(not enabled)
-		if typeof(result) == "table" and result.ok then
-			enabled = result.enabled == true
-			unlocked = result.unlocked ~= false
-			refreshToggleVisual()
-			refreshAddMaxVisual()
-		end
+		AutoPlantUI.requestToggle()
 	end)
 
 	-- Row 2: ADD MAX + shuffle dice.
@@ -1477,7 +1613,7 @@ local function playOrbArrive(payload: any, opts: {
 					-- TEMP: local red dot if this orb had a missing colorIndex → teal.
 					if hueDefaulted then
 						pcall(function()
-							local HueDefaultDebug = require(script.Parent:WaitForChild("HueDefaultDebug"))
+							local HueDefaultDebug = require(script.Parent:WaitForChild("HueDefaultDebugLib"))
 							HueDefaultDebug.attachDot(part)
 						end)
 					end
@@ -1493,7 +1629,14 @@ local function playOrbArrive(payload: any, opts: {
 end
 
 local function playAutoPlantArrive(payload: any)
-	playOrbArrive(payload, nil)
+	local tutorialAuto = playerGui:GetAttribute("OceanTD_TutorialChapter") == "autoPlant"
+	playOrbArrive(payload, {
+		onDone = if tutorialAuto
+			then function()
+				playerGui:SetAttribute("OceanTD_TutorialAutoPlantDone", os.clock())
+			end
+			else nil,
+	})
 end
 
 function AutoPlantUI.playAddMaxPlacements(placements: any)
@@ -1688,6 +1831,16 @@ function AutoPlantUI.playAddMaxPlacements(placements: any)
 			end)
 		end)
 	end
+end
+
+-- Bind remotes once. Returns true if this call performed the bind.
+function AutoPlantUI.ensureBound(): boolean
+	if remotesBound then
+		return false
+	end
+	remotesBound = true
+	AutoPlantUI.bind()
+	return true
 end
 
 function AutoPlantUI.bind()

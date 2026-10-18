@@ -1365,18 +1365,125 @@ do
 	end
 end
 
-local function zoomToward(part: BasePart, fromCf: CFrame, closer: boolean): CFrame
+local function inspectSizeClass(part: BasePart): number
+	local attr = part:GetAttribute("OceanTD_SizeClass")
+	if typeof(attr) == "number" then
+		return CoralSize.clampTier(attr)
+	end
+	return CoralSize.classFromDiameter(math.max(part.Size.X, part.Size.Z))
+end
+
+-- Tree / SeaGrass — keep pre-side-pitch relative framing.
+local function isLongRangeCoral(part: BasePart): boolean
+	local speciesId = part:GetAttribute("OceanTD_SpeciesId")
+	if typeof(speciesId) ~= "string" then
+		return false
+	end
+	local def = ItemCatalog.get(speciesId)
+	return def ~= nil and def.coralClass == "Long Range"
+end
+
+local function inspectCloseupDist(part: BasePart, byClass: { [number]: number }): number
+	local class = inspectSizeClass(part)
+	local base = byClass[class] or byClass[2] or 8
+	-- Tall meshes need a little extra room; Medium stays snug.
+	local h = math.max(part.Size.Y, 1)
+	if class >= CoralSize.LARGE then
+		return math.clamp(math.max(base, h * 1.15), 10, 28)
+	elseif class == CoralSize.MEDIUM then
+		return math.clamp(math.min(base, 4.5 + h * 0.55), 5.0, 9.5)
+	end
+	return math.clamp(base, 4.0, 8.0)
+end
+
+-- Side-view close-up: keep yaw from current cam, force shallow pitch (not PlotCam 52°).
+local function sideCloseupCf(part: BasePart, fromCf: CFrame, dist: number, lookYFrac: number, lookYMax: number): CFrame
+	local lookY = math.min(part.Size.Y * lookYFrac, lookYMax)
+	local look = part.Position + Vector3.new(0, lookY, 0)
+	local flat = Vector3.new(fromCf.Position.X - look.X, 0, fromCf.Position.Z - look.Z)
+	if flat.Magnitude < 0.35 then
+		local back = -fromCf.LookVector
+		flat = Vector3.new(back.X, 0, back.Z)
+	end
+	if flat.Magnitude < 0.05 then
+		flat = Vector3.new(0, 0, 1)
+	end
+	local away = flat.Unit
+	local pitch = math.rad(Consts.INSPECT_CAM_PITCH_DEG or 16)
+	local pos = look + away * (math.cos(pitch) * dist) + Vector3.new(0, math.sin(pitch) * dist)
+	return CFrame.lookAt(pos, look)
+end
+
+-- Pre-update Long Range framing: pull along the live cam→coral vector.
+local function relativeCloseupCf(part: BasePart, fromCf: CFrame, distFrac: number, lookYFrac: number?, lookYMax: number?): CFrame
 	local look = part.Position
+	if typeof(lookYFrac) == "number" then
+		local lookY = math.min(part.Size.Y * lookYFrac, lookYMax or 2)
+		look = part.Position + Vector3.new(0, lookY, 0)
+	end
 	local origin = fromCf.Position
 	local delta = look - origin
 	local mag = delta.Magnitude
 	if mag < 0.05 then
 		return fromCf
 	end
-	-- closer: pull in; farther: push out so tall SeaGrass Large stays in frame
-	local dist = if closer then mag * 0.6 else mag * 1.85
-	local pos = look - delta.Unit * dist
-	return CFrame.lookAt(pos, look)
+	local distMin = Consts.HUE_CAM_DIST_MIN or 3.5
+	local distMax = Consts.HUE_CAM_DIST_MAX or 32
+	local dist = math.clamp(mag * distFrac, distMin, distMax)
+	return CFrame.lookAt(look - delta.Unit * dist, look)
+end
+
+local function zoomToward(part: BasePart, fromCf: CFrame, closer: boolean): CFrame
+	if not closer then
+		-- Push out along current approach so tall SeaGrass Large stays in frame.
+		local look = part.Position
+		local origin = fromCf.Position
+		local delta = look - origin
+		local mag = delta.Magnitude
+		if mag < 0.05 then
+			return fromCf
+		end
+		local pos = look - delta.Unit * (mag * 1.85)
+		return CFrame.lookAt(pos, look)
+	end
+	-- Long Range: prior relative pull-in (looked better than the new side seat).
+	if isLongRangeCoral(part) then
+		local look = part.Position
+		local origin = fromCf.Position
+		local delta = look - origin
+		local mag = delta.Magnitude
+		if mag < 0.05 then
+			return fromCf
+		end
+		local pos = look - delta.Unit * (mag * 0.6)
+		return CFrame.lookAt(pos, look)
+	end
+	local distTable = Consts.UPGRADE_CAM_DIST_BY_CLASS or { [1] = 6, [2] = 7.5, [3] = 15 }
+	local dist = inspectCloseupDist(part, distTable)
+	return sideCloseupCf(part, fromCf, dist, Consts.HUE_CAM_LOOK_Y_FRAC or 0.25, Consts.HUE_CAM_LOOK_Y_MAX or 2)
+end
+
+-- Only reclaim when stuck on true Player Cam (Custom). Never reseat an already-Scriptable
+-- Plot Cam view — EnsurePlotCam with a fresh default pitch looks straight down at the coral.
+local function ensurePlotCamIfPlayerCam()
+	local cam = workspace.CurrentCamera
+	if not cam then
+		return
+	end
+	if cam.CameraType == Enum.CameraType.Scriptable then
+		-- Keep approach angle; just make sure PlotCam2 is driving if HUD says plotcam.
+		local cycle = playerGui:GetAttribute("OceanTD_CamCycleMode")
+		if cycle == "plotcam" then
+			pcall(function()
+				local PlotCam2 = require(script.Parent:WaitForChild("PlotCam2"))
+				if not PlotCam2.isActive() then
+					PlotCam2.begin(cam.CFrame)
+				end
+			end)
+		end
+		return
+	end
+	playerGui:SetAttribute("OceanTD_EnsurePlotCam", os.clock())
 end
 
 -- Hue close-up + range suppress (nested to stay under Luau's 200-local chunk limit).
@@ -1388,17 +1495,20 @@ do
 	local hueRangeHideToken = 0
 
 	local function zoomHueCloseup(part: BasePart, fromCf: CFrame): CFrame
-		-- Look lower on the coral so world PLANT chrome sits higher in the frame.
-		local lookY = math.min(part.Size.Y * Consts.HUE_CAM_LOOK_Y_FRAC, Consts.HUE_CAM_LOOK_Y_MAX)
-		local look = part.Position + Vector3.new(0, lookY, 0)
-		local origin = fromCf.Position
-		local delta = look - origin
-		local mag = delta.Magnitude
-		if mag < 0.05 then
-			return fromCf
+		-- Long Range (Tree / SeaGrass): prior relative pull-in.
+		if isLongRangeCoral(part) then
+			return relativeCloseupCf(
+				part,
+				fromCf,
+				Consts.HUE_CAM_DIST_FRAC or 0.42,
+				Consts.HUE_CAM_LOOK_Y_FRAC or 0.25,
+				Consts.HUE_CAM_LOOK_Y_MAX or 2
+			)
 		end
-		local dist = math.clamp(mag * Consts.HUE_CAM_DIST_FRAC, 4.5, 36)
-		return CFrame.lookAt(look - delta.Unit * dist, look)
+		-- Balanced / Fast Reload: side pitch + class distance.
+		local distTable = Consts.HUE_CAM_DIST_BY_CLASS or { [1] = 5.5, [2] = 7, [3] = 14 }
+		local dist = inspectCloseupDist(part, distTable)
+		return sideCloseupCf(part, fromCf, dist, Consts.HUE_CAM_LOOK_Y_FRAC or 0.25, Consts.HUE_CAM_LOOK_Y_MAX or 2)
 	end
 
 	local function stopHueCamFollow()
@@ -1443,11 +1553,11 @@ do
 	end
 
 	-- Quick zoom onto the painted coral, hold so the hue reads, then restore prior view.
+	-- Note: do NOT gate on tutorialHueDemoSuppressNote — finger demo uses applyCoralPaint
+	-- directly (no close-up). Suppress is only for noteTutorialHueApplied; blocking here
+	-- raced user taps and skipped their zoom while a demo InvokeServer was in flight.
 	runHueColorCloseup = function(part: BasePart?)
 		if not part or not part.Parent then
-			return
-		end
-		if tutorialHueDemoSuppressNote then
 			return
 		end
 		suppressRangeForHue()
@@ -1455,11 +1565,12 @@ do
 		if not cam then
 			return
 		end
-
+		-- Check before arming busy (re-paint while holding jumps to hold phase).
 		local alreadyBusy = playerGui:GetAttribute(HUE_CAM_ATTR) == true
 		local restore = hueCamRestoreCf
+		-- Prefer live cam (PlotCam) — Relocate freeze CF is nil while freecam owns the lens.
 		if not alreadyBusy or typeof(restore) ~= "CFrame" then
-			restore = cam.CFrame
+			restore = RelocateController.getSavedCameraCFrame() or cam.CFrame
 		end
 		hueCamRestoreCf = restore
 
@@ -1474,6 +1585,7 @@ do
 		local phaseT0 = os.clock()
 		playerGui:SetAttribute(HUE_CAM_ATTR, true)
 		RelocateController.setCinematicHold(true)
+		ensurePlotCamIfPlayerCam()
 		cam.CameraType = Enum.CameraType.Scriptable
 		if alreadyBusy then
 			cam.CFrame = zoomHueCloseup(focusPart, startCf)
@@ -1559,6 +1671,8 @@ local function runUnlockCinematic(part: BasePart, newDiam: number)
 	local fromD = math.max(part.Size.X, 0.05)
 	local zoomCf = zoomToward(part, startCf, true)
 	RelocateController.setCinematicHold(true)
+	ensurePlotCamIfPlayerCam()
+	cam.CameraType = Enum.CameraType.Scriptable
 
 	local camTw = TweenService:Create(
 		cam,
@@ -1571,6 +1685,8 @@ local function runUnlockCinematic(part: BasePart, newDiam: number)
 		RelocateController.setCinematicHold(false)
 		if saved then
 			RelocateController.setLiveCameraCFrame(saved)
+		else
+			RelocateController.setLiveCameraCFrame(startCf)
 		end
 		return
 	end
@@ -1853,6 +1969,8 @@ local function runSpongeSizeCinematic(
 		)
 		local zoomCf = zoomToward(oldPart, startCf, zoomCloser)
 		RelocateController.setCinematicHold(true)
+		ensurePlotCamIfPlayerCam()
+		cam.CameraType = Enum.CameraType.Scriptable
 		local camTw = TweenService:Create(
 			cam,
 			TweenInfo.new(Consts.CINE_CAM_SEC, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),

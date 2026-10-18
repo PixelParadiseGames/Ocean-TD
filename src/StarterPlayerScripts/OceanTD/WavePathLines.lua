@@ -2,7 +2,8 @@
 --[[
 	Always-on green path ribbon for the friendly fish route (WaveRoute.A).
 	Length follows the current Plot Size stage (ends at the reef heart waypoint).
-	Hidden while Hide UI is active. Red / A2 routes intentionally omitted for now.
+	Hidden while Hide UI is active.
+	During waves with crabs/urchins: red GroundA/B ribbons (same beam style).
 ]]
 
 local Players = game:GetService("Players")
@@ -19,6 +20,7 @@ local TutorialVo = require(script.Parent:WaitForChild("TutorialVo"))
 local WaveFeedPayout = require(script.Parent:WaitForChild("WaveFeedPayout"))
 local SkillStages = require(ReplicatedStorage:WaitForChild("OceanTD"):WaitForChild("Shared"):WaitForChild("SkillStages"))
 local UiTheme = require(ReplicatedStorage:WaitForChild("OceanTD"):WaitForChild("Shared"):WaitForChild("UiTheme"))
+local ReefHealthBarFx = require(ReplicatedStorage:WaitForChild("OceanTD"):WaitForChild("Shared"):WaitForChild("ReefHealthBarFx"))
 
 -- Join-intro narrator beats tied to the green path + GAME OVER.
 local INK_PATH_VO_ID = "rbxassetid://112823944631846"
@@ -40,6 +42,12 @@ export type Host = {
 	getFishPath: () -> PathLike?,
 	sampleFishPath: (PathLike, number) -> (Vector3, Vector3),
 	getPlotSizeStage: (() -> number)?,
+	-- Crab/urchin GroundA/B routes (red ribbons while those critters are in the wave).
+	getGroundPaths: (() -> { PathLike })?,
+	-- Single path currently shown when multiple GroundA/B are cycling.
+	getHostileDisplayPath: (() -> PathLike?)?,
+	sampleGroundPath: ((PathLike, number) -> (Vector3, Vector3))?,
+	waveShowsHostilePaths: (() -> boolean)?,
 }
 
 local FOLDER_NAME = "OceanTD_PathLines"
@@ -47,6 +55,8 @@ local SAMPLE_STEP = 5 -- studs along path between beam joints
 local BEAM_WIDTH = 1.75
 local BEAM_TRANSPARENCY = 0.28
 local GREEN = C.FILL_GREEN or Color3.fromRGB(40, 255, 90)
+local RED = C.CRAB_ARROW_COLOR or C.DANGER_RED or Color3.fromRGB(230, 45, 55)
+local GROUND_Y_LIFT = C.CRAB_ARROW_Y_LIFT or 1.35 -- seafloor paths need a little height
 local TIP_GREEN = Color3.fromRGB(165, 255, 195)
 local TIP_HEAD_STUDS = 14
 local TIP_WIDTH = 2.55
@@ -70,7 +80,7 @@ local FISH_TRAVEL_MAX = 6
 local END_RATING_IN_FORK_SEC = 0.38
 local END_RATING_IN_THUMBS_SEC = 0.42
 local END_RATING_THUMB_STAGGER_SEC = 1 -- thumbs up + happy spray before down can arm
-local END_RATING_AFTER_HAPPY_PAUSE_SEC = 1 -- extra beat after happy/$D ready, before thumbs down
+local END_RATING_AFTER_HAPPY_PAUSE_SEC = 2 -- extra beat after happy/$D ready, before thumbs down (+1s)
 local END_RATING_OUT_SEC = 0.5
 local END_RATING_WIDTH_STUDS = 56
 local END_RATING_HEIGHT_STUDS = 22
@@ -88,7 +98,6 @@ local INTRO_REEF_BAR_W = 260
 local INTRO_REEF_BAR_H = 26
 local INTRO_REEF_SLIDE_SEC = 0.55
 local INTRO_REEF_BG = Color3.fromRGB(0x00, 0x03, 0x29)
-local INTRO_REEF_FILL = Color3.fromRGB(0xff, 0x18, 0x14)
 
 local host: Host? = nil
 local linesFolder: Folder? = nil
@@ -96,6 +105,8 @@ local hiddenByUi = false
 local introReefGui: ScreenGui? = nil
 local introReefHost: Frame? = nil
 local introReefFill: Frame? = nil
+local introReefTrail: Frame? = nil
+local introReefTrailState = ReefHealthBarFx.makeState(1)
 local introReefLabel: TextLabel? = nil
 local introReefHp = INTRO_REEF_MAX
 
@@ -107,6 +118,10 @@ local liveBeams: { Beam } = {}
 local liveBeamMids: { Vector3 } = {}
 local liveBeamLastT: { number } = {}
 local liveAnchors: BasePart? = nil
+
+-- Red GroundA/B ribbons (independent of green ink / live cache).
+local groundContainers: { Folder } = {}
+local groundBeams: { Beam } = {}
 
 -- POV coaster: invisible near cam → default green far (smoothstep 10→90).
 local POV_NEAR_CLEAR_STUDS = 10 -- ≤ this: 100% transparent (gone)
@@ -210,6 +225,8 @@ local function destroyInkEmojis()
 	end
 	introReefHost = nil
 	introReefFill = nil
+	introReefTrail = nil
+	introReefTrailState = ReefHealthBarFx.makeState(1)
 	introReefLabel = nil
 	introReefHp = INTRO_REEF_MAX
 end
@@ -222,11 +239,20 @@ end
 local function setIntroReefHealth(cur: number)
 	introReefHp = math.clamp(math.floor(cur + 0.5), 0, INTRO_REEF_MAX)
 	local frac = introReefHp / INTRO_REEF_MAX
-	if introReefFill then
-		introReefFill.Size = UDim2.fromScale(frac, 1)
-	end
 	if introReefLabel then
 		introReefLabel.Text = ("🤍 Reef Health %d/%d"):format(introReefHp, INTRO_REEF_MAX)
+	end
+	if introReefFill then
+		local bar = introReefHost
+		ReefHealthBarFx.applyWithFly(introReefFill, introReefTrail, bar, frac, introReefTrailState, function()
+			local ok, WaveEndVfx = pcall(function()
+				return require(script.Parent:WaitForChild("WaveEndVfx"))
+			end)
+			if ok and WaveEndVfx and WaveEndVfx.getEndHeartWorldPos then
+				return WaveEndVfx.getEndHeartWorldPos()
+			end
+			return nil
+		end)
 	end
 end
 
@@ -237,6 +263,8 @@ local function destroyIntroReefBar()
 	end
 	introReefHost = nil
 	introReefFill = nil
+	introReefTrail = nil
+	introReefTrailState = ReefHealthBarFx.makeState(1)
 	introReefLabel = nil
 	introReefHp = INTRO_REEF_MAX
 end
@@ -284,12 +312,15 @@ local function showIntroReefBarFull()
 	reefStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
 	reefStroke.Parent = reefBar
 
+	introReefTrail = ReefHealthBarFx.ensureTrail(reefBar, 2)
+	introReefTrailState = ReefHealthBarFx.makeState(1)
+
 	local reefFill = Instance.new("Frame")
 	reefFill.Name = "Fill"
-	reefFill.BackgroundColor3 = INTRO_REEF_FILL
+	reefFill.BackgroundColor3 = ReefHealthBarFx.colorForFrac(1)
 	reefFill.BorderSizePixel = 0
 	reefFill.Size = UDim2.fromScale(1, 1)
-	reefFill.ZIndex = 2
+	reefFill.ZIndex = 3
 	reefFill.Parent = reefBar
 	local reefFillCorner = Instance.new("UICorner")
 	reefFillCorner.CornerRadius = UDim.new(1, 0)
@@ -307,7 +338,7 @@ local function showIntroReefBarFull()
 	reefLabel.TextStrokeColor3 = Color3.new(0, 0, 0)
 	reefLabel.TextXAlignment = Enum.TextXAlignment.Center
 	reefLabel.TextYAlignment = Enum.TextYAlignment.Center
-	reefLabel.ZIndex = 3
+	reefLabel.ZIndex = 4
 	reefLabel.Parent = reefBar
 	introReefLabel = reefLabel
 
@@ -757,6 +788,9 @@ local function playEndRatingEmojis(at: Vector3, myToken: number)
 	pcall(function()
 		TutorialVo.play(ROLL_FOR_CORAL_VO_ID, "OceanTD_JoinIntroRollCoral")
 	end)
+	-- Unblock JoinIntro immediately so HUD / roll finger appear with the VO (not after it).
+	inkCompleted = true
+	revealDoneEvent:Fire()
 	-- Slide reef bar + $D HUD down together.
 	local reefDone = false
 	local sdDone = false
@@ -812,6 +846,9 @@ local function cancelInkReveal()
 	destroyTipHead()
 	destroyInkEmojis()
 	pcall(function()
+		require(script.Parent:WaitForChild("IntroCamPunch")).cancel()
+	end)
+	pcall(function()
 		JoinIntroExampleCorals.clear()
 	end)
 	if wasActive then
@@ -834,6 +871,9 @@ function WavePathLines.finishIntroCinematicSkipped()
 	inkActive = false
 	destroyTipHead()
 	destroyInkEmojis()
+	pcall(function()
+		require(script.Parent:WaitForChild("IntroCamPunch")).cancel()
+	end)
 	pcall(function()
 		TutorialVo.stop()
 	end)
@@ -1036,6 +1076,16 @@ syncPovFadeFromAttr = function()
 	setPovFadeActive(isFishCamPovAttrOn())
 end
 
+local function clearGroundRibbons()
+	for _, container in ipairs(groundContainers) do
+		if container.Parent then
+			container:Destroy()
+		end
+	end
+	table.clear(groundContainers)
+	table.clear(groundBeams)
+end
+
 function WavePathLines.destroy()
 	cancelInkReveal()
 	inkCompleted = false
@@ -1047,6 +1097,7 @@ function WavePathLines.destroy()
 	end
 	restoreBeamDefaultTransparency()
 	clearLiveCache()
+	clearGroundRibbons()
 	if linesFolder and linesFolder.Parent then
 		linesFolder:Destroy()
 	end
@@ -1170,7 +1221,11 @@ end
 
 local function buildPolylineFromPoints(points: { Vector3 }, path: PathLike?)
 	local folder = ensureFolder()
-	folder:ClearAllChildren()
+	-- Keep HostileGround* ribbons; only replace the green fish container.
+	local priorFriendly = folder:FindFirstChild("FriendlyFish")
+	if priorFriendly then
+		priorFriendly:Destroy()
+	end
 	clearLiveCache()
 	if #points < 2 then
 		return
@@ -1232,6 +1287,93 @@ local function buildPolylineFromPoints(points: { Vector3 }, path: PathLike?)
 	end
 end
 
+local function buildGroundRibbonFromPoints(points: { Vector3 }, name: string)
+	if #points < 2 then
+		return
+	end
+	local folder = ensureFolder()
+	local container = Instance.new("Folder")
+	container.Name = name
+	container.Parent = folder
+	table.insert(groundContainers, container)
+
+	local anchors = Instance.new("Part")
+	anchors.Name = "Anchors"
+	anchors.Anchored = true
+	anchors.CanCollide = false
+	anchors.CanQuery = false
+	anchors.CanTouch = false
+	anchors.CastShadow = false
+	anchors.Transparency = 1
+	anchors.Size = Vector3.new(0.05, 0.05, 0.05)
+	anchors.CFrame = CFrame.new()
+	anchors.Parent = container
+
+	local lift = Vector3.new(0, GROUND_Y_LIFT, 0)
+	local prevAtt: Attachment? = nil
+	for i, worldPos in ipairs(points) do
+		local att = Instance.new("Attachment")
+		att.Name = "P" .. tostring(i)
+		att.Position = worldPos + lift
+		att.Parent = anchors
+		if prevAtt then
+			local beam = Instance.new("Beam")
+			beam.Name = "Seg" .. tostring(i - 1)
+			beam.Attachment0 = prevAtt
+			beam.Attachment1 = att
+			beam.Color = ColorSequence.new(RED)
+			beam.Width0 = BEAM_WIDTH
+			beam.Width1 = BEAM_WIDTH
+			beam.FaceCamera = true
+			beam.Segments = 1
+			beam.LightEmission = 0.55
+			beam.LightInfluence = 0
+			beam.Transparency = NumberSequence.new(BEAM_TRANSPARENCY)
+			beam.Enabled = not hiddenByUi
+			beam.Parent = anchors
+			table.insert(groundBeams, beam)
+		end
+		prevAtt = att
+	end
+end
+
+--[[
+	Show/hide red GroundA/B ribbons for waves that include crabs or urchins.
+	One ribbon at a time when multiple routes are cycling (getHostileDisplayPath).
+]]
+function WavePathLines.syncHostilePaths()
+	clearGroundRibbons()
+	if hiddenByUi or joinIntroBusy() then
+		return
+	end
+	local h = host
+	if not h or not h.waveShowsHostilePaths then
+		return
+	end
+	if h.waveShowsHostilePaths() ~= true then
+		return
+	end
+	local path: PathLike? = nil
+	if h.getHostileDisplayPath then
+		path = h.getHostileDisplayPath()
+	end
+	if not path and h.getGroundPaths then
+		local paths = h.getGroundPaths()
+		if typeof(paths) == "table" and #paths > 0 then
+			path = paths[1]
+		end
+	end
+	if not path or path.totalLen <= 0.5 then
+		return
+	end
+	local sampleFn = h.sampleGroundPath or h.sampleFishPath
+	local points = samplePolyline(path.totalLen, function(d)
+		local pos = sampleFn(path, d)
+		return pos
+	end)
+	buildGroundRibbonFromPoints(points, "HostileGround")
+end
+
 paintFullPathIfPossible = function(): boolean
 	local h = host
 	local path = h and h.getFishPath()
@@ -1256,6 +1398,7 @@ function WavePathLines.rebuild()
 	if inkSkipSettled then
 		paintFullPathIfPossible()
 		applyBeamEnabled(not hiddenByUi)
+		WavePathLines.syncHostilePaths()
 		return
 	end
 	cancelInkReveal()
@@ -1271,8 +1414,12 @@ function WavePathLines.rebuild()
 	local path = h.getFishPath()
 	if not path or path.totalLen <= 0.5 then
 		local folder = ensureFolder()
-		folder:ClearAllChildren()
+		local priorFriendly = folder:FindFirstChild("FriendlyFish")
+		if priorFriendly then
+			priorFriendly:Destroy()
+		end
 		clearLiveCache()
+		WavePathLines.syncHostilePaths()
 		return
 	end
 	local points = samplePolyline(path.totalLen, function(d)
@@ -1281,6 +1428,7 @@ function WavePathLines.rebuild()
 	end)
 	buildPolylineFromPoints(points, path)
 	inkCompleted = true
+	WavePathLines.syncHostilePaths()
 end
 
 function WavePathLines.isRevealing(): boolean
@@ -1410,6 +1558,8 @@ function WavePathLines.playInkReveal(durationSec: number?)
 		-- 🍴 rating scale-up starts 1s before the fish arrives; tip fish still finishes the path.
 		local ratingLeadSec = 1
 		local ratingFinished = false
+		local fishCamStarted = false
+		local latestFishTip = h.sampleFishPath(path, 0)
 		task.spawn(function()
 			local wakeAt = tFish + math.max(0, travelDur - ratingLeadSec)
 			while os.clock() < wakeAt and my == inkToken do
@@ -1436,7 +1586,24 @@ function WavePathLines.playInkReveal(durationSec: number?)
 			-- Linear along path length so speed stays even (waypoints are uneven in world space).
 			local len = fullLen * u
 			local tipPos = h.sampleFishPath(path, len)
+			latestFishTip = tipPos
 			updateTipFishEmojis(tipPos, u)
+			if not fishCamStarted then
+				fishCamStarted = true
+				-- Zoom into the sample reef / coral while food orbs fly to the fish emoji.
+				pcall(function()
+					local ClientPlot = require(script.Parent:WaitForChild("ClientPlot"))
+					local plot = ClientPlot.get()
+					local focus = if plot then plot.cframe.Position else tipPos
+					local IntroCamPunch = require(script.Parent:WaitForChild("IntroCamPunch"))
+					local punch = IntroCamPunch.beginHold(focus, 0.38, 0.4, { freezeFocus = true })
+					if punch then
+						task.delay(2.2 + 0.4, function()
+							punch.release(0.5)
+						end)
+					end
+				end)
+			end
 			pcall(function()
 				JoinIntroExampleCorals.feedToward(tipPos)
 			end)
@@ -1451,7 +1618,7 @@ function WavePathLines.playInkReveal(durationSec: number?)
 		-- Fish reached the heart — tip can go away; rating may already be on-screen.
 		updateTipFishEmojis(endPos, 1)
 		destroyTipFishEmojis()
-		-- Wait for 👍🍴👎 / GAME OVER / roll VO before completing the reveal.
+		-- Rating / GAME OVER / roll VO: revealDone already fired when roll VO started.
 		while not ratingFinished and my == inkToken do
 			RunService.RenderStepped:Wait()
 		end
@@ -1462,7 +1629,6 @@ function WavePathLines.playInkReveal(durationSec: number?)
 		destroyInkEmojis()
 		inkActive = false
 		inkCompleted = true
-		revealDoneEvent:Fire()
 		pcall(function()
 			WaveEndVfx.ensureHeartVisibleAfterInk()
 		end)
@@ -1582,6 +1748,13 @@ end
 -- Hide UI: false = show ribbons (default). true = hide.
 function WavePathLines.setVisible(visible: boolean)
 	hiddenByUi = visible ~= true
+	local function finishHostileVisibility()
+		if hiddenByUi then
+			clearGroundRibbons()
+		else
+			WavePathLines.syncHostilePaths()
+		end
+	end
 	local folder = linesFolder
 	if not folder or not folder.Parent then
 		if visible and not hiddenByUi then
@@ -1592,6 +1765,7 @@ function WavePathLines.setVisible(visible: boolean)
 				WavePathLines.ensureInkReveal()
 			end
 		end
+		finishHostileVisibility()
 		return
 	end
 	-- Skip settled: never re-apply a partial ink trim when toggling visibility.
@@ -1600,6 +1774,7 @@ function WavePathLines.setVisible(visible: boolean)
 			paintFullPathIfPossible()
 		end
 		applyBeamEnabled(not hiddenByUi)
+		finishHostileVisibility()
 		return
 	end
 	if inkActive and livePath then
@@ -1608,12 +1783,14 @@ function WavePathLines.setVisible(visible: boolean)
 		if h then
 			updateTipHead(livePath, inkDrawLen, h)
 		end
+		finishHostileVisibility()
 		return
 	end
 	applyBeamEnabled(not hiddenByUi)
 	if hiddenByUi and tipBeam then
 		tipBeam.Enabled = false
 	end
+	finishHostileVisibility()
 end
 
 function WavePathLines.isHiddenByUi(): boolean

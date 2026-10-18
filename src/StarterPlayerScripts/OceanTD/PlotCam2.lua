@@ -823,6 +823,39 @@ function PlotCam2.notifyBuildOpened()
 	-- liveDist keeps easing via DIST_TWEEN_RATE in tick().
 end
 
+-- Join-intro path / backpack lift: default plot focus at start zoom (never resumeCf floor ray).
+function PlotCam2.beginIntroOverview(): boolean
+	awaitingBuildZoom = true
+	local ok = PlotCam2.begin(nil)
+	if not ok then
+		return false
+	end
+	tune.distOffset = START_DIST_OFFSET
+	local plotCf, plotSize = getPlot()
+	if plotCf and plotSize then
+		focus = clampFocus(plotCf.Position, plotCf, plotSize)
+		liveDist = targetDist(plotCf, plotSize)
+	end
+	persistTune()
+	return true
+end
+
+-- Refresh distance/focus as the demo plot grows (call each frame while holding intro seat).
+function PlotCam2.syncIntroOverview(): boolean
+	awaitingBuildZoom = true
+	if not active then
+		return PlotCam2.beginIntroOverview()
+	end
+	tune.distOffset = START_DIST_OFFSET
+	local plotCf, plotSize = getPlot()
+	if not plotCf or not plotSize then
+		return false
+	end
+	focus = clampFocus(plotCf.Position, plotCf, plotSize)
+	liveDist = targetDist(plotCf, plotSize)
+	return true
+end
+
 local function easeOutCubic(t: number): number
 	local u = 1 - math.clamp(t, 0, 1)
 	return 1 - u * u * u

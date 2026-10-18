@@ -521,8 +521,10 @@ end
 local backpackLockHosts: { GuiObject } = { slot4 }
 
 local function syncBackpackGate()
+	-- Join-intro backpack demo must show normal BUILD (no red lock overlay).
 	local gated = playerGui:GetAttribute(GATE_BACKPACK) == true
 		and playerGui:GetAttribute(HAS_ROLLED_SESSION) ~= true
+		and not InventoryState.isJoinIntroDemo()
 	if gated and InventoryState.isOpen() then
 		InventoryState.setOpen(false)
 	end
@@ -739,6 +741,11 @@ local function startCloseXPulse()
 end
 
 local function applyClosedIdleFrame(showBuild: boolean)
+	-- Drop land-flash radial if still attached (helpers live in seed-land defer — 200-local limit).
+	local landGrad = circle:FindFirstChild("_OceanTD_LandRadial")
+	if landGrad then
+		landGrad:Destroy()
+	end
 	if showBuild then
 		if circle:IsA("ImageLabel") or circle:IsA("ImageButton") then
 			(circle :: any).Image = ""
@@ -778,6 +785,17 @@ end
 
 local function applySlotOpenChrome()
 	stopClosedIdleCycle()
+	-- Join-intro demo: show normal BUILD (not red locked/close chrome).
+	if InventoryState.isJoinIntroDemo() then
+		closedStroke.Enabled = true
+		closedStroke.Color = BRIGHT_YELLOW
+		closedStroke.Thickness = 3
+		closeX.Visible = false
+		stopCloseXPulse()
+		applyClosedIdleFrame(true)
+		UiCircles.ensure(circle)
+		return
+	end
 	closedStroke.Enabled = true
 	closedStroke.Color = Color3.new(1, 1, 1)
 	closedStroke.Thickness = 2
@@ -1397,6 +1415,16 @@ local function mountSideSlots()
 			log = log,
 		}
 		UndoSlot.mount(depsShared)
+		-- Require inside mountOne (not chunk scope) — InventoryUI is at the 200-local limit.
+		require(script.Parent:WaitForChild("AutoPlantHudSlot")).mount({
+			mainHUD = hud,
+			playerGui = playerGui :: PlayerGui,
+			ensureButton = ensureSlot4GuiButton,
+			passthroughDecor = passthroughDecor,
+			ensureCircle = ensureCircle,
+			ensureStroke = ensureStroke,
+			log = log,
+		})
 		ClearPlotSlot.mount({
 			mainHUD = hud,
 			playerGui = playerGui :: PlayerGui,
@@ -2089,9 +2117,6 @@ local function makeSection(title: string, layoutOrder: number): (Frame, Frame)
 	return section, gridHost
 end
 
-local AutoPlantUI = require(script.Parent:WaitForChild("AutoPlantUI"))
-local autoPlantBound = false
-
 local function rebuildItems()
 	for _, child in ipairs(scroll:GetChildren()) do
 		if child:IsA("GuiObject") and child.Name ~= "UIPadding" then
@@ -2106,13 +2131,14 @@ local function rebuildItems()
 	table.clear(sectionGrids)
 	clearAllPulses()
 
-	-- Auto Plant + shuffle above coral sections / LONG RANGE.
-	AutoPlantUI.mount(scroll)
-	if not autoPlantBound then
-		autoPlantBound = true
-		AutoPlantUI.bind()
-	else
-		AutoPlantUI.refreshFromServer()
+	-- ADD MAX + shuffle in backpack; ON/OFF toggle hidden (HUD circle owns it).
+	-- Require inside function — InventoryUI is at the Luau 200-local limit.
+	do
+		local AutoPlantUI = require(script.Parent:WaitForChild("AutoPlantUI"))
+		AutoPlantUI.mount(scroll)
+		if not AutoPlantUI.ensureBound() then
+			AutoPlantUI.refreshFromServer()
+		end
 	end
 
 	if TEMP_BRAIN_CORAL_SLOT_COUNT > 0 then
@@ -2153,10 +2179,11 @@ rebuildItems()
 
 local function refreshSeedCountBadges()
 	local backpackOpen = InventoryState.isOpen()
+	local demoAllKnown = InventoryState.isJoinIntroDemo() == true
 	for _, btn in ipairs(itemButtons) do
 		local itemId = btn:GetAttribute("OceanTD_ItemId")
 		if typeof(itemId) == "string" then
-			local discovered = InventoryState.hasDiscoveredSpecies(itemId)
+			local discovered = demoAllKnown or InventoryState.hasDiscoveredSpecies(itemId)
 			local icon = btn:FindFirstChild("Circle")
 			local veil = icon and icon:FindFirstChild("UnknownVeil")
 			if veil and veil:IsA("GuiObject") then
@@ -2328,6 +2355,21 @@ InventoryState.setScrollCenterProvider(function(): Vector2?
 end)
 
 InventoryState.setBackpackButtonScreenPosProvider(function(): Vector2?
+	-- Auto Plant ON → seed slide / plant orbs target the Auto Plant HUD circle.
+	local apOk, AutoPlantUI = pcall(function()
+		return require(script.Parent:WaitForChild("AutoPlantUI"))
+	end)
+	if apOk and AutoPlantUI and AutoPlantUI.isEnabled and AutoPlantUI.isEnabled() then
+		local hudOk, AutoPlantHudSlot = pcall(function()
+			return require(script.Parent:WaitForChild("AutoPlantHudSlot"))
+		end)
+		if hudOk and AutoPlantHudSlot and AutoPlantHudSlot.getScreenCenter then
+			local c = AutoPlantHudSlot.getScreenCenter()
+			if typeof(c) == "Vector2" then
+				return c
+			end
+		end
+	end
 	local btn = slotButton or slot4
 	if not btn or not btn.Parent then
 		return nil
@@ -2335,6 +2377,175 @@ InventoryState.setBackpackButtonScreenPosProvider(function(): Vector2?
 	local pos = btn.AbsolutePosition
 	local size = btn.AbsoluteSize
 	return Vector2.new(pos.X + size.X * 0.5, pos.Y + size.Y * 0.5)
+end)
+
+-- Seed lands: flash BUILD green when Auto Plant is off; Auto Plant HUD when on.
+-- Locals scoped here so InventoryUI chunk stays under Luau's 200-local limit.
+task.defer(function()
+	local SoundService = game:GetService("SoundService")
+	local SeedWheelRevealApi = require(script.Parent:WaitForChild("SeedWheelRevealApi"))
+	local buildFlashToken = 0
+	local landDingTemplate = Instance.new("Sound")
+	landDingTemplate.Name = "OceanTD_SeedLandDing"
+	landDingTemplate.SoundId = "rbxassetid://123582256549202"
+	landDingTemplate.Volume = 0.85
+	landDingTemplate.Parent = SoundService
+
+	local function playSeedLandDing()
+		local s = landDingTemplate:Clone()
+		s.PlaybackSpeed = 0.88 + math.random() * 0.28
+		s.Parent = SoundService
+		s:Play()
+		s.Ended:Once(function()
+			s:Destroy()
+		end)
+		task.delay(3, function()
+			if s.Parent then
+				s:Destroy()
+			end
+		end)
+	end
+
+	local function applyBrightGreenRadialFill(btn: GuiObject)
+		local g = btn:FindFirstChild("_OceanTD_LandRadial") :: UIGradient?
+		if not g then
+			local old = btn:FindFirstChildOfClass("UIGradient")
+			if old then
+				old:Destroy()
+			end
+			g = Instance.new("UIGradient")
+			g.Name = "_OceanTD_LandRadial"
+			g.Parent = btn
+		end
+		g.Color = ColorSequence.new({
+			ColorSequenceKeypoint.new(0, Color3.fromRGB(190, 255, 210)),
+			ColorSequenceKeypoint.new(0.45, Color3.fromRGB(90, 255, 130)),
+			ColorSequenceKeypoint.new(1, Color3.fromRGB(28, 140, 60)),
+		})
+		g.Transparency = NumberSequence.new(0)
+		g.Offset = Vector2.zero
+		g.Rotation = 0
+		local gt = (Enum :: any).GradientType
+		if gt and gt.Radial then
+			pcall(function()
+				(g :: any).Type = gt.Radial
+			end)
+		else
+			g.Rotation = 90
+			g.Color = ColorSequence.new({
+				ColorSequenceKeypoint.new(0, Color3.fromRGB(28, 140, 60)),
+				ColorSequenceKeypoint.new(0.5, Color3.fromRGB(190, 255, 210)),
+				ColorSequenceKeypoint.new(1, Color3.fromRGB(28, 140, 60)),
+			})
+		end
+	end
+
+	SeedWheelRevealApi.connectSlideToBackpackLanded(function()
+		playSeedLandDing()
+		local apOk, AutoPlantUI = pcall(function()
+			return require(script.Parent:WaitForChild("AutoPlantUI"))
+		end)
+		if apOk and AutoPlantUI and AutoPlantUI.isEnabled and AutoPlantUI.isEnabled() then
+			local hudOk, AutoPlantHudSlot = pcall(function()
+				return require(script.Parent:WaitForChild("AutoPlantHudSlot"))
+			end)
+			if hudOk and AutoPlantHudSlot and AutoPlantHudSlot.flashArrive then
+				AutoPlantHudSlot.flashArrive()
+			end
+			return
+		end
+		-- Auto Plant OFF → green flash on BUILD (Slot4): "+1", strokes, glow.
+		if not circle or InventoryState.isOpen() then
+			return
+		end
+		buildFlashToken += 1
+		local token = buildFlashToken
+		if closedIdleStop then
+			closedIdleStop()
+			closedIdleStop = nil
+		end
+		if circle:IsA("ImageLabel") or circle:IsA("ImageButton") then
+			(circle :: any).Image = ""
+		end
+		circle.BackgroundColor3 = Color3.fromRGB(90, 255, 120)
+		circle.BackgroundTransparency = 0
+		applyBrightGreenRadialFill(circle)
+		local DARK_GREEN_STROKE = Color3.fromRGB(12, 70, 28)
+		local RING_GREEN = Color3.fromRGB(80, 230, 120)
+		if buildLabel then
+			buildLabel.Text = "+1"
+			buildLabel.Visible = true
+			buildLabel.TextColor3 = Color3.new(1, 1, 1)
+			buildLabel.TextStrokeColor3 = DARK_GREEN_STROKE
+			buildLabel.TextStrokeTransparency = 0
+		end
+		if closeX then
+			closeX.Visible = false
+		end
+		if closedStroke then
+			closedStroke.Enabled = true
+			closedStroke.Color = RING_GREEN
+			closedStroke.Thickness = 3.5
+		end
+		-- Expanding green glow from the backpack / BUILD circle.
+		local glowParent = circle.Parent
+		if glowParent and glowParent:IsA("GuiObject") then
+			local oldGlow = glowParent:FindFirstChild("_OceanTD_BuildLandGlow")
+			if oldGlow then
+				oldGlow:Destroy()
+			end
+			local cPos = circle.AbsolutePosition
+			local cSize = circle.AbsoluteSize
+			local pPos = glowParent.AbsolutePosition
+			local glow = Instance.new("Frame")
+			glow.Name = "_OceanTD_BuildLandGlow"
+			glow.AnchorPoint = Vector2.new(0.5, 0.5)
+			glow.Position = UDim2.fromOffset(
+				cPos.X - pPos.X + cSize.X * 0.5,
+				cPos.Y - pPos.Y + cSize.Y * 0.5
+			)
+			glow.Size = UDim2.fromOffset(math.max(cSize.X, 1), math.max(cSize.Y, 1))
+			glow.BackgroundColor3 = Color3.fromRGB(70, 255, 120)
+			glow.BackgroundTransparency = 0.35
+			glow.BorderSizePixel = 0
+			glow.ZIndex = math.max(0, circle.ZIndex - 1)
+			glow.Active = false
+			glow.Parent = glowParent
+			local corner = Instance.new("UICorner")
+			corner.CornerRadius = UDim.new(1, 0)
+			corner.Parent = glow
+			local gScale = Instance.new("UIScale")
+			gScale.Scale = 1
+			gScale.Parent = glow
+			TweenService:Create(gScale, TweenInfo.new(0.55, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+				Scale = 2.1,
+			}):Play()
+			TweenService:Create(glow, TweenInfo.new(0.55, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+				BackgroundTransparency = 1,
+			}):Play()
+			task.delay(0.6, function()
+				if glow.Parent then
+					glow:Destroy()
+				end
+			end)
+		end
+		task.delay(0.55, function()
+			if token ~= buildFlashToken then
+				return
+			end
+			if closedStroke then
+				closedStroke.Color = BRIGHT_YELLOW
+				closedStroke.Thickness = 3
+			end
+			if buildLabel then
+				buildLabel.Text = "BUILD"
+				buildLabel.TextStrokeTransparency = 1
+			end
+			if not InventoryState.isOpen() and startClosedIdleCycle then
+				startClosedIdleCycle()
+			end
+		end)
+	end)
 end)
 
 -- Placement / relocate ignore world picks when the finger is on build HUD or the backpack.
@@ -2477,9 +2688,28 @@ local function playOpen()
 	applySlotOpenChrome()
 	equipBackpackShovel()
 
-	local center = slotCenterLocal()
 	local right, top, width, height = dockRect()
 	local dockW = math.max(40, width - PANEL_STROKE_PAD)
+
+	-- Join-intro demo: quick scale-up from top-right (BUILD corner), not mid-screen skinny expand.
+	if InventoryState.isJoinIntroDemo() then
+		panel.AnchorPoint = Vector2.new(1, 0)
+		panel.Position = UDim2.fromOffset(right - PANEL_STROKE_PAD, top)
+		panel.Size = UDim2.fromOffset(dockW, height)
+		uiScale.Scale = 0.06
+		local tw = TweenService:Create(
+			uiScale,
+			TweenInfo.new(0.16, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+			{ Scale = 1 }
+		)
+		tw:Play()
+		tw.Completed:Wait()
+		applyDockedLayout()
+		animating = false
+		return
+	end
+
+	local center = slotCenterLocal()
 	local dockRight = right - PANEL_STROKE_PAD
 
 	panel.AnchorPoint = Vector2.new(0.5, 0.5)
@@ -2625,9 +2855,18 @@ InventoryState.onOpenChanged(function(isOpen)
 				host.Visible = false
 				return
 			end
-			task.spawn(SavePlotSlot.playReveal)
-			task.spawn(ClearPlotSlot.playReveal)
-			task.spawn(UndoSlot.playReveal)
+			-- Join-intro: keep Save / Clear / Undo hidden (demo only needs BUILD + ADD MAX).
+			if not InventoryState.isJoinIntroDemo() then
+				task.spawn(SavePlotSlot.playReveal)
+				task.spawn(ClearPlotSlot.playReveal)
+				task.spawn(UndoSlot.playReveal)
+			else
+				pcall(function()
+					SavePlotSlot.playHide()
+					ClearPlotSlot.playHide()
+					UndoSlot.playHide()
+				end)
+			end
 			playOpen()
 			if openWithGamepadPending then
 				enableGamepadSelect(true)
@@ -3068,4 +3307,19 @@ SavePlotSlot.syncVisibility()
 UserInputService.LastInputTypeChanged:Connect(function()
 	refreshGamepadCloseLabel()
 end)
+
+-- Join-intro fake backpack (module keeps InventoryUI under the 200-local limit).
+require(script.Parent:WaitForChild("JoinIntroBackpackUi")).mount({
+	scroll = scroll,
+	panel = panel,
+	host = host,
+	circle = circle,
+	itemButtons = itemButtons,
+	playClose = playClose,
+	applySlotOpenChrome = applySlotOpenChrome,
+	applySlotClosedChrome = applySlotClosedChrome,
+	syncBackpackGate = syncBackpackGate,
+	refreshSeedCountBadges = refreshSeedCountBadges,
+})
+
 log("Backpack UI ready — shortcuts: Y/Q backpack; Z/L2 undo (open); Z/R3 skip (closed); T/L2 wave speed (closed); C/R3 clear; R/X waves")

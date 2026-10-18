@@ -1,6 +1,8 @@
 --!strict
 --[[
 	TEMP: shared helpers for missing→teal red-dot debug.
+	ModuleScript name is HueDefaultDebugLib so it does not collide with
+	HueDefaultDebug.client.lua (Rojo LocalScript also named HueDefaultDebug).
 	Client script HueDefaultDebug.client.lua drives Workspace watchers.
 ]]
 

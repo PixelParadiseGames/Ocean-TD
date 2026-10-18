@@ -323,6 +323,8 @@ function PlotSizeCinematic.play(
 )
 	if busy then
 		if not (opts and opts.dial == true) then
+			-- SkillPowerUpUI may have armed suppress before ForceClose — don't leave it stuck.
+			setTutorialSuppress(false)
 			return
 		end
 		token += 1
@@ -343,6 +345,10 @@ function PlotSizeCinematic.play(
 	if parkFrom then
 		WaveEndVfx.setRouteEndWorldPos(parkFrom)
 	end
+
+	-- Snapshot Plot Cam pose BEFORE ForceClose (never capture a Player Cam seat).
+	local camPre = Workspace.CurrentCamera
+	local preCloseCf: CFrame? = if camPre then camPre.CFrame else nil
 
 	playerGui:SetAttribute("OceanTD_PlotSizeCinematicBusy", true)
 	-- Always drop avatar-cam override so the wide plot shot can play.
@@ -391,7 +397,7 @@ function PlotSizeCinematic.play(
 
 	local cam = Workspace.CurrentCamera
 	local savedType: Enum.CameraType? = nil
-	local savedCf: CFrame? = nil
+	local savedCf: CFrame? = preCloseCf
 	local savedSubject: Instance? = nil
 	local function restorePlayerCamera(tweenBack: boolean)
 		if skipCam then
@@ -401,6 +407,16 @@ function PlotSizeCinematic.play(
 		if not cam then
 			return
 		end
+		local resume = playerGui:GetAttribute("OceanTD_CinematicResumeMode")
+		local hasResume = resume == "plotcam" or resume == "fishcam" or resume == "dronecam"
+		-- FreeCam will reclaim Plot/Fish via ResumeCinematicCam — don't tween to a stale seat.
+		if hasResume then
+			cam.CameraType = Enum.CameraType.Scriptable
+			return
+		end
+		if tweenBack and savedCf and my == token then
+			tweenCameraTo(savedCf, CAM_OUT_SEC, my)
+		end
 		local char = player.Character
 		local hum = char and char:FindFirstChildOfClass("Humanoid")
 		-- Always re-seat on the avatar — Scriptable cinematic can leave focus feeling "stuck".
@@ -408,9 +424,6 @@ function PlotSizeCinematic.play(
 			cam.CameraSubject = hum
 		elseif savedSubject then
 			cam.CameraSubject = savedSubject
-		end
-		if tweenBack and savedCf and my == token then
-			tweenCameraTo(savedCf, CAM_OUT_SEC, my)
 		end
 		local restore = savedType or Enum.CameraType.Custom
 		if restore == Enum.CameraType.Scriptable then
@@ -439,10 +452,30 @@ function PlotSizeCinematic.play(
 			busy = false
 		end
 		playerGui:SetAttribute("OceanTD_PlotSizeCinematicBusy", false)
+		-- ForceCloseFreeCam stashed the prior seat — reclaim it (was leaving Player Cam stuck).
+		playerGui:SetAttribute("OceanTD_ResumeCinematicCam", os.clock())
 		if shouldReopenPlotSize then
-			-- Return to skills + Plot Size power-up after the wide shot.
-			-- Suppress clears inside reopenPlotSizeSkills (after chrome is back).
-			task.defer(reopenPlotSizeSkills)
+			-- Wait for FreeCam to actually drive PlotCam2 — ATTR_MODE stays "plotcam" through
+			-- ForceClose stash, so checking the attribute alone reopened skills on Player Cam.
+			task.spawn(function()
+				local deadline = os.clock() + 1.5
+				while os.clock() < deadline do
+					local driving = false
+					pcall(function()
+						local PlotCam2 = require(script.Parent:WaitForChild("PlotCam2"))
+						local cam = Workspace.CurrentCamera
+						driving = PlotCam2.isActive()
+							and cam ~= nil
+							and cam.CameraType == Enum.CameraType.Scriptable
+							and playerGui:GetAttribute("OceanTD_CamCycleMode") == "plotcam"
+					end)
+					if driving then
+						break
+					end
+					task.wait()
+				end
+				reopenPlotSizeSkills()
+			end)
 		elseif not keepSkillsOpen then
 			playerGui:SetAttribute("OceanTD_SkillsUiRestore", os.clock())
 			setTutorialSuppress(false)

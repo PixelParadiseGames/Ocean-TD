@@ -21,6 +21,7 @@ local UiHaptics = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiHapti
 local UiIdleCycle = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiIdleCycle"))
 local UiPopupScale = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiPopupScale"))
 local UiViewportTags = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiViewportTags"))
+local ReefHealthBarFx = require(oceanRoot:WaitForChild("Shared"):WaitForChild("ReefHealthBarFx"))
 
 local InventoryState = require(script.Parent:WaitForChild("InventoryState"))
 local WaveSim = require(script.Parent:WaitForChild("WaveSim"))
@@ -111,6 +112,8 @@ local slot5PopScale: UIScale? = nil
 local hudFrame: Frame? = nil
 local hudWaveBar: Frame? = nil
 local hudWaveFill: Frame? = nil
+local hudWaveTrail: Frame? = nil
+local hudWaveTrailState = ReefHealthBarFx.makeState(0)
 local hudWaveLabel: TextLabel? = nil
 local hudWaveHit: TextButton? = nil
 local hudCritterBarsEye: TextButton? = nil
@@ -121,6 +124,8 @@ local hudBarHeartScale: UIScale? = nil
 local hudFinishHint: TextLabel? = nil
 local hudReefBar: Frame? = nil
 local hudReefFill: Frame? = nil
+local hudReefTrail: Frame? = nil
+local hudReefTrailState = ReefHealthBarFx.makeState(1)
 local hudReefLabel: TextLabel? = nil
 local hudReefPlus: TextButton? = nil
 local hudTime: TextLabel? = nil
@@ -902,6 +907,8 @@ end
 local function refreshReefHudLabels()
 	local cur = math.max(0, math.floor(lastReefHealth + 1e-6))
 	local maxHp = math.max(1, math.floor(lastReefMax + 1e-6))
+	local frac = math.clamp(cur / maxHp, 0, 1)
+	-- Label tracks live HP; fill waits for 💔 fly on damage.
 	local text = "🤍 Reef Health " .. tostring(cur) .. "/" .. tostring(maxHp)
 	if hudReefLabel then
 		hudReefLabel.Text = text
@@ -909,8 +916,18 @@ local function refreshReefHudLabels()
 	if reefHealTitle then
 		reefHealTitle.Text = text
 	end
-	if hudReefFill then
-		hudReefFill.Size = UDim2.fromScale(math.clamp(cur / maxHp, 0, 1), 1)
+	if hudReefFill and hudReefBar then
+		ReefHealthBarFx.applyWithFly(hudReefFill, hudReefTrail, hudReefBar, frac, hudReefTrailState, function()
+			local ok, WaveEndVfx = pcall(function()
+				return require(script.Parent:WaitForChild("WaveEndVfx"))
+			end)
+			if ok and WaveEndVfx and WaveEndVfx.getEndHeartWorldPos then
+				return WaveEndVfx.getEndHeartWorldPos()
+			end
+			return nil
+		end)
+	elseif hudReefFill then
+		ReefHealthBarFx.apply(hudReefFill, hudReefTrail, frac, hudReefTrailState)
 	end
 	if reefHealBtn then
 		local atMax = cur >= maxHp
@@ -1362,13 +1379,16 @@ local function ensureHud()
 	reefStroke.Parent = reefBar
 	hudReefBar = reefBar
 
+	hudReefTrail = ReefHealthBarFx.ensureTrail(reefBar, 27)
+	hudReefTrailState = ReefHealthBarFx.makeState(1)
+
 	local reefFill = Instance.new("Frame")
 	reefFill.Name = "Fill"
-	reefFill.BackgroundColor3 = REEF_BAR_FILL
+	reefFill.BackgroundColor3 = ReefHealthBarFx.colorForFrac(1)
 	reefFill.BackgroundTransparency = 0
 	reefFill.BorderSizePixel = 0
 	reefFill.Size = UDim2.fromScale(1, 1)
-	reefFill.ZIndex = 27
+	reefFill.ZIndex = 28
 	reefFill.Parent = reefBar
 	local reefFillCorner = Instance.new("UICorner")
 	reefFillCorner.CornerRadius = UDim.new(1, 0)
@@ -1448,13 +1468,18 @@ local function ensureHud()
 	hudWaveBar = bar
 	hudWaveStroke = barStroke
 
+	-- White trail fills first; green catch-up is delayed (reverse of reef health).
+	hudWaveTrail = ReefHealthBarFx.ensureTrail(bar, 27)
+	hudWaveTrailState = ReefHealthBarFx.makeState(0)
+	hudWaveTrail.Size = UDim2.fromScale(0, 1)
+
 	local fill = Instance.new("Frame")
 	fill.Name = "Fill"
 	fill.BackgroundColor3 = BAR_FILL
 	fill.BackgroundTransparency = 0
 	fill.BorderSizePixel = 0
 	fill.Size = UDim2.fromScale(0, 1)
-	fill.ZIndex = 27
+	fill.ZIndex = 28
 	fill.Parent = bar
 	local fillCorner = Instance.new("UICorner")
 	fillCorner.CornerRadius = UDim.new(1, 0)
@@ -1944,7 +1969,7 @@ setHudVisible = function(on: boolean)
 		restoreBarChrome()
 		if hudWaveFill then
 			hudWaveFill.BackgroundColor3 = BAR_FILL
-			hudWaveFill.Size = UDim2.fromScale(0, 1)
+			ReefHealthBarFx.snapSizes(hudWaveFill, hudWaveTrail, 0, hudWaveTrailState)
 		end
 		if hudWaveLabel then
 			hudWaveLabel.Text = "🍴 Wave"
@@ -2006,7 +2031,7 @@ local function updateHud(snap: WaveSim.HudSnapshot)
 	setHudVisible(true)
 	local prog = math.clamp(snap.feedProgress or 0, 0, 1)
 	if hudWaveFill then
-		hudWaveFill.Size = UDim2.fromScale(prog, 1)
+		ReefHealthBarFx.applyFillAhead(hudWaveFill, hudWaveTrail, prog, hudWaveTrailState)
 	end
 	lastReefHealth = snap.reefHealth or 0
 	lastReefMax = snap.reefMax or 10

@@ -504,6 +504,10 @@ function UndoSlot.playHide()
 end
 
 function UndoSlot.syncVisibility()
+	if InventoryState.isJoinIntroDemo() then
+		UndoSlot.playHide()
+		return
+	end
 	if InventoryState.isOpen() then
 		if slot3 and slot3HomePos then
 			slot3.Position = slot3HomePos

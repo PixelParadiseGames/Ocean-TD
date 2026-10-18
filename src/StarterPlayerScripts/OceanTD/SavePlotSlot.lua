@@ -1620,6 +1620,10 @@ function SavePlotSlot.playHide()
 end
 
 function SavePlotSlot.syncVisibility()
+	if InventoryState.isJoinIntroDemo() then
+		SavePlotSlot.playHide()
+		return
+	end
 	if InventoryState.isOpen() then
 		if slot1 and slot1HomePos then
 			slot1.Position = slot1HomePos
