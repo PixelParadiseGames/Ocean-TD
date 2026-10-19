@@ -195,6 +195,8 @@ local function tweenCamFov(cam: Camera, goal: number)
 	povFovTween:Play()
 end
 
+local DEFAULT_SCRIPTABLE_FOV = 70
+
 local function syncPovFov()
 	local cam = getCamera()
 	if not cam then
@@ -204,13 +206,20 @@ local function syncPovFov()
 	if want == povFovWant and (want == false or povFovSaved ~= nil) then
 		if want then
 			tweenCamFov(cam, FC.FISH_POV_FOV)
+		elseif cam.FieldOfView >= FC.FISH_POV_FOV - 2 then
+			-- Interrupted leave can leave FOV at fish-POV wide while state already says off.
+			local restore = if typeof(povFovSaved) == "number" then povFovSaved :: number else DEFAULT_SCRIPTABLE_FOV
+			povFovSaved = nil
+			tweenCamFov(cam, restore)
 		end
 		return
 	end
 	povFovWant = want
 	if want then
 		if povFovSaved == nil then
-			povFovSaved = cam.FieldOfView
+			-- Never treat the POV wide-angle as the "normal" FOV to restore later.
+			local cur = cam.FieldOfView
+			povFovSaved = if cur >= FC.FISH_POV_FOV - 5 then DEFAULT_SCRIPTABLE_FOV else cur
 		end
 		tweenCamFov(cam, FC.FISH_POV_FOV)
 	else
@@ -218,7 +227,29 @@ local function syncPovFov()
 		povFovSaved = nil
 		if typeof(restore) == "number" then
 			tweenCamFov(cam, restore)
+		elseif cam.FieldOfView >= FC.FISH_POV_FOV - 2 then
+			tweenCamFov(cam, DEFAULT_SCRIPTABLE_FOV)
 		end
+	end
+end
+
+-- Cinematic ForceClose sets mode="off" without setMode — drop POV FOV so PlotCam
+-- doesn't inherit the fish-cam wide angle, and path tours snapshot a normal FOV.
+local function clearPovFovForCinematic()
+	local cam = getCamera()
+	local restore = povFovSaved
+	povFovSaved = nil
+	povFovWant = false
+	if povFovTween then
+		povFovTween:Cancel()
+		povFovTween = nil
+	end
+	if not cam then
+		return
+	end
+	local goal = if typeof(restore) == "number" then restore else DEFAULT_SCRIPTABLE_FOV
+	if math.abs(cam.FieldOfView - goal) > 0.05 then
+		cam.FieldOfView = goal
 	end
 end
 
@@ -487,6 +518,16 @@ local function raiseDPadIconLayer()
 	icon.Parent = icon.Parent
 end
 
+-- Interactive cam circles must sit above dPadIcon (Z80) so Activated fires during waves.
+local function raiseInteractiveCamHits()
+	for _, icon in ipairs(camIcons) do
+		if icon.hit.Active and icon.root.Visible then
+			icon.root.ZIndex = math.max(icon.root.ZIndex, 90)
+			icon.hit.ZIndex = math.max(icon.hit.ZIndex, 91)
+		end
+	end
+end
+
 local function tweenIconsToLayout(relativeTo: CamMode, collapsed: boolean, info: TweenInfo, token: number, onDone: (() -> ())?)
 	local remaining = #camIcons
 	local function oneDone()
@@ -509,6 +550,7 @@ local function tweenIconsToLayout(relativeTo: CamMode, collapsed: boolean, info:
 		end)
 	end
 	raiseDPadIconLayer()
+	raiseInteractiveCamHits()
 end
 
 local function snapIconsToLayout(relativeTo: CamMode, collapsed: boolean)
@@ -522,6 +564,7 @@ local function snapIconsToLayout(relativeTo: CamMode, collapsed: boolean)
 		icon.root.Rotation = 0
 	end
 	raiseDPadIconLayer()
+	raiseInteractiveCamHits()
 end
 
 local function setCarouselCollapsedAttr(collapsed: boolean)
@@ -2259,6 +2302,13 @@ setMode = function(nextMode: CamMode)
 
 	if nextMode == "plotcam" then
 		local cam = getCamera()
+		-- Fish-cam POV uses ~105 FOV; PlotCam framing assumes ~70.
+		if cam and cam.FieldOfView >= FC.FISH_POV_FOV - 2 then
+			syncPovFov()
+			if cam.FieldOfView >= FC.FISH_POV_FOV - 2 then
+				tweenCamFov(cam, DEFAULT_SCRIPTABLE_FOV)
+			end
+		end
 		if FC.PLOT_CAM_VARIANT == 2 then
 			local resumeCf = if resumePreserveView and cam then cam.CFrame else nil
 			if not PlotCam2.begin(resumeCf) then
@@ -2362,8 +2412,24 @@ setMode = function(nextMode: CamMode)
 	startRenderLoop()
 end
 
+local function camCycleGated(): boolean
+	if playerGui:GetAttribute("OceanTD_TutorialGateCam") ~= true then
+		return false
+	end
+	-- Wave-3 teach tap must still cycle even if GateCam raced true.
+	return playerGui:GetAttribute("OceanTD_Wave3FishCamHint") ~= true
+end
+
+local function refreshCamCycleHits()
+	if not carouselReady or #camIcons == 0 then
+		return
+	end
+	snapIconsToLayout(mode, carouselCollapsed)
+	raiseInteractiveCamHits()
+end
+
 local function cycleMode()
-	if playerGui:GetAttribute("OceanTD_TutorialGateCam") == true then
+	if camCycleGated() then
 		return
 	end
 	setMode(nextCamMode(mode))
@@ -2374,7 +2440,7 @@ ContextActionService:BindActionAtPriority(FC.DPAD_ACTION, function(_name, state,
 	if state ~= Enum.UserInputState.Begin then
 		return Enum.ContextActionResult.Pass
 	end
-	if playerGui:GetAttribute("OceanTD_TutorialGateCam") == true then
+	if camCycleGated() then
 		return Enum.ContextActionResult.Sink
 	end
 	if InventoryState.isOpen() then
@@ -2759,13 +2825,14 @@ local function wireModeIcon(btn: GuiObject, camMode: CamMode)
 		scale = scale,
 		brand = modeBrand(camMode),
 	})
+	hit:SetAttribute("OceanTD_CamCycleHit", true)
 	if hit:GetAttribute("_OceanTD_CamCycleBound") ~= true then
 		hit:SetAttribute("_OceanTD_CamCycleBound", true)
 		hit.Activated:Connect(function()
 			-- Expanded carousel: tap an inactive option to rotate that mode active.
 			-- Active slot (or collapsed stack) still cycles forward.
 			if camMode ~= mode and not carouselCollapsed then
-				if playerGui:GetAttribute("OceanTD_TutorialGateCam") == true then
+				if camCycleGated() then
 					return
 				end
 				if camMode == "dronecam" and freeCamTutorialLocked() then
@@ -2841,6 +2908,7 @@ local function syncDPadIcon()
 	if want == dPadIconShown then
 		if want then
 			raiseDPadIconLayer()
+			raiseInteractiveCamHits()
 		end
 		return
 	end
@@ -2851,6 +2919,7 @@ local function syncDPadIcon()
 	end
 	dPadIcon.Visible = true
 	raiseDPadIconLayer()
+	raiseInteractiveCamHits()
 	local goal = if want then 1 else 0
 	local info = if want then FC.ICON_SCALE_IN else FC.ICON_SCALE_OUT
 	local tw = TweenService:Create(dPadIconScale, info, { Scale = goal })
@@ -3277,11 +3346,13 @@ local function bindMobileLeftUi(left: Instance)
 			end
 			-- Plot Cam is the default RTS seat — stay on it through place/build.
 			-- Cinematics still stash + close (never overwrite a prior stash with "off").
+			local plotSizeCine = playerGui:GetAttribute("OceanTD_PlotSizeCinematicBusy") == true
+				or playerGui:GetAttribute("OceanTD_PlotSizeCinePending") == true
 			if playerGui:GetAttribute("OceanTD_ReefDefeatCamBusy") == true
 				or playerGui:GetAttribute("OceanTD_TangCamBusy") == true
 				or playerGui:GetAttribute("OceanTD_SharkCamBusy") == true
 				or playerGui:GetAttribute("OceanTD_UrchinCamBusy") == true
-				or playerGui:GetAttribute("OceanTD_PlotSizeCinematicBusy") == true
+				or plotSizeCine
 			then
 				local stashed = mode
 				if stashed ~= "off" then
@@ -3294,6 +3365,10 @@ local function bindMobileLeftUi(left: Instance)
 				PlotCam2Tune.setVisible(false)
 				FishCamTune.setVisible(false)
 				-- Internal "off" so Resume can setMode(plotcam) again; keep CamCycleMode on the stash.
+				-- Must clear fish-cam POV FOV here — setMode/publishMode are skipped.
+				if stashed == "fishcam" then
+					clearPovFovForCinematic()
+				end
 				mode = "off"
 				if stashed ~= "off" then
 					playerGui:SetAttribute(FC.ATTR_MODE, stashed)
@@ -3470,6 +3545,22 @@ local function bindMobileLeftUi(left: Instance)
 		playerGui:GetAttributeChangedSignal("OceanTD_ForceCamMode"):Connect(applyForcedCamMode)
 		-- Stamp re-applies even when ForceCamMode string is unchanged (e.g. already "fishcam").
 		playerGui:GetAttributeChangedSignal("OceanTD_ForceCamStamp"):Connect(applyForcedCamMode)
+
+		local function onRefreshCamCycleHits()
+			if playerGui:GetAttribute("OceanTD_RefreshCamCycleHits") == nil then
+				return
+			end
+			task.defer(refreshCamCycleHits)
+		end
+		playerGui:GetAttributeChangedSignal("OceanTD_RefreshCamCycleHits"):Connect(onRefreshCamCycleHits)
+		playerGui:GetAttributeChangedSignal("OceanTD_Wave3FishCamHint"):Connect(function()
+			if playerGui:GetAttribute("OceanTD_Wave3FishCamHint") == true then
+				if playerGui:GetAttribute("OceanTD_TutorialGateCam") == true then
+					playerGui:SetAttribute("OceanTD_TutorialGateCam", false)
+				end
+				task.defer(refreshCamCycleHits)
+			end
+		end)
 
 		playerGui:GetAttributeChangedSignal("OceanTD_JoinIntroBusy"):Connect(function()
 			if playerGui:GetAttribute("OceanTD_JoinIntroBusy") == true then

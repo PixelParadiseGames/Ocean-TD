@@ -232,7 +232,52 @@ local function playTapJuice(screenPos: Vector2)
 	UiHaptics.pulseShort()
 end
 
+local CAM_CYCLE_NAMES: { [string]: boolean } = {
+	PlotCam = true,
+	FishCam = true,
+	FreeCam = true,
+	OffCam = true,
+	_OceanTD_CamCycleHit = true,
+}
+
+local function isCamCycleGui(gui: GuiObject): boolean
+	if gui:GetAttribute("OceanTD_CamCycleHit") == true then
+		return true
+	end
+	local cur: Instance? = gui
+	while cur and cur:IsA("GuiObject") do
+		local g = cur :: GuiObject
+		if CAM_CYCLE_NAMES[g.Name] == true or g:GetAttribute("OceanTD_CamCycleHit") == true then
+			return true
+		end
+		cur = cur.Parent
+	end
+	return false
+end
+
+local function pointerOverCamCycle(screenPos: Vector2): boolean
+	local left = playerGui:FindFirstChild("MobileLeftUI")
+	local dPad = left and left:FindFirstChild("dPad")
+	if not dPad then
+		return false
+	end
+	for name in pairs(CAM_CYCLE_NAMES) do
+		if name ~= "_OceanTD_CamCycleHit" then
+			local g = dPad:FindFirstChild(name)
+			if g and g:IsA("GuiObject") and g.Visible then
+				if PlaceConfirmHitTest.isOverDisc(screenPos, g, 6) then
+					return true
+				end
+			end
+		end
+	end
+	return false
+end
+
 local function screenBlocked(screenPos: Vector2): boolean
+	if pointerOverCamCycle(screenPos) then
+		return true
+	end
 	local inset = GuiService:GetGuiInset()
 	local guiPos = screenPos - Vector2.new(inset.X, inset.Y)
 	local ok, hits = pcall(function()
@@ -242,6 +287,10 @@ local function screenBlocked(screenPos: Vector2): boolean
 		return false
 	end
 	for _, gui in ipairs(hits) do
+		-- Cam cycle (may sit under decorative dPadIcon) — never treat as world feed.
+		if gui.Visible and isCamCycleGui(gui) then
+			return true
+		end
 		-- Only real buttons/text boxes swallow the tap (frames/labels stay pass-through).
 		if gui:IsA("GuiButton") or gui:IsA("TextBox") then
 			if gui.Visible and gui.Active then

@@ -522,8 +522,8 @@ local backpackLockHosts: { GuiObject } = { slot4 }
 
 local function syncBackpackGate()
 	-- Join-intro backpack demo must show normal BUILD (no red lock overlay).
+	-- Training: GATE stays true through the roll until the finger points at BUILD.
 	local gated = playerGui:GetAttribute(GATE_BACKPACK) == true
-		and playerGui:GetAttribute(HAS_ROLLED_SESSION) ~= true
 		and not InventoryState.isJoinIntroDemo()
 	if gated and InventoryState.isOpen() then
 		InventoryState.setOpen(false)
@@ -543,10 +543,15 @@ playerGui:GetAttributeChangedSignal(GATE_BACKPACK):Connect(syncBackpackGate)
 playerGui:GetAttributeChangedSignal(HAS_ROLLED_SESSION):Connect(syncBackpackGate)
 task.defer(syncBackpackGate)
 
--- Unlock when the awarded coral starts sliding into Slot4 (not on roll press).
+-- Mark rolled for session tracking. During training keep BUILD locked until the finger
+-- points at it; outside training unlock on first award slide as before.
 SeedWheelRevealApi.connectSlideToBackpackStarted(function()
 	playerGui:SetAttribute(HAS_ROLLED_SESSION, true)
-	playerGui:SetAttribute(GATE_BACKPACK, false)
+	local chapter = playerGui:GetAttribute("OceanTD_TutorialChapter")
+	local inTraining = chapter == "autoPlant" or chapter == "manualPlant"
+	if not inTraining then
+		playerGui:SetAttribute(GATE_BACKPACK, false)
+	end
 end)
 
 -- QuickbarHelp.Slot4 — shortcut badge (Y / Q). Click/tap opens backpack like Slot4.
@@ -1372,11 +1377,17 @@ local function refreshHelpSlotBadge()
 		return
 	end
 	local mode = getShortcutMode()
-	-- Hide help badge on touch, and while backpack is open (Slot4 shows the close letter).
+	-- Hide help badge on touch, while backpack is open, during waves (BUILD hidden), etc.
 	if mode == "touch" or closeX.Visible or InventoryState.isOpen()
 		or playerGui:GetAttribute("OceanTD_SkillsBubblesOpen") == true
+		or WaveSim.isRunning()
+		or not slot4.Visible
 	then
 		helpSlot4.Visible = false
+		if helpHitButton then
+			helpHitButton.Visible = false
+			helpHitButton.Active = false
+		end
 		return
 	end
 	helpSlot4.Visible = true
@@ -2810,6 +2821,8 @@ local function syncWaveHideBuildAndSkills(running: boolean)
 			skills.Visible = true
 		end
 	end
+	-- BUILD help circle only while BUILD is visible (not during waves).
+	refreshHelpSlotBadge()
 end
 
 do
@@ -2982,9 +2995,7 @@ end)
 
 local lastToggleClock = 0
 local function toggleFromUser(fromGamepad: boolean?)
-	if playerGui:GetAttribute(GATE_BACKPACK) == true
-		and playerGui:GetAttribute(HAS_ROLLED_SESSION) ~= true
-	then
+	if playerGui:GetAttribute(GATE_BACKPACK) == true and not InventoryState.isJoinIntroDemo() then
 		return
 	end
 	if backpackToggleBlockedBySkills() then

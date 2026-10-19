@@ -199,6 +199,8 @@ local fishA2Remaining = 0
 local waveUsesFishA2 = false
 local critterHungerBarsVisible = true
 local hideUiSuppressesCritterUi = false
+-- Highest wave index reached this client session (build-mode path previews).
+local sessionHighestWaveReached = 0
 local coralList: { CoralAgent } = {}
 -- XZ hash of non-stunned corals for crab/urchin stun (rebuilt when dirty).
 local coralSpatial: WaveCrab.SpatialHash = {}
@@ -874,16 +876,32 @@ L.WavePathLines.bind({
 		return WaveCrab.sample(path, dist)
 	end,
 	waveShowsHostilePaths = function()
-		if not running or joinIntroDemo then
+		if joinIntroDemo then
 			return false
 		end
-		if #hostilePreviewPaths == 0 then
+		-- Wave-bar eye also gates crab/urchin ribbons (build + waves).
+		if not critterHungerBarsVisible or hideUiSuppressesCritterUi then
 			return false
 		end
-		return WaveCrab.expectedCount() > 0
-			or WaveUrchin.expectedCount() > 0
-			or WaveCrab.spawnedCount() > 0
-			or WaveUrchin.spawnedCount() > 0
+		if running then
+			if #hostilePreviewPaths == 0 then
+				return false
+			end
+			return WaveCrab.expectedCount() > 0
+				or WaveUrchin.expectedCount() > 0
+				or WaveCrab.spawnedCount() > 0
+				or WaveUrchin.spawnedCount() > 0
+		end
+		-- Build mode: backpack open, eye not hiding pick circles, past wave 4 this session.
+		local InventoryState = require(script.Parent:WaitForChild("InventoryState"))
+		if not InventoryState.isOpen() then
+			return false
+		end
+		local RelocatePickHover = require(script.Parent:WaitForChild("RelocatePickHover"))
+		if not RelocatePickHover.isPickDebugVisible() then
+			return false
+		end
+		return sessionHighestWaveReached > 4
 	end,
 	getSharkPath = function()
 		return pathDataShark
@@ -892,12 +910,36 @@ L.WavePathLines.bind({
 		return WaveShark.sample(path, dist)
 	end,
 	waveShowsSharkPath = function()
-		if not running or joinIntroDemo then
+		if joinIntroDemo then
 			return false
 		end
-		return WaveShark.shouldSpawn(waveIndex) or WaveShark.liveCount() > 0
+		if not critterHungerBarsVisible or hideUiSuppressesCritterUi then
+			return false
+		end
+		if running then
+			-- Only while a shark is alive — shouldSpawn stays true all ×10 wave after it finishes.
+			return WaveShark.liveCount() > 0
+		end
+		-- Build mode: backpack open, eye not hiding pick circles, wave 10+ this session.
+		local InventoryState = require(script.Parent:WaitForChild("InventoryState"))
+		if not InventoryState.isOpen() then
+			return false
+		end
+		local RelocatePickHover = require(script.Parent:WaitForChild("RelocatePickHover"))
+		if not RelocatePickHover.isPickDebugVisible() then
+			return false
+		end
+		return sessionHighestWaveReached >= 10
 	end,
 })
+
+-- Build preview paths follow backpack open/close (not only wave start/stop).
+task.defer(function()
+	local InventoryState = require(script.Parent:WaitForChild("InventoryState"))
+	InventoryState.onOpenChanged(function()
+		L.WavePathLines.syncHostilePaths()
+	end)
+end)
 
 local function pathAlreadyInList(list: { WaveCrab.PathData }, path: WaveCrab.PathData): boolean
 	for _, p in ipairs(list) do
@@ -2132,6 +2174,8 @@ local function destroyFish(agent: FishAgent)
 	elseif agent.isShark then
 		WaveShark.onDespawned()
 		WaveEntityPool.releaseFish(WaveEntityPool.FISH_SHARK, agent.model)
+		-- Drop the orange shark ribbon as soon as the shark (and reef heart) leave.
+		L.WavePathLines.syncHostilePaths()
 	else
 		WaveEntityPool.releaseFish(WaveEntityPool.FISH_TANG, agent.model)
 	end
@@ -2901,6 +2945,9 @@ end
 local function beginWave(wave: number)
 	pruneFinishedFish()
 	waveIndex = wave
+	if not joinIntroDemo then
+		sessionHighestWaveReached = math.max(sessionHighestWaveReached, wave)
+	end
 	waveFishExpected = waveFishCount(wave)
 	waveFishSpawned = 0
 	waveFishFullyFed = 0
@@ -2927,9 +2974,12 @@ local function beginWave(wave: number)
 			local skippedTutorial = pg:GetAttribute("OceanTD_FingerTutorialSkipped") == true
 			if wave == 3 and not skippedTutorial then
 				pg:SetAttribute("OceanTD_TutorialGateCam", false)
+				-- Re-run LeftHud gate + FreeCam hit raise even if GateCam was already false.
+				pg:SetAttribute("OceanTD_RefreshLeftHudGate", os.clock())
 				pg:SetAttribute("OceanTD_Wave3FishCamHint", true)
 				pg:SetAttribute("OceanTD_Wave3CamHoldPause", true)
 				pg:SetAttribute("OceanTD_RollFingerHint", "cam")
+				pg:SetAttribute("OceanTD_RefreshCamCycleHits", os.clock())
 				WaveSim.setCinematicPaused(true)
 			else
 				if pg:GetAttribute("OceanTD_Wave3FishCamHint") == true then
@@ -4609,11 +4659,14 @@ function WaveSim.setCritterHungerBarsVisible(visible: boolean)
 	end
 	critterHungerBarsVisible = visible
 	HungerUi.applyCritterHungerBarsVisible()
+	-- Eye also toggles crab/urchin/shark path ribbons (waves + build preview).
+	L.WavePathLines.syncHostilePaths()
 end
 
 function WaveSim.toggleCritterHungerBarsVisible(): boolean
 	critterHungerBarsVisible = not critterHungerBarsVisible
 	HungerUi.applyCritterHungerBarsVisible()
+	L.WavePathLines.syncHostilePaths()
 	return critterHungerBarsVisible
 end
 
@@ -4625,6 +4678,9 @@ function WaveSim.setHideUiSuppressesCritterUi(suppress: boolean)
 	HungerUi.applyCritterHungerBarsVisible()
 	-- Path ribbons count as HUD chrome — hide with Hide UI.
 	L.WavePathLines.setVisible(not suppress)
+	if not suppress then
+		L.WavePathLines.syncHostilePaths()
+	end
 end
 
 function WaveSim.healReef(amount: number): boolean
@@ -4864,14 +4920,14 @@ function WaveSim.stop(opts: { silent: boolean?, preserveAmmoFade: boolean?, pres
 	-- Clear defeat flags after snapshot so the next run starts clean.
 	lastStopDefeated = false
 	lastDefeatOrigin = nil
-	critterHungerBarsVisible = true
+	-- Keep eye preference so build-mode path previews stay hidden if they toggled off.
 	L.WaveEndVfx.setHappyExitVisible(true)
 	resetSpeedState()
 	hardCleanup(preserveAmmoFade, preserveCritterFade)
 	table.clear(hostilePreviewPaths)
 	table.clear(hostilePathQueue)
 	hostileDisplayIndex = 1
-	-- Drop red crab/urchin path ribbons + mini end hearts with the wave.
+	-- Wave ribbons clear; build-mode crab/urchin/shark previews may paint next.
 	L.WavePathLines.syncHostilePaths()
 	L.WaveEndVfx.clearGroundPathHearts()
 	demoCoralParts = nil

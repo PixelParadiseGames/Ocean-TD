@@ -4,6 +4,7 @@
 	Length follows the current Plot Size stage (ends at the reef heart waypoint).
 	Hidden while Hide UI is active.
 	During waves with crabs/urchins: red GroundA/B ribbons (same beam style).
+	Build mode: after session wave > 4 show crab/urchin paths; ≥10 also shark (wave-bar eye hides).
 ]]
 
 local Players = game:GetService("Players")
@@ -79,8 +80,12 @@ local THUMBS_DOWN_EMOJI = "👎"
 local HAPPY_BURST_EMOJIS = { "😊", "😄", "😁", "🥰", "😍" }
 local SAD_BURST_EMOJIS = { "💔", "☠️", "💔", "☠️", "💔", "☠️", "💔", "☠️", "💔", "☠️" }
 local TIP_FISH_STUDS = 26 -- 50% of prior oversized tip fish
-local TIP_FORK_STUDS = 7.8 -- keep prior fork size (was 15% of 52)
 local TIP_SCALE_DOWN_START = 0.6 -- last 40% of fish travel → scale to 0
+local TIP_FISH_TRAIL_LAG_SEC = 2.5 -- second emoji fish lags the lead
+local TIP_TRAIL_FILL_AT_HEART = 0.5 -- trail hunger only half-full when it arrives
+local TIP_LEAD_FULL_AT_U = 0.75 -- lead hunger bar full by 75% of path
+local TIP_HUNGER_STUDS_W = 22 -- oversized bar above tip fish
+local TIP_HUNGER_STUDS_H = 5.2
 local FISH_TRAVEL_MIN = 4
 local FISH_TRAVEL_MAX = 6
 local END_RATING_IN_FORK_SEC = 0.38
@@ -155,14 +160,24 @@ local inkActive = false
 local inkCompleted = false
 -- Skip Intro snapped to end-of-cinematic; never start a fresh ink draw until destroy().
 local inkSkipSettled = false
+-- Set when the "if you don't…" VO ends — GAME OVER SFX/title wait on this (not isPlaying gaps).
+local inkIfYouDontVoDone = false
 local inkDrawLen = 0
 local tipAtt0: Attachment? = nil
 local tipAtt1: Attachment? = nil
 local tipBeam: Beam? = nil
 
-local tipEmojiAnchor: BasePart? = nil
-local tipFishScale: UIScale? = nil
-local tipForkScale: UIScale? = nil
+type TipFishEmoji = {
+	anchor: BasePart,
+	fishScale: UIScale,
+	hungerBb: BillboardGui,
+	hungerFill: Frame,
+	hungerStroke: UIStroke,
+	hungerScale: UIScale,
+}
+
+local tipLeadFish: TipFishEmoji? = nil
+local tipTrailFish: TipFishEmoji? = nil
 local endRatingAnchor: BasePart? = nil
 local revealDoneEvent = Instance.new("BindableEvent")
 local paintFullPathIfPossible: () -> boolean
@@ -225,12 +240,14 @@ local function destroyTipHead()
 end
 
 local function destroyTipFishEmojis()
-	if tipEmojiAnchor then
-		tipEmojiAnchor:Destroy()
-		tipEmojiAnchor = nil
+	if tipLeadFish then
+		tipLeadFish.anchor:Destroy()
+		tipLeadFish = nil
 	end
-	tipFishScale = nil
-	tipForkScale = nil
+	if tipTrailFish then
+		tipTrailFish.anchor:Destroy()
+		tipTrailFish = nil
+	end
 end
 
 local function destroyInkEmojis()
@@ -416,15 +433,71 @@ local function makeEmojiLabel(parent: Instance, text: string, z: number): TextLa
 	return lbl
 end
 
-local function ensureTipFishEmojis()
-	if tipEmojiAnchor and tipEmojiAnchor.Parent and tipFishScale and tipForkScale then
-		return
-	end
-	-- Only clear the tip fish — never the end-rating 🍴 / GAME OVER stage.
-	destroyTipFishEmojis()
+local TIP_HUNGER_DANGER_FLASH_SEC = 0.28
+
+local function makeTipHungerBillboard(adornee: BasePart): (BillboardGui, Frame, UIStroke, UIScale)
+	local bb = Instance.new("BillboardGui")
+	bb.Name = "TipHunger"
+	bb.Adornee = adornee
+	bb.AlwaysOnTop = true
+	bb.LightInfluence = 0
+	bb.MaxDistance = 4000
+	bb.Size = UDim2.fromScale(TIP_HUNGER_STUDS_W, TIP_HUNGER_STUDS_H)
+	bb.StudsOffset = Vector3.new(0, TIP_FISH_STUDS * 0.55 + TIP_HUNGER_STUDS_H * 0.55, 0)
+	bb.Parent = adornee
+	local hungerScale = Instance.new("UIScale")
+	hungerScale.Scale = 1
+	hungerScale.Parent = bb
+
+	local fork = Instance.new("TextLabel")
+	fork.Name = "Fork"
+	fork.BackgroundTransparency = 1
+	fork.AnchorPoint = Vector2.new(0, 0.5)
+	fork.Position = UDim2.new(0, 0, 0.5, 0)
+	fork.Size = UDim2.fromScale(0.18, 1)
+	fork.Font = Enum.Font.SourceSansBold
+	fork.Text = FORK_EMOJI
+	fork.TextScaled = true
+	fork.ZIndex = 3
+	fork.Parent = bb
+
+	local bar = Instance.new("Frame")
+	bar.Name = "Bg"
+	bar.BackgroundColor3 = Color3.new(0, 0, 0)
+	bar.BackgroundTransparency = 0.45
+	bar.BorderSizePixel = 0
+	bar.AnchorPoint = Vector2.new(0, 0.5)
+	bar.Position = UDim2.new(0.2, 0, 0.5, 0)
+	bar.Size = UDim2.fromScale(0.78, 0.42)
+	bar.ZIndex = 1
+	bar.Parent = bb
+	local corner = Instance.new("UICorner")
+	corner.CornerRadius = UDim.new(0.35, 0)
+	corner.Parent = bar
+	local stroke = Instance.new("UIStroke")
+	stroke.Color = Color3.new(1, 1, 1)
+	stroke.Thickness = 2.5
+	stroke.Parent = bar
+
+	local fill = Instance.new("Frame")
+	fill.Name = "Fill"
+	fill.BackgroundColor3 = GREEN
+	fill.BackgroundTransparency = 0
+	fill.BorderSizePixel = 0
+	fill.Size = UDim2.fromScale(0, 1)
+	fill.ZIndex = 2
+	fill.Parent = bar
+	local fillCorner = Instance.new("UICorner")
+	fillCorner.CornerRadius = UDim.new(0.35, 0)
+	fillCorner.Parent = fill
+
+	return bb, fill, stroke, hungerScale
+end
+
+local function createTipFishEmoji(name: string): TipFishEmoji
 	local folder = ensureFolder()
 	local anchor = Instance.new("Part")
-	anchor.Name = "InkTipEmoji"
+	anchor.Name = name
 	anchor.Anchored = true
 	anchor.CanCollide = false
 	anchor.CanQuery = false
@@ -434,7 +507,6 @@ local function ensureTipFishEmojis()
 	anchor.Size = Vector3.new(0.2, 0.2, 0.2)
 	anchor.CFrame = CFrame.new()
 	anchor.Parent = folder
-	tipEmojiAnchor = anchor
 
 	local fishBb = Instance.new("BillboardGui")
 	fishBb.Name = "TipFish"
@@ -449,57 +521,101 @@ local function ensureTipFishEmojis()
 	local fishScale = Instance.new("UIScale")
 	fishScale.Scale = 1
 	fishScale.Parent = fishBb
-	tipFishScale = fishScale
 
-	local forkBb = Instance.new("BillboardGui")
-	forkBb.Name = "TipFork"
-	forkBb.Adornee = anchor
-	forkBb.AlwaysOnTop = true
-	forkBb.LightInfluence = 0
-	forkBb.MaxDistance = 4000
-	forkBb.Size = UDim2.fromScale(TIP_FORK_STUDS, TIP_FORK_STUDS)
-	forkBb.StudsOffset = Vector3.new(0, TIP_FISH_STUDS * 0.5 + TIP_FORK_STUDS * 0.7, 0)
-	forkBb.Parent = anchor
-	makeEmojiLabel(forkBb, FORK_EMOJI, 3)
-	local forkScale = Instance.new("UIScale")
-	forkScale.Scale = 1
-	forkScale.Parent = forkBb
-	tipForkScale = forkScale
+	local hungerBb, hungerFill, hungerStroke, hungerScale = makeTipHungerBillboard(anchor)
+	return {
+		anchor = anchor,
+		fishScale = fishScale,
+		hungerBb = hungerBb,
+		hungerFill = hungerFill,
+		hungerStroke = hungerStroke,
+		hungerScale = hungerScale,
+	}
 end
 
-local function updateTipFishEmojis(worldPos: Vector3, tweenU: number)
-	if hiddenByUi then
-		if tipEmojiAnchor then
-			tipEmojiAnchor.Parent = nil
-		end
+local function ensureTipFishEmojis()
+	-- Anchors may be temporarily unparented while hidden — do not recreate (that wiped the trail).
+	if tipLeadFish and tipLeadFish.anchor and tipTrailFish and tipTrailFish.anchor then
 		return
 	end
-	ensureTipFishEmojis()
-	local anchor = tipEmojiAnchor
-	if not anchor then
+	-- Only clear the tip fish — never the end-rating 🍴 / GAME OVER stage.
+	destroyTipFishEmojis()
+	tipLeadFish = createTipFishEmoji("InkTipFishLead")
+	tipTrailFish = createTipFishEmoji("InkTipFishTrail")
+end
+
+local function updateOneTipFish(
+	fish: TipFishEmoji,
+	worldPos: Vector3,
+	tweenU: number,
+	fill01: number,
+	visible: boolean,
+	flashDanger: boolean
+)
+	local anchor = fish.anchor
+	if not visible or hiddenByUi then
+		if anchor.Parent then
+			anchor.Parent = nil
+		end
 		return
 	end
 	if not anchor.Parent then
 		anchor.Parent = ensureFolder()
 	end
 	anchor.CFrame = CFrame.new(worldPos)
-	-- Last 40% of tween: oversized → 0.
+	-- Last 40% of this fish's own travel: oversized → 0.
 	local scale = 1
 	if tweenU >= TIP_SCALE_DOWN_START then
 		local t = math.clamp((tweenU - TIP_SCALE_DOWN_START) / (1 - TIP_SCALE_DOWN_START), 0, 1)
 		scale = 1 - t
 	end
-	if tipFishScale then
-		tipFishScale.Scale = scale
-	end
-	if tipForkScale then
-		tipForkScale.Scale = scale
+	fish.fishScale.Scale = scale
+	fish.hungerScale.Scale = scale
+	fish.hungerFill.Size = UDim2.fromScale(math.clamp(fill01, 0, 1), 1)
+	-- Trail only: flash red on last 40%. Lead stays green (full by 75%).
+	if flashDanger and tweenU >= TIP_SCALE_DOWN_START then
+		local onRed = (math.floor(os.clock() / TIP_HUNGER_DANGER_FLASH_SEC) % 2) == 0
+		local dangerRed = C.DANGER_RED or Color3.fromRGB(255, 45, 55)
+		fish.hungerFill.BackgroundColor3 = if onRed then dangerRed else GREEN
+		fish.hungerStroke.Color = if onRed then dangerRed else Color3.new(1, 1, 1)
+	else
+		fish.hungerFill.BackgroundColor3 = GREEN
+		fish.hungerStroke.Color = Color3.new(1, 1, 1)
 	end
 	local show = scale > 0.01
 	for _, ch in ipairs(anchor:GetChildren()) do
 		if ch:IsA("BillboardGui") then
 			ch.Enabled = show
 		end
+	end
+end
+
+local function updateTipFishEmojis(
+	leadPos: Vector3,
+	leadU: number,
+	leadFill: number,
+	trailPos: Vector3,
+	trailU: number,
+	trailFill: number,
+	trailVisible: boolean
+)
+	if hiddenByUi then
+		if tipLeadFish and tipLeadFish.anchor.Parent then
+			tipLeadFish.anchor.Parent = nil
+		end
+		if tipTrailFish and tipTrailFish.anchor.Parent then
+			tipTrailFish.anchor.Parent = nil
+		end
+		return
+	end
+	ensureTipFishEmojis()
+	if tipLeadFish then
+		-- Lead scales out on its last 40%; hide only after it finishes (trail keeps going).
+		updateOneTipFish(tipLeadFish, leadPos, leadU, leadFill, leadU < 1, false)
+	end
+	if tipTrailFish then
+		-- Trail appears only once it starts moving; stays until its own path scale-out at the heart.
+		updateOneTipFish(tipTrailFish, trailPos, trailU, trailFill, trailVisible and trailU < 1, true)
 	end
 end
 
@@ -789,18 +905,9 @@ local function playEndRatingEmojis(at: Vector3, myToken: number)
 		return
 	end
 
-	-- Wait until broken-heart bursts are nearly done, then GAME OVER (1s earlier than full fly-out).
-	if downBurstAt then
-		local heartsDoneAt = downBurstAt + math.max(0, brokenHeartBurstDuration() - 1)
-		while os.clock() < heartsDoneAt and myToken == inkToken and anchor.Parent do
-			RunService.RenderStepped:Wait()
-		end
-	end
-	if myToken ~= inkToken or not anchor.Parent then
-		return
-	end
-	-- Wait for "if you don't…" VO (after fully fed) before GAME OVER SFX.
-	while TutorialVo.isPlaying() and myToken == inkToken do
+	-- GAME OVER SFX/title fire exactly when "if you don't…" VO ends (not after hearts,
+	-- and not on TutorialVo.isPlaying() which dips false between chained clips).
+	while not inkIfYouDontVoDone and myToken == inkToken do
 		RunService.RenderStepped:Wait()
 	end
 	if myToken ~= inkToken then
@@ -910,6 +1017,7 @@ function WavePathLines.finishIntroCinematicSkipped()
 	hiddenByUi = false
 	inkSkipSettled = true
 	inkCompleted = true
+	inkIfYouDontVoDone = true
 	-- rebuildForPath blocks while JoinIntroBusy unless inkActive — paint directly.
 	local painted = paintFullPathIfPossible()
 	if not painted and livePath and livePath.totalLen > 0.5 and #liveBeams > 0 then
@@ -1448,10 +1556,11 @@ local function buildGroundRibbonFromPoints(points: { Vector3 }, name: string, co
 	local lift = Vector3.new(0, if typeof(yLift) == "number" then yLift :: number else GROUND_Y_LIFT, 0)
 	local beamColor = color or RED
 	local trackShark = name == "SharkRoute"
-	local trackHostile = name == "HostileGround"
+	local trackHostile = name == "HostileGround" or string.sub(name, 1, 14) == "HostileGround_"
 	if trackShark then
 		clearSharkPovCache()
-	elseif trackHostile then
+	elseif name == "HostileGround" then
+		-- Single live-wave ribbon. Build-mode HostileGround_N appends without wiping peers.
 		clearHostilePovCache()
 	end
 	local prevAtt: Attachment? = nil
@@ -1517,23 +1626,26 @@ function WavePathLines.syncHostilePaths()
 		return
 	end
 	if h.waveShowsHostilePaths and h.waveShowsHostilePaths() == true then
-		local path: PathLike? = nil
-		if h.getHostileDisplayPath then
-			path = h.getHostileDisplayPath()
-		end
-		if not path and h.getGroundPaths then
-			local paths = h.getGroundPaths()
-			if typeof(paths) == "table" and #paths > 0 then
-				path = paths[1]
-			end
-		end
-		if path and path.totalLen > 0.5 then
-			local sampleFn = h.sampleGroundPath or h.sampleFishPath
-			local points = samplePolyline(path.totalLen, function(d)
-				local pos = sampleFn(path, d)
-				return pos
+		local sampleFn = h.sampleGroundPath or h.sampleFishPath
+		-- Live wave: one cycling display path. Build preview: all GroundA/B routes.
+		local display = if h.getHostileDisplayPath then h.getHostileDisplayPath() else nil
+		if display and display.totalLen > 0.5 then
+			local points = samplePolyline(display.totalLen, function(d)
+				return sampleFn(display, d)
 			end)
 			buildGroundRibbonFromPoints(points, "HostileGround", RED, GROUND_Y_LIFT)
+		elseif h.getGroundPaths then
+			local paths = h.getGroundPaths()
+			if typeof(paths) == "table" then
+				for i, path in ipairs(paths) do
+					if path and path.totalLen > 0.5 then
+						local points = samplePolyline(path.totalLen, function(d)
+							return sampleFn(path, d)
+						end)
+						buildGroundRibbonFromPoints(points, "HostileGround_" .. tostring(i), RED, GROUND_Y_LIFT)
+					end
+				end
+			end
 		end
 	end
 	if h.waveShowsSharkPath and h.waveShowsSharkPath() == true and h.getSharkPath and h.sampleSharkPath then
@@ -1651,6 +1763,7 @@ function WavePathLines.playInkReveal(durationSec: number?)
 	inkActive = true
 	inkCompleted = false
 	inkSkipSettled = false
+	inkIfYouDontVoDone = false
 	inkDrawLen = 0
 
 	local fullLen = path.totalLen
@@ -1681,7 +1794,13 @@ function WavePathLines.playInkReveal(durationSec: number?)
 							if my ~= inkToken then
 								return
 							end
-							TutorialVo.play(IF_YOU_DONT_VO_ID, "OceanTD_JoinIntroIfYouDont")
+							TutorialVo.play(IF_YOU_DONT_VO_ID, "OceanTD_JoinIntroIfYouDont", {
+								onEnded = function()
+									if my == inkToken then
+										inkIfYouDontVoDone = true
+									end
+								end,
+							})
 						end,
 					})
 				end,
@@ -1730,11 +1849,12 @@ function WavePathLines.playInkReveal(durationSec: number?)
 		end)
 		local travelDur = fishTravelDurationForStage()
 		local tFish = os.clock()
-		-- 🍴 rating scale-up starts 1s before the fish arrives; tip fish still finishes the path.
+		-- 🍴 rating scale-up starts 1s before the lead fish arrives; trail finishes 2.5s later.
 		local ratingLeadSec = 1
 		local ratingFinished = false
 		local fishCamStarted = false
-		local latestFishTip = h.sampleFishPath(path, 0)
+		local startPos = h.sampleFishPath(path, 0)
+		local latestFishTip = startPos
 		task.spawn(function()
 			local wakeAt = tFish + math.max(0, travelDur - ratingLeadSec)
 			while os.clock() < wakeAt and my == inkToken do
@@ -1744,25 +1864,34 @@ function WavePathLines.playInkReveal(durationSec: number?)
 				ratingFinished = true
 				return
 			end
-			-- Despawn examples in parallel — don't block the food icon scale-in.
-			task.spawn(function()
-				pcall(function()
-					JoinIntroExampleCorals.scaleOutAndClear()
-				end)
-			end)
+			-- Rating starts while trail fish still walks; examples stay until trail finishes.
 			playEndRatingEmojis(endPos, my)
 			ratingFinished = true
 		end)
+		local fishPhaseDur = travelDur + TIP_FISH_TRAIL_LAG_SEC
 		while my == inkToken do
-			local u = math.clamp((os.clock() - tFish) / travelDur, 0, 1)
-			if u >= 1 then
+			local elapsed = os.clock() - tFish
+			if elapsed >= fishPhaseDur then
 				break
 			end
+			local uLead = math.clamp(elapsed / travelDur, 0, 1)
+			-- Trail only appears once it starts moving (2.5s behind the lead) — never parked at W1.
+			local uTrail = math.clamp((elapsed - TIP_FISH_TRAIL_LAG_SEC) / travelDur, 0, 1)
+			local trailVisible = elapsed >= TIP_FISH_TRAIL_LAG_SEC
 			-- Linear along path length so speed stays even (waypoints are uneven in world space).
-			local len = fullLen * u
-			local tipPos = h.sampleFishPath(path, len)
+			local tipPos = h.sampleFishPath(path, fullLen * uLead)
+			local trailPos = if trailVisible then h.sampleFishPath(path, fullLen * uTrail) else startPos
 			latestFishTip = tipPos
-			updateTipFishEmojis(tipPos, u)
+			-- Lead full by 75% of path; trail half-full at heart (and flashes red last 40%).
+			updateTipFishEmojis(
+				tipPos,
+				uLead,
+				math.clamp(uLead / TIP_LEAD_FULL_AT_U, 0, 1),
+				trailPos,
+				uTrail,
+				uTrail * TIP_TRAIL_FILL_AT_HEART,
+				trailVisible
+			)
 			if not fishCamStarted then
 				fishCamStarted = true
 				-- Zoom into the sample reef / coral while food orbs fly to the fish emoji.
@@ -1779,9 +1908,12 @@ function WavePathLines.playInkReveal(durationSec: number?)
 					end
 				end)
 			end
-			pcall(function()
-				JoinIntroExampleCorals.feedToward(tipPos)
-			end)
+			-- Example corals keep shooting orbs at the lead while it travels.
+			if uLead < 1 then
+				pcall(function()
+					JoinIntroExampleCorals.feedToward(tipPos)
+				end)
+			end
 			RunService.RenderStepped:Wait()
 		end
 		if my ~= inkToken then
@@ -1790,8 +1922,13 @@ function WavePathLines.playInkReveal(durationSec: number?)
 			end)
 			return
 		end
-		-- Fish reached the heart — tip can go away; rating may already be on-screen.
-		updateTipFishEmojis(endPos, 1)
+		-- Trail fish reached the heart — fade examples now (not when rating started).
+		task.spawn(function()
+			pcall(function()
+				JoinIntroExampleCorals.scaleOutAndClear()
+			end)
+		end)
+		updateTipFishEmojis(endPos, 1, 1, endPos, 1, TIP_TRAIL_FILL_AT_HEART, false)
 		destroyTipFishEmojis()
 		-- Rating / GAME OVER / roll VO: revealDone already fired when roll VO started.
 		while not ratingFinished and my == inkToken do

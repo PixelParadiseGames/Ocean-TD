@@ -325,6 +325,7 @@ function PlotSizeCinematic.play(
 		if not (opts and opts.dial == true) then
 			-- SkillPowerUpUI may have armed suppress before ForceClose — don't leave it stuck.
 			setTutorialSuppress(false)
+			playerGui:SetAttribute("OceanTD_PlotSizeCinePending", nil)
 			return
 		end
 		token += 1
@@ -350,6 +351,7 @@ function PlotSizeCinematic.play(
 	local camPre = Workspace.CurrentCamera
 	local preCloseCf: CFrame? = if camPre then camPre.CFrame else nil
 
+	playerGui:SetAttribute("OceanTD_PlotSizeCinePending", nil)
 	playerGui:SetAttribute("OceanTD_PlotSizeCinematicBusy", true)
 	-- Always drop avatar-cam override so the wide plot shot can play.
 	releaseSkillsAvatarCam()
@@ -403,6 +405,14 @@ function PlotSizeCinematic.play(
 		if skipCam then
 			return
 		end
+		-- Reopening skills on Plot Cam — never dip to the avatar (that delayed bubbles/power-up).
+		if shouldReopenPlotSize then
+			cam = Workspace.CurrentCamera
+			if cam then
+				cam.CameraType = Enum.CameraType.Scriptable
+			end
+			return
+		end
 		cam = Workspace.CurrentCamera
 		if not cam then
 			return
@@ -451,23 +461,22 @@ function PlotSizeCinematic.play(
 		if my == token then
 			busy = false
 		end
-		playerGui:SetAttribute("OceanTD_PlotSizeCinematicBusy", false)
-		-- ForceCloseFreeCam stashed the prior seat — reclaim it (was leaving Player Cam stuck).
+		-- Resume Plot Cam first, then clear busy so FreeCam can reclaim without an avatar beat.
 		playerGui:SetAttribute("OceanTD_ResumeCinematicCam", os.clock())
+		playerGui:SetAttribute("OceanTD_EnsurePlotCam", os.clock())
+		playerGui:SetAttribute("OceanTD_PlotSizeCinematicBusy", false)
 		if shouldReopenPlotSize then
-			-- Wait for FreeCam to actually drive PlotCam2 — ATTR_MODE stays "plotcam" through
-			-- ForceClose stash, so checking the attribute alone reopened skills on Player Cam.
+			-- Short settle for ResumeCinematicCam defer — do not wait 1.5s on PlotCam2.
 			task.spawn(function()
-				local deadline = os.clock() + 1.5
+				local deadline = os.clock() + 0.35
 				while os.clock() < deadline do
 					local driving = false
 					pcall(function()
 						local PlotCam2 = require(script.Parent:WaitForChild("PlotCam2"))
-						local cam = Workspace.CurrentCamera
+						local camNow = Workspace.CurrentCamera
 						driving = PlotCam2.isActive()
-							and cam ~= nil
-							and cam.CameraType == Enum.CameraType.Scriptable
-							and playerGui:GetAttribute("OceanTD_CamCycleMode") == "plotcam"
+							and camNow ~= nil
+							and camNow.CameraType == Enum.CameraType.Scriptable
 					end)
 					if driving then
 						break

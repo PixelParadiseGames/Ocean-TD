@@ -114,6 +114,7 @@ local hudWaveBar: Frame? = nil
 local hudWaveFill: Frame? = nil
 local hudWaveTrail: Frame? = nil
 local hudWaveTrailState = ReefHealthBarFx.makeState(0)
+local nextWaveRockState = ReefHealthBarFx.makeState(0)
 local hudWaveLabel: TextLabel? = nil
 local hudWaveHit: TextButton? = nil
 local hudCritterBarsEye: TextButton? = nil
@@ -129,6 +130,7 @@ local hudReefTrailState = ReefHealthBarFx.makeState(1)
 local hudReefLabel: TextLabel? = nil
 local hudReefPlus: TextButton? = nil
 local hudTime: TextLabel? = nil
+local hudUpcoming: TextLabel? = nil
 local hudFishNeed: TextLabel? = nil
 local hudLayoutConn: RBXScriptConnection? = nil
 local finishFlashToken = 0
@@ -159,6 +161,12 @@ local FLASH_GREEN = Color3.fromRGB(40, 180, 80) -- Next Wave outer stroke (not n
 local FLASH_DARK = Color3.fromRGB(0, 110, 35)
 local LINE_H = 28
 local BAR_H = 26
+
+local function upcomingWaveTeaserText(wave: number): string
+	local w = math.max(1, math.floor(wave))
+	local nextMilestone = if w < 5 then 5 else (math.floor(w / 10) + 1) * 10
+	return string.format("Wave:%d ???", nextMilestone)
+end
 local WAVE_NEXT_HEIGHT_MULT = 1.4 -- Next Wave bar resting height vs normal
 local WAVE_NEXT_OVERSHOOT_MULT = 1.58 -- legacy grow (non-unlock paths)
 local WAVE_NEXT_UNLOCK_PEAK_MULT = 5 -- 500% height pop when NEXT WAVE unlocks
@@ -378,6 +386,7 @@ function WaveSlot.refreshHelpBadge()
 	end
 	if Players.LocalPlayer.PlayerGui:GetAttribute("OceanTD_SkillsBubblesOpen") == true
 		or Players.LocalPlayer.PlayerGui:GetAttribute("OceanTD_TutorialGateWaves") == true
+		or Players.LocalPlayer.PlayerGui:GetAttribute("OceanTD_JoinIntroShowBackpack") == true
 	then
 		helpSlot5.Visible = false
 		if helpHit then
@@ -802,6 +811,10 @@ do
 	function WaveSlot.tryFinishFromShortcut(): boolean
 		if not WaveSlot.isFinishReady() then
 			return false
+		end
+		-- Half the reef-health rock when the player taps NEXT WAVE.
+		if hudWaveBar then
+			ReefHealthBarFx.rockBar(hudWaveBar, nextWaveRockState, 0.5)
 		end
 		-- Happy emoji burst already fired when NEXT WAVE unlocked; green spheres on press.
 		if hudWaveBar and deps.mainHUD then
@@ -1607,20 +1620,39 @@ local function ensureHud()
 	local timeLabel = Instance.new("TextLabel")
 	timeLabel.Name = "Time"
 	timeLabel.BackgroundTransparency = 1
-	timeLabel.Size = UDim2.new(0.34, -4, 0, LINE_H)
-	timeLabel.Position = UDim2.new(1, 0, 0, BAR_H + REEF_ROW_GAP + BAR_H + 4)
-	timeLabel.AnchorPoint = Vector2.new(1, 0)
+	timeLabel.Size = UDim2.new(0.48, -4, 0, LINE_H)
+	timeLabel.Position = UDim2.fromOffset(0, BAR_H + REEF_ROW_GAP)
+	timeLabel.AnchorPoint = Vector2.new(0, 0)
 	timeLabel.Font = UiTheme.Font
 	timeLabel.TextSize = 15
 	timeLabel.TextColor3 = Color3.new(1, 1, 1)
 	timeLabel.TextStrokeTransparency = 0.35
 	timeLabel.TextStrokeColor3 = Color3.new(0, 0, 0)
-	timeLabel.TextXAlignment = Enum.TextXAlignment.Right
+	timeLabel.TextXAlignment = Enum.TextXAlignment.Left
 	timeLabel.TextYAlignment = Enum.TextYAlignment.Center
 	timeLabel.TextTruncate = Enum.TextTruncate.None
 	timeLabel.ZIndex = 26
 	timeLabel.Parent = f
 	hudTime = timeLabel
+
+	local upcomingLabel = Instance.new("TextLabel")
+	upcomingLabel.Name = "UpcomingWave"
+	upcomingLabel.BackgroundTransparency = 1
+	upcomingLabel.Size = UDim2.new(0.48, -4, 0, LINE_H)
+	upcomingLabel.Position = UDim2.new(1, 0, 0, BAR_H + REEF_ROW_GAP)
+	upcomingLabel.AnchorPoint = Vector2.new(1, 0)
+	upcomingLabel.Font = UiTheme.Font
+	upcomingLabel.TextSize = 15
+	upcomingLabel.TextColor3 = Color3.new(1, 1, 1)
+	upcomingLabel.TextStrokeTransparency = 0.35
+	upcomingLabel.TextStrokeColor3 = Color3.new(0, 0, 0)
+	upcomingLabel.TextXAlignment = Enum.TextXAlignment.Right
+	upcomingLabel.TextYAlignment = Enum.TextYAlignment.Center
+	upcomingLabel.TextTruncate = Enum.TextTruncate.None
+	upcomingLabel.ZIndex = 26
+	upcomingLabel.Text = "Wave:5 ???"
+	upcomingLabel.Parent = f
+	hudUpcoming = upcomingLabel
 
 	local fishNeed = Instance.new("TextLabel")
 	fishNeed.Name = "FishNeed"
@@ -1670,25 +1702,33 @@ local function applyWaveHudScale(root: GuiObject): number
 	return barScale
 end
 
--- Saved layout: reef stacked above wave/hunger, anchored to Slot5 on the right HUD.
+-- Saved layout: reef stacked above meta + wave, anchored to Slot5 on the right HUD.
 local function applyWaveHudBarsLayoutRight()
 	if not hudReefBar or not hudWaveBar then
 		return
 	end
 	local wh = waveBarHeight()
-	local waveY = BAR_H + REEF_ROW_GAP
-	local metaY = waveY + wh + 4
+	local metaY = BAR_H + REEF_ROW_GAP
+	local waveY = metaY + LINE_H + 4
 	hudReefBar.Size = UDim2.new(1, -4, 0, BAR_H)
 	hudReefBar.Position = UDim2.fromOffset(0, 0)
 	hudReefBar.AnchorPoint = Vector2.new(0, 0)
 	hudWaveBar.Size = UDim2.new(1, -4, 0, wh)
 	hudWaveBar.Position = UDim2.fromOffset(0, waveY)
 	hudWaveBar.AnchorPoint = Vector2.new(0, 0)
+	-- Clock left / upcoming teaser right, above the wave bar.
 	if hudTime then
-		hudTime.Size = UDim2.new(0.34, -4, 0, LINE_H)
-		hudTime.Position = UDim2.new(1, 0, 0, metaY)
-		hudTime.AnchorPoint = Vector2.new(1, 0)
-		hudTime.TextXAlignment = Enum.TextXAlignment.Right
+		hudTime.Size = UDim2.new(0.48, -4, 0, LINE_H)
+		hudTime.Position = UDim2.fromOffset(0, metaY)
+		hudTime.AnchorPoint = Vector2.new(0, 0)
+		hudTime.TextXAlignment = Enum.TextXAlignment.Left
+	end
+	if hudUpcoming then
+		hudUpcoming.Size = UDim2.new(0.48, -4, 0, LINE_H)
+		hudUpcoming.Position = UDim2.new(1, -2, 0, metaY)
+		hudUpcoming.AnchorPoint = Vector2.new(1, 0)
+		hudUpcoming.TextXAlignment = Enum.TextXAlignment.Right
+		hudUpcoming.Visible = true
 	end
 	if hudFishNeed then
 		hudFishNeed.Size = UDim2.new(0.58, -4, 0, LINE_H)
@@ -1730,18 +1770,28 @@ local function applyWaveHudBarsLayoutBottomRight()
 	local gap = WAVE_HUD_SIDE_GAP
 	local total = reefW + gap + waveW
 	local wh = waveBarHeight()
+	local waveLeft = (reefW + gap) / total
+	local waveFrac = waveW / total
 	-- Reef stays left-aligned to the wave HUD (immediate left neighbor).
 	hudReefBar.Size = UDim2.new(reefW / total, 0, 0, BAR_H)
 	hudReefBar.AnchorPoint = Vector2.new(0, 1)
 	hudReefBar.Position = UDim2.new(0, 0, 1, 0)
-	hudWaveBar.Size = UDim2.new(waveW / total, 0, 0, wh)
+	hudWaveBar.Size = UDim2.new(waveFrac, 0, 0, wh)
 	hudWaveBar.AnchorPoint = Vector2.new(0, 1)
-	hudWaveBar.Position = UDim2.new((reefW + gap) / total, 0, 1, 0)
+	hudWaveBar.Position = UDim2.new(waveLeft, 0, 1, 0)
+	-- Clock left / upcoming teaser right, above the wave bar.
 	if hudTime then
-		hudTime.Size = UDim2.new(0.34, -4, 0, LINE_H)
-		hudTime.AnchorPoint = Vector2.new(1, 1)
-		hudTime.Position = UDim2.new(1, 0, 1, -(wh + 4))
-		hudTime.TextXAlignment = Enum.TextXAlignment.Right
+		hudTime.Size = UDim2.new(waveFrac * 0.5, -4, 0, LINE_H)
+		hudTime.AnchorPoint = Vector2.new(0, 1)
+		hudTime.Position = UDim2.new(waveLeft, 0, 1, -(wh + 4))
+		hudTime.TextXAlignment = Enum.TextXAlignment.Left
+	end
+	if hudUpcoming then
+		hudUpcoming.Size = UDim2.new(waveFrac * 0.5, -4, 0, LINE_H)
+		hudUpcoming.AnchorPoint = Vector2.new(1, 1)
+		hudUpcoming.Position = UDim2.new(1, 0, 1, -(wh + 4))
+		hudUpcoming.TextXAlignment = Enum.TextXAlignment.Right
+		hudUpcoming.Visible = true
 	end
 	if hudFishNeed then
 		-- Critter counts live inside the wave bar now.
@@ -1789,7 +1839,8 @@ local function layoutHudRight()
 	if scale > 1 then
 		designW = math.floor(designW * WAVE_HUD_WIDTH_MULT + 0.5)
 	end
-	local designH = BAR_H + REEF_ROW_GAP + waveBarHeight() + 4 + LINE_H
+	-- reef + meta (clock/upcoming) + gap + wave
+	local designH = BAR_H + REEF_ROW_GAP + LINE_H + 4 + waveBarHeight()
 	local w = math.floor(designW / scale + 0.5)
 	local h = designH
 	local gap = math.floor(BAR_TOP_GAP * scale + 0.5)
@@ -1813,7 +1864,8 @@ local function layoutHudBottomRight()
 	if scale > 1 then
 		designW = math.floor(designW * WAVE_HUD_WIDTH_MULT + 0.5)
 	end
-	local designH = waveBarHeight() + 4 + LINE_H
+	-- meta row (clock/upcoming) sits above the wave bar
+	local designH = LINE_H + 4 + waveBarHeight()
 	local w = math.floor(designW / scale + 0.5)
 	-- Same widths as before; pin the wave bar's center to screen center (reef stays on its left).
 	local waveCenterFrac = (reefW + gap + waveW * 0.5) / total
@@ -1977,6 +2029,10 @@ setHudVisible = function(on: boolean)
 		if hudTime then
 			hudTime.Text = "⏱️00:00:00"
 		end
+		if hudUpcoming then
+			hudUpcoming.Text = "Wave:5 ???"
+			hudUpcoming.Visible = false
+		end
 		if hudBarHeartScale then
 			hudBarHeartScale.Scale = 1
 		end
@@ -2119,6 +2175,10 @@ local function updateHud(snap: WaveSim.HudSnapshot)
 	end
 	if hudTime then
 		hudTime.Text = "⏱️" .. WaveSim.formatClock(snap.elapsedSec)
+	end
+	if hudUpcoming then
+		hudUpcoming.Text = upcomingWaveTeaserText(snap.wave or 1)
+		hudUpcoming.Visible = true
 	end
 	if hudFishNeed then
 		hudFishNeed.Visible = false
@@ -2670,6 +2730,12 @@ function WaveSlot.mount(d: Deps)
 			return
 		end
 		local skillsOpen = deps.playerGui:GetAttribute("OceanTD_SkillsBubblesOpen") == true
+		-- Plot-intro BUILD showcase: hide Start Wave so only BUILD is on the right HUD.
+		if deps.playerGui:GetAttribute("OceanTD_JoinIntroShowBackpack") == true then
+			slot5.Visible = false
+			WaveSlot.refreshHelpBadge()
+			return
+		end
 		if tutorialWavesGated() then
 			slot5TutorialPopPending = true
 			slot5PopDelayActive = false
@@ -2744,6 +2810,7 @@ function WaveSlot.mount(d: Deps)
 
 	syncSlot5TutorialGate()
 	deps.playerGui:GetAttributeChangedSignal("OceanTD_TutorialGateWaves"):Connect(syncSlot5TutorialGate)
+	deps.playerGui:GetAttributeChangedSignal("OceanTD_JoinIntroShowBackpack"):Connect(syncSlot5TutorialGate)
 
 	InventoryState.onOpenChanged(function(isOpen)
 		setSlot5Interactable(not isOpen)

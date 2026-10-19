@@ -61,10 +61,12 @@ function ReefHealthBarFx.makeState(initialFrac: number?): State
 end
 
 -- Rock the bar ±AMP from center for ~1s; amplitude decays each swing.
-function ReefHealthBarFx.rockBar(bar: GuiObject?, state: State?)
+-- ampScale: optional multiplier (e.g. 0.5 = half as aggressive as the health bar).
+function ReefHealthBarFx.rockBar(bar: GuiObject?, state: State?, ampScale: number?)
 	if not bar or not bar.Parent then
 		return
 	end
+	local amp = ROCK_AMP_DEG * (if typeof(ampScale) == "number" then ampScale else 1)
 	local my = 0
 	if state then
 		state.rockToken += 1
@@ -96,7 +98,7 @@ function ReefHealthBarFx.rockBar(bar: GuiObject?, state: State?)
 		-- Soften each swing: strong at start, nearly still at the end.
 		local envelope = (1 - u) * (1 - u)
 		local osc = math.sin(u * math.pi * 2 * ROCK_CYCLES)
-		bar.Rotation = ROCK_AMP_DEG * envelope * osc
+		bar.Rotation = amp * envelope * osc
 	end)
 end
 

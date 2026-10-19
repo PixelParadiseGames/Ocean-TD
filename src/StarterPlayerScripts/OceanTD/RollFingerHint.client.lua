@@ -1659,6 +1659,8 @@ local function applyAttr(raw: any)
 	local mode = parseMode(raw)
 	if mode then
 		if mode == "backpack" then
+			-- Unlock BUILD when the finger points at it (after roll finishes).
+			playerGui:SetAttribute("OceanTD_TutorialGateBackpack", false)
 			-- Manual Plant chapter → finger on BUILD: VO once.
 			playPlantFirstCoralSoundOnce()
 		elseif mode == "upgrade" then
@@ -1715,7 +1717,8 @@ SeedWheelRevealApi.connectCycleFinished(function()
 		end)
 		return
 	end
-	-- Manual Plant chapter (or no chapter): open BUILD next.
+	-- Manual Plant chapter (or no chapter): unlock BUILD + finger on it.
+	playerGui:SetAttribute("OceanTD_TutorialGateBackpack", false)
 	playerGui:SetAttribute(HINT_ATTR, "backpack")
 end)
 
@@ -1803,6 +1806,13 @@ playerGui:GetAttributeChangedSignal("OceanTD_CamCycleMode"):Connect(function()
 		-- Release W3 hold-pause so fish start swimming.
 		pcall(function()
 			require(script.Parent:WaitForChild("WaveSim")).setCinematicPaused(false)
+		end)
+		-- Don't leave ForceCamMode stuck on fishcam — later cycle taps must work.
+		task.defer(function()
+			if playerGui:GetAttribute("OceanTD_ForceCamMode") == "fishcam" then
+				playerGui:SetAttribute("OceanTD_ForceCamMode", "")
+			end
+			playerGui:SetAttribute("OceanTD_RefreshCamCycleHits", os.clock())
 		end)
 		return
 	end
@@ -1897,18 +1907,14 @@ local function clearTutorialLockOn(host: GuiObject)
 		ic:Destroy()
 	end
 	local function restoreBtn(btn: GuiButton)
-		local wasActive = btn:GetAttribute("_OceanTD_TutorialLockActive")
-		local wasSel = btn:GetAttribute("_OceanTD_TutorialLockSelectable")
-		if typeof(wasActive) == "boolean" then
-			btn.Active = wasActive
-			btn:SetAttribute("_OceanTD_TutorialLockActive", nil)
-		end
-		if typeof(wasSel) == "boolean" then
-			btn.Selectable = wasSel
-			btn:SetAttribute("_OceanTD_TutorialLockSelectable", nil)
-		end
+		btn:SetAttribute("_OceanTD_TutorialLockActive", nil)
+		btn:SetAttribute("_OceanTD_TutorialLockSelectable", nil)
+		-- Always re-enable on unlock. Restoring a saved Active=false left cam hits dead
+		-- (wave 3 teach tap) until a later carousel pass — which often never came.
+		btn.Active = true
+		btn.Selectable = true
 		pcall(function()
-			(btn :: any).Interactable = btn.Active
+			(btn :: any).Interactable = true
 		end)
 	end
 	if host:IsA("GuiButton") then
@@ -2107,6 +2113,7 @@ playerGui:GetAttributeChangedSignal("OceanTD_TutorialGateLeftHud"):Connect(apply
 playerGui:GetAttributeChangedSignal("OceanTD_TutorialGateCam"):Connect(applyLeftHudGate)
 playerGui:GetAttributeChangedSignal("OceanTD_TutorialGateFreeCam"):Connect(applyLeftHudGate)
 playerGui:GetAttributeChangedSignal("OceanTD_TutorialGateShop"):Connect(applyLeftHudGate)
+playerGui:GetAttributeChangedSignal("OceanTD_RefreshLeftHudGate"):Connect(applyLeftHudGate)
 playerGui:GetAttributeChangedSignal(SKILLS_OPEN_ATTR):Connect(applyLeftHudGate)
 playerGui.ChildAdded:Connect(function(ch)
 	if ch.Name == "MobileLeftUI" then

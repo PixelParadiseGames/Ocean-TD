@@ -2,7 +2,7 @@
 --[[
 	Join-intro sample plot beat (replaces old example drop after bleach):
 	1) Shrink footprint MAX → stage 1 (PLOT title ~2s before shrink ends)
-	2) Open fake backpack (non-clickable), scroll list bottom → top
+	2) Show BUILD 1s, then open fake backpack (non-clickable), scroll bottom → top
 	3) Fire 1 of each species (orb from slot); grow plot when PS1 spots fill
 	4) Short beat, then ADD MAX press → autoplant fill (stretched)
 	5) Avatar sped-up dash/dig chase from first orb fire
@@ -28,12 +28,13 @@ local SHRINK_TO_ONE_SEC = 2.2
 -- PLOT title pops this many seconds before shrink reaches stage 1.
 local PLOT_TITLE_EARLY_SEC = 1.0 -- show 0.5s later than prior 1.5
 local GROW_DURATION_SEC = 5.5
--- Spread 1-of-each fires ~1s longer; ADD_MAX_DELAY shrinks by the same so ADD MAX stays put.
+-- BUILD visible first; backpack opens after this (plant + ADD MAX each −0.5s so end time matches).
+local BACKPACK_OPEN_DELAY_SEC = 1.0
 local PLANT_STAGGER_SEC = 0.30
-local FIRST_ORB_DELAY_SEC = 1.5 -- beat after backpack open before first species orb (+1s later)
+local FIRST_ORB_DELAY_SEC = 1.0 -- was 1.5; −0.5s plant beat after backpack open
 local FILL_COUNT = 180
 local FILL_STAGGER = 0.072 -- ~1s longer firing window than 0.045
-local ADD_MAX_DELAY_SEC = 1.0 -- was 2.0; gap after last species (individuals took the extra second)
+local ADD_MAX_DELAY_SEC = 0.5 -- was 1.0; −0.5s gap after last species
 local ADD_MAX_WAIT_SEC = 1.5
 local PLANT_RETRY_SEC = 0.12
 
@@ -95,12 +96,19 @@ function JoinIntroPlotDemo.runAfterBleach(opts: RunOpts): boolean
 		return false
 	end
 
+	-- Show BUILD only (2× → 1×), no Auto Plant / lock; then open backpack.
 	playerGui:SetAttribute(ATTR_SHOW_BACKPACK, true)
 	enableRightHudForDemo(playerGui, opts.hiddenScreens)
 	local bindDeadline = os.clock() + 3
 	while not JoinIntroBackpackDemo.isBound() and os.clock() < bindDeadline do
 		task.wait()
 	end
+	JoinIntroBackpackDemo.previewBuildBeforeOpen(BACKPACK_OPEN_DELAY_SEC, cancelled)
+	if cancelled() then
+		return false
+	end
+	enableRightHudForDemo(playerGui, opts.hiddenScreens)
+
 	local scrollSec = GROW_DURATION_SEC
 	local began = JoinIntroBackpackDemo.begin(scrollSec)
 	if not began then
@@ -110,12 +118,6 @@ function JoinIntroPlotDemo.runAfterBleach(opts: RunOpts): boolean
 		local AutoPlantUI = require(script.Parent:WaitForChild("AutoPlantUI"))
 		if AutoPlantUI.setJoinIntroDemo then
 			AutoPlantUI.setJoinIntroDemo(true)
-		end
-	end)
-	pcall(function()
-		local AutoPlantHudSlot = require(script.Parent:WaitForChild("AutoPlantHudSlot"))
-		if AutoPlantHudSlot.setVisible then
-			AutoPlantHudSlot.setVisible(false)
 		end
 	end)
 	if opts.onBackpackOpen then
@@ -185,7 +187,7 @@ function JoinIntroPlotDemo.runAfterBleach(opts: RunOpts): boolean
 	JoinIntroBackpackDemo.setScrollProgress(1)
 	enableRightHudForDemo(playerGui, opts.hiddenScreens)
 
-	-- Beat after last species orb, then ADD MAX (2s later than prior "immediate" timing).
+	-- Beat after last species orb, then ADD MAX.
 	if not cancelled() and plantedIdx >= plantCount and ADD_MAX_DELAY_SEC > 0 then
 		local delayUntil = os.clock() + ADD_MAX_DELAY_SEC
 		while os.clock() < delayUntil and not cancelled() do

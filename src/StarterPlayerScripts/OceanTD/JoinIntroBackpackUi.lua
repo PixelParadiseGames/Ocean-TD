@@ -105,6 +105,12 @@ function JoinIntroBackpackUi.mount(deps: MountDeps)
 				AutoPlantUI.setJoinIntroDemo(false)
 			end
 		end)
+		pcall(function()
+			local AutoPlantHudSlot = require(script.Parent:WaitForChild("AutoPlantHudSlot"))
+			if AutoPlantHudSlot.setForcedHidden then
+				AutoPlantHudSlot.setForcedHidden(false)
+			end
+		end)
 		for _, ph in ipairs(hiddenPlaceholders) do
 			if ph.Parent then
 				ph.Visible = true
@@ -124,6 +130,52 @@ function JoinIntroBackpackUi.mount(deps: MountDeps)
 	end
 
 	JoinIntroBackpackDemo.bind({
+		previewBuildBeforeOpen = function(durationSec: number, cancelled: (() -> boolean)?)
+			demoCollapsed = false
+			-- Unlock BUILD chrome + hide Auto Plant HUD; keep backpack closed.
+			InventoryState.setJoinIntroDemo(true)
+			syncBackpackGate()
+			refreshSeedCountBadges()
+			if InventoryState.isOpen() then
+				InventoryState.setOpenForced(false)
+			end
+			applySlotClosedChrome()
+			pcall(function()
+				local AutoPlantHudSlot = require(script.Parent:WaitForChild("AutoPlantHudSlot"))
+				if AutoPlantHudSlot.setForcedHidden then
+					AutoPlantHudSlot.setForcedHidden(true)
+				elseif AutoPlantHudSlot.setVisible then
+					AutoPlantHudSlot.setVisible(false)
+				end
+			end)
+			resetBuildPopScale()
+			local myPop = buildPopToken
+			local scale = circle:FindFirstChild("_OceanTD_JoinIntroBuildPop") :: UIScale?
+			if not scale then
+				scale = Instance.new("UIScale")
+				scale.Name = "_OceanTD_JoinIntroBuildPop"
+				scale.Parent = circle
+			end
+			local dur = math.max(0.05, durationSec)
+			scale.Scale = 2
+			local t0 = os.clock()
+			while myPop == buildPopToken and scale.Parent do
+				if cancelled and cancelled() then
+					break
+				end
+				local u = math.clamp((os.clock() - t0) / dur, 0, 1)
+				-- Ease out: oversized → normal by the time the backpack opens.
+				local e = 1 - (1 - u) ^ 3
+				scale.Scale = 2 + (1 - 2) * e
+				if u >= 1 then
+					break
+				end
+				task.wait()
+			end
+			if myPop == buildPopToken and scale.Parent then
+				scale.Scale = 1
+			end
+		end,
 		begin = function(_scrollSec: number)
 			demoCollapsed = false
 			InventoryState.setJoinIntroDemo(true)
@@ -140,44 +192,20 @@ function JoinIntroBackpackUi.mount(deps: MountDeps)
 					AutoPlantUI.setJoinIntroDemo(true)
 				end
 			end)
-			resetBuildPopScale()
-			local myPop = buildPopToken
-			task.spawn(function()
-				if myPop ~= buildPopToken then
-					return
-				end
-				local scale = circle:FindFirstChild("_OceanTD_JoinIntroBuildPop") :: UIScale?
-				if not scale then
-					scale = Instance.new("UIScale")
-					scale.Name = "_OceanTD_JoinIntroBuildPop"
-					scale.Parent = circle
-				end
-				scale.Scale = 1
-				local up = TweenService:Create(
-					scale,
-					TweenInfo.new(0.28, Enum.EasingStyle.Back, Enum.EasingDirection.Out),
-					{ Scale = 2 }
-				)
-				local down = TweenService:Create(
-					scale,
-					TweenInfo.new(0.35, Enum.EasingStyle.Quad, Enum.EasingDirection.InOut),
-					{ Scale = 1 }
-				)
-				buildPopUp = up
-				buildPopDown = down
-				up:Play()
-				up.Completed:Wait()
-				if myPop ~= buildPopToken or not scale.Parent then
-					return
-				end
-				if InventoryState.isJoinIntroDemo and InventoryState.isJoinIntroDemo() then
-					down:Play()
-					down.Completed:Wait()
-				end
-				if myPop == buildPopToken and scale.Parent then
-					scale.Scale = 1
+			pcall(function()
+				local AutoPlantHudSlot = require(script.Parent:WaitForChild("AutoPlantHudSlot"))
+				if AutoPlantHudSlot.setForcedHidden then
+					AutoPlantHudSlot.setForcedHidden(true)
+				elseif AutoPlantHudSlot.setVisible then
+					AutoPlantHudSlot.setVisible(false)
 				end
 			end)
+			-- Preview already ran 2× → 1×; keep BUILD at normal size (no second pop).
+			resetBuildPopScale()
+			local scale = circle:FindFirstChild("_OceanTD_JoinIntroBuildPop") :: UIScale?
+			if scale then
+				scale.Scale = 1
+			end
 			for _, child in ipairs(scroll:GetDescendants()) do
 				if child:IsA("GuiObject") and string.sub(child.Name, 1, 11) == "_LockedSlot" then
 					if child.Visible then

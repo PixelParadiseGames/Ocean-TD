@@ -3423,10 +3423,9 @@ local function doUnlockRemote()
 			WaveSim.clampSpeedToMaxStep(SkillStages.waveSpeedMaxStep(newStage))
 		end
 		if skillId == "PlotSize" then
-			-- Before ForceCloseSkills: FreeCam must KEEP skillsResume (PlotSizeCinematicBusy
-			-- isn't set until PlotSizeChanged → play). Otherwise close wipes Plot Cam restore
-			-- and the player lands in Player Cam after training — upgrade/hue zoom break.
+			-- Pending BEFORE ForceClose so FreeCam stashes Plot Cam (Busy is set in play()).
 			playerGui:SetAttribute("OceanTD_PlotSizeCineSuppressTutorial", true)
+			playerGui:SetAttribute("OceanTD_PlotSizeCinePending", true)
 			local hint = playerGui:GetAttribute("OceanTD_RollFingerHint")
 			if hint == "plotSizeUpgrade" then
 				-- Hide finger + skills UI for the grow shot; restore CloseBTN finger after cine.

@@ -359,6 +359,12 @@ end
 
 local plantPulseActive = false
 
+local function joinIntroHidesPlaceMore(): boolean
+	return playerGui:GetAttribute("OceanTD_JoinIntroBusy") == true
+		or playerGui:GetAttribute("OceanTD_JoinIntroShowBackpack") == true
+		or InventoryState.isJoinIntroDemo()
+end
+
 local function refreshVisible()
 	if shouldShowPlantHint() then
 		applyCountLabelLayout(true)
@@ -377,7 +383,7 @@ local function refreshVisible()
 		stopPlantPulse()
 	end
 
-	if not InventoryState.isOpen() or chromeBlocked() then
+	if not InventoryState.isOpen() or chromeBlocked() or joinIntroHidesPlaceMore() then
 		textSg.Enabled = false
 		btnSg.Enabled = false
 		plusBtn.Visible = false
@@ -471,9 +477,18 @@ playerGui:GetAttributeChangedSignal(RELOCATE_CHROME_ATTR):Connect(function()
 	refreshVisible()
 end)
 playerGui:GetAttributeChangedSignal(FLASH_INCREASE_ATTR):Connect(function()
+	if joinIntroHidesPlaceMore() then
+		return
+	end
 	if typeof(playerGui:GetAttribute(FLASH_INCREASE_ATTR)) == "number" then
 		flashIncreaseMaxPlanted()
 	end
+end)
+playerGui:GetAttributeChangedSignal("OceanTD_JoinIntroBusy"):Connect(function()
+	refreshVisible()
+end)
+playerGui:GetAttributeChangedSignal("OceanTD_JoinIntroShowBackpack"):Connect(function()
+	refreshVisible()
 end)
 
 task.spawn(function()

@@ -1162,10 +1162,12 @@ local function onHideUiPressed()
 		showConfirmUnlock()
 		return
 	end
-	-- Build mode: eye only toggles coral pick debug circles — leave backpack / HUD alone.
+	-- Build mode: eye toggles coral pick circles + crab/urchin/shark path previews.
 	if InventoryState.isOpen() then
 		local circlesVisible = RelocatePickHover.togglePickDebugVisible()
 		refreshPickDebugStroke()
+		local WavePathLines = require(script.Parent:WaitForChild("WavePathLines"))
+		WavePathLines.syncHostilePaths()
 		local nextHidden = not circlesVisible
 		if nextHidden then
 			flashButtonBg(RED, GREEN_HOLD_SEC, BG_FADE_SEC)

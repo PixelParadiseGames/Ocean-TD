@@ -35,6 +35,10 @@ local TUTORIAL_LOCK_IMAGE = "rbxassetid://105420423737825"
 local TUTORIAL_LOCK_SIZE_PX = 17
 local TUTORIAL_LOCK_ORBIT_SPEED = 1.35 -- rad/sec
 local TUTORIAL_LOCK_ORBIT_FRAC = 0.42
+local TUTORIAL_LOCK_BIG_SEC = 2.0 -- hold at 2× while floating
+local TUTORIAL_LOCK_NORMAL_SEC = 2.0 -- then hold at 1×
+local TUTORIAL_LOCK_FADE_SEC = 0.45
+local TUTORIAL_LOCK_SCALE_DOWN_SEC = 0.35
 
 export type Deps = {
 	mainHUD: ScreenGui,
@@ -63,6 +67,8 @@ local REPORT_OPEN_ATTR = "OceanTD_ReefReportOpen"
 local tutorialLockIcon: ImageLabel? = nil
 local tutorialLockOrbitConn: RBXScriptConnection? = nil
 local tutorialLockOrbitAngle = 0
+local tutorialLockFeedbackToken = 0
+local tutorialLockFeedbackActive = false
 
 local function applyFillGradient(btn: GuiObject, top: Color3, bottom: Color3)
 	local land = btn:FindFirstChild("_OceanTD_LandRadial")
@@ -170,9 +176,7 @@ local function shouldShow(): boolean
 	if InventoryState.isOpen() then
 		return false
 	end
-	if WaveSim.isRunning and WaveSim.isRunning() then
-		return false
-	end
+	-- Visible during waves so players can toggle Auto Plant on/off.
 	local pg = deps and deps.playerGui
 	if not pg then
 		return false
@@ -214,41 +218,121 @@ local function startTutorialLockOrbit(lockHost: GuiObject)
 	end)
 end
 
-local function syncTutorialLock()
-	local lockHost: GuiObject? = if circle and circle:IsA("GuiObject") then circle else host
-	if not lockHost then
+local function ensureTutorialLockIcon(lockHost: GuiObject): ImageLabel
+	local icon = tutorialLockIcon
+	if not icon or not icon.Parent then
+		icon = Instance.new("ImageLabel")
+		icon.Name = "OceanTD_AutoPlantTutorialLock"
+		icon.BackgroundTransparency = 1
+		icon.Image = TUTORIAL_LOCK_IMAGE
+		icon.ImageColor3 = WHITE
+		icon.ImageTransparency = 1
+		icon.Size = UDim2.fromOffset(TUTORIAL_LOCK_SIZE_PX, TUTORIAL_LOCK_SIZE_PX)
+		icon.AnchorPoint = Vector2.new(0.5, 0.5)
+		icon.Position = UDim2.fromScale(0.5, 0.5)
+		icon.Active = false
+		icon.Visible = false
+		icon.ZIndex = lockHost.ZIndex + 22
+		icon.ScaleType = Enum.ScaleType.Fit
+		icon.Parent = lockHost
+		local sc = Instance.new("UIScale")
+		sc.Name = "_OceanTD_TutorialLockScale"
+		sc.Scale = 1
+		sc.Parent = icon
+		tutorialLockIcon = icon
+		tutorialLockOrbitAngle = Random.new():NextNumber(0, math.pi * 2)
+	else
+		icon.ZIndex = lockHost.ZIndex + 22
+		if not icon:FindFirstChild("_OceanTD_TutorialLockScale") then
+			local sc = Instance.new("UIScale")
+			sc.Name = "_OceanTD_TutorialLockScale"
+			sc.Scale = 1
+			sc.Parent = icon
+		end
+	end
+	return icon
+end
+
+local function hideTutorialLockIcon()
+	stopTutorialLockOrbit()
+	tutorialLockFeedbackActive = false
+	local icon = tutorialLockIcon
+	if not icon then
 		return
 	end
-	local show = shouldShow() and tutorialLocksAutoPlant()
-	if show then
-		local icon = tutorialLockIcon
-		if not icon or not icon.Parent then
-			icon = Instance.new("ImageLabel")
-			icon.Name = "OceanTD_AutoPlantTutorialLock"
-			icon.BackgroundTransparency = 1
-			icon.Image = TUTORIAL_LOCK_IMAGE
-			icon.ImageColor3 = WHITE
-			icon.Size = UDim2.fromOffset(TUTORIAL_LOCK_SIZE_PX, TUTORIAL_LOCK_SIZE_PX)
-			icon.AnchorPoint = Vector2.new(0.5, 0.5)
-			icon.Position = UDim2.fromScale(0.5, 0.5)
-			icon.Active = false
-			icon.ZIndex = lockHost.ZIndex + 22
-			icon.ScaleType = Enum.ScaleType.Fit
-			icon.Parent = lockHost
-			tutorialLockIcon = icon
-			tutorialLockOrbitAngle = Random.new():NextNumber(0, math.pi * 2)
-		else
-			icon.Visible = true
-			icon.ImageColor3 = WHITE
-			icon.Size = UDim2.fromOffset(TUTORIAL_LOCK_SIZE_PX, TUTORIAL_LOCK_SIZE_PX)
-			icon.ZIndex = lockHost.ZIndex + 22
+	icon.Visible = false
+	icon.ImageTransparency = 1
+	local sc = icon:FindFirstChild("_OceanTD_TutorialLockScale")
+	if sc and sc:IsA("UIScale") then
+		sc.Scale = 1
+	end
+end
+
+-- Tap while locked: float lock at 2× (2s) → 1× (2s) → fade out until next tap.
+local function playTutorialLockReject()
+	local lockHost: GuiObject? = if circle and circle:IsA("GuiObject") then circle else host
+	if not lockHost or not tutorialLocksAutoPlant() then
+		return
+	end
+	tutorialLockFeedbackToken += 1
+	local my = tutorialLockFeedbackToken
+	tutorialLockFeedbackActive = true
+	local icon = ensureTutorialLockIcon(lockHost)
+	local scale = icon:FindFirstChild("_OceanTD_TutorialLockScale") :: UIScale?
+	if not scale then
+		scale = Instance.new("UIScale")
+		scale.Name = "_OceanTD_TutorialLockScale"
+		scale.Parent = icon
+	end
+	icon.Visible = true
+	icon.ImageTransparency = 0
+	icon.ImageColor3 = WHITE
+	scale.Scale = 2
+	startTutorialLockOrbit(lockHost)
+	task.spawn(function()
+		local holdBigUntil = os.clock() + TUTORIAL_LOCK_BIG_SEC
+		while os.clock() < holdBigUntil and my == tutorialLockFeedbackToken do
+			task.wait()
 		end
-		startTutorialLockOrbit(lockHost)
-	else
-		stopTutorialLockOrbit()
-		if tutorialLockIcon then
-			tutorialLockIcon.Visible = false
+		if my ~= tutorialLockFeedbackToken or not icon.Parent then
+			return
 		end
+		local down = TweenService:Create(
+			scale,
+			TweenInfo.new(TUTORIAL_LOCK_SCALE_DOWN_SEC, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+			{ Scale = 1 }
+		)
+		down:Play()
+		local holdNormalUntil = os.clock() + TUTORIAL_LOCK_NORMAL_SEC
+		while os.clock() < holdNormalUntil and my == tutorialLockFeedbackToken do
+			task.wait()
+		end
+		if my ~= tutorialLockFeedbackToken or not icon.Parent then
+			return
+		end
+		local fade = TweenService:Create(
+			icon,
+			TweenInfo.new(TUTORIAL_LOCK_FADE_SEC, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+			{ ImageTransparency = 1 }
+		)
+		fade:Play()
+		fade.Completed:Wait()
+		if my == tutorialLockFeedbackToken then
+			hideTutorialLockIcon()
+		end
+	end)
+end
+
+local function syncTutorialLock()
+	-- Lock icon is tap-to-reveal only (not always floating during training).
+	if tutorialLockFeedbackActive then
+		return
+	end
+	if not tutorialLocksAutoPlant() then
+		tutorialLockFeedbackToken += 1
+		hideTutorialLockIcon()
+	elseif tutorialLockIcon and tutorialLockIcon.Visible and tutorialLockIcon.ImageTransparency >= 0.99 then
+		hideTutorialLockIcon()
 	end
 end
 
@@ -422,16 +506,7 @@ local function ensureHostInQuickbar(): boolean
 		if hostButton:GetAttribute("_OceanTD_AutoPlantHudBound") ~= true then
 			hostButton:SetAttribute("_OceanTD_AutoPlantHudBound", true)
 			local function press()
-				if not shouldShow() then
-					return
-				end
-				if not AutoPlantUI.isUnlocked() then
-					return
-				end
-				if tutorialLocksAutoPlant() then
-					return
-				end
-				AutoPlantUI.requestToggle()
+				onPress()
 			end
 			hostButton.MouseButton1Down:Connect(press)
 			hostButton.InputBegan:Connect(function(input)
@@ -473,10 +548,8 @@ function AutoPlantHudSlot.setVisible(on: boolean)
 		AutoPlantHudSlot.syncVisibility()
 	else
 		stopIdle()
-		stopTutorialLockOrbit()
-		if tutorialLockIcon then
-			tutorialLockIcon.Visible = false
-		end
+		tutorialLockFeedbackToken += 1
+		hideTutorialLockIcon()
 		host.Visible = false
 	end
 end
@@ -485,10 +558,8 @@ function AutoPlantHudSlot.setForcedHidden(on: boolean)
 	forcedHidden = on == true
 	if forcedHidden then
 		stopIdle()
-		stopTutorialLockOrbit()
-		if tutorialLockIcon then
-			tutorialLockIcon.Visible = false
-		end
+		tutorialLockFeedbackToken += 1
+		hideTutorialLockIcon()
 		if host and not introBusy then
 			host.Visible = false
 		end
@@ -646,8 +717,9 @@ local function onPress()
 	if not AutoPlantUI.isUnlocked() then
 		return
 	end
-	-- Training chapters: keep Auto Plant locked (ON in autoPlant, OFF in manualPlant).
+	-- Training chapters: keep Auto Plant locked — show floating lock on tap only.
 	if tutorialLocksAutoPlant() then
+		playTutorialLockReject()
 		return
 	end
 	AutoPlantUI.requestToggle()

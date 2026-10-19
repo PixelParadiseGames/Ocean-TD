@@ -10,6 +10,8 @@ export type Handlers = {
 	finish: () -> (),
 	-- Shrink panel into BUILD (top-right) then hide — after ADD MAX orbs finish firing.
 	collapseAway: (() -> ())?,
+	-- BUILD only (no Auto Plant / lock): 2× → 1× over durationSec, backpack still closed.
+	previewBuildBeforeOpen: ((durationSec: number, cancelled: (() -> boolean)?) -> ())?,
 	speciesBottomToTop: () -> { string },
 	slotScreenCenter: (itemId: string) -> Vector2?,
 	setScrollProgress: (u: number) -> (),
@@ -29,6 +31,12 @@ function JoinIntroBackpackDemo.begin(scrollSec: number): boolean
 		return false
 	end
 	return handlers.begin(scrollSec)
+end
+
+function JoinIntroBackpackDemo.previewBuildBeforeOpen(durationSec: number, cancelled: (() -> boolean)?)
+	if handlers and handlers.previewBuildBeforeOpen then
+		handlers.previewBuildBeforeOpen(durationSec, cancelled)
+	end
 end
 
 function JoinIntroBackpackDemo.finish()
