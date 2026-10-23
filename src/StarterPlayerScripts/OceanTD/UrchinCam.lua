@@ -2,7 +2,8 @@
 --[[
 	Urchin / crab / shark intro cameras:
 
-	1) play(getPose) — crab first-appear: orbit zoom onto the critter (legacy SharkCam beat).
+	1) play(getPose, opts?) — crab first-appear: orbit zoom onto the critter.
+	   opts.resumeMode / skipZoomOut: e.g. crab → Plot Cam after focus hold.
 	2) playPathTour(opts) — focus → soft POV path ride → tween back.
 	   Caller pauses the wave for the whole tour; onEnd fires after the restore tween.
 ]]
@@ -38,6 +39,11 @@ export type PathTourOpts = {
 	waypointDists: { number }?,
 	-- Eye height above the path (studs). Shark uses ~2; default keeps urchin POV height.
 	pathHeight: number?,
+	-- Focus beat framing (defaults = urchin appear: in front, tight).
+	focusFromBehind: boolean?,
+	focusDist: number?,
+	focusHeight: number?,
+	focusLookY: number?, -- look-at Y offset above subject (shark uses ~2)
 }
 
 local function getPlayerGui(): PlayerGui?
@@ -118,18 +124,28 @@ local function flatUnit(look: Vector3): Vector3
 	return flat.Unit
 end
 
-local function lookAtTarget(from: Vector3, targetPos: Vector3): CFrame
-	local target = targetPos + Vector3.new(0, 1.2, 0)
+local function lookAtTarget(from: Vector3, targetPos: Vector3, lookY: number?): CFrame
+	local y = if typeof(lookY) == "number" then lookY else 1.2
+	local target = targetPos + Vector3.new(0, y, 0)
 	return CFrame.lookAt(from, target, Vector3.yAxis)
 end
 
-local function focusOffset(targetPos: Vector3, flatLook: Vector3): Vector3
+local function focusOffset(
+	targetPos: Vector3,
+	flatLook: Vector3,
+	dist: number?,
+	height: number?,
+	fromBehind: boolean?
+): Vector3
 	local flat = flatUnit(flatLook)
 	local side = Vector3.new(-flat.Z, 0, flat.X)
+	local d = if typeof(dist) == "number" then dist else (C.URCHIN_CAM_DIST or 22)
+	local h = if typeof(height) == "number" then height else (C.URCHIN_CAM_HEIGHT or 10)
+	local along = if fromBehind == true then -flat else flat
 	return targetPos
-		+ flat * C.SHARK_CAM_DIST
-		+ side * (C.SHARK_CAM_DIST * 0.22)
-		+ Vector3.new(0, C.SHARK_CAM_HEIGHT + 10, 0)
+		+ along * d
+		+ side * (d * 0.22)
+		+ Vector3.new(0, h, 0)
 end
 
 local function claimCamera(cam: Camera)
@@ -236,6 +252,7 @@ local function kickOtherCamOwners(pg: PlayerGui?)
 	if not pg then
 		return
 	end
+	-- Busy attrs must be set by caller first so FreeCam stashes Plot/Fish instead of Off.
 	pg:SetAttribute("OceanTD_ForceCloseFreeCam", os.clock())
 	pcall(function()
 		local mod = script.Parent:FindFirstChild("SkillsAvatarCam")
@@ -243,11 +260,24 @@ local function kickOtherCamOwners(pg: PlayerGui?)
 			require(mod).releaseForCinematic()
 		end
 	end)
+	pcall(function()
+		local PlotCam2 = require(script.Parent:WaitForChild("PlotCam2"))
+		if PlotCam2.isActive and PlotCam2.isActive() then
+			PlotCam2.stop()
+		end
+	end)
 end
 
-local function urchinFocusCf(pos: Vector3, tang: Vector3): CFrame
+local function subjectFocusCf(
+	pos: Vector3,
+	tang: Vector3,
+	dist: number?,
+	height: number?,
+	fromBehind: boolean?,
+	lookY: number?
+): CFrame
 	local flat = flatUnit(tang)
-	return lookAtTarget(focusOffset(pos, flat), pos)
+	return lookAtTarget(focusOffset(pos, flat, dist, height, fromBehind), pos, lookY)
 end
 
 -- First urchin: focus on entry → tween down to path POV → soft path fly → restore.
@@ -266,21 +296,31 @@ function UrchinCam.playPathTour(opts: PathTourOpts)
 	local lookNextWaypoint = opts.lookNextWaypoint == true
 	local waypointDists = opts.waypointDists
 	local pathHeight = if typeof(opts.pathHeight) == "number" then opts.pathHeight :: number else (C.URCHIN_POV_HEIGHT or 15)
+	local focusDist = if typeof(opts.focusDist) == "number" then opts.focusDist else nil
+	local focusHeight = if typeof(opts.focusHeight) == "number" then opts.focusHeight else nil
+	local focusFromBehind = opts.focusFromBehind == true
+	local focusLookY = if typeof(opts.focusLookY) == "number" then opts.focusLookY else nil
 	local focusInSec = math.max(0.2, C.URCHIN_POV_FOCUS_IN_SEC or 0.85)
 	local focusHoldSec = math.max(0.2, C.URCHIN_POV_FOCUS_SEC or 3)
 	local tweenOutSec = math.max(0.2, C.URCHIN_POV_TWEEN_OUT_SEC or 1.1)
 	local pathSec = math.max(0.5, C.URCHIN_POV_PATH_SEC or 10)
 	local followRate = math.max(0.5, C.URCHIN_POV_FOLLOW_RATE or 2.4)
 	local lookRate = math.max(0.5, (C.URCHIN_POV_FOLLOW_RATE or 2.4) * 0.85)
-	local fovMult = math.max(1, C.URCHIN_POV_FOV_MULT or 1.2)
 
-	-- Snapshot the player's live seat BEFORE ForceClose so restore matches their view.
+	local function focusCf(pos: Vector3, tang: Vector3): CFrame
+		return subjectFocusCf(pos, tang, focusDist, focusHeight, focusFromBehind, focusLookY)
+	end
+	local fovMult = math.max(1, C.URCHIN_POV_FOV_MULT or 1.2)
+	local focusFov = math.clamp(C.URCHIN_CAM_FOCUS_FOV or 55, 35, 80)
+	local baseFov = 70
+	local wideFov = math.clamp(baseFov * fovMult, 20, 120)
+
+	-- Snapshot CF before ForceClose; FOV after (Fish Cam POV ~105 must not stick).
 	local preCam = Workspace.CurrentCamera
 	local savedCf = if preCam then preCam.CFrame else CFrame.new()
 	local savedType = if preCam then preCam.CameraType else Enum.CameraType.Custom
 	local savedSubject = if preCam then preCam.CameraSubject else nil
-	local savedFov = if preCam then preCam.FieldOfView else 70
-	local wideFov = math.clamp(savedFov * fovMult, 20, 120)
+	local savedFov = baseFov
 
 	local pg = getPlayerGui()
 	if pg then
@@ -316,6 +356,12 @@ function UrchinCam.playPathTour(opts: PathTourOpts)
 			UrchinCam.stopImmediate()
 			return
 		end
+		-- After FreeCam clears fish-POV FOV; restore target stays ~70 not 105.
+		if cam.FieldOfView > baseFov + 5 then
+			cam.FieldOfView = baseFov
+		end
+		savedFov = math.clamp(cam.FieldOfView, 40, 80)
+		pathTourSavedFov = savedFov
 
 		claimCamera(cam)
 		cam.FieldOfView = savedFov
@@ -326,7 +372,7 @@ function UrchinCam.playPathTour(opts: PathTourOpts)
 			return
 		end
 		local lockedFlat = flatUnit(focusTang or Vector3.new(0, 0, -1))
-		local focusGoal = urchinFocusCf(focusPos, lockedFlat)
+		local focusGoal = focusCf(focusPos, lockedFlat)
 
 		-- focusIn → focus (3s) → path (seamless from W3) → out
 		local phase: "focusIn" | "focus" | "path" | "out" | "done" = "focusIn"
@@ -360,18 +406,27 @@ function UrchinCam.playPathTour(opts: PathTourOpts)
 				if livePos then
 					dampPos = dampPos:Lerp(livePos, a)
 					lockedFlat = flatUnit(liveTang or lockedFlat)
-					toCf = urchinFocusCf(dampPos, lockedFlat)
+					toCf = focusCf(dampPos, lockedFlat)
 				end
 				local u = smootherstep(elapsed / focusInSec)
-				local goal = fromCf:Lerp(toCf, u)
-				dampCf = dampCf:Lerp(goal, math.max(a, u))
+				-- Shark (from-behind): hard lerp Plot→subject so Plot Cam seat can't "stick".
+				if focusFromBehind then
+					dampCf = fromCf:Lerp(toCf, u)
+				else
+					local goal = fromCf:Lerp(toCf, u)
+					dampCf = dampCf:Lerp(goal, math.max(a, u))
+				end
+				-- Tighten FOV as we zoom onto the subject (beats wide Fish Cam POV).
+				dampFov = savedFov + (focusFov - savedFov) * u
 				c.CFrame = dampCf
-				c.FieldOfView = savedFov
+				c.FieldOfView = dampFov
 				if elapsed >= focusInSec then
 					phase = "focus"
 					phaseT0 = os.clock()
 					dampCf = toCf
+					dampFov = focusFov
 					c.CFrame = dampCf
+					c.FieldOfView = dampFov
 				end
 				return
 			end
@@ -379,13 +434,14 @@ function UrchinCam.playPathTour(opts: PathTourOpts)
 			if phase == "focus" then
 				local livePos, liveTang = getFocusPose()
 				if livePos then
-					dampPos = dampPos:Lerp(livePos, a)
+					dampPos = if focusFromBehind then livePos else dampPos:Lerp(livePos, a)
 					lockedFlat = flatUnit(liveTang or lockedFlat)
 				end
-				local goal = urchinFocusCf(dampPos, lockedFlat)
-				dampCf = dampCf:Lerp(goal, a)
+				local goal = focusCf(dampPos, lockedFlat)
+				dampCf = if focusFromBehind then goal else dampCf:Lerp(goal, a)
 				c.CFrame = dampCf
-				c.FieldOfView = savedFov
+				c.FieldOfView = focusFov
+				dampFov = focusFov
 				if elapsed >= focusHoldSec then
 					-- Seamless handoff: keep current dampCf and start riding from W3.
 					startDist = rideStartDist
@@ -446,9 +502,9 @@ function UrchinCam.playPathTour(opts: PathTourOpts)
 					goal = pathPovCf(dampPos, dampTang)
 				end
 				dampCf = dampCf:Lerp(goal, a)
-				-- Widen FOV as we settle into the path ride (no hard FOV cut).
+				-- Widen FOV as we settle into the path ride (from tight focus → wide).
 				local fovBlend = math.min(1, elapsed / 1.2)
-				local wantFov = savedFov + (wideFov - savedFov) * smootherstep(fovBlend)
+				local wantFov = focusFov + (wideFov - focusFov) * smootherstep(fovBlend)
 				dampFov = dampFov + (wantFov - dampFov) * a
 				c.CFrame = dampCf
 				c.FieldOfView = dampFov
@@ -466,7 +522,7 @@ function UrchinCam.playPathTour(opts: PathTourOpts)
 			local u = smootherstep(elapsed / tweenOutSec)
 			local goal = fromCf:Lerp(toCf, u)
 			dampCf = dampCf:Lerp(goal, math.max(a, u))
-			dampFov = wideFov + (savedFov - wideFov) * u
+			dampFov = dampFov + (savedFov - dampFov) * math.max(a, u)
 			c.CFrame = dampCf
 			c.FieldOfView = dampFov
 			if elapsed >= tweenOutSec then
@@ -485,14 +541,25 @@ function UrchinCam.playPathTour(opts: PathTourOpts)
 	end)
 end
 
--- getPose: () -> (position, lookDir)? — crab intro orbit zoom (unchanged beat).
-function UrchinCam.play(getPose: () -> (Vector3?, Vector3?))
+export type PlayOpts = {
+	-- After focus hold: resume this cam cycle mode (e.g. "plotcam") instead of the pre-cinematic seat.
+	resumeMode: string?,
+	-- Skip zoom-out tween back to the prior CF (cut straight to resumeMode).
+	skipZoomOut: boolean?,
+	onEnd: (() -> ())?,
+}
+
+-- getPose: () -> (position, lookDir)? — crab intro orbit zoom (legacy SharkCam beat).
+function UrchinCam.play(getPose: () -> (Vector3?, Vector3?), opts: PlayOpts?)
 	if busy then
 		return
 	end
 	token += 1
 	local my = token
 	busy = true
+	local resumeMode = if opts and typeof(opts.resumeMode) == "string" then opts.resumeMode else nil
+	local skipZoomOut = opts ~= nil and opts.skipZoomOut == true
+	local onEnd = if opts then opts.onEnd else nil
 
 	local pg = getPlayerGui()
 	if pg then
@@ -521,7 +588,13 @@ function UrchinCam.play(getPose: () -> (Vector3?, Vector3?))
 
 		local posePos, poseLook = getPose()
 		if not posePos then
+			if resumeMode and pg then
+				pg:SetAttribute(FC.ATTR_CINEMATIC_RESUME_MODE, resumeMode)
+			end
 			finishAndResume(pg, cam, savedCf, savedType, savedSubject)
+			if onEnd then
+				pcall(onEnd)
+			end
 			return
 		end
 		local lockedFlat = flatUnit(poseLook or Vector3.new(0, 0, -1))
@@ -571,6 +644,24 @@ function UrchinCam.play(getPose: () -> (Vector3?, Vector3?))
 			return
 		end
 
+		-- Prefer caller's resume seat (ATTR wins over FreeCam's stashed local).
+		if resumeMode and pg then
+			pg:SetAttribute(FC.ATTR_CINEMATIC_RESUME_MODE, resumeMode)
+		end
+
+		if skipZoomOut then
+			-- Leave CF on the focus beat; cycle cam reclaims (fresh Plot Cam seat).
+			local cHand = Workspace.CurrentCamera
+			if cHand then
+				claimCamera(cHand)
+			end
+			finishAndResume(pg, cHand, if cHand then cHand.CFrame else savedCf, savedType, savedSubject)
+			if onEnd then
+				pcall(onEnd)
+			end
+			return
+		end
+
 		local c2 = Workspace.CurrentCamera
 		if not c2 then
 			UrchinCam.stopImmediate()
@@ -589,6 +680,9 @@ function UrchinCam.play(getPose: () -> (Vector3?, Vector3?))
 		end
 
 		finishAndResume(pg, Workspace.CurrentCamera, savedCf, savedType, savedSubject)
+		if onEnd then
+			pcall(onEnd)
+		end
 	end)
 end
 

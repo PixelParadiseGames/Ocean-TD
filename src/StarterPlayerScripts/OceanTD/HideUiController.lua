@@ -812,6 +812,11 @@ local function resyncSubsystemsAfterShow()
 			if left then
 				local dPad = left:FindFirstChild("dPad")
 				if dPad then
+					local lastInput = UserInputService:GetLastInputType()
+					local gamepadOpen = lastInput == Enum.UserInputType.Gamepad1
+						or lastInput == Enum.UserInputType.Gamepad2
+						or lastInput == Enum.UserInputType.Gamepad3
+						or lastInput == Enum.UserInputType.Gamepad4
 					for _, ch in ipairs(dPad:GetChildren()) do
 						if
 							ch:IsA("GuiObject")
@@ -824,11 +829,25 @@ local function resyncSubsystemsAfterShow()
 							and not LeftHudLayout.isSandDollarChrome(ch)
 						then
 							ch.Visible = false
+						elseif gamepadOpen and ch:IsA("GuiObject") and (
+							ch.Name == "HideUI"
+							or ch.Name == "CartIcon"
+							or ch.Name == "Cart"
+							or ch.Name == "CartBTN"
+							or ch.Name == "CartBtn"
+							or ch.Name == "PlotCam"
+							or ch.Name == "FishCam"
+							or ch.Name == "FreeCam"
+							or ch.Name == "OffCam"
+						) then
+							ch.Visible = false
 						end
 					end
-					local eye = dPad:FindFirstChild("HideUI")
-					if eye and eye:IsA("GuiObject") then
-						eye.Visible = true
+					if not gamepadOpen then
+						local eye = dPad:FindFirstChild("HideUI")
+						if eye and eye:IsA("GuiObject") then
+							eye.Visible = true
+						end
 					end
 				end
 				for _, ch in ipairs(left:GetChildren()) do
@@ -1183,6 +1202,27 @@ local function onHideUiPressed()
 		flashButtonBg(GREEN, 0, BG_FADE_SEC)
 	end
 	applyHudHidden(nextHidden)
+end
+
+function HideUiController.press(): boolean
+	if not hideAnchor or not hideAnchor.Visible then
+		return false
+	end
+	if not hideHitBtn or not hideHitBtn.Parent or not hideHitBtn.Visible then
+		return false
+	end
+	local cur: Instance? = hideAnchor
+	while cur and not cur:IsA("LayerCollector") do
+		if cur:IsA("GuiObject") and not cur.Visible then
+			return false
+		end
+		cur = cur.Parent
+	end
+	if cur and cur:IsA("LayerCollector") and not cur.Enabled then
+		return false
+	end
+	onHideUiPressed()
+	return true
 end
 
 local function wireStudioHideUiButton(leftOpt: Instance?)

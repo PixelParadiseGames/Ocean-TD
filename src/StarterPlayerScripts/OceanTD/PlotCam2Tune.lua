@@ -14,11 +14,13 @@ local UserInputService = game:GetService("UserInputService")
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local UiTheme = require(ReplicatedStorage:WaitForChild("OceanTD"):WaitForChild("Shared"):WaitForChild("UiTheme"))
+local UiPopupScale = require(ReplicatedStorage:WaitForChild("OceanTD"):WaitForChild("Shared"):WaitForChild("UiPopupScale"))
 local Constants = require(ReplicatedStorage:WaitForChild("OceanTD"):WaitForChild("Shared"):WaitForChild("Constants"))
 local FreeCamConfig = require(script.Parent:WaitForChild("FreeCamConfig"))
 local PlotCam2 = require(script.Parent:WaitForChild("PlotCam2"))
 local HideUiState = require(script.Parent:WaitForChild("HideUiState"))
 local InventoryState = require(script.Parent:WaitForChild("InventoryState"))
+local UiIdleCycle = require(ReplicatedStorage:WaitForChild("OceanTD"):WaitForChild("Shared"):WaitForChild("UiIdleCycle"))
 
 local PlotCam2Tune = {}
 
@@ -63,6 +65,9 @@ end
 
 local gui: ScreenGui? = nil
 local quickHolder: Frame? = nil
+local distMinusBtn: TextButton? = nil
+local distPlusBtn: TextButton? = nil
+local zoomGlyphStop: (() -> ())? = nil
 local quickGrid: UIGridLayout? = nil
 local plotCamBtn: GuiObject? = nil
 local layoutConn: RBXScriptConnection? = nil
@@ -390,25 +395,36 @@ local function layoutQuickButtons()
 		return
 	end
 
-	local side = math.max(22, math.floor(math.min(as.X, as.Y) * QUICK_SCALE))
-	local width = side * 2 + QUICK_GAP
-	local height = side * 2 + QUICK_ROW_GAP
+	-- dPad carries a 720p HUD UIScale. Absolute pixels already include it, and
+	-- this holder is a child, so offsets must be in unscaled parent space.
+	-- Mobile scale is 1, so the pad stays put.
+	local uiScale = UiPopupScale.ancestorScale(dPad)
+	local side = math.max(22, math.floor(math.min(as.X, as.Y) * QUICK_SCALE / uiScale))
+	local gap = QUICK_GAP / uiScale
+	local rowGap = QUICK_ROW_GAP / uiScale
+	local width = side * 2 + gap
+	local height = side * 2 + rowGap
 	holder.Size = UDim2.fromOffset(width, height)
 	holder.AnchorPoint = Vector2.new(0.5, 0)
 	-- Same parent as PlotCam — place just under its absolute bottom.
 	holder.Position = UDim2.fromOffset(
-		math.floor(ap.X + as.X * 0.5 - dAp.X),
-		math.floor(ap.Y + as.Y + QUICK_ROW_GAP - dAp.Y)
+		math.floor((ap.X + as.X * 0.5 - dAp.X) / uiScale),
+		math.floor((ap.Y + as.Y - dAp.Y) / uiScale + rowGap)
 	)
 	if quickGrid then
 		quickGrid.CellSize = UDim2.fromOffset(side, side)
+		quickGrid.CellPadding = UDim2.fromOffset(gap, rowGap)
 	end
 	for _, ch in ipairs(holder:GetChildren()) do
 		if ch:IsA("TextButton") then
 			ch.Size = UDim2.fromOffset(side, side)
 			-- Dist −/+ glyphs: larger text, same circle size. Yaw uses icons (empty text).
 			if ch.Name == "DistOffMinus" or ch.Name == "DistOffPlus" then
-				ch.TextSize = math.clamp(math.floor(side * 0.92), 20, 36)
+				local shoulder = ch.Text == "L2" or ch.Text == "R2"
+				local factor = if shoulder then 0.52 else 0.92
+				local cap = if shoulder then 22 else 36
+				ch.TextScaled = false
+				ch.TextSize = math.clamp(math.floor(side * factor), 12, cap)
 			else
 				ch.TextSize = math.clamp(math.floor(side * 0.55), 14, 22)
 			end
@@ -451,6 +467,8 @@ local function ensureQuickPad(): Frame?
 	-- Larger −/+ glyphs at create time (layoutQuickButtons keeps circles fixed).
 	offMinus.TextSize = math.clamp(math.floor(36 * 0.92), 20, 36)
 	offPlus.TextSize = math.clamp(math.floor(36 * 0.92), 20, 36)
+	distMinusBtn = offMinus
+	distPlusBtn = offPlus
 
 	local function wireQuick(btn: TextButton, key: string, delta: number)
 		btn.Activated:Connect(function()
@@ -529,6 +547,51 @@ local function hudBlocksQuick(): boolean
 	return false
 end
 
+local function isGamepad(): boolean
+	local t = UserInputService:GetLastInputType()
+	return t == Enum.UserInputType.Gamepad1
+		or t == Enum.UserInputType.Gamepad2
+		or t == Enum.UserInputType.Gamepad3
+		or t == Enum.UserInputType.Gamepad4
+end
+
+local function applyZoomGlyph(btn: TextButton, base: string, shoulder: string, alt: boolean)
+	btn.TextScaled = false
+	btn.Text = if alt then shoulder else base
+end
+
+local function syncZoomGlyphs()
+	if zoomGlyphStop then
+		zoomGlyphStop()
+		zoomGlyphStop = nil
+	end
+	local minus = distMinusBtn
+	local plus = distPlusBtn
+	if not minus or not plus then
+		return
+	end
+	local holder = quickHolder
+	if not holder or not holder.Visible or not isGamepad() or not minus.Visible then
+		applyZoomGlyph(minus, "-", "L2", false)
+		applyZoomGlyph(plus, "+", "R2", false)
+		return
+	end
+	zoomGlyphStop = UiIdleCycle.subscribeSharedToggle(2, function(alt: boolean)
+		if distMinusBtn then
+			applyZoomGlyph(distMinusBtn, "-", "L2", alt)
+		end
+		if distPlusBtn then
+			applyZoomGlyph(distPlusBtn, "+", "R2", alt)
+		end
+	end, function()
+		return isGamepad()
+			and quickHolder ~= nil
+			and (quickHolder :: Frame).Visible
+			and distMinusBtn ~= nil
+			and (distMinusBtn :: TextButton).Visible
+	end)
+end
+
 local function syncQuickVisibility()
 	-- Only while Plot Cam is the active cycle mode (never Fish Cam / POV / drone / off).
 	local camMode = playerGui:GetAttribute(FreeCamConfig.ATTR_MODE)
@@ -538,6 +601,7 @@ local function syncQuickVisibility()
 	end
 	-- Yaw / DistOff quick pad under Plot Cam — keep these even when the full tuner panel is off.
 	setQuickVisible(visible and carouselCollapsedReady() and not hudBlocksQuick())
+	syncZoomGlyphs()
 end
 
 local function syncDebugPanel()
@@ -581,6 +645,32 @@ playerGui:GetAttributeChangedSignal(Constants.HIDE_UI_ACTIVE_ATTR):Connect(syncQ
 HideUiState.onChanged(syncQuickVisibility)
 InventoryState.onOpenChanged(function()
 	syncQuickVisibility()
+end)
+UserInputService.LastInputTypeChanged:Connect(syncQuickVisibility)
+
+UserInputService.InputBegan:Connect(function(input, _gameProcessed)
+	if input.UserInputType ~= Enum.UserInputType.Gamepad1
+		and input.UserInputType ~= Enum.UserInputType.Gamepad2
+		and input.UserInputType ~= Enum.UserInputType.Gamepad3
+		and input.UserInputType ~= Enum.UserInputType.Gamepad4
+	then
+		return
+	end
+	local minus = distMinusBtn
+	local plus = distPlusBtn
+	local holder = quickHolder
+	if not minus or not plus or not holder or not holder.Visible or not minus.Visible then
+		return
+	end
+	if input.KeyCode == Enum.KeyCode.ButtonL2 then
+		local ok = PlotCam2.nudge("distOffset", PlotCam2.distOffsetZoomStep())
+		flashQuickButton(minus, ok)
+		refreshReadout()
+	elseif input.KeyCode == Enum.KeyCode.ButtonR2 then
+		local ok = PlotCam2.nudge("distOffset", -PlotCam2.distOffsetZoomStep())
+		flashQuickButton(plus, ok)
+		refreshReadout()
+	end
 end)
 
 function PlotCam2Tune.isVisible(): boolean

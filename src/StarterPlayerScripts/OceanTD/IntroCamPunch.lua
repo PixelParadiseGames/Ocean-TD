@@ -55,7 +55,7 @@ end
 local LOOK_SHIFT = 0.5
 local function poseAtBlend(startCf: CFrame, foc: Vector3, closerFrac: number, blend: number): CFrame
 	local b = smoothstep(math.clamp(blend, 0, 1))
-	local closer = math.clamp(closerFrac, 0.05, 0.6)
+	local closer = math.clamp(closerFrac, 0.05, 0.85)
 	local goalPos = startCf.Position:Lerp(foc, closer)
 	local dist = math.max((startCf.Position - foc).Magnitude, 8)
 	local startLookAt = startCf.Position + startCf.LookVector * dist
@@ -93,7 +93,7 @@ function IntroCamPunch.beginHold(
 	local my = token
 	releaseRequested = false
 	releaseOutSec = 0.35
-	local closer = if typeof(closerFrac) == "number" then math.clamp(closerFrac, 0.05, 0.6) else 0.25
+	local closer = if typeof(closerFrac) == "number" then math.clamp(closerFrac, 0.05, 0.85) else 0.25
 	local easeIn = if typeof(inSec) == "number" and inSec > 0 then inSec else 0.2
 	freezeHoldFocus = opts ~= nil and opts.freezeFocus == true
 	frozenHoldFocus = nil

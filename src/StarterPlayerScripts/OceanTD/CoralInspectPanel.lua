@@ -23,6 +23,7 @@ local UiCircles = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiCircl
 local UiTheme = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiTheme"))
 local UiHaptics = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiHaptics"))
 local UiViewportTags = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiViewportTags"))
+local UiPopupScale = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiPopupScale"))
 
 local RelocateController = require(script.Parent:WaitForChild("RelocateController"))
 local RelocateMultiSelect = require(script.Parent:WaitForChild("RelocateMultiSelect"))
@@ -2780,6 +2781,7 @@ local function showConfirmUnlock(targetClass: number?)
 	panel.ZIndex = 2
 	panel.Selectable = false
 	panel.Parent = sg
+	UiPopupScale.attachHud(panel)
 	local pc = Instance.new("UICorner")
 	pc.CornerRadius = UDim.new(0, 14)
 	pc.Parent = panel
@@ -3464,15 +3466,25 @@ end
 
 local function syncColorFromPart(part: BasePart)
 	local attr = part:GetAttribute("OceanTD_ColorIndex")
+	-- Finger demo paints the target hue before the player presses B. Keep the
+	-- D-pad highlight one circle away until they move onto it themselves.
+	local hint = playerGui:GetAttribute(HINT_ATTR)
+	local keepFocus = hueFingerArming or hint == "hue" or hint == "hueReroll"
 	if typeof(attr) == "number" then
 		activeColorIndex = PlotOutlineColors.clampCoralIndex(attr)
-		focusColorIndex = activeColorIndex
+		if not keepFocus then
+			focusColorIndex = activeColorIndex
+		end
 	else
 		activeColorIndex = nil
-		focusColorIndex = Consts.DEFAULT_PALETTE_SWATCH
+		if not keepFocus then
+			focusColorIndex = Consts.DEFAULT_PALETTE_SWATCH
+		end
 	end
 	refreshColorSwatches()
-	task.defer(scrollFocusIntoView)
+	if not keepFocus then
+		task.defer(scrollFocusIntoView)
+	end
 end
 
 local function spinColorDice()
@@ -3529,55 +3541,62 @@ local function applyCoralPaint(part: BasePart, idx: number, paint: Color3, place
 	if not skipHaptic then
 		UiHaptics.pulseShort()
 	end
-	local ok, result = pcall(function()
-		return remotes.color:InvokeServer(
-			placeId,
-			idx,
-			paint.R,
-			paint.G,
-			paint.B,
-			webIdx,
-			if webPaint then webPaint.R else nil,
-			if webPaint then webPaint.G else nil,
-			if webPaint then webPaint.B else nil
-		)
-	end)
-	if myToken ~= colorSendToken then
-		-- Newer hue tap owns the mesh; never apply this response.
-		return true
-	end
-	if not RelocateController.isPartSelected(part) then
-		return ok == true and typeof(result) == "table" and result.ok == true
-	end
-	if not ok or typeof(result) ~= "table" or result.ok ~= true then
-		-- Optimistic paint must not stick when the server rejects (HueCap / locked).
-		if typeof(prevIdx) == "number" then
-			part:SetAttribute("OceanTD_ColorIndex", prevIdx)
-			local restore = PlotOutlineColors.coralColor(prevIdx)
-			CoralVisual.setRestColor(part, restore)
-		else
-			CoralVisual.clearPalettePaint(part)
+	-- Return immediately so joypad B can reshade again while the close-up is still up.
+	-- The server call used to yield inside the button handler and swallow the next presses.
+	-- Capture the demo flag now: it is cleared as soon as this function returns, and the
+	-- server reply used to count the finger's fake tap as the player's hue press.
+	local suppressNote = tutorialHueDemoSuppressNote
+	task.spawn(function()
+		local ok, result = pcall(function()
+			return remotes.color:InvokeServer(
+				placeId,
+				idx,
+				paint.R,
+				paint.G,
+				paint.B,
+				webIdx,
+				if webPaint then webPaint.R else nil,
+				if webPaint then webPaint.G else nil,
+				if webPaint then webPaint.B else nil
+			)
+		end)
+		if myToken ~= colorSendToken then
+			return
 		end
+		if not RelocateController.isPartSelected(part) then
+			return
+		end
+		if not ok or typeof(result) ~= "table" or result.ok ~= true then
+			if typeof(prevIdx) == "number" then
+				part:SetAttribute("OceanTD_ColorIndex", prevIdx)
+				local restore = PlotOutlineColors.coralColor(prevIdx)
+				CoralVisual.setRestColor(part, restore)
+			else
+				CoralVisual.clearPalettePaint(part)
+			end
+			RelocateController.syncPartRestColor(part)
+			syncColorFromPart(part)
+			return
+		end
+		local confirmed = PlotOutlineColors.clampCoralIndex(result.colorIndex or idx)
+		activeColorIndex = confirmed
+		part:SetAttribute("OceanTD_ColorIndex", confirmed)
+		local confirmedPaint = PlotOutlineColors.resolveCoralPaint(confirmed, result.colorR, result.colorG, result.colorB)
+		local confirmedWeb: Color3? = nil
+		local confirmedWebIdx: number? = nil
+		if typeof(result.webColorR) == "number" and typeof(result.webColorG) == "number" and typeof(result.webColorB) == "number" then
+			confirmedWeb = Color3.new(result.webColorR, result.webColorG, result.webColorB)
+		end
+		if typeof(result.webColorIndex) == "number" then
+			confirmedWebIdx = result.webColorIndex
+		end
+		CoralVisual.setRestColor(part, confirmedPaint, confirmedWeb, confirmedWebIdx)
 		RelocateController.syncPartRestColor(part)
-		syncColorFromPart(part)
-		return false
-	end
-	local confirmed = PlotOutlineColors.clampCoralIndex(result.colorIndex or idx)
-	activeColorIndex = confirmed
-	part:SetAttribute("OceanTD_ColorIndex", confirmed)
-	local confirmedPaint = PlotOutlineColors.resolveCoralPaint(confirmed, result.colorR, result.colorG, result.colorB)
-	local confirmedWeb: Color3? = nil
-	local confirmedWebIdx: number? = nil
-	if typeof(result.webColorR) == "number" and typeof(result.webColorG) == "number" and typeof(result.webColorB) == "number" then
-		confirmedWeb = Color3.new(result.webColorR, result.webColorG, result.webColorB)
-	end
-	if typeof(result.webColorIndex) == "number" then
-		confirmedWebIdx = result.webColorIndex
-	end
-	CoralVisual.setRestColor(part, confirmedPaint, confirmedWeb, confirmedWebIdx)
-	RelocateController.syncPartRestColor(part)
-	refreshColorSwatches()
-	noteTutorialHueApplied(confirmed)
+		refreshColorSwatches()
+		if not suppressNote then
+			noteTutorialHueApplied(confirmed)
+		end
+	end)
 	return true
 end
 
@@ -3892,6 +3911,22 @@ do
 			fed = math.max(fed, attrFed)
 			waves = math.max(waves, attrWaves)
 		end
+		local statPx = 14
+		if UiViewportTags.is720p() then
+			local hudPx = math.max(14, math.floor(22 * UiPopupScale.getHud() + 0.5))
+			local rowH = 0
+			local row = fedLbl.Parent
+			if row and row:IsA("GuiObject") then
+				rowH = row.AbsoluteSize.Y
+			end
+			if rowH > 16 then
+				statPx = math.min(hudPx, math.floor(rowH * 0.86))
+			else
+				statPx = hudPx
+			end
+		end
+		fedLbl.TextSize = statPx
+		wavesLbl.TextSize = statPx
 		fedLbl.Text = "Fed: " .. tostring(math.max(0, fed))
 		wavesLbl.Text = "Waves: " .. tostring(math.max(0, waves))
 	end
@@ -4117,7 +4152,7 @@ function CoralInspectPanel.bind(panel: GuiObject, catalogFrame: GuiObject)
 	local lifeRow = Instance.new("Frame")
 	lifeRow.Name = "LifeRow"
 	lifeRow.BackgroundTransparency = 1
-	lifeRow.Size = UDim2.new(1, 0, 0.06, 0)
+	lifeRow.Size = UDim2.new(1, 0, if UiViewportTags.is720p() then 0.1 else 0.06, 0)
 	lifeRow.LayoutOrder = 2
 	lifeRow.Parent = frame
 	local lifeLayout = Instance.new("UIListLayout")
@@ -4165,6 +4200,19 @@ function CoralInspectPanel.bind(panel: GuiObject, catalogFrame: GuiObject)
 	waves.TextYAlignment = Enum.TextYAlignment.Center
 	waves.Parent = lifeRow
 	wavesLbl = waves
+	lifeRow:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
+		if not UiViewportTags.is720p() or not fedLbl or not wavesLbl then
+			return
+		end
+		local rowH = lifeRow.AbsoluteSize.Y
+		if rowH < 16 then
+			return
+		end
+		local hudPx = math.max(14, math.floor(22 * UiPopupScale.getHud() + 0.5))
+		local statPx = math.min(hudPx, math.floor(rowH * 0.86))
+		fedLbl.TextSize = statPx
+		wavesLbl.TextSize = statPx
+	end)
 
 	-- Color swatch row (above UPGRADE).
 	local colorRow = Instance.new("Frame")
@@ -4366,11 +4414,17 @@ function CoralInspectPanel.bind(panel: GuiObject, catalogFrame: GuiObject)
 		if viewW < 8 or viewH < 8 then
 			return
 		end
+		local wide = UiViewportTags.is720p()
+		-- 720p: 25% then another 15% (1.25 * 1.15). Row grows with the circles so they are not clipped.
+		colorRow.Size = if wide then UDim2.new(1, 0, 0.201, 0) else UDim2.new(1, 0, 0.14, 0)
 		local visible = colorVisibleSlots()
 		-- Gaps between visible slots (floor so 4.5 → 4 gaps among the first 4 full circles).
 		local gaps = math.floor(visible)
 		local inner = viewW - COLOR_SWATCH_PAD * 2 - gaps * COLOR_SWATCH_GAP
 		local diam = math.floor(inner / visible)
+		if wide then
+			diam = math.floor(diam * 1.4375 + 0.5)
+		end
 		diam = math.clamp(diam, 22, math.max(22, math.floor(viewH * 0.92)))
 		for _, btn in pairs(colorSwatchBtns) do
 			btn.Size = UDim2.fromOffset(diam, diam)
@@ -4760,6 +4814,16 @@ function CoralInspectPanel.bind(panel: GuiObject, catalogFrame: GuiObject)
 		if confirmGui then
 			return false
 		end
+		if focusColorIndex == Consts.DEFAULT_PALETTE_SWATCH then
+			return selectDefaultPalette()
+		end
+		return selectCoralColor(focusColorIndex)
+	end)
+	RelocateController.setBWhileHueHandler(function(): boolean
+		if confirmGui or not root or not root.Visible then
+			return false
+		end
+		-- Stay on this hue circle and reshade it. Do not step to the next swatch.
 		if focusColorIndex == Consts.DEFAULT_PALETTE_SWATCH then
 			return selectDefaultPalette()
 		end

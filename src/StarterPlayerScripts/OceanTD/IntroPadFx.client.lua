@@ -285,6 +285,9 @@ local function bindLoop()
 	conn = RunService.RenderStepped:Connect(function(dt)
 		-- Local HRP vs remapped pad only — ignore sticky server ON_PAD_ATTR for FX.
 		wantOn = IntroPad.isPlayerOnPad(player)
+		if player:GetAttribute("OceanTD_OnIntroPadClient") ~= wantOn then
+			player:SetAttribute("OceanTD_OnIntroPadClient", wantOn)
+		end
 
 		if wantOn ~= lastOn then
 			lastOn = wantOn

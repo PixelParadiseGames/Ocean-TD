@@ -261,6 +261,24 @@ local reefHealth = C.REEF_START_HEALTH
 local joinIntroDemo = false
 -- Session one-shots for tutorial VO (ids live on WaveSimLibs).
 local firstVoPlayed = { reefEmpty = false, urchin = false, crab = false, shark = false }
+-- Session one-shots for train teach cams (wave-3 fish / crab focus / urchin+shark path tours).
+local firstCamTeach = {
+	wave3FishCam = false,
+	crabFocus = false,
+	urchinPathTour = false,
+	sharkPathTour = false,
+}
+
+local function trainingCamTeachEnabled(): boolean
+	if joinIntroDemo then
+		return false
+	end
+	local pg = Players.LocalPlayer and Players.LocalPlayer:FindFirstChildOfClass("PlayerGui")
+	if pg and pg:GetAttribute("OceanTD_FingerTutorialSkipped") == true then
+		return false
+	end
+	return true
+end
 -- Wave-2 tutorial grant of Reload Speed stage 8 (session once; ends when wave 2 ends).
 local wave2FullAutoTrialOffered = false
 local wave2FullAutoTrialActive = false
@@ -1062,14 +1080,25 @@ end
 function HungerUi.makeHungerBillboard(adornee: BasePart, hungryGlyphs: string?): (BillboardGui, Frame, Frame, TextLabel, TextLabel, TextLabel, UIScale)
 	local glyphs = hungryGlyphs or "🍴"
 	local glyphN = utf8.len(glyphs) or 1
-	local emojiW = C.HUNGER_EMOJI_SIZE * glyphN
-	local remainW = C.HUNGER_REMAIN_W
-	local remainGap = C.HUNGER_REMAIN_GAP
+	-- BillboardGui is not inside the 720p ScreenGui, so it does not inherit BUILD's size.
+	-- Phone stays at 1. Larger screens use the same factor as the BUILD button.
+	local hud = L.UiPopupScale.getHud()
+	local function px(n: number): number
+		return math.max(1, math.floor(n * hud + 0.5))
+	end
+	local emojiSize = px(C.HUNGER_EMOJI_SIZE)
+	local emojiW = emojiSize * glyphN
+	local remainW = px(C.HUNGER_REMAIN_W)
+	local remainGap = px(C.HUNGER_REMAIN_GAP)
+	local barGap = px(C.HUNGER_BAR_GAP)
+	local barW = px(C.HUNGER_BAR_PX_W)
+	local barH = px(C.HUNGER_BAR_PX_H)
+	local remainText = px(C.HUNGER_REMAIN_TEXT_SIZE)
 	-- [fork] [N] [bar]
-	local totalW = emojiW + remainGap + remainW + C.HUNGER_BAR_GAP + C.HUNGER_BAR_PX_W
+	local totalW = emojiW + remainGap + remainW + barGap + barW
 	local bb = Instance.new("BillboardGui")
 	bb.Name = "HungerBar"
-	bb.Size = UDim2.fromOffset(totalW, C.HUNGER_BAR_PX_H)
+	bb.Size = UDim2.fromOffset(totalW, barH)
 	bb.StudsOffset = Vector3.new(0, C.HUNGER_BAR_HEIGHT, 0)
 	bb.AlwaysOnTop = true
 	bb.MaxDistance = C.HUNGER_BAR_MAX_DIST
@@ -1081,7 +1110,7 @@ function HungerUi.makeHungerBillboard(adornee: BasePart, hungryGlyphs: string?):
 	barHost.BackgroundTransparency = 1
 	barHost.AnchorPoint = Vector2.new(1, 0.5)
 	barHost.Position = UDim2.new(1, 0, 0.5, 0)
-	barHost.Size = UDim2.fromOffset(C.HUNGER_BAR_PX_W, C.HUNGER_BAR_STRIP_H)
+	barHost.Size = UDim2.fromOffset(barW, px(C.HUNGER_BAR_STRIP_H))
 	barHost.ZIndex = 1
 	barHost.Parent = bb
 
@@ -1102,7 +1131,7 @@ function HungerUi.makeHungerBillboard(adornee: BasePart, hungryGlyphs: string?):
 	corner.Parent = bg
 	local stroke = Instance.new("UIStroke")
 	stroke.Color = Color3.new(1, 1, 1)
-	stroke.Thickness = 1
+	stroke.Thickness = math.max(1, hud)
 	stroke.Parent = bg
 
 	local fill = Instance.new("Frame")
@@ -1122,10 +1151,10 @@ function HungerUi.makeHungerBillboard(adornee: BasePart, hungryGlyphs: string?):
 	fork.BackgroundTransparency = 1
 	fork.AnchorPoint = Vector2.new(0, 0.5)
 	fork.Position = UDim2.new(0, 0, 0.5, 0)
-	fork.Size = UDim2.fromOffset(emojiW, C.HUNGER_EMOJI_SIZE)
+	fork.Size = UDim2.fromOffset(emojiW, emojiSize)
 	fork.Font = Enum.Font.SourceSansBold
 	fork.Text = glyphs
-	fork.TextSize = C.HUNGER_EMOJI_SIZE
+	fork.TextSize = emojiSize
 	fork.TextScaled = false
 	fork.TextXAlignment = Enum.TextXAlignment.Left
 	fork.ZIndex = 4
@@ -1135,11 +1164,11 @@ function HungerUi.makeHungerBillboard(adornee: BasePart, hungryGlyphs: string?):
 	happy.Name = "Happy"
 	happy.BackgroundTransparency = 1
 	happy.AnchorPoint = Vector2.new(0, 0.5)
-	happy.Position = UDim2.new(0, emojiW - C.HUNGER_EMOJI_SIZE, 0.5, 0)
-	happy.Size = UDim2.fromOffset(C.HUNGER_EMOJI_SIZE, C.HUNGER_EMOJI_SIZE)
+	happy.Position = UDim2.new(0, emojiW - emojiSize, 0.5, 0)
+	happy.Size = UDim2.fromOffset(emojiSize, emojiSize)
 	happy.Font = Enum.Font.SourceSansBold
 	happy.Text = "😊"
-	happy.TextSize = C.HUNGER_EMOJI_SIZE
+	happy.TextSize = emojiSize
 	happy.TextScaled = false
 	happy.Visible = false
 	happy.ZIndex = 5
@@ -1150,11 +1179,11 @@ function HungerUi.makeHungerBillboard(adornee: BasePart, hungryGlyphs: string?):
 	remain.BackgroundTransparency = 1
 	remain.AnchorPoint = Vector2.new(0, 0.5)
 	remain.Position = UDim2.new(0, emojiW + remainGap, 0.5, 0)
-	remain.Size = UDim2.fromOffset(remainW, C.HUNGER_REMAIN_TEXT_SIZE + 2)
+	remain.Size = UDim2.fromOffset(remainW, remainText + px(2))
 	remain.Font = Enum.Font.FredokaOne
 	remain.Text = ""
 	remain.TextColor3 = Color3.new(1, 1, 1)
-	remain.TextSize = C.HUNGER_REMAIN_TEXT_SIZE
+	remain.TextSize = remainText
 	remain.TextScaled = false
 	remain.TextXAlignment = Enum.TextXAlignment.Center
 	remain.TextYAlignment = Enum.TextYAlignment.Center
@@ -1162,7 +1191,7 @@ function HungerUi.makeHungerBillboard(adornee: BasePart, hungryGlyphs: string?):
 	remain.Parent = bb
 	local remainStroke = Instance.new("UIStroke")
 	remainStroke.Color = Color3.fromRGB(48, 48, 48)
-	remainStroke.Thickness = 1.35
+	remainStroke.Thickness = 1.35 * hud
 	remainStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Contextual
 	remainStroke.Parent = remain
 
@@ -2210,8 +2239,9 @@ local function attachTapFeedDebug(agent: FishAgent)
 	local root = agent.root
 	local baseR = C.TAP_FEED_RADIUS or 10
 	local mult = if waveIndex <= 10
-		then (C.TAP_FEED_RADIUS_MULT_W1_10 or 1.32)
-		elseif waveIndex <= 20 then (C.TAP_FEED_RADIUS_MULT_W11_20 or 1.1)
+		then (C.TAP_FEED_RADIUS_MULT_W1_10 or 1.716)
+		elseif waveIndex <= 20 then (C.TAP_FEED_RADIUS_MULT_W11_20 or 1.32)
+		elseif waveIndex <= 30 then (C.TAP_FEED_RADIUS_MULT_W21_30 or 1.1)
 		else 1
 	if agent.isShark then
 		mult *= (C.TAP_FEED_RADIUS_MULT_SHARK or 2)
@@ -2283,7 +2313,8 @@ local function finishFish(agent: FishAgent, skipHappyVfx: boolean?)
 			lastDefeatOrigin = heartPos
 			if not firstVoPlayed.reefEmpty then
 				firstVoPlayed.reefEmpty = true
-				L.TutorialVo.play(L.VO_REEF_EMPTY, "OceanTD_ReefEmpty")
+				-- Round over: cut cam / wave explainer / any other narrator immediately.
+				L.TutorialVo.playOverride(L.VO_REEF_EMPTY, "OceanTD_ReefEmpty")
 			end
 			if speedMult > 1e-6 then
 				applySpeedPauseState(true)
@@ -2543,8 +2574,13 @@ local function spawnOneCrab(startDist: number?)
 		})
 	end
 
-	-- First crab appearance: same intro zoom as first urchin (queue if urchin/shark cam owns cam).
-	if not joinIntroDemo and waveIndex == C.CRAB_FIRST_WAVE and WaveCrab.spawnedCount() == 1 then
+	-- First crab in training only: focus zoom → Plot Cam (never on retries / later waves).
+	if trainingCamTeachEnabled()
+		and not firstCamTeach.crabFocus
+		and waveIndex == C.CRAB_FIRST_WAVE
+		and WaveCrab.spawnedCount() == 1
+	then
+		firstCamTeach.crabFocus = true
 		local crabId = agent.id
 		task.spawn(function()
 			local waitT0 = os.clock()
@@ -2554,6 +2590,7 @@ local function spawnOneCrab(startDist: number?)
 			if not running then
 				return
 			end
+			-- Focus crab, then seat Plot Cam (not Fish Cam / prior seat).
 			L.UrchinCam.play(function(): (Vector3?, Vector3?)
 				for _, f in ipairs(fishList) do
 					if f.id == crabId and not f.finished then
@@ -2561,7 +2598,10 @@ local function spawnOneCrab(startDist: number?)
 					end
 				end
 				return nil, nil
-			end)
+			end, {
+				resumeMode = "plotcam",
+				skipZoomOut = true,
+			})
 		end)
 	end
 end
@@ -2680,13 +2720,23 @@ local function spawnOneUrchin(startDist: number?)
 		})
 	end
 
-	-- Wave 5 only: play ~3s, then pause → path POV tour → unpause after cam restore.
-	if not joinIntroDemo and waveIndex == C.URCHIN_FIRST_WAVE and WaveUrchin.spawnedCount() == 1 then
+	-- First urchin in training only: focus → path POV tour (never on retries / later waves).
+	if trainingCamTeachEnabled()
+		and not firstCamTeach.urchinPathTour
+		and waveIndex == C.URCHIN_FIRST_WAVE
+		and WaveUrchin.spawnedCount() == 1
+	then
+		firstCamTeach.urchinPathTour = true
 		local urchinId = agent.id
 		local tourPath = path
 		task.defer(function()
 			local t0 = os.clock()
 			while running and (os.clock() - t0) < PATH_TOUR_PLAY_SEC do
+				task.wait()
+			end
+			-- Wait out first-urchin VO so the path explainer can start with the tour.
+			local voDeadline = os.clock() + 45
+			while running and L.TutorialVo.isPlaying() and os.clock() < voDeadline do
 				task.wait()
 			end
 			if not running or L.UrchinCam.isBusy() or not tourPath then
@@ -2702,6 +2752,7 @@ local function spawnOneUrchin(startDist: number?)
 				endDist = math.max(startDist + 1, tourPath.totalLen * 0.85)
 			end
 			WaveSim.setCinematicPaused(true)
+			L.TutorialVo.play(L.VO_URCHIN_PATH, "OceanTD_UrchinPathExplainer", { volume = 4 })
 			L.UrchinCam.playPathTour({
 				sample = function(dist: number): (Vector3, Vector3)
 					return WaveUrchin.sample(tourPath, dist)
@@ -2830,16 +2881,22 @@ local function spawnOneShark()
 		})
 	end
 
-	-- Wave 10 only: play ~3s, then pause → path POV tour → unpause after cam restore.
-	if not joinIntroDemo and waveIndex == C.SHARK_FIRST_WAVE then
+	-- First shark in training only: zoom to shark as soon as appear VO starts, then path tour.
+	if trainingCamTeachEnabled()
+		and not firstCamTeach.sharkPathTour
+		and waveIndex == C.SHARK_FIRST_WAVE
+	then
+		firstCamTeach.sharkPathTour = true
 		local sharkId = agent.id
 		local tourPath = path
 		task.defer(function()
-			local t0 = os.clock()
-			while running and (os.clock() - t0) < PATH_TOUR_PLAY_SEC do
-				task.wait()
+			-- Don't wait out the appear VO — focus must steal Plot Cam while it speaks.
+			task.wait(0.2)
+			local waitT0 = os.clock()
+			while (L.UrchinCam.isBusy() or L.SharkCam.isBusy()) and (os.clock() - waitT0) < 12 do
+				task.wait(0.1)
 			end
-			if not running or L.UrchinCam.isBusy() or L.SharkCam.isBusy() or not tourPath then
+			if not running or not tourPath then
 				return
 			end
 			L.WavePathLines.syncHostilePaths()
@@ -2853,6 +2910,11 @@ local function spawnOneShark()
 				endDist = math.max(startDist + 1, tourPath.totalLen)
 			end
 			WaveSim.setCinematicPaused(true)
+			local pg = Players.LocalPlayer and Players.LocalPlayer:FindFirstChildOfClass("PlayerGui")
+			-- SharkCamBusy + UrchinCamBusy so Plot/Fish FreeCam fully yields for the focus beat.
+			if pg then
+				pg:SetAttribute("OceanTD_SharkCamBusy", true)
+			end
 			L.UrchinCam.playPathTour({
 				sample = function(dist: number): (Vector3, Vector3)
 					return WaveShark.sample(tourPath, dist)
@@ -2863,6 +2925,11 @@ local function spawnOneShark()
 				lookNextWaypoint = true,
 				waypointDists = tourPath.waypointDists,
 				pathHeight = 2,
+				-- Match SharkCam framing (behind + wider) so the focus beat reads.
+				focusFromBehind = true,
+				focusDist = C.SHARK_CAM_DIST,
+				focusHeight = C.SHARK_CAM_HEIGHT,
+				focusLookY = 2,
 				getFocusPose = function(): (Vector3?, Vector3?)
 					for _, f in ipairs(fishList) do
 						if f.id == sharkId and not f.finished then
@@ -2871,7 +2938,14 @@ local function spawnOneShark()
 					end
 					return nil, nil
 				end,
+				-- Path explainer after appear VO; focus runs under the first-shark line.
+				onPathBegin = function()
+					L.TutorialVo.playWhenIdle(L.VO_SHARK_PATH, "OceanTD_SharkPathExplainer", { volume = 4 })
+				end,
 				onEnd = function()
+					if pg and pg.Parent then
+						pg:SetAttribute("OceanTD_SharkCamBusy", false)
+					end
 					WaveSim.setCinematicPaused(false, 1)
 				end,
 			})
@@ -2967,12 +3041,15 @@ local function beginWave(wave: number)
 	if wave == 2 then
 		tryOfferWave2FullAutoTrial()
 	end
-	-- Wave 3: pause until cam tap → Fish Cam POV, then fish spawn/swim.
+	-- Wave 3 (first time in training only): pause until cam tap → Fish Cam POV.
 	if not joinIntroDemo then
 		local pg = Players.LocalPlayer and Players.LocalPlayer:FindFirstChildOfClass("PlayerGui")
 		if pg then
-			local skippedTutorial = pg:GetAttribute("OceanTD_FingerTutorialSkipped") == true
-			if wave == 3 and not skippedTutorial then
+			local teachWave3 = trainingCamTeachEnabled()
+				and not firstCamTeach.wave3FishCam
+				and wave == 3
+			if teachWave3 then
+				firstCamTeach.wave3FishCam = true
 				pg:SetAttribute("OceanTD_TutorialGateCam", false)
 				-- Re-run LeftHud gate + FreeCam hit raise even if GateCam was already false.
 				pg:SetAttribute("OceanTD_RefreshLeftHudGate", os.clock())
@@ -4527,8 +4604,9 @@ function WaveSim.tryTapFeedAtScreen(screenPos: Vector2): TapFeedResult
 	end
 	local baseRadius = C.TAP_FEED_RADIUS or 5
 	local radiusMult = if waveIndex <= 10
-		then (C.TAP_FEED_RADIUS_MULT_W1_10 or 1.32)
-		elseif waveIndex <= 20 then (C.TAP_FEED_RADIUS_MULT_W11_20 or 1.1)
+		then (C.TAP_FEED_RADIUS_MULT_W1_10 or 1.716)
+		elseif waveIndex <= 20 then (C.TAP_FEED_RADIUS_MULT_W11_20 or 1.32)
+		elseif waveIndex <= 30 then (C.TAP_FEED_RADIUS_MULT_W21_30 or 1.1)
 		else 1
 	local radius = baseRadius * radiusMult
 	local sharkRadius = radius * (C.TAP_FEED_RADIUS_MULT_SHARK or 2)

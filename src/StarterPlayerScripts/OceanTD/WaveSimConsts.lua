@@ -97,8 +97,9 @@ local C = {
 	-- Player tap-to-feed: click/tap near a critter → food orb (screen-top; Player Cam = from hand).
 	TAP_FEED_RADIUS = 5, -- was 10; tighter click/tap hit radius
 	-- Early waves: larger tap hitbox so feeding is easier.
-	TAP_FEED_RADIUS_MULT_W1_10 = 1.32, -- was 1.2; +10% again for waves 1–10
-	TAP_FEED_RADIUS_MULT_W11_20 = 1.1,
+	TAP_FEED_RADIUS_MULT_W1_10 = 1.716, -- was 1.32; +30% for waves 1–10
+	TAP_FEED_RADIUS_MULT_W11_20 = 1.32, -- was 1.1; +20% for waves 11–20
+	TAP_FEED_RADIUS_MULT_W21_30 = 1.1, -- +10% for waves 21–30
 	TAP_FEED_RADIUS_MULT_SHARK = 2, -- sharks are large / fast — easier tap target
 	-- Fallback only; live cooldown comes from SkillStages ReloadSpeed.
 	TAP_FEED_COOLDOWN_SEC = 1,
@@ -267,6 +268,9 @@ local C = {
 	SHARK_CAM_DIST = 42,
 	SHARK_CAM_HEIGHT = 14,
 	-- First urchin (wave 5): focus on urchin, then soft POV fly once down path.
+	URCHIN_CAM_DIST = 22, -- appear focus distance (closer than SHARK_CAM_DIST)
+	URCHIN_CAM_HEIGHT = 10, -- appear focus height
+	URCHIN_CAM_FOCUS_FOV = 55, -- tight FOV on appear (Fish Cam POV ~105 washes out the zoom)
 	URCHIN_POV_FOCUS_SEC = 3, -- hold on the urchin after it enters
 	URCHIN_POV_FOCUS_IN_SEC = 0.85, -- player view → urchin focus
 	URCHIN_POV_TO_PATH_SEC = 1.25, -- focus → path POV (tween down)
@@ -276,7 +280,7 @@ local C = {
 	URCHIN_POV_BACK = 6,
 	URCHIN_POV_LOOK_AHEAD = 18,
 	URCHIN_POV_FOLLOW_RATE = 2.4, -- soft cam lerp while riding the path
-	URCHIN_POV_FOV_MULT = 1.2, -- 20% wider FOV while on the path
+	URCHIN_POV_FOV_MULT = 1.2, -- 20% wider FOV while on the path (from ~70, not fish POV)
 	TANG_FIRST_WAVE = 1, -- overview cam: full path + heart until fish fed
 	TANG_CAM_OVERVIEW_ZOOM_SEC = 1.6,
 	TANG_CAM_OVERVIEW_RESTORE_SEC = 1.4,

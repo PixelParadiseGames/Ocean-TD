@@ -550,7 +550,12 @@ local function ensureHoverHint(adornee: BasePart, playerGui: PlayerGui)
 	bb.AlwaysOnTop = true
 	bb.Active = false
 	bb.LightInfluence = 0
-	bb.Size = UDim2.fromOffset(C.HOVER_HINT_SIZE, C.HOVER_HINT_SIZE)
+	-- Circle stays the current size. The sheet icon is larger than that circle, so the
+	-- billboard canvas has to be bigger or it clips the icon back inside the circle.
+	local circlePx = math.floor(C.HOVER_HINT_SIZE * 1.4375 + 0.5)
+	local iconOverCircle = 1.5
+	local bbPx = math.floor(circlePx * iconOverCircle + 0.5)
+	bb.Size = UDim2.fromOffset(bbPx, bbPx)
 	bb.StudsOffset = Vector3.new(0, 2.6, 0)
 	bb.MaxDistance = 2000
 	bb.Adornee = adornee
@@ -561,16 +566,23 @@ local function ensureHoverHint(adornee: BasePart, playerGui: PlayerGui)
 	badge.BackgroundColor3 = Color3.new(0, 0, 0)
 	badge.BackgroundTransparency = 0.15
 	badge.BorderSizePixel = 0
-	badge.Size = UDim2.fromScale(1, 1)
+	badge.AnchorPoint = Vector2.new(0.5, 0.5)
+	badge.Position = UDim2.fromScale(0.5, 0.5)
+	badge.Size = UDim2.fromScale(circlePx / bbPx, circlePx / bbPx)
+	badge.ClipsDescendants = false
 	badge.Parent = bb
 	UiCircles.ensure(badge)
 	local lbl = Instance.new("TextLabel")
 	lbl.BackgroundTransparency = 1
+	lbl.AnchorPoint = Vector2.new(0.5, 0.5)
+	lbl.Position = UDim2.fromScale(0.5, 0.5)
 	lbl.Size = UDim2.fromScale(1, 1)
 	lbl.Font = UiTheme.Font
 	lbl.Text = "R1"
 	lbl.TextColor3 = Color3.new(1, 1, 1)
 	lbl.TextScaled = true
+	lbl.ZIndex = badge.ZIndex + 2
+	lbl:SetAttribute("_OceanTD_PadScaleMul", iconOverCircle)
 	lbl.Parent = badge
 
 	local moveBg = Instance.new("Frame")
@@ -578,7 +590,9 @@ local function ensureHoverHint(adornee: BasePart, playerGui: PlayerGui)
 	moveBg.BackgroundColor3 = Color3.new(0, 0, 0)
 	moveBg.BackgroundTransparency = 0.15
 	moveBg.BorderSizePixel = 0
-	moveBg.Size = UDim2.fromScale(1, 1)
+	moveBg.AnchorPoint = Vector2.new(0.5, 0.5)
+	moveBg.Position = UDim2.fromScale(0.5, 0.5)
+	moveBg.Size = UDim2.fromScale(C.HOVER_HINT_SIZE / bbPx, C.HOVER_HINT_SIZE / bbPx)
 	moveBg.Visible = false
 	moveBg.Parent = bb
 	UiCircles.ensure(moveBg)

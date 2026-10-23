@@ -26,6 +26,7 @@ local WaveShark = require(script.Parent:WaitForChild("WaveShark"))
 local WaveEndVfx = require(script.Parent:WaitForChild("WaveEndVfx"))
 local WaveStartVfx = require(script.Parent:WaitForChild("WaveStartVfx"))
 local C = require(script.Parent:WaitForChild("WaveSimConsts"))
+local UiPopupScale = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiPopupScale"))
 local WaveWatchMode = require(script.Parent:WaitForChild("WaveWatchMode"))
 
 local WaveGhostSim = {}
@@ -395,11 +396,19 @@ end
 local function makeHungerBillboard(adornee: BasePart, hungryGlyphs: string?): (BillboardGui, Frame, Frame, TextLabel, TextLabel, UIScale, UIStroke?)
 	local glyphs = hungryGlyphs or "🍴"
 	local glyphN = utf8.len(glyphs) or 1
-	local emojiW = C.HUNGER_EMOJI_SIZE * glyphN
-	local totalW = emojiW + C.HUNGER_BAR_GAP + C.HUNGER_BAR_PX_W
+	-- Same BUILD-button factor as solo hunger bars. Phone stays at 1.
+	local hud = UiPopupScale.getHud()
+	local function px(n: number): number
+		return math.max(1, math.floor(n * hud + 0.5))
+	end
+	local emojiSize = px(C.HUNGER_EMOJI_SIZE)
+	local emojiW = emojiSize * glyphN
+	local barGap = px(C.HUNGER_BAR_GAP)
+	local barW = px(C.HUNGER_BAR_PX_W)
+	local totalW = emojiW + barGap + barW
 	local bb = Instance.new("BillboardGui")
 	bb.Name = "HungerBar"
-	bb.Size = UDim2.fromOffset(totalW, C.HUNGER_BAR_PX_H)
+	bb.Size = UDim2.fromOffset(totalW, px(C.HUNGER_BAR_PX_H))
 	bb.StudsOffset = Vector3.new(0, C.HUNGER_BAR_HEIGHT, 0)
 	bb.AlwaysOnTop = true
 	bb.MaxDistance = C.HUNGER_BAR_MAX_DIST
@@ -411,7 +420,7 @@ local function makeHungerBillboard(adornee: BasePart, hungryGlyphs: string?): (B
 	barHost.BackgroundTransparency = 1
 	barHost.AnchorPoint = Vector2.new(1, 0.5)
 	barHost.Position = UDim2.new(1, 0, 0.5, 0)
-	barHost.Size = UDim2.fromOffset(C.HUNGER_BAR_PX_W, C.HUNGER_BAR_STRIP_H)
+	barHost.Size = UDim2.fromOffset(barW, px(C.HUNGER_BAR_STRIP_H))
 	barHost.ZIndex = 1
 	barHost.Parent = bb
 
@@ -432,7 +441,7 @@ local function makeHungerBillboard(adornee: BasePart, hungryGlyphs: string?): (B
 	corner.Parent = bg
 	local stroke = Instance.new("UIStroke")
 	stroke.Color = Color3.new(1, 1, 1)
-	stroke.Thickness = 1
+	stroke.Thickness = math.max(1, hud)
 	stroke.Parent = bg
 
 	local fill = Instance.new("Frame")
@@ -451,10 +460,10 @@ local function makeHungerBillboard(adornee: BasePart, hungryGlyphs: string?): (B
 	fork.BackgroundTransparency = 1
 	fork.AnchorPoint = Vector2.new(0, 0.5)
 	fork.Position = UDim2.new(0, 0, 0.5, 0)
-	fork.Size = UDim2.fromOffset(emojiW, C.HUNGER_EMOJI_SIZE)
+	fork.Size = UDim2.fromOffset(emojiW, emojiSize)
 	fork.Font = Enum.Font.SourceSansBold
 	fork.Text = glyphs
-	fork.TextSize = C.HUNGER_EMOJI_SIZE
+	fork.TextSize = emojiSize
 	fork.TextScaled = false
 	fork.TextXAlignment = Enum.TextXAlignment.Left
 	fork.ZIndex = 4
@@ -464,11 +473,11 @@ local function makeHungerBillboard(adornee: BasePart, hungryGlyphs: string?): (B
 	happy.Name = "Happy"
 	happy.BackgroundTransparency = 1
 	happy.AnchorPoint = Vector2.new(0, 0.5)
-	happy.Position = UDim2.new(0, emojiW - C.HUNGER_EMOJI_SIZE, 0.5, 0)
-	happy.Size = UDim2.fromOffset(C.HUNGER_EMOJI_SIZE, C.HUNGER_EMOJI_SIZE)
+	happy.Position = UDim2.new(0, emojiW - emojiSize, 0.5, 0)
+	happy.Size = UDim2.fromOffset(emojiSize, emojiSize)
 	happy.Font = Enum.Font.SourceSansBold
 	happy.Text = C.HAPPY_EMOJIS[1]
-	happy.TextSize = C.HUNGER_EMOJI_SIZE
+	happy.TextSize = emojiSize
 	happy.TextScaled = false
 	happy.Visible = false
 	happy.ZIndex = 5

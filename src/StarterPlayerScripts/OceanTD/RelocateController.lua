@@ -61,6 +61,7 @@ local placeConfirmBridge = false
 local activeChanged = Instance.new("BindableEvent")
 local r1WhileActive: (() -> boolean)? = nil
 local aWhileIdle: (() -> boolean)? = nil
+local bWhileHue: (() -> boolean)? = nil
 -- Coral inspect header owns recycle confirm UI when registered.
 local inspectRecycle = {
 	uiHandler = nil :: ((boolean) -> ())?,
@@ -208,6 +209,24 @@ local function isUsingGamepad(): boolean
 		or t == Enum.UserInputType.Gamepad3
 		or t == Enum.UserInputType.Gamepad4
 end
+
+local function readThumbstick2(): Vector2
+	local ok, states = pcall(function()
+		return UserInputService:GetGamepadState(Enum.UserInputType.Gamepad1)
+	end)
+	if not ok or typeof(states) ~= "table" then
+		return Vector2.zero
+	end
+	for _, input in ipairs(states :: { InputObject }) do
+		if input.KeyCode == Enum.KeyCode.Thumbstick2 then
+			return Vector2.new(input.Position.X, input.Position.Y)
+		end
+	end
+	return Vector2.zero
+end
+
+local stickRotHeld = 0
+local stickRotWait = 0
 
 local function readThumbstick1(): Vector2
 	local ok, states = pcall(function()
@@ -1642,7 +1661,6 @@ end
 
 local function startLoop()
 	stopLoop()
-	local stickWasAiming = false
 	loopConn = RunService.RenderStepped:Connect(function(dt)
 		if not active then
 			return
@@ -1654,7 +1672,6 @@ local function startLoop()
 			local stick = readThumbstick1()
 			local mag = stick.Magnitude
 			if mag > C.GAMEPAD_STICK_DEADZONE then
-				stickWasAiming = true
 				local screen = if part then worldToViewport(Workspace.CurrentCamera :: Camera, coralChromeWorldPos(part)) else nil
 				if not gamepadCursor then
 					gamepadCursor = screen or UserInputService:GetMouseLocation()
@@ -1666,10 +1683,36 @@ local function startLoop()
 				if pos then
 					updateAt(pos)
 				end
-			elseif stickWasAiming then
-				stickWasAiming = false
-				-- Stick released after a move: save immediately (same as mouse drag end).
-				finalizeMoveOrRotateIfReady()
+			end
+			-- Releasing the stick leaves the coral where it is. Button A plants.
+			local rx = readThumbstick2().X
+			local rotDir = if rx >= 0.45 then -1 elseif rx <= -0.45 then 1 else 0
+			if rotDir == 0 then
+				stickRotHeld = 0
+				stickRotWait = 0
+			else
+				local function stepRot()
+					local rotBtn = if rotDir == 1 then rotLeftBtn else rotRightBtn
+					if rotBtn then
+						PlaceConfirmChrome.playRotatePressFeedback(rotBtn)
+					end
+					if selectedBrainShouldOrbit() then
+						rotateBrainSnapOrbit(rotDir)
+					else
+						rotateSelectedSeaFan(rotDir)
+					end
+				end
+				if rotDir ~= stickRotHeld then
+					stickRotHeld = rotDir
+					stickRotWait = 0.5
+					stepRot()
+				else
+					stickRotWait -= dt
+					if stickRotWait <= 0 then
+						stickRotWait = 0.5
+						stepRot()
+					end
+				end
 			end
 		end
 		syncChrome()
@@ -1920,6 +1963,10 @@ function RelocateController.setAWhileIdleHandler(cb: (() -> boolean)?)
 	aWhileIdle = cb
 end
 
+function RelocateController.setBWhileHueHandler(cb: (() -> boolean)?)
+	bWhileHue = cb
+end
+
 -- After inspect paints a new rest color, drop white neon and show the real paint.
 function RelocateController.syncPartRestColor(p: BasePart)
 	if not p or not p.Parent then
@@ -1953,6 +2000,58 @@ end
 
 function RelocateController.isMoveConfirmUp(): boolean
 	return active == true and (hasMoved == true or hasRotated == true or recyclePending == true)
+end
+
+function RelocateController.hasMovedSelection(): boolean
+	return active == true and hasMoved == true
+end
+
+function RelocateController.getMoveHandleScreenCenter(): Vector2?
+	-- Billboard AbsolutePosition is often (0,0) — project the move adornee like chrome layout does.
+	local adornee = if moveAdorneePart and moveAdorneePart.Parent then moveAdorneePart else part
+	if adornee and adornee.Parent then
+		local world = adornee.Position
+		if moveBillboard and moveBillboard.Parent then
+			local off = moveBillboard.StudsOffsetWorldSpace
+			if off.Magnitude > 1e-4 then
+				world = world + off
+			else
+				local localOff = moveBillboard.StudsOffset
+				if localOff.Magnitude > 1e-4 then
+					world = world + Vector3.new(0, localOff.Y, 0)
+				end
+			end
+		end
+		local guiPos = PlaceConfirmChrome.guiPosFromWorld(world)
+		if guiPos and PlaceConfirmChrome.isPlausibleGuiPos(guiPos) then
+			return guiPos
+		end
+	end
+	local center = PlaceConfirmChrome.moveIconScreenCenter(moveIcon)
+	if typeof(center) == "Vector2" and PlaceConfirmChrome.isPlausibleGuiPos(center) then
+		return center
+	end
+	return nil
+end
+
+function RelocateController.getConfirmScreenCenter(): Vector2?
+	-- Prefer world-projected confirm seat under the move icon (same as place PLANT finger).
+	local adornee = if moveAdorneePart and moveAdorneePart.Parent then moveAdorneePart else part
+	if adornee and adornee.Parent then
+		local c = PlaceConfirmChrome.plantConfirmScreenCenter(adornee, C.MOVE_ICON_SIZE, C.BTN_SIZE)
+		if c and PlaceConfirmChrome.isPlausibleGuiPos(c) then
+			return c
+		end
+	end
+	local btn = checkBtn
+	if not btn or not btn.Parent or not btn.Visible then
+		return nil
+	end
+	local center = PlaceConfirmChrome.absoluteCenterToGuiPos(btn)
+	if typeof(center) == "Vector2" and PlaceConfirmChrome.isPlausibleGuiPos(center) then
+		return center
+	end
+	return nil
 end
 
 function RelocateController.getSavedCameraCFrame(): CFrame?
@@ -3182,6 +3281,13 @@ table.insert(inputConns, UserInputService.InputBegan:Connect(function(input, _pr
 		if inspectModal then
 			return
 		end
+		if input.KeyCode == Enum.KeyCode.ButtonB then
+			-- A plants. B only changes the active hue and never deselects.
+			if not hasMoved and not recyclePending and not inspectModal and bWhileHue then
+				bWhileHue()
+			end
+			return
+		end
 		if busy then
 			return
 		end
@@ -3190,17 +3296,12 @@ table.insert(inputConns, UserInputService.InputBegan:Connect(function(input, _pr
 				return
 			end
 		end
-		if input.KeyCode == Enum.KeyCode.Escape or input.KeyCode == Enum.KeyCode.X or input.KeyCode == Enum.KeyCode.ButtonB then
+		if input.KeyCode == Enum.KeyCode.Escape or input.KeyCode == Enum.KeyCode.X then
 			RelocateController.cancel()
 			return
 		end
 		if input.KeyCode == Enum.KeyCode.ButtonA then
-			-- Idle (no ✓ / recycle confirm): allow inspect A (e.g. color pick).
-			if not hasMoved and not recyclePending then
-				if aWhileIdle and aWhileIdle() then
-					return
-				end
-			end
+			-- A plants / confirms. B owns hue shades, so A must not be eaten by a color pick.
 			RelocateController.commit()
 			return
 		end

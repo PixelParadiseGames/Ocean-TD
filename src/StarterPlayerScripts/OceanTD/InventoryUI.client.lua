@@ -107,9 +107,29 @@ local function setLeftUiHiddenForBackpack(hide: boolean)
 		end
 		local dPad = left:FindFirstChild("dPad")
 		if dPad then
+			local lastInput = UserInputService:GetLastInputType()
+			local gamepadOpen = lastInput == Enum.UserInputType.Gamepad1
+				or lastInput == Enum.UserInputType.Gamepad2
+				or lastInput == Enum.UserInputType.Gamepad3
+				or lastInput == Enum.UserInputType.Gamepad4
+			-- Joypad build: camera cluster, eye, and info "i" stay off the left HUD.
+			local gamepadHideExtra = if gamepadOpen
+				then {
+					HideUI = true,
+					CartIcon = true,
+					Cart = true,
+					CartBTN = true,
+					CartBtn = true,
+					PlotCam = true,
+					FishCam = true,
+					FreeCam = true,
+					OffCam = true,
+					OceanTD_PlotCam2Quick = true,
+					OceanTD_FishCamQuick = true,
+				}
+				else {}
 			for _, ch in ipairs(dPad:GetChildren()) do
-				-- FreeCam syncs dPadIcon + cam mode icons from InventoryState.isOpen().
-				-- Keep cart, HideUI, active cam button, and Plot/Fish cam quick pads in build mode.
+				-- Touch/keyboard keeps cart, eye, and cam buttons in build mode.
 				if ch:IsA("GuiObject")
 					and ch.Name ~= "dPadIcon"
 					and ch.Name ~= "HideUI"
@@ -126,12 +146,16 @@ local function setLeftUiHiddenForBackpack(hide: boolean)
 					and not LeftHudLayout.isSandDollarChrome(ch)
 				then
 					rememberHideLeftForBackpack(ch)
+				elseif ch:IsA("GuiObject") and gamepadHideExtra[ch.Name] == true then
+					rememberHideLeftForBackpack(ch)
 				end
 			end
-			for _, name in ipairs({ "CartIcon", "Cart", "CartBTN", "CartBtn", "HideUI" }) do
-				local keep = dPad:FindFirstChild(name)
-				if keep and keep:IsA("GuiObject") then
-					keep.Visible = true
+			if not gamepadOpen then
+				for _, name in ipairs({ "CartIcon", "Cart", "CartBTN", "CartBtn", "HideUI" }) do
+					local keep = dPad:FindFirstChild(name)
+					if keep and keep:IsA("GuiObject") then
+						keep.Visible = true
+					end
 				end
 			end
 		end
@@ -906,7 +930,7 @@ local function backpackItemLabelHeight(): number
 	if not UiViewportTags.is720p(UiViewportTags.readViewport()) then
 		return 14
 	end
-	return math.clamp(math.floor(14 * UiPopupScale.get()), 20, 40)
+	return math.clamp(math.floor(14 * UiPopupScale.getHud()), 14, 72)
 end
 
 local function backpackItemLabelRoom(): number
@@ -914,7 +938,7 @@ local function backpackItemLabelRoom(): number
 	if not UiViewportTags.is720p(UiViewportTags.readViewport()) then
 		return 18
 	end
-	return math.clamp(math.floor(18 * UiPopupScale.get()), 26, 52)
+	return math.clamp(math.floor(18 * UiPopupScale.getHud()), 18, 96)
 end
 
 local function refreshGridCellSize()
@@ -941,6 +965,26 @@ local function refreshGridCellSize()
 		grid.CellSize = cellSize
 	end
 	local labelH = backpackItemLabelHeight()
+	local headerH, headerMin, headerMax = 32, 17, 23
+	if UiViewportTags.is720p() then
+		local hud = UiPopupScale.getHud()
+		headerH = math.floor(32 * hud + 0.5)
+		headerMax = math.min(100, math.floor(23 * hud + 0.5))
+		headerMin = math.min(headerMax, math.floor(17 * hud + 0.5))
+	end
+	for _, child in ipairs(scroll:GetChildren()) do
+		if child:IsA("GuiObject") and string.sub(child.Name, 1, 8) == "Section_" then
+			local header = child:FindFirstChild("SectionTitle")
+			if header and header:IsA("TextLabel") then
+				header.Size = UDim2.new(1, -4, 0, headerH)
+				local cap = header:FindFirstChildOfClass("UITextSizeConstraint")
+				if cap then
+					cap.MaxTextSize = headerMax
+					cap.MinTextSize = headerMin
+				end
+			end
+		end
+	end
 	for _, btn in ipairs(itemButtons) do
 		local nameLbl = btn:FindFirstChild("Name")
 		if nameLbl and nameLbl:IsA("TextLabel") then
@@ -1084,6 +1128,10 @@ local function clearFocusOutlines()
 		local prompt = b:FindFirstChild("_GamepadPrompt")
 		if prompt and prompt:IsA("GuiObject") then
 			prompt.Visible = false
+			local sc = prompt:FindFirstChild("_DpadIntroPulse")
+			if sc and sc:IsA("UIScale") then
+				sc.Scale = 1
+			end
 		end
 		-- Legacy A label (child of btn or Circle).
 		local aPrompt = b:FindFirstChild("_GamepadA")
@@ -1093,6 +1141,20 @@ local function clearFocusOutlines()
 		local iconA = icon and icon:FindFirstChild("_GamepadA")
 		if iconA then
 			iconA:Destroy()
+		end
+	end
+	local AutoPlantUI = require(script.Parent:WaitForChild("AutoPlantUI"))
+	for _, host in ipairs({ AutoPlantUI.getAddMaxShell(), AutoPlantUI.getShuffleButton() }) do
+		if host then
+			local focus = host:FindFirstChild("_FocusOutline")
+			if focus and focus:IsA("UIStroke") then
+				focus.Enabled = false
+				focus.Thickness = FOCUS_STROKE_BASE
+			end
+			local prompt = host:FindFirstChild("_GamepadPrompt")
+			if prompt and prompt:IsA("GuiObject") then
+				prompt.Visible = false
+			end
 		end
 	end
 end
@@ -1130,7 +1192,7 @@ local function applyFocusPromptMode()
 	end
 end
 
-local function ensureGamepadPrompt(btn: GuiButton, icon: GuiObject): Frame
+local function ensureGamepadPrompt(btn: GuiObject, icon: GuiObject): Frame
 	local existing = btn:FindFirstChild("_GamepadPrompt")
 	if existing and existing:IsA("Frame") then
 		focusPromptRoot = existing
@@ -1183,6 +1245,16 @@ local function ensureGamepadPrompt(btn: GuiButton, icon: GuiObject): Frame
 	edge.Parent = glyph
 
 	local function syncOverIcon()
+		if icon == btn then
+			local h = math.max(btn.AbsoluteSize.X, btn.AbsoluteSize.Y)
+			if h < 1 then
+				return
+			end
+			root.AnchorPoint = Vector2.new(0.5, 0.5)
+			root.Position = UDim2.fromScale(0.5, 0.5)
+			root.Size = UDim2.fromOffset(h, h)
+			return
+		end
 		local h = icon.AbsoluteSize.Y
 		if h < 1 then
 			return
@@ -1199,15 +1271,13 @@ local function ensureGamepadPrompt(btn: GuiButton, icon: GuiObject): Frame
 	return root
 end
 
-local function setFocusOutline(btn: GuiButton?)
+local function setFocusOutline(btn: GuiObject?)
 	clearFocusOutlines()
 	if not btn then
 		return
 	end
-	local icon = btn:FindFirstChild("Circle")
-	if not icon or not icon:IsA("GuiObject") then
-		return
-	end
+	local circle = btn:FindFirstChild("Circle")
+	local icon: GuiObject = if circle and circle:IsA("GuiObject") then circle else btn
 	-- White outline = D-pad focused, not armed yet. Pulses up to 3x thickness.
 	local focus = ensureStroke(icon, "_FocusOutline", Color3.new(1, 1, 1), FOCUS_STROKE_BASE)
 	focus.Enabled = true
@@ -1222,10 +1292,58 @@ local function setFocusOutline(btn: GuiButton?)
 			return
 		end
 		local wave = (math.sin((os.clock() - t0) * 5) + 1) * 0.5 -- 0..1
-		focus.Thickness = FOCUS_STROKE_BASE + (FOCUS_STROKE_PEAK - FOCUS_STROKE_BASE) * wave
-		focus.Transparency = 0.05 + wave * 0.2
 		applyFocusPromptMode()
+		local prompt = focusPromptRoot
+		local function promptScale(n: number)
+			if not prompt then
+				return
+			end
+			local sc = prompt:FindFirstChild("_DpadIntroPulse")
+			if not (sc and sc:IsA("UIScale")) then
+				local made = Instance.new("UIScale")
+				made.Name = "_DpadIntroPulse"
+				made.Parent = prompt
+				sc = made
+			end
+			if sc and sc:IsA("UIScale") then
+				sc.Scale = n
+			end
+		end
+		if isDpadPromptActive() then
+			-- Grow the D-pad graphic itself. The coral ring stays a steady stroke.
+			focus.Thickness = FOCUS_STROKE_BASE
+			focus.Transparency = 0
+			promptScale(1 + 0.28 * wave)
+		else
+			promptScale(1)
+			focus.Thickness = FOCUS_STROKE_BASE + (FOCUS_STROKE_PEAK - FOCUS_STROKE_BASE) * wave
+			focus.Transparency = 0.05 + wave * 0.2
+		end
 	end)
+end
+
+local function setDpadIntroPulse(scale: number?)
+	-- Scale the whole badge (icon + label), not a stroke on the coral circle.
+	local icon = focusPromptRoot or focusPromptMove
+	if not icon then
+		return
+	end
+	local sc = icon:FindFirstChild("_DpadIntroPulse")
+	if scale == nil then
+		if sc and sc:IsA("UIScale") then
+			sc.Scale = 1
+		end
+		return
+	end
+	if not (sc and sc:IsA("UIScale")) then
+		local made = Instance.new("UIScale")
+		made.Name = "_DpadIntroPulse"
+		made.Parent = icon
+		sc = made
+	end
+	if sc and sc:IsA("UIScale") then
+		sc.Scale = scale
+	end
 end
 
 local function stopGamepadOpenIntro()
@@ -1234,6 +1352,7 @@ local function stopGamepadOpenIntro()
 		gamepadIntroConn = nil
 	end
 	gamepadIntroActive = false
+	setDpadIntroPulse(nil)
 end
 
 local function bottomLeftListIndex(): number
@@ -1281,53 +1400,58 @@ local function startGamepadOpenIntro()
 			setFocusOutline(startBtn)
 		end
 
-		local startY = maxY
-		local endY = 0
 		local t0 = os.clock()
-		local lastPathStep = 1
-		gamepadDpadPromptUntil = t0 + GAMEPAD_INTRO_SCROLL_SEC + GAMEPAD_INTRO_HOLD_SEC
+		local lastPathStep = 0
+		-- Walk up once, then pulse the D-pad icon on Tree Coral until the player presses D-pad.
+		gamepadDpadPromptUntil = t0 + 10 ^ 6
+		local STEP_SEC = 0.42
+
+		local function showStep(step: number)
+			local focusIdx = path[step]
+			gamepadFocusIndex = focusIdx
+			local btn = itemButtons[focusIdx]
+			if not btn then
+				return
+			end
+			setFocusOutline(btn)
+			local btnTop = btn.AbsolutePosition.Y
+			local btnBottom = btnTop + btn.AbsoluteSize.Y
+			local scrollTop = scroll.AbsolutePosition.Y
+			local scrollBottom = scrollTop + scroll.AbsoluteSize.Y
+			local canvas = scroll.CanvasPosition
+			if btnTop < scrollTop then
+				scroll.CanvasPosition = Vector2.new(canvas.X, math.max(0, canvas.Y - (scrollTop - btnTop) - 8))
+			elseif btnBottom > scrollBottom then
+				scroll.CanvasPosition = Vector2.new(canvas.X, canvas.Y + (btnBottom - scrollBottom) + 8)
+			end
+		end
 
 		gamepadIntroConn = RunService.RenderStepped:Connect(function()
 			if not gamepadSelectActive then
 				stopGamepadOpenIntro()
 				return
 			end
+			local steps = #path
+			if steps < 1 then
+				return
+			end
 			local elapsed = os.clock() - t0
-			if elapsed < GAMEPAD_INTRO_SCROLL_SEC then
-				local u = math.clamp(elapsed / GAMEPAD_INTRO_SCROLL_SEC, 0, 1)
-				local a = 1 - (1 - u) * (1 - u)
-				scroll.CanvasPosition = Vector2.new(0, startY + (endY - startY) * a)
-
-				-- Step highlight through each left-column slot in sync with scroll progress.
-				local steps = #path
-				local step = if steps <= 1 then 1 else math.clamp(math.floor(a * (steps - 1) + 0.0001) + 1, 1, steps)
-				if step ~= lastPathStep then
-					lastPathStep = step
-					local focusIdx = path[step]
-					gamepadFocusIndex = focusIdx
-					local btn = itemButtons[focusIdx]
-					if btn then
-						setFocusOutline(btn)
-					end
+			local travel = math.max(0, (steps - 1) * STEP_SEC)
+			if elapsed < travel then
+				local step = math.clamp(math.floor(elapsed / STEP_SEC) + 1, 1, steps)
+				setDpadIntroPulse(1)
+				if step == lastPathStep then
+					return
 				end
+				lastPathStep = step
+				showStep(step)
 			else
-				scroll.CanvasPosition = Vector2.new(0, 0)
-				if gamepadFocusIndex ~= 1 or lastPathStep ~= #path then
-					lastPathStep = #path
-					gamepadFocusIndex = 1
-					local first = itemButtons[1]
-					if first then
-						setFocusOutline(first)
-					end
+				if lastPathStep ~= steps then
+					lastPathStep = steps
+					showStep(steps)
 				end
-				if elapsed >= GAMEPAD_INTRO_SCROLL_SEC + GAMEPAD_INTRO_HOLD_SEC then
-					stopGamepadOpenIntro()
-					gamepadDpadPromptUntil = 0
-					local first = itemButtons[1]
-					if first and gamepadSelectActive then
-						setFocusOutline(first)
-					end
-				end
+				local wave = (math.sin(os.clock() * 5) + 1) * 0.5
+				setDpadIntroPulse(1 + 0.28 * wave)
 			end
 		end)
 	end)
@@ -1673,10 +1797,21 @@ local function findItemButtonForReveal(itemId: string): ImageButton?
 end
 
 local function setGamepadFocus(index: number)
-	if #itemButtons == 0 then
+	if gamepadIntroActive then
 		return
 	end
-	if gamepadIntroActive then
+	if index == -1 or index == -2 then
+		gamepadFocusIndex = index
+		clearAllPulses()
+		local AutoPlantUI = require(script.Parent:WaitForChild("AutoPlantUI"))
+		local host = if index == -1 then AutoPlantUI.getAddMaxShell() else AutoPlantUI.getShuffleButton()
+		if host then
+			setFocusOutline(host)
+			scrollFocusIntoView(host)
+		end
+		return
+	end
+	if #itemButtons == 0 then
 		return
 	end
 	gamepadFocusIndex = math.clamp(index, 1, #itemButtons)
@@ -1704,6 +1839,14 @@ end
 
 local function activateGamepadFocusedItem()
 	if gamepadIntroActive then
+		return
+	end
+	if gamepadFocusIndex == -1 or gamepadFocusIndex == -2 then
+		local AutoPlantUI = require(script.Parent:WaitForChild("AutoPlantUI"))
+		local host = if gamepadFocusIndex == -1 then AutoPlantUI.getAddMaxButton() else AutoPlantUI.getShuffleButton()
+		if host then
+			host:Activate()
+		end
 		return
 	end
 	if InventoryState.isBuildModalBlocking() then
@@ -2090,10 +2233,17 @@ local function makeSection(title: string, layoutOrder: number): (Frame, Frame)
 	list.Padding = UDim.new(0, 4)
 	list.Parent = section
 
+	local headerH, headerMin, headerMax = 32, 17, 23
+	if UiViewportTags.is720p() then
+		local hud = UiPopupScale.getHud()
+		headerH = math.floor(32 * hud + 0.5)
+		headerMax = math.min(100, math.floor(23 * hud + 0.5))
+		headerMin = math.min(headerMax, math.floor(17 * hud + 0.5))
+	end
 	local header = Instance.new("TextLabel")
 	header.Name = "SectionTitle"
 	header.BackgroundTransparency = 1
-	header.Size = UDim2.new(1, -4, 0, 32)
+	header.Size = UDim2.new(1, -4, 0, headerH)
 	header.Font = UiTheme.Font
 	header.Text = string.upper(title)
 	header.TextColor3 = Color3.new(1, 1, 1)
@@ -2104,8 +2254,8 @@ local function makeSection(title: string, layoutOrder: number): (Frame, Frame)
 	header.LayoutOrder = 1
 	header.Parent = section
 	local headerSize = Instance.new("UITextSizeConstraint")
-	headerSize.MaxTextSize = 23
-	headerSize.MinTextSize = 17
+	headerSize.MaxTextSize = headerMax
+	headerSize.MinTextSize = headerMin
 	headerSize.Parent = header
 
 	local gridHost = Instance.new("Frame")
@@ -2272,6 +2422,59 @@ InventoryState.setItemSlotScreenPosProvider(function(itemId: string): Vector2?
 	return Vector2.new(pos.X + size.X * 0.5, pos.Y + size.Y * 0.5)
 end)
 
+local function itemButtonIndex(btn: ImageButton): number?
+	for i, b in ipairs(itemButtons) do
+		if b == btn then
+			return i
+		end
+	end
+	return nil
+end
+
+-- Finger tutorial: D-pad highlight sits one seed away so the player has to move to it.
+-- Top row (Tree Coral / Sea Grass) → the seed below. Any other coral → the seed above.
+local function tutorialDpadNeighborIndex(finger: ImageButton): number?
+	local idx = itemButtonIndex(finger)
+	if not idx then
+		return nil
+	end
+	local id = finger:GetAttribute("OceanTD_ItemId")
+	local placeBelow = id == "TreeCoral" or id == "SeaGrass"
+	local neighbor = if placeBelow then idx + GRID_COLS else idx - GRID_COLS
+	if neighbor < 1 or neighbor > #itemButtons then
+		neighbor = if placeBelow then math.min(#itemButtons, idx + 1) else math.max(1, idx - 1)
+	end
+	return neighbor
+end
+
+local function parkTutorialDpadAway(finger: ImageButton)
+	if getShortcutMode() ~= "gamepad" or not tutorialWantsItemReveal() then
+		return
+	end
+	local neighbor = tutorialDpadNeighborIndex(finger)
+	if not neighbor then
+		return
+	end
+	stopGamepadOpenIntro()
+	gamepadSelectActive = true
+	gamepadDpadPromptUntil = os.clock() + 10 ^ 6
+	setGamepadFocus(neighbor)
+	local focusBtn = itemButtons[neighbor]
+	if not focusBtn then
+		return
+	end
+	scrollFocusIntoView(focusBtn)
+	-- If the highlight is clipped at the top of the list, scroll the row down into view.
+	local margin = math.max(16, focusBtn.AbsoluteSize.Y * 0.35)
+	local top = focusBtn.AbsolutePosition.Y
+	local scrollTop = scroll.AbsolutePosition.Y
+	if top < scrollTop + margin then
+		local canvas = scroll.CanvasPosition
+		local need = (scrollTop + margin) - top
+		scroll.CanvasPosition = Vector2.new(canvas.X, math.max(0, canvas.Y - need))
+	end
+end
+
 InventoryState.setRevealItemInBackpackProvider(function(itemId: string)
 	if typeof(itemId) ~= "string" or itemId == "" then
 		return
@@ -2326,6 +2529,7 @@ InventoryState.setRevealItemInBackpackProvider(function(itemId: string)
 		local targetY = canvasYForItemBtn(btn)
 		if typeof(targetY) ~= "number" then
 			scrollFocusIntoView(btn)
+			parkTutorialDpadAway(btn)
 			return
 		end
 		animateItemScrollToY(targetY, my, REVEAL_SCROLL_SEC)
@@ -2344,6 +2548,7 @@ InventoryState.setRevealItemInBackpackProvider(function(itemId: string)
 				return
 			end
 			if isBtnVisibleInItemScroll(live, 6) then
+				parkTutorialDpadAway(live)
 				return
 			end
 			local y = canvasYForItemBtn(live)
@@ -2352,6 +2557,10 @@ InventoryState.setRevealItemInBackpackProvider(function(itemId: string)
 			else
 				scrollFocusIntoView(live)
 			end
+		end
+		local live = findItemButtonForReveal(itemId)
+		if live then
+			parkTutorialDpadAway(live)
 		end
 	end)
 end)
@@ -3067,6 +3276,9 @@ end
 
 UserInputService.InputBegan:Connect(function(input, gameProcessed)
 	if input.KeyCode == Enum.KeyCode.ButtonY then
+		if playerGui:GetAttribute("OceanTD_JoinIntroBusy") == true then
+			return
+		end
 		if backpackToggleBlockedBySkills() then
 			return
 		end
@@ -3159,10 +3371,18 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
 			return
 		end
 	end
-	-- Finish wave early: Enter (keyboard) / R2 (gamepad); backpack must be closed.
+	-- Finish wave early: Enter, or gamepad R1 (bumper). R2 is camera zoom.
 	if input.KeyCode == Enum.KeyCode.Return
 		or input.KeyCode == Enum.KeyCode.KeypadEnter
-		or input.KeyCode == Enum.KeyCode.ButtonR2
+	then
+		if WaveSlot.tryFinishFromShortcut() then
+			return
+		end
+	end
+	if input.KeyCode == Enum.KeyCode.ButtonR1
+		and not InventoryState.isOpen()
+		and not RelocateController.isActive()
+		and not PlacementController.isActive()
 	then
 		if WaveSlot.tryFinishFromShortcut() then
 			return
@@ -3203,14 +3423,31 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
 			return
 		end
 	end
-	-- Undo L2 while backpack open; Wave Speed L2 / T while closed.
-	if input.KeyCode == Enum.KeyCode.ButtonL2 then
+	-- Undo: Z keyboard, X gamepad while backpack is open and waves are not running.
+	-- Skills open: X is Refund Skills only.
+	-- L2/R2 are camera zoom. Wave speed on gamepad is L1 during a wave.
+	if playerGui:GetAttribute("OceanTD_SkillsBubblesOpen") == true
+		and input.KeyCode == Enum.KeyCode.ButtonX
+	then
+		return
+	end
+	if input.KeyCode == Enum.KeyCode.ButtonX and not WaveSim.isRunning() then
 		if InventoryState.isOpen() and not SavePlotSlot.isOpen() then
 			UndoSlot.requestUndo()
 			return
 		end
-		if not InventoryState.isOpen() then
+	end
+	if input.KeyCode == Enum.KeyCode.ButtonL1 then
+		if WaveSim.isRunning()
+			and not InventoryState.isOpen()
+			and not RelocateController.isActive()
+			and not PlacementController.isActive()
+		then
 			WaveSpeedSlot.cycle()
+			return
+		end
+		-- Outside a wave and build, L1 toggles Auto Plant. X stays start/stop.
+		if require(script.Parent:WaitForChild("AutoPlantHudSlot")).tryGamepadToggle() then
 			return
 		end
 	end
@@ -3220,7 +3457,7 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
 			return
 		end
 	end
-	-- Waves: R (keyboard) / ButtonX (gamepad Square). Closed backpack only (Slot5 inert while open).
+	-- Waves: R (keyboard) / X (gamepad) starts and stops. Auto Plant does not take X.
 	if input.KeyCode == Enum.KeyCode.R or input.KeyCode == Enum.KeyCode.ButtonX then
 		if gameProcessed then
 			return
@@ -3240,6 +3477,7 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
 		return
 	end
 	-- B closes backpack when in list select (placement/relocate own B while active).
+	-- B opens volume when the backpack and skills are closed, including during the intro.
 	if input.KeyCode == Enum.KeyCode.ButtonB then
 		if PlacementController.isActive() or RelocateController.isActive() then
 			return
@@ -3250,6 +3488,19 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
 		end
 		if SettingsUI.isOpen() then
 			SettingsUI.close()
+			return
+		end
+		local skillsOpen = playerGui:GetAttribute("OceanTD_SkillsBubblesOpen") == true
+		local introBusy = playerGui:GetAttribute("OceanTD_JoinIntroBusy") == true
+		local modalBlocksSettings = playerGui:GetAttribute("OceanTD_StoreOpen") == true
+			or playerGui:GetAttribute("OceanTD_ReefReportOpen") == true
+			or WaveSlot.isSummaryOpen()
+			or ClearPlotSlot.isConfirmActive()
+			or SkipWaveSlot.isConfirmActive()
+			or WaveSlot.isStopConfirmActive()
+			or WaveSlot.isReefHealOpen()
+		if not skillsOpen and not modalBlocksSettings and (introBusy or not InventoryState.isOpen()) then
+			SettingsUI.open()
 			return
 		end
 		if InventoryState.isOpen() and (gamepadSelectActive or openWithGamepadPending) then
@@ -3266,19 +3517,67 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
 		and not SavePlotSlot.isOpen()
 		and not SettingsUI.isOpen()
 	then
-		if input.KeyCode == Enum.KeyCode.DPadLeft then
-			setGamepadFocus(gamepadFocusIndex - 1)
+		local code = input.KeyCode
+		local isDpad = code == Enum.KeyCode.DPadLeft
+			or code == Enum.KeyCode.DPadRight
+			or code == Enum.KeyCode.DPadUp
+			or code == Enum.KeyCode.DPadDown
+		if isDpad and gamepadIntroActive then
+			stopGamepadOpenIntro()
+			gamepadDpadPromptUntil = 0
+		end
+		local function itemIndex(id: string): number
+			for i, btn in ipairs(itemButtons) do
+				if btn:GetAttribute("OceanTD_ItemId") == id then
+					return i
+				end
+			end
+			return 1
+		end
+		if code == Enum.KeyCode.DPadLeft then
+			if gamepadFocusIndex == -2 then
+				setGamepadFocus(-1)
+			elseif gamepadFocusIndex ~= -1 then
+				setGamepadFocus(gamepadFocusIndex - 1)
+			end
 			return
-		elseif input.KeyCode == Enum.KeyCode.DPadRight then
-			setGamepadFocus(gamepadFocusIndex + 1)
+		elseif code == Enum.KeyCode.DPadRight then
+			if gamepadFocusIndex == -1 then
+				setGamepadFocus(-2)
+			elseif gamepadFocusIndex ~= -2 then
+				setGamepadFocus(gamepadFocusIndex + 1)
+			end
 			return
-		elseif input.KeyCode == Enum.KeyCode.DPadDown then
-			setGamepadFocus(gamepadFocusIndex + GRID_COLS)
+		elseif code == Enum.KeyCode.DPadDown then
+			if gamepadFocusIndex == -1 then
+				setGamepadFocus(itemIndex("TreeCoral"))
+			elseif gamepadFocusIndex == -2 then
+				setGamepadFocus(itemIndex("SeaGrass"))
+			else
+				setGamepadFocus(gamepadFocusIndex + GRID_COLS)
+			end
 			return
-		elseif input.KeyCode == Enum.KeyCode.DPadUp then
-			setGamepadFocus(gamepadFocusIndex - GRID_COLS)
+		elseif code == Enum.KeyCode.DPadUp then
+			if gamepadFocusIndex > 0 then
+				local focused = itemButtons[gamepadFocusIndex]
+				local id = focused and focused:GetAttribute("OceanTD_ItemId")
+				if id == "TreeCoral" then
+					setGamepadFocus(-1)
+					return
+				elseif id == "SeaGrass" then
+					setGamepadFocus(-2)
+					return
+				end
+			end
+			if gamepadFocusIndex > 0 then
+				setGamepadFocus(gamepadFocusIndex - GRID_COLS)
+			end
 			return
-		elseif input.KeyCode == Enum.KeyCode.ButtonA then
+		elseif code == Enum.KeyCode.ButtonA then
+			if gamepadIntroActive then
+				stopGamepadOpenIntro()
+				gamepadDpadPromptUntil = 0
+			end
 			activateGamepadFocusedItem()
 			return
 		end
@@ -3317,6 +3616,11 @@ ClearPlotSlot.syncVisibility()
 SavePlotSlot.syncVisibility()
 UserInputService.LastInputTypeChanged:Connect(function()
 	refreshGamepadCloseLabel()
+	if InventoryState.isOpen() then
+		setLeftUiHiddenForBackpack(false)
+		setLeftUiHiddenForBackpack(true)
+		playerGui:SetAttribute("OceanTD_SyncCartChrome", os.clock())
+	end
 end)
 
 -- Join-intro fake backpack (module keeps InventoryUI under the 200-local limit).

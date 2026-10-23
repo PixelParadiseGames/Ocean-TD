@@ -35,12 +35,136 @@ local SKIP_GREEN = Color3.fromRGB(55, 200, 90) -- gradient top
 local SKIP_GREEN_DARK = Color3.fromRGB(16, 64, 28) -- gradient bottom
 local SKIP_STROKE_BRIGHT = Color3.fromRGB(90, 255, 110)
 local SKIP_BTN_SIZE = Vector2.new(118, 28)
-local LOAD_BAR_BG = Color3.fromRGB(28, 36, 48)
-local LOAD_BAR_FILL = Color3.fromRGB(70, 200, 255)
-local LOAD_WAVE_EMOJI = "🌊"
+local GLYPH_A_RED = Color3.fromRGB(200, 45, 50)
+
+local function introUsingGamepad(): boolean
+	local t = UserInputService:GetLastInputType()
+	return t == Enum.UserInputType.Gamepad1
+		or t == Enum.UserInputType.Gamepad2
+		or t == Enum.UserInputType.Gamepad3
+		or t == Enum.UserInputType.Gamepad4
+end
+
+local function ensureCornerGlyph(host: GuiObject, name: string, letter: string, bg: Color3, belowRight: boolean): TextLabel
+	local existing = host:FindFirstChild(name)
+	local tip: TextLabel
+	if existing and existing:IsA("TextLabel") then
+		tip = existing
+	else
+		if existing then
+			existing:Destroy()
+		end
+		tip = Instance.new("TextLabel")
+		tip.Name = name
+		tip.BackgroundColor3 = bg
+		tip.BorderSizePixel = 0
+		tip.Font = Enum.Font.GothamBold
+		tip.Text = letter
+		tip.TextColor3 = Color3.new(1, 1, 1)
+		tip.TextScaled = true
+		tip.ZIndex = host.ZIndex + 6
+		tip.Active = false
+		tip.Size = UDim2.fromOffset(26, 26)
+		if belowRight then
+			tip.AnchorPoint = Vector2.new(0, 0)
+			tip.Position = UDim2.new(1, 2, 1, 2)
+		else
+			-- Skip sits on the bottom edge, so the badge stays above its right side.
+			tip.AnchorPoint = Vector2.new(0, 1)
+			tip.Position = UDim2.new(1, 8, 0, -4)
+		end
+		tip.Parent = host
+		local corner = Instance.new("UICorner")
+		corner.CornerRadius = UDim.new(1, 0)
+		corner.Parent = tip
+		local pad = Instance.new("UIPadding")
+		pad.PaddingTop = UDim.new(0.14, 0)
+		pad.PaddingBottom = UDim.new(0.14, 0)
+		pad.PaddingLeft = UDim.new(0.1, 0)
+		pad.PaddingRight = UDim.new(0.1, 0)
+		pad.Parent = tip
+	end
+	tip.Visible = introUsingGamepad()
+	return tip
+end
+
+-- Same class as UiViewportTags.is720p, but available before ReplicatedStorage modules load.
+-- Once UiPopupScale is required, this delegates to getHud() (BUILD button factor).
+local popupScaleModule: any = nil
+local applyLoadTrackSize: (track: Frame) -> ()
 local LOAD_WAVE_EMOJI_PX = 110
 local LOAD_WAVE_EMOJI_GAP = 18 -- space between emoji bottom and bar top
 local LOAD_TIP_GAP = 22 -- space between bar bottom and tip top
+local function loadHudScale(): number
+	if popupScaleModule then
+		return popupScaleModule.getHud()
+	end
+	local cam = Workspace.CurrentCamera
+	local vp = if cam then cam.ViewportSize else Vector2.new(1280, 720)
+	local short = math.min(vp.X, vp.Y)
+	local long = math.max(vp.X, vp.Y)
+	if short < 720 then
+		return 1
+	end
+	local aspect = long / math.max(short, 1)
+	local touchPhone = UserInputService.TouchEnabled
+		and not UserInputService.KeyboardEnabled
+		and not UserInputService.GamepadEnabled
+		and aspect >= 2
+	if touchPhone then
+		return 1
+	end
+	-- 3× matches 720pRightHUD / the seed wheel until Slot4 can be measured.
+	return 3
+end
+
+local function refreshLoadChrome()
+	local hud = loadHudScale()
+	local sg = playerGui:FindFirstChild("OceanTD_JoinIntroLoad")
+	if sg and sg:IsA("ScreenGui") then
+		local track = sg:FindFirstChild("LoadTrack")
+		if track and track:IsA("Frame") then
+			applyLoadTrackSize(track)
+			local wave = sg:FindFirstChild("WaveEmoji")
+			if wave and wave:IsA("TextLabel") then
+				local emojiPx = math.floor(LOAD_WAVE_EMOJI_PX * hud + 0.5)
+				wave.Size = UDim2.fromOffset(emojiPx, emojiPx)
+				wave.Position = UDim2.new(
+					track.Position.X.Scale,
+					track.Position.X.Offset,
+					track.Position.Y.Scale,
+					track.Position.Y.Offset
+						- math.floor(track.Size.Y.Offset * 0.5 + 0.5)
+						- math.floor(LOAD_WAVE_EMOJI_GAP * hud + 0.5)
+				)
+			end
+			local tip = sg:FindFirstChild("LoadTip")
+			if tip and tip:IsA("TextLabel") then
+				tip.Size = UDim2.new(0.85, 0, 0, math.floor(36 * hud + 0.5))
+				tip.TextSize = math.floor(22 * hud + 0.5)
+				tip.Position = UDim2.new(
+					track.Position.X.Scale,
+					track.Position.X.Offset,
+					track.Position.Y.Scale,
+					track.Position.Y.Offset
+						+ math.floor(track.Size.Y.Offset * 0.5 + 0.5)
+						+ math.floor(LOAD_TIP_GAP * hud + 0.5)
+				)
+			end
+		end
+	end
+	local intro = playerGui:FindFirstChild("OceanTD_JoinIntro")
+	local skip = intro and intro:FindFirstChild("SkipIntro")
+	if skip and skip:IsA("GuiObject") then
+		local sc = skip:FindFirstChild("_OceanTD_PopupScale")
+		if sc and sc:IsA("UIScale") then
+			sc.Scale = hud
+		end
+	end
+end
+local LOAD_BAR_BG = Color3.fromRGB(28, 36, 48)
+local LOAD_BAR_FILL = Color3.fromRGB(70, 200, 255)
+local LOAD_WAVE_EMOJI = "🌊"
 local LOAD_TIP_DOT_SEC = 0.45
 local ATTR_LOAD_TIP_ORDER = "OceanTD_LoadTipOrder"
 local ATTR_LOAD_TIP_CURSOR = "OceanTD_LoadTipCursor"
@@ -192,9 +316,10 @@ local function addLoadWaveEmoji(sg: ScreenGui, track: Frame)
 		track.Position.X.Scale,
 		track.Position.X.Offset,
 		track.Position.Y.Scale,
-		track.Position.Y.Offset - math.floor(track.Size.Y.Offset * 0.5 + 0.5) - LOAD_WAVE_EMOJI_GAP
+		track.Position.Y.Offset - math.floor(track.Size.Y.Offset * 0.5 + 0.5) - math.floor(LOAD_WAVE_EMOJI_GAP * loadHudScale() + 0.5)
 	)
-	wave.Size = UDim2.fromOffset(LOAD_WAVE_EMOJI_PX, LOAD_WAVE_EMOJI_PX)
+	local hud = loadHudScale()
+	wave.Size = UDim2.fromOffset(math.floor(LOAD_WAVE_EMOJI_PX * hud + 0.5), math.floor(LOAD_WAVE_EMOJI_PX * hud + 0.5))
 	wave.Font = Enum.Font.GothamBold
 	wave.Text = LOAD_WAVE_EMOJI
 	wave.TextScaled = true
@@ -257,11 +382,12 @@ local function addLoadTip(sg: ScreenGui, track: Frame)
 		track.Position.X.Scale,
 		track.Position.X.Offset,
 		track.Position.Y.Scale,
-		track.Position.Y.Offset + math.floor(track.Size.Y.Offset * 0.5 + 0.5) + LOAD_TIP_GAP
+		track.Position.Y.Offset + math.floor(track.Size.Y.Offset * 0.5 + 0.5) + math.floor(LOAD_TIP_GAP * loadHudScale() + 0.5)
 	)
-	tip.Size = UDim2.new(0.85, 0, 0, 36)
+	local hud = loadHudScale()
+	tip.Size = UDim2.new(0.85, 0, 0, math.floor(36 * hud + 0.5))
 	tip.Font = Enum.Font.GothamMedium
-	tip.TextSize = 22
+	tip.TextSize = math.floor(22 * hud + 0.5)
 	tip.TextColor3 = Color3.fromRGB(210, 230, 245)
 	tip.TextTransparency = 0.05
 	tip.TextXAlignment = Enum.TextXAlignment.Center
@@ -292,6 +418,17 @@ local function addLoadTip(sg: ScreenGui, track: Frame)
 			task.wait(LOAD_TIP_DOT_SEC)
 		end
 	end)
+end
+
+function applyLoadTrackSize(track: Frame)
+	local hud = loadHudScale()
+	track.Size = UDim2.new(0.55, 0, 0, math.floor(36 * hud + 0.5))
+	local cap = track:FindFirstChildOfClass("UISizeConstraint")
+	if cap then
+		-- Phone keeps the 720px cap. Larger screens must not freeze the bar at that width.
+		cap.MaxSize = Vector2.new(if hud > 1 then 4096 else 720, math.floor(44 * hud + 0.5))
+		cap.MinSize = Vector2.new(220, math.floor(28 * hud + 0.5))
+	end
 end
 
 local function adornLoadBarChrome(sg: ScreenGui, track: Frame)
@@ -343,6 +480,7 @@ local function bootstrapImmediateLoadBar()
 	trackAspect.MinSize = Vector2.new(220, 28)
 	trackAspect.MaxSize = Vector2.new(720, 44)
 	trackAspect.Parent = track
+	applyLoadTrackSize(track)
 	adornLoadBarChrome(sg, track)
 
 	local fill = Instance.new("Frame")
@@ -375,6 +513,28 @@ local Remotes = require(oceanRoot:WaitForChild("Remotes"))
 local SkillStages = require(oceanRoot:WaitForChild("Shared"):WaitForChild("SkillStages"))
 local UiTheme = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiTheme"))
 local UiViewportTags = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiViewportTags"))
+local UiPopupScale = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiPopupScale"))
+popupScaleModule = UiPopupScale
+do
+	local loadScaleConn: RBXScriptConnection? = nil
+	local function bindLoadScale(cam: Camera?)
+		if loadScaleConn then
+			loadScaleConn:Disconnect()
+			loadScaleConn = nil
+		end
+		if cam then
+			loadScaleConn = cam:GetPropertyChangedSignal("ViewportSize"):Connect(refreshLoadChrome)
+		end
+		refreshLoadChrome()
+	end
+	bindLoadScale(Workspace.CurrentCamera)
+	Workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function()
+		bindLoadScale(Workspace.CurrentCamera)
+	end)
+	-- Emulator viewport often settles after the first layout.
+	task.delay(0.5, refreshLoadChrome)
+	task.delay(1.5, refreshLoadChrome)
+end
 
 local ClientPlot = require(script.Parent:WaitForChild("ClientPlot"))
 local PlotLoadDropIn = require(script.Parent:WaitForChild("PlotLoadDropIn"))
@@ -773,10 +933,16 @@ local function pinSettingsButtonVisible()
 	local dPad = left:FindFirstChild("dPad")
 	if dPad and dPad:IsA("GuiObject") then
 		dPad.Visible = true
+		dPad.ClipsDescendants = false
 		local settingsBtn = dPad:FindFirstChild("Settings")
 		if settingsBtn and settingsBtn:IsA("GuiObject") then
 			settingsBtn.Visible = true
 			settingsBtn.Active = true
+			settingsBtn.ClipsDescendants = false
+			local staleY = settingsBtn:FindFirstChild("_OceanTD_IntroYGlyph")
+			if staleY then
+				staleY:Destroy()
+			end
 		end
 		-- Hide every other dPad control (nested or direct) — only ♪ Settings stays.
 		for _, d in ipairs(dPad:GetDescendants()) do
@@ -845,6 +1011,12 @@ local function startHudSuppress()
 				end
 			end
 			pinSettingsButtonVisible()
+			local introGui = playerGui:FindFirstChild("OceanTD_JoinIntro")
+			local skip = introGui and introGui:FindFirstChild("SkipIntro")
+			local aTip = skip and skip:FindFirstChild("_OceanTD_SkipAGlyph")
+			if aTip and aTip:IsA("GuiObject") then
+				aTip.Visible = introUsingGamepad()
+			end
 		end)
 	end
 end
@@ -951,6 +1123,7 @@ local function makeUi(): (ScreenGui, TextButton)
 	btn.Selectable = true
 	btn.Active = true
 	btn.ZIndex = 3
+	btn.ClipsDescendants = false
 	btn.Parent = sg
 	local corner = Instance.new("UICorner")
 	corner.CornerRadius = UDim.new(0, 8)
@@ -987,6 +1160,8 @@ local function makeUi(): (ScreenGui, TextButton)
 	lbl.ZIndex = 4
 	lbl.Active = false
 	lbl.Parent = btn
+	UiPopupScale.attachHud(btn)
+	ensureCornerGlyph(btn, "_OceanTD_SkipAGlyph", "A", GLYPH_A_RED, false)
 
 	return sg, btn
 end
@@ -1040,6 +1215,7 @@ local function makeLoadingUi(): (ScreenGui, Frame)
 	trackAspect.MinSize = Vector2.new(220, 28)
 	trackAspect.MaxSize = Vector2.new(720, 44)
 	trackAspect.Parent = track
+	applyLoadTrackSize(track)
 	adornLoadBarChrome(sg, track)
 
 	local fill = Instance.new("Frame")
@@ -1091,6 +1267,11 @@ local function ensureLoadBubbleGui(): ScreenGui
 	sg.ResetOnSpawn = false
 	sg.DisplayOrder = 1990 -- under OceanTD_JoinIntroLoad (2000)
 	sg.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+	sg.ClipToDeviceSafeArea = false
+	pcall(function()
+		local anySg = sg :: any
+		anySg.ScreenInsets = Enum.ScreenInsets.None
+	end)
 	sg.Parent = playerGui
 	loadBubbleGui = sg
 	return sg

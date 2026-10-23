@@ -108,6 +108,8 @@ local slot5TutorialPopPending = false
 local slot5PopDelayActive = false
 local slot5PopDelayGen = 0
 local slot5PopScale: UIScale? = nil
+-- Center→dock intro only once (before first Start Waves), not again after manual plant unlock.
+local slot5TutorialPopDone = false
 
 local hudFrame: Frame? = nil
 local hudWaveBar: Frame? = nil
@@ -180,9 +182,8 @@ local LABEL_TEXT_SIZE = math.floor(15 * 1.25 + 0.5) -- 25% bigger
 local FORK_COUNT_TEXT_SIZE = math.max(1, LABEL_TEXT_SIZE - 2)
 local SIDE_ICON_PAD = 6
 local BAR_TOP_GAP = 20
--- 720p+ wave/reef bars: wider than mobile quickbar track, and taller/larger text than popup baseline.
-local WAVE_HUD_WIDTH_MULT = 1.25 * 1.25 -- +25%, then another +25%
-local WAVE_HUD_SIZE_MULT = 1.25 -- extra UIScale on top of UiPopupScale (taller + larger text)
+-- 720p+ wave/reef bars use the same factor as the authored BUILD button (UiPopupScale.getHud).
+local WAVE_HUD_WIDTH_MULT = 1.25 * 1.25 -- +25%, then another +25% (inactive "right" layout only)
 local WAVE_HUD_SCALE_NAME = "_OceanTD_WaveHudScale"
 -- Wave HUD chrome placement. "right" is the saved Slot5 stack; "bottomRight" is active.
 local WAVE_HUD_LAYOUT: "right" | "bottomRight" = "bottomRight"
@@ -359,7 +360,7 @@ local function refreshFinishHint()
 		hudFinishHint.Visible = false
 		return
 	end
-	hudFinishHint.Text = if mode == "gamepad" then "R2" else "ENTER"
+	hudFinishHint.Text = if mode == "gamepad" then "R1" else "ENTER"
 	hudFinishHint.Visible = true
 end
 
@@ -386,6 +387,7 @@ function WaveSlot.refreshHelpBadge()
 	end
 	if Players.LocalPlayer.PlayerGui:GetAttribute("OceanTD_SkillsBubblesOpen") == true
 		or Players.LocalPlayer.PlayerGui:GetAttribute("OceanTD_TutorialGateWaves") == true
+		or Players.LocalPlayer.PlayerGui:GetAttribute("OceanTD_TutorialLockStartWaves") == true
 		or Players.LocalPlayer.PlayerGui:GetAttribute("OceanTD_JoinIntroShowBackpack") == true
 	then
 		helpSlot5.Visible = false
@@ -1605,6 +1607,8 @@ local function ensureHud()
 	eyeBtn.ZIndex = 31
 	eyeBtn.Visible = false
 	eyeBtn.Active = false
+	-- Gui selection would eat D-pad left before the eye toggle.
+	eyeBtn.Selectable = false
 	eyeBtn.Parent = bar
 	UiCircles.ensure(eyeBtn)
 	eyeBtn.Activated:Connect(function()
@@ -1679,8 +1683,8 @@ local setHudVisible: (on: boolean) -> ()
 do
 local layoutTempW100Button: () -> ()
 local function applyWaveHudScale(root: GuiObject): number
-	local popup = UiPopupScale.get()
-	local barScale = if popup > 1 then popup * WAVE_HUD_SIZE_MULT else 1
+	-- Mobile stays at 1. Larger screens use the BUILD-button factor (not a small extra on top).
+	local barScale = UiPopupScale.getHud()
 	local existing = root:FindFirstChild(WAVE_HUD_SCALE_NAME)
 	local scaleObj: UIScale
 	if existing and existing:IsA("UIScale") then
@@ -1855,22 +1859,18 @@ local function layoutHudBottomRight()
 	if not hudFrame then
 		return
 	end
-	local scale = applyWaveHudScale(hudFrame)
+	applyWaveHudScale(hudFrame)
 	local reefW = WAVE_HUD_BOTTOM_BAR_W
 	local waveW = WAVE_HUD_BOTTOM_WAVE_BAR_W
 	local gap = WAVE_HUD_SIDE_GAP
 	local total = reefW + gap + waveW
-	local designW = total
-	if scale > 1 then
-		designW = math.floor(designW * WAVE_HUD_WIDTH_MULT + 0.5)
-	end
 	-- meta row (clock/upcoming) sits above the wave bar
 	local designH = LINE_H + 4 + waveBarHeight()
-	local w = math.floor(designW / scale + 0.5)
 	-- Same widths as before; pin the wave bar's center to screen center (reef stays on its left).
+	-- UIScale on the frame enlarges this design size on 720p+; mobile scale is 1.
 	local waveCenterFrac = (reefW + gap + waveW * 0.5) / total
 	hudFrame.AnchorPoint = Vector2.new(waveCenterFrac, 1)
-	hudFrame.Size = UDim2.fromOffset(w, designH)
+	hudFrame.Size = UDim2.fromOffset(total, designH)
 	hudFrame.Position = UDim2.new(0.5, 0, 1, -WAVE_HUD_BOTTOM_PAD)
 end
 
@@ -1969,7 +1969,8 @@ syncTempW100Button = function(wavesOn: boolean)
 	local pg = Players.LocalPlayer:FindFirstChild("PlayerGui")
 	local skillsOpen = pg ~= nil and pg:GetAttribute("OceanTD_SkillsBubblesOpen") == true
 	local hideUiActive = pg ~= nil and pg:GetAttribute("OceanTD_HideUiActive") == true
-	tempW100Btn.Visible = wavesOn and not skillsOpen and not hideUiActive
+	local onFreePad = Players.LocalPlayer:GetAttribute("OceanTD_OnIntroPadClient") == true
+	tempW100Btn.Visible = wavesOn and not skillsOpen and not hideUiActive and onFreePad
 	if tempW100Btn.Visible then
 		layoutTempW100Button()
 	end
@@ -2211,6 +2212,9 @@ function WaveSlot.hideStopConfirm()
 		return
 	end
 	stopConfirmActive = false
+	if deps.playerGui then
+		deps.playerGui:SetAttribute("OceanTD_StopWaveConfirm", false)
+	end
 	stopScaleToken += 1
 	local my = stopScaleToken
 	if stopTitleFlashConn then
@@ -2470,9 +2474,29 @@ function WaveSlot.beginStopConfirm()
 			stopConfirmTitle.TextColor3 = Color3.new(1, 1, 1):Lerp(HELP_RED, wave)
 		end)
 	end
+	if deps.playerGui then
+		deps.playerGui:SetAttribute("OceanTD_StopWaveConfirm", true)
+	end
 	if isUsingGamepad() and stopConfirmCheck then
 		stopPrevGuiSelected = GuiService.SelectedObject
-		GuiService.SelectedObject = stopConfirmCheck
+		stopConfirmCheck.Selectable = true
+		if stopConfirmCancel then
+			stopConfirmCancel.Selectable = true
+		end
+		local btn = stopConfirmCheck
+		GuiService.SelectedObject = btn
+		-- The panel scales in from the slot, so the first assignment often drops.
+		task.spawn(function()
+			for _ = 1, 12 do
+				if not stopConfirmActive or not btn.Parent then
+					return
+				end
+				if GuiService.SelectedObject ~= btn and GuiService.SelectedObject ~= stopConfirmCancel then
+					GuiService.SelectedObject = btn
+				end
+				RunService.Heartbeat:Wait()
+			end
+		end)
 	end
 	deps.log("Stop waves confirm")
 end
@@ -2493,7 +2517,10 @@ function WaveSlot.toggle()
 		return
 	end
 	-- Join-intro: hide/block Start Waves until the player has placed a coral.
-	if deps.playerGui:GetAttribute("OceanTD_TutorialGateWaves") == true then
+	-- Post End Waves: also locked through skills + manual plant training.
+	if deps.playerGui:GetAttribute("OceanTD_TutorialGateWaves") == true
+		or deps.playerGui:GetAttribute("OceanTD_TutorialLockStartWaves") == true
+	then
 		return
 	end
 	-- Block clicks while the center pop / settle tween is still playing.
@@ -2617,6 +2644,7 @@ function WaveSlot.mount(d: Deps)
 
 	local function tutorialWavesGated(): boolean
 		return deps.playerGui:GetAttribute("OceanTD_TutorialGateWaves") == true
+			or deps.playerGui:GetAttribute("OceanTD_TutorialLockStartWaves") == true
 	end
 
 	local function ensureSlot5PopScale(): UIScale?
@@ -2720,14 +2748,37 @@ function WaveSlot.mount(d: Deps)
 			slot5.AnchorPoint = homeAnchor
 			slot5.Position = homePos
 			scale.Scale = 1
+			slot5TutorialPopDone = true
 			markSlot5TutorialReady()
 			setSlot5Interactable(not InventoryState.isOpen())
 		end)
 	end
 
+	local function revealSlot5AtRest()
+		slot5TutorialPopPending = false
+		slot5PopDelayActive = false
+		local scale = ensureSlot5PopScale()
+		if scale then
+			scale.Scale = 1
+		end
+		if slot5 then
+			slot5.Visible = true
+		end
+		markSlot5TutorialReady()
+		setSlot5Interactable(not InventoryState.isOpen())
+		WaveSlot.refreshHelpBadge()
+	end
+
 	local function syncSlot5TutorialGate()
 		if not slot5 then
 			return
+		end
+		-- Already ran a Start Waves session — never re-play the center intro.
+		if not slot5TutorialPopDone then
+			local n = WaveSim.getWavesStartCount()
+			if typeof(n) == "number" and n > 0 then
+				slot5TutorialPopDone = true
+			end
 		end
 		local skillsOpen = deps.playerGui:GetAttribute("OceanTD_SkillsBubblesOpen") == true
 		-- Plot-intro BUILD showcase: hide Start Wave so only BUILD is on the right HUD.
@@ -2737,14 +2788,19 @@ function WaveSlot.mount(d: Deps)
 			return
 		end
 		if tutorialWavesGated() then
-			slot5TutorialPopPending = true
+			-- First teach only: queue center pop. Later locks (skills/manual plant) just hide.
+			if not slot5TutorialPopDone then
+				slot5TutorialPopPending = true
+				deps.playerGui:SetAttribute(SLOT5_READY_ATTR, false)
+				local scale = ensureSlot5PopScale()
+				if scale then
+					scale.Scale = 0
+				end
+			else
+				slot5TutorialPopPending = false
+			end
 			slot5PopDelayActive = false
 			slot5PopDelayGen += 1
-			deps.playerGui:SetAttribute(SLOT5_READY_ATTR, false)
-			local scale = ensureSlot5PopScale()
-			if scale then
-				scale.Scale = 0
-			end
 			slot5.Visible = false
 			WaveSlot.refreshHelpBadge()
 			return
@@ -2752,6 +2808,10 @@ function WaveSlot.mount(d: Deps)
 		if skillsOpen then
 			slot5.Visible = false
 			WaveSlot.refreshHelpBadge()
+			return
+		end
+		if slot5TutorialPopDone then
+			revealSlot5AtRest()
 			return
 		end
 		if slot5TutorialPopPending or slot5PopDelayActive then
@@ -2792,6 +2852,10 @@ function WaveSlot.mount(d: Deps)
 					slot5TutorialPopPending = true
 					return
 				end
+				if slot5TutorialPopDone then
+					revealSlot5AtRest()
+					return
+				end
 				playSlot5TutorialPop()
 			end)
 			return
@@ -2801,8 +2865,10 @@ function WaveSlot.mount(d: Deps)
 	end
 
 	if tutorialWavesGated() then
-		slot5TutorialPopPending = true
-		deps.playerGui:SetAttribute(SLOT5_READY_ATTR, false)
+		if not slot5TutorialPopDone then
+			slot5TutorialPopPending = true
+			deps.playerGui:SetAttribute(SLOT5_READY_ATTR, false)
+		end
 	elseif deps.playerGui:GetAttribute(SLOT5_READY_ATTR) ~= true then
 		-- Non-tutorial / already unlocked: finger can target Slot5 immediately.
 		deps.playerGui:SetAttribute(SLOT5_READY_ATTR, true)
@@ -2810,6 +2876,7 @@ function WaveSlot.mount(d: Deps)
 
 	syncSlot5TutorialGate()
 	deps.playerGui:GetAttributeChangedSignal("OceanTD_TutorialGateWaves"):Connect(syncSlot5TutorialGate)
+	deps.playerGui:GetAttributeChangedSignal("OceanTD_TutorialLockStartWaves"):Connect(syncSlot5TutorialGate)
 	deps.playerGui:GetAttributeChangedSignal("OceanTD_JoinIntroShowBackpack"):Connect(syncSlot5TutorialGate)
 
 	InventoryState.onOpenChanged(function(isOpen)
@@ -2822,6 +2889,9 @@ function WaveSlot.mount(d: Deps)
 		if not isOpen then
 			syncSlot5TutorialGate()
 		end
+	end)
+	Players.LocalPlayer:GetAttributeChangedSignal("OceanTD_OnIntroPadClient"):Connect(function()
+		syncTempW100Button(WaveSim.isRunning())
 	end)
 	Players.LocalPlayer.PlayerGui:GetAttributeChangedSignal("OceanTD_SkillsBubblesOpen"):Connect(function()
 		local skillsOpen = Players.LocalPlayer.PlayerGui:GetAttribute("OceanTD_SkillsBubblesOpen") == true
@@ -2907,6 +2977,53 @@ function WaveSlot.mount(d: Deps)
 	UserInputService.LastInputTypeChanged:Connect(function()
 		WaveSlot.refreshHelpBadge()
 	end)
+
+	-- D-pad left toggles the same eye a click does, in or out of waves.
+	-- Left-HUD eye first (hide HUD, or pick circles in build). Wave-bar eye
+	-- (hunger bars / path hide) when that left eye is not on screen.
+	local ContextActionService = game:GetService("ContextActionService")
+	ContextActionService:BindActionAtPriority(
+		"OceanTD_DPadLeftEye",
+		function(_name, state, _input)
+			if state ~= Enum.UserInputState.Begin then
+				return Enum.ContextActionResult.Pass
+			end
+			if InventoryState.isOpen() or WaveSlotSummary.isOpen() then
+				return Enum.ContextActionResult.Pass
+			end
+			local pg = deps.playerGui
+			if pg:GetAttribute("OceanTD_SkillsBubblesOpen") == true
+				or pg:GetAttribute("OceanTD_StoreOpen") == true
+				or pg:GetAttribute("OceanTD_ReefReportOpen") == true
+				or pg:GetAttribute("OceanTD_SkillPowerUpOpen") == true
+			then
+				return Enum.ContextActionResult.Pass
+			end
+			local settings = require(script.Parent:WaitForChild("SettingsUI"))
+			if settings.isOpen() then
+				return Enum.ContextActionResult.Pass
+			end
+			local relocate = require(script.Parent:WaitForChild("RelocateController"))
+			local placement = require(script.Parent:WaitForChild("PlacementController"))
+			if relocate.isActive() or placement.isActive() then
+				return Enum.ContextActionResult.Pass
+			end
+			local hideUi = require(script.Parent:WaitForChild("HideUiController"))
+			if hideUi.press() then
+				return Enum.ContextActionResult.Sink
+			end
+			if WaveSim.isRunning() and hudCritterBarsEye and hudCritterBarsEye.Visible then
+				WaveSim.toggleCritterHungerBarsVisible()
+				UiHaptics.pulseShort()
+				refreshCritterBarsEye()
+				return Enum.ContextActionResult.Sink
+			end
+			return Enum.ContextActionResult.Pass
+		end,
+		false,
+		Enum.ContextActionPriority.High.Value + 40,
+		Enum.KeyCode.DPadLeft
+	)
 end
 
 return WaveSlot

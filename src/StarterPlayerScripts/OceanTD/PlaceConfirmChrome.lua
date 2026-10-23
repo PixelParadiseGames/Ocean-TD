@@ -19,6 +19,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local oceanRoot = ReplicatedStorage:WaitForChild("OceanTD")
 local UiCircles = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiCircles"))
 local UiViewportTags = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiViewportTags"))
+local GamepadButtonGlyph = require(oceanRoot:WaitForChild("Shared"):WaitForChild("GamepadButtonGlyph"))
 
 local player = Players.LocalPlayer
 
@@ -255,6 +256,7 @@ function PlaceConfirmChrome.syncConfirmFace(
 		btn.TextScaled = true
 		btn.TextStrokeColor3 = Color3.fromRGB(12, 55, 25)
 		btn.TextStrokeTransparency = 0
+		GamepadButtonGlyph.apply(btn, true)
 		return
 	end
 	if showWord then
@@ -272,6 +274,7 @@ function PlaceConfirmChrome.syncConfirmFace(
 		btn.TextTransparency = 1
 		icon.Visible = true
 	end
+	GamepadButtonGlyph.apply(btn, true)
 end
 
 PlaceConfirmChrome.CONFIRM_CHECK_IMAGE = CONFIRM_CHECK_IMAGE

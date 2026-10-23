@@ -9,9 +9,35 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 local SoundService = game:GetService("SoundService")
+local TextService = game:GetService("TextService")
 local Workspace = game:GetService("Workspace")
 
 local AudioSettings = require(ReplicatedStorage:WaitForChild("OceanTD"):WaitForChild("Shared"):WaitForChild("AudioSettings"))
+local UiViewportTags = require(ReplicatedStorage:WaitForChild("OceanTD"):WaitForChild("Shared"):WaitForChild("UiViewportTags"))
+
+-- 720p+: a 100px Arcade glyph scaled so "GAME OVER" is 80% of the screen width.
+-- Phone keeps TextScaled inside the original box (rest scale 1).
+local function gameOverRestScale(lbl: TextLabel?): number
+	if not UiViewportTags.is720p() then
+		if lbl then
+			lbl.TextScaled = true
+			lbl.TextSize = 100
+			lbl.Size = UDim2.fromScale(0.96, 0.22)
+		end
+		return 1
+	end
+	local bounds = TextService:GetTextSize("GAME OVER", 100, Enum.Font.Arcade, Vector2.new(4000, 200))
+	local textW = math.max(bounds.X, 8)
+	local textH = math.max(bounds.Y, 8)
+	if lbl then
+		lbl.TextScaled = false
+		lbl.TextSize = 100
+		lbl.Size = UDim2.fromOffset(textW, textH)
+	end
+	local cam = Workspace.CurrentCamera
+	local w = if cam then cam.ViewportSize.X else 1280
+	return math.clamp((w * 0.8) / textW, 0.35, 12)
+end
 
 local GameOverTitle = {}
 
@@ -146,8 +172,10 @@ function GameOverTitle.playAndWait(fromWorld: Vector3?, isCancelled: (() -> bool
 	lbl.TextStrokeColor3 = Color3.new(0, 0, 0)
 	lbl.TextStrokeTransparency = 0.25
 	lbl.TextScaled = true
+	lbl.TextSize = 100
 	lbl.ZIndex = 10
 	lbl.Parent = sg
+	gameOverRestScale(lbl)
 
 	local scale = Instance.new("UIScale")
 	scale.Scale = 0.04
@@ -157,9 +185,10 @@ function GameOverTitle.playAndWait(fromWorld: Vector3?, isCancelled: (() -> bool
 
 	local t0 = os.clock()
 	while not cancelled(my, isCancelled) and sg.Parent do
+		local rest = gameOverRestScale(lbl)
 		local u = math.clamp((os.clock() - t0) / SCALE_SEC, 0, 1)
 		local e = 1 - (1 - u) ^ 3
-		scale.Scale = 0.04 + (1 - 0.04) * e
+		scale.Scale = 0.04 * rest + (rest - 0.04 * rest) * e
 		lbl.Position = startScale:Lerp(UDim2.fromScale(0.5, 0.5), e)
 		if u >= 1 then
 			break
@@ -175,11 +204,12 @@ function GameOverTitle.playAndWait(fromWorld: Vector3?, isCancelled: (() -> bool
 		end
 		return
 	end
-	scale.Scale = 1
+	scale.Scale = gameOverRestScale(lbl)
 	lbl.Position = UDim2.fromScale(0.5, 0.5)
 
 	local holdUntil = os.clock() + HOLD_SEC
 	while os.clock() < holdUntil and not cancelled(my, isCancelled) and sg.Parent do
+		scale.Scale = gameOverRestScale(lbl)
 		RunService.RenderStepped:Wait()
 	end
 	if cancelled(my, isCancelled) or not sg.Parent then

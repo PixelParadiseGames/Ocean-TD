@@ -1386,6 +1386,17 @@ SeedWheelRevealApi.isBusy = function(): boolean
 	return busy
 end
 
+do
+	local published = false
+	RunService.Heartbeat:Connect(function()
+		if busy == published then
+			return
+		end
+		published = busy
+		playerGui:SetAttribute("OceanTD_SeedWheelBusy", busy)
+	end)
+end
+
 playerGui:GetAttributeChangedSignal("OceanTD_SkillsBubblesOpen"):Connect(function()
 	local overlay = playerGui:FindFirstChild("OceanTD_SeedWheel")
 	if overlay and overlay:IsA("ScreenGui") then

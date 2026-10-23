@@ -8,10 +8,12 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 local TweenService = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
 local Workspace = game:GetService("Workspace")
 
 local oceanRoot = ReplicatedStorage:WaitForChild("OceanTD")
 local UiCircles = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiCircles"))
+local UiPopupScale = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiPopupScale"))
 local UiTheme = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiTheme"))
 local UiIdleCycle = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiIdleCycle"))
 
@@ -69,6 +71,7 @@ local tutorialLockOrbitConn: RBXScriptConnection? = nil
 local tutorialLockOrbitAngle = 0
 local tutorialLockFeedbackToken = 0
 local tutorialLockFeedbackActive = false
+local refreshXGlyph: () -> ()
 
 local function applyFillGradient(btn: GuiObject, top: Color3, bottom: Color3)
 	local land = btn:FindFirstChild("_OceanTD_LandRadial")
@@ -169,6 +172,50 @@ local function tutorialLocksAutoPlant(): boolean
 	return tutorialLockMode() ~= nil
 end
 
+local function usingGamepad(): boolean
+	local t = UserInputService:GetLastInputType()
+	return t == Enum.UserInputType.Gamepad1
+		or t == Enum.UserInputType.Gamepad2
+		or t == Enum.UserInputType.Gamepad3
+		or t == Enum.UserInputType.Gamepad4
+end
+
+local function ensureXGlyph(parent: GuiObject)
+	local existing = parent:FindFirstChild("_OceanTD_AutoPlantX")
+	if existing and existing:IsA("TextLabel") then
+		return existing
+	end
+	if existing then
+		existing:Destroy()
+	end
+	local tip = Instance.new("TextLabel")
+	tip.Name = "_OceanTD_AutoPlantX"
+	tip.AnchorPoint = Vector2.new(1, 1)
+	tip.Position = UDim2.new(1, 8, 1, 8)
+	tip.Size = UDim2.fromScale(0.42, 0.42)
+	tip.BackgroundColor3 = Color3.fromRGB(40, 130, 220)
+	tip.BorderSizePixel = 0
+	tip.Font = Enum.Font.GothamBold
+	tip.Text = "L1"
+	tip.TextColor3 = Color3.new(1, 1, 1)
+	tip.TextScaled = true
+	tip.ZIndex = parent.ZIndex + 8
+	tip.Active = false
+	tip.Visible = false
+	tip.Parent = parent
+	parent.ClipsDescendants = false
+	local corner = Instance.new("UICorner")
+	corner.CornerRadius = UDim.new(1, 0)
+	corner.Parent = tip
+	local pad = Instance.new("UIPadding")
+	pad.PaddingTop = UDim.new(0.12, 0)
+	pad.PaddingBottom = UDim.new(0.12, 0)
+	pad.PaddingLeft = UDim.new(0.12, 0)
+	pad.PaddingRight = UDim.new(0.12, 0)
+	pad.Parent = tip
+	return tip
+end
+
 local function shouldShow(): boolean
 	if forcedHidden then
 		return false
@@ -209,6 +256,14 @@ local function startTutorialLockOrbit(lockHost: GuiObject)
 		if not icon or not icon.Parent or not icon.Visible then
 			return
 		end
+		local lockPx = TUTORIAL_LOCK_SIZE_PX
+		local hud = UiPopupScale.getHud()
+		if hud > 1.01 then
+			lockPx = math.max(TUTORIAL_LOCK_SIZE_PX, math.floor(TUTORIAL_LOCK_SIZE_PX * hud + 0.5))
+		end
+		if icon.Size.X.Offset ~= lockPx then
+			icon.Size = UDim2.fromOffset(lockPx, lockPx)
+		end
 		tutorialLockOrbitAngle += TUTORIAL_LOCK_ORBIT_SPEED * dt
 		local abs = lockHost.AbsoluteSize
 		local radius = math.max(10, math.min(abs.X, abs.Y) * 0.5 * TUTORIAL_LOCK_ORBIT_FRAC)
@@ -227,7 +282,12 @@ local function ensureTutorialLockIcon(lockHost: GuiObject): ImageLabel
 		icon.Image = TUTORIAL_LOCK_IMAGE
 		icon.ImageColor3 = WHITE
 		icon.ImageTransparency = 1
-		icon.Size = UDim2.fromOffset(TUTORIAL_LOCK_SIZE_PX, TUTORIAL_LOCK_SIZE_PX)
+		local lockPx = TUTORIAL_LOCK_SIZE_PX
+		local hud = UiPopupScale.getHud()
+		if hud > 1.01 then
+			lockPx = math.max(TUTORIAL_LOCK_SIZE_PX, math.floor(TUTORIAL_LOCK_SIZE_PX * hud + 0.5))
+		end
+		icon.Size = UDim2.fromOffset(lockPx, lockPx)
 		icon.AnchorPoint = Vector2.new(0.5, 0.5)
 		icon.Position = UDim2.fromScale(0.5, 0.5)
 		icon.Active = false
@@ -503,6 +563,9 @@ local function ensureHostInQuickbar(): boolean
 		pad.PaddingRight = UDim.new(0.08, 0)
 		pad.Parent = lbl
 		label = lbl
+		if circle then
+			ensureXGlyph(circle)
+		end
 		if hostButton:GetAttribute("_OceanTD_AutoPlantHudBound") ~= true then
 			hostButton:SetAttribute("_OceanTD_AutoPlantHudBound", true)
 			local function press()
@@ -538,6 +601,7 @@ function AutoPlantHudSlot.syncVisibility()
 		stopIdle()
 	end
 	syncTutorialLock()
+	refreshXGlyph()
 end
 
 function AutoPlantHudSlot.setVisible(on: boolean)
@@ -637,6 +701,10 @@ function AutoPlantHudSlot.playTutorialIntro(durationSec: number?): boolean
 	clone.ZIndex = 10
 	clone.Active = false
 	clone.Parent = sg
+	local clonedTip = clone:FindFirstChild("_OceanTD_AutoPlantX", true)
+	if clonedTip and clonedTip:IsA("GuiObject") then
+		clonedTip.Visible = false
+	end
 	for _, desc in ipairs(clone:GetDescendants()) do
 		if desc:IsA("GuiButton") then
 			desc.Active = false
@@ -723,6 +791,65 @@ local function onPress()
 		return
 	end
 	AutoPlantUI.requestToggle()
+end
+
+local function layoutAutoPlantTip(tip: TextLabel, parent: GuiObject)
+	tip.Text = "L1"
+	tip.AnchorPoint = Vector2.new(1, 1)
+	parent.ClipsDescendants = false
+	local slot = dockSlot4
+	local hud = deps and deps.mainHUD
+	local helpRoot = hud and hud:FindFirstChild("QuickbarHelp")
+	local help = helpRoot and helpRoot:FindFirstChild("Slot4")
+	if slot and slot:IsA("GuiObject") and help and help:IsA("GuiObject")
+		and slot.AbsoluteSize.X >= 2 and help.AbsoluteSize.X >= 2 and parent.AbsoluteSize.X >= 2
+	then
+		local slotCorner = slot.AbsolutePosition + slot.AbsoluteSize
+		local helpCorner = help.AbsolutePosition + help.AbsoluteSize
+		local delta = helpCorner - slotCorner
+		tip.Size = UDim2.fromOffset(help.AbsoluteSize.X, help.AbsoluteSize.Y)
+		tip.Position = UDim2.new(1, math.floor(delta.X + 0.5), 1, math.floor(delta.Y + 0.5))
+		return
+	end
+	tip.Size = UDim2.fromScale(0.42, 0.42)
+	tip.Position = UDim2.new(1, 8, 1, 8)
+end
+
+local function autoPlantXReady(): boolean
+	-- L1 is wave speed during a wave, and Collect while a coral tool is up.
+	if WaveSim.isRunning() or InventoryState.isOpen() or not shouldShow() then
+		return false
+	end
+	local relocate = require(script.Parent:WaitForChild("RelocateController"))
+	local placement = require(script.Parent:WaitForChild("PlacementController"))
+	if relocate.isActive() or placement.isActive() then
+		return false
+	end
+	return true
+end
+
+refreshXGlyph = function()
+	local parent = host or circle
+	if not parent then
+		return
+	end
+	if circle and circle ~= parent then
+		local stale = circle:FindFirstChild("_OceanTD_AutoPlantX")
+		if stale then
+			stale:Destroy()
+		end
+	end
+	local tip = ensureXGlyph(parent)
+	layoutAutoPlantTip(tip, parent)
+	tip.Visible = usingGamepad() and autoPlantXReady()
+end
+
+function AutoPlantHudSlot.tryGamepadToggle(): boolean
+	if not autoPlantXReady() then
+		return false
+	end
+	onPress()
+	return true
 end
 
 function AutoPlantHudSlot.mount(d: Deps)
@@ -812,6 +939,9 @@ function AutoPlantHudSlot.mount(d: Deps)
 		label = lbl
 	end
 	label.Text = "AUTO\nPLANT"
+	if host then
+		ensureXGlyph(host)
+	end
 
 	if hostButton:GetAttribute("_OceanTD_AutoPlantHudBound") ~= true then
 		hostButton:SetAttribute("_OceanTD_AutoPlantHudBound", true)
@@ -853,7 +983,17 @@ function AutoPlantHudSlot.mount(d: Deps)
 	end)
 	pg:GetAttributeChangedSignal("OceanTD_RollFingerHint"):Connect(function()
 		syncTutorialLock()
+		refreshXGlyph()
 	end)
+	UserInputService.LastInputTypeChanged:Connect(refreshXGlyph)
+	require(script.Parent:WaitForChild("RelocateController")).onActiveChanged(function()
+		refreshXGlyph()
+	end)
+	pg:GetAttributeChangedSignal("OceanTD_PlaceConfirmChromeUp"):Connect(refreshXGlyph)
+	local cam = Workspace.CurrentCamera
+	if cam then
+		cam:GetPropertyChangedSignal("ViewportSize"):Connect(refreshXGlyph)
+	end
 
 	task.defer(function()
 		-- Remotes + state even if backpack never opened (toggle lives on HUD now).

@@ -48,6 +48,19 @@ end
 local function summaryPanelGoalSize(): UDim2
 	return UDim2.fromOffset(SUMMARY_PANEL_W, SUMMARY_PANEL_H)
 end
+
+-- Phone keeps the bottom-anchored seat. Large screens grow from the screen center
+-- so the HUD scale doesn't shove Out Of Reef Health downward.
+local function placeSummaryPanel(panel: GuiObject)
+	if UiPopupScale.getHud() > 1.01 then
+		panel.AnchorPoint = Vector2.new(0.5, 0.5)
+		panel.Position = UDim2.fromScale(0.5, 0.5)
+	else
+		panel.AnchorPoint = Vector2.new(0.5, 1)
+		panel.Position = summaryPanelGoalPos()
+	end
+	panel.Size = summaryPanelGoalSize()
+end
 local TITLE_STROKE_BRIGHT = Color3.fromRGB(255, 70, 70)
 local TITLE_STROKE_DARK = Color3.fromRGB(95, 12, 18)
 local TITLE_STROKE_PERIOD_SEC = 4
@@ -499,15 +512,13 @@ function WaveSlotSummary.hide()
 		h.setHudVisible(false)
 		h.applyIcon(false)
 	end
-	-- Join-intro: post-summary finger (roll-then-skills on defeat, or skills on win).
+	-- Join-intro: post-summary finger (skills next). Always reseat Plot Cam at default start.
 	local pg = Players.LocalPlayer:FindFirstChild("PlayerGui")
 	if pg and pg:IsA("PlayerGui") then
-		if not wasDefeat then
-			-- END WAVES: always return to Plot Cam (not whatever mode waves started in).
-			pg:SetAttribute("OceanTD_ForceCamMode", "plotcam")
-			pg:SetAttribute("OceanTD_ForceCamStamp", os.clock())
-		end
 		pg:SetAttribute("OceanTD_WaveResumeCamMode", "")
+		pg:SetAttribute("OceanTD_ResetPlotCamDefault", os.clock())
+		pg:SetAttribute("OceanTD_ForceCamMode", "plotcam")
+		pg:SetAttribute("OceanTD_ForceCamStamp", os.clock())
 		pg:SetAttribute("OceanTD_TutorialSummaryWasDefeat", wasDefeat)
 		pg:SetAttribute("OceanTD_TutorialSummaryFinished", os.clock())
 	end
@@ -548,9 +559,7 @@ function WaveSlotSummary.resumeAfterSkills()
 	if panel and panel:IsA("Frame") then
 		panel.ClipsDescendants = false
 		panel.Visible = true
-		panel.AnchorPoint = Vector2.new(0.5, 1)
-		panel.Position = summaryPanelGoalPos()
-		panel.Size = summaryPanelGoalSize()
+		placeSummaryPanel(panel)
 		local edge = panel:FindFirstChild("SummaryEdge")
 		if edge and edge:IsA("UIStroke") then
 			styleSummaryEdge(edge)
@@ -715,14 +724,13 @@ function WaveSlotSummary.show(summary: WaveSim.Summary)
 		local panel = Instance.new("Frame")
 		panel.Name = "Panel"
 		panel.AnchorPoint = Vector2.new(0.5, 1)
-		panel.Position = summaryPanelGoalPos()
-		panel.Size = summaryPanelGoalSize()
+		placeSummaryPanel(panel)
 		panel.BackgroundColor3 = Color3.fromRGB(16, 26, 38)
 		panel.BorderSizePixel = 0
 		panel.ClipsDescendants = false
 		panel.ZIndex = 2
 		panel.Parent = g
-		UiPopupScale.attach(panel)
+		UiPopupScale.attachHud(panel)
 		local pc = Instance.new("UICorner")
 		pc.CornerRadius = UDim.new(0, SUMMARY_CORNER)
 		pc.Parent = panel
@@ -745,7 +753,7 @@ function WaveSlotSummary.show(summary: WaveSim.Summary)
 	local panel = g:FindFirstChild("Panel")
 	if panel and panel:IsA("Frame") then
 		panel.ClipsDescendants = false
-		UiPopupScale.attach(panel)
+		UiPopupScale.attachHud(panel)
 		local corner = panel:FindFirstChildOfClass("UICorner")
 		if corner then
 			corner.CornerRadius = UDim.new(0, SUMMARY_CORNER)
@@ -770,11 +778,12 @@ function WaveSlotSummary.show(summary: WaveSim.Summary)
 		local vp = if cam then cam.ViewportSize else Vector2.new(1920, 1080)
 		local startX = if origin then origin.X / vp.X else 0.92
 		local startY = if origin then origin.Y / vp.Y else 0.55
-		panel.AnchorPoint = Vector2.new(0.5, 1)
+		local wideSummary = UiPopupScale.getHud() > 1.01
+		panel.AnchorPoint = if wideSummary then Vector2.new(0.5, 0.5) else Vector2.new(0.5, 1)
 		panel.Position = UDim2.fromScale(startX, startY)
 		panel.Size = UDim2.fromOffset(48, 28)
 		TweenService:Create(panel, scaleInfo, {
-			Position = summaryPanelGoalPos(),
+			Position = if wideSummary then UDim2.fromScale(0.5, 0.5) else summaryPanelGoalPos(),
 			Size = summaryPanelGoalSize(),
 		}):Play()
 		-- Celebration only — defeat "Out Of Reef Health" should not leave confetti circles.

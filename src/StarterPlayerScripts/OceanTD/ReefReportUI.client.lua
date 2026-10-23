@@ -609,6 +609,15 @@ syncCartChrome = function()
 	end
 	destroyCloseChrome(false)
 	if InventoryState.isOpen() then
+		-- Info "i" only while standing on the unlimited $D pad. Joypad build also hides it.
+		local onFreePad = player:GetAttribute("OceanTD_OnIntroPadClient") == true
+		if isGamepadMode() or not onFreePad then
+			destroyInfoChrome(false)
+			if cartBtn then
+				cartBtn.Visible = false
+			end
+			return
+		end
 		if cartBtn then
 			cartBtn.Visible = true
 		end
@@ -2175,6 +2184,9 @@ InventoryState.onOpenChanged(function(_isOpen: boolean)
 end)
 
 playerGui:GetAttributeChangedSignal("OceanTD_SyncCartChrome"):Connect(function()
+	syncCartChrome()
+end)
+player:GetAttributeChangedSignal("OceanTD_OnIntroPadClient"):Connect(function()
 	syncCartChrome()
 end)
 playerGui:GetAttributeChangedSignal("OceanTD_TutorialGateShop"):Connect(function()

@@ -56,7 +56,7 @@ local function ensureColorFocusA(): TextLabel
 	a.Position = UDim2.fromScale(0.5, 0.5)
 	a.Size = UDim2.fromScale(0.62, 0.62)
 	a.Font = UiTheme.Font
-	a.Text = "A"
+	a.Text = "B"
 	a.TextColor3 = Color3.new(1, 1, 1)
 	a.TextScaled = true
 	a.ZIndex = 8

@@ -9,14 +9,17 @@
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
 local TweenService = game:GetService("TweenService")
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local UiTheme = require(ReplicatedStorage:WaitForChild("OceanTD"):WaitForChild("Shared"):WaitForChild("UiTheme"))
+local UiPopupScale = require(ReplicatedStorage:WaitForChild("OceanTD"):WaitForChild("Shared"):WaitForChild("UiPopupScale"))
 local Constants = require(ReplicatedStorage:WaitForChild("OceanTD"):WaitForChild("Shared"):WaitForChild("Constants"))
 local FreeCamConfig = require(script.Parent:WaitForChild("FreeCamConfig"))
 local HideUiState = require(script.Parent:WaitForChild("HideUiState"))
 local InventoryState = require(script.Parent:WaitForChild("InventoryState"))
+local UiIdleCycle = require(ReplicatedStorage:WaitForChild("OceanTD"):WaitForChild("Shared"):WaitForChild("UiIdleCycle"))
 
 local FishCamTune = {}
 
@@ -83,11 +86,13 @@ local pauseIcon: Frame? = nil -- two-bar pause glyph (❚❚ often missing from 
 local pausePlayLbl: TextLabel? = nil
 local zoomOutBtn: TextButton? = nil
 local zoomInBtn: TextButton? = nil
+local zoomGlyphStop: (() -> ())? = nil
 local povSlowBtn: TextButton? = nil
 local povFastBtn: TextButton? = nil
 
 local refreshToggleChrome: () -> ()
 local syncBottomRow: () -> ()
+local syncZoomGlyphs: () -> ()
 local layoutQuickButtons: () -> ()
 local syncPauseGlyph: () -> ()
 
@@ -148,6 +153,7 @@ function FishCamTune.setPovOn(on: boolean, silent: boolean?)
 	refreshToggleChrome()
 	syncBottomRow()
 	layoutQuickButtons()
+	syncZoomGlyphs()
 	local fn = onPovChanged
 	if fn and not silent then
 		fn(povOn)
@@ -168,6 +174,7 @@ function FishCamTune.setPaused(on: boolean, silent: boolean?)
 	refreshToggleChrome()
 	syncBottomRow()
 	layoutQuickButtons()
+	syncZoomGlyphs()
 	local fn = onPauseChanged
 	if fn and not silent then
 		fn(paused)
@@ -386,25 +393,34 @@ layoutQuickButtons = function()
 		return
 	end
 
-	local side = math.max(22, math.floor(math.min(as.X, as.Y) * QUICK_SCALE))
-	local width = side * 2 + QUICK_GAP
+	-- Same as the plot-cam pad: dPad's 720p UIScale is already in AbsoluteSize.
+	-- Offsets are in unscaled parent space so the pad stays under the fish button.
+	local uiScale = UiPopupScale.ancestorScale(dPad)
+	local side = math.max(22, math.floor(math.min(as.X, as.Y) * QUICK_SCALE / uiScale))
+	local gap = QUICK_GAP / uiScale
+	local rowGap = QUICK_ROW_GAP / uiScale
+	local width = side * 2 + gap
 	-- One row only while POV is paused (play); otherwise top + bottom.
 	local rows = if (povOn and paused) then 1 else 2
-	local height = side * rows + QUICK_ROW_GAP * (rows - 1)
+	local height = side * rows + rowGap * (rows - 1)
 	holder.Size = UDim2.fromOffset(width, height)
 	holder.AnchorPoint = Vector2.new(0.5, 0)
 	holder.Position = UDim2.fromOffset(
-		math.floor(ap.X + as.X * 0.5 - dAp.X),
-		math.floor(ap.Y + as.Y + QUICK_ROW_GAP - dAp.Y)
+		math.floor((ap.X + as.X * 0.5 - dAp.X) / uiScale),
+		math.floor((ap.Y + as.Y - dAp.Y) / uiScale + rowGap)
 	)
 	if quickGrid then
 		quickGrid.CellSize = UDim2.fromOffset(side, side)
+		quickGrid.CellPadding = UDim2.fromOffset(gap, rowGap)
 	end
 	for _, ch in ipairs(holder:GetChildren()) do
 		if ch:IsA("TextButton") then
 			ch.Size = UDim2.fromOffset(side, side)
 			local isPov = ch.Name == "PovToggle"
-			ch.TextSize = math.clamp(math.floor(side * (if isPov then 0.34 else 0.42)), 10, 18)
+			local shoulder = ch.Text == "L2" or ch.Text == "R2"
+			local factor = if isPov then 0.34 elseif shoulder then 0.30 else 0.42
+			ch.TextScaled = false
+			ch.TextSize = math.clamp(math.floor(side * factor), 10, if shoulder then 14 else 18)
 		end
 	end
 	syncBottomRow()
@@ -590,6 +606,51 @@ local function hudBlocksQuick(): boolean
 	return false
 end
 
+local function isGamepad(): boolean
+	local t = UserInputService:GetLastInputType()
+	return t == Enum.UserInputType.Gamepad1
+		or t == Enum.UserInputType.Gamepad2
+		or t == Enum.UserInputType.Gamepad3
+		or t == Enum.UserInputType.Gamepad4
+end
+
+local function applyZoomGlyph(btn: TextButton, base: string, shoulder: string, alt: boolean)
+	btn.TextScaled = false
+	btn.Text = if alt then shoulder else base
+end
+
+function syncZoomGlyphs()
+	if zoomGlyphStop then
+		zoomGlyphStop()
+		zoomGlyphStop = nil
+	end
+	local minus = zoomOutBtn
+	local plus = zoomInBtn
+	if not minus or not plus then
+		return
+	end
+	local holder = quickHolder
+	if not holder or not holder.Visible or not isGamepad() or not minus.Visible then
+		applyZoomGlyph(minus, "-", "L2", false)
+		applyZoomGlyph(plus, "+", "R2", false)
+		return
+	end
+	zoomGlyphStop = UiIdleCycle.subscribeSharedToggle(2, function(alt: boolean)
+		if zoomOutBtn then
+			applyZoomGlyph(zoomOutBtn, "-", "L2", alt)
+		end
+		if zoomInBtn then
+			applyZoomGlyph(zoomInBtn, "+", "R2", alt)
+		end
+	end, function()
+		return isGamepad()
+			and quickHolder ~= nil
+			and (quickHolder :: Frame).Visible
+			and zoomOutBtn ~= nil
+			and (zoomOutBtn :: TextButton).Visible
+	end)
+end
+
 local function syncQuickVisibility()
 	local camMode = playerGui:GetAttribute(FreeCamConfig.ATTR_MODE)
 	if camMode ~= nil and camMode ~= "fishcam" then
@@ -597,6 +658,7 @@ local function syncQuickVisibility()
 		return
 	end
 	setQuickVisible(visible and carouselCollapsedReady() and not hudBlocksQuick())
+	syncZoomGlyphs()
 end
 
 function FishCamTune.setVisible(on: boolean)
@@ -623,6 +685,30 @@ playerGui:GetAttributeChangedSignal(Constants.HIDE_UI_ACTIVE_ATTR):Connect(syncQ
 HideUiState.onChanged(syncQuickVisibility)
 InventoryState.onOpenChanged(function()
 	syncQuickVisibility()
+end)
+UserInputService.LastInputTypeChanged:Connect(syncQuickVisibility)
+
+UserInputService.InputBegan:Connect(function(input, _gameProcessed)
+	if input.UserInputType ~= Enum.UserInputType.Gamepad1
+		and input.UserInputType ~= Enum.UserInputType.Gamepad2
+		and input.UserInputType ~= Enum.UserInputType.Gamepad3
+		and input.UserInputType ~= Enum.UserInputType.Gamepad4
+	then
+		return
+	end
+	local minus = zoomOutBtn
+	local plus = zoomInBtn
+	local holder = quickHolder
+	if not minus or not plus or not holder or not holder.Visible or not minus.Visible then
+		return
+	end
+	if input.KeyCode == Enum.KeyCode.ButtonL2 then
+		local ok = nudgeZoom(true)
+		flashQuickButton(minus, ok)
+	elseif input.KeyCode == Enum.KeyCode.ButtonR2 then
+		local ok = nudgeZoom(false)
+		flashQuickButton(plus, ok)
+	end
 end)
 
 return FishCamTune

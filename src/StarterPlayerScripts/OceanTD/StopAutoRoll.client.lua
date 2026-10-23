@@ -22,6 +22,8 @@ local LeftHudLayout = require(oceanRoot:WaitForChild("Shared"):WaitForChild("Lef
 local UiTheme = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiTheme"))
 local UiHaptics = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiHaptics"))
 local UiCircles = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiCircles"))
+local UiPopupScale = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiPopupScale"))
+local UiViewportTags = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiViewportTags"))
 
 local SeedWheelAutoRollState = require(script.Parent:WaitForChild("SeedWheelAutoRollState"))
 local SeedWheelRevealApi = require(script.Parent:WaitForChild("SeedWheelRevealApi"))
@@ -54,6 +56,18 @@ local STORE_OPEN_ATTR = "OceanTD_StoreOpen"
 local LABEL_HEIGHT = 10 -- one size smaller than prior 11
 local STROKE_NAME = "_OceanTD_StopAutoRollStroke"
 local REST_SCALE = 1.2 -- 20% bigger than Studio anchor
+-- Extra UIScale was swallowed by the button's size cap, so 720p+ grows the
+-- authored Size (and lifts that cap) by 20%. Phone Size stays as authored.
+local ROLL_WIDE_SIZE = 1.2
+local function rollWideMul(): number
+	return if UiViewportTags.is720p() then ROLL_WIDE_SIZE else 1
+end
+local function rollRestScale(): number
+	return REST_SCALE
+end
+local function rollTipScale(): number
+	return 0.42 * rollWideMul()
+end
 local ICON_SWAP_SEC = 1.35
 local DICE_EMOJI = "🎲"
 local FOUNTAIN_GUI_NAME = "OceanTD_DiceFountain"
@@ -193,7 +207,36 @@ local function refreshHelpTip()
 		helpTip.BackgroundTransparency = 0
 		helpLetter.Text = "A"
 		helpLetter.TextColor3 = Color3.new(1, 1, 1)
+		local tipScale = rollTipScale()
+		helpTip.Size = UDim2.fromScale(tipScale, tipScale)
 		UiCircles.ensure(helpTip)
+	end
+end
+
+local function applyRollWideScale()
+	local host = anchor
+	if host then
+		local base = host:GetAttribute("_OceanTD_RollSizeBase")
+		if typeof(base) ~= "UDim2" then
+			base = host.Size
+			host:SetAttribute("_OceanTD_RollSizeBase", base)
+		end
+		local m = rollWideMul()
+		host:SetAttribute("_OceanTD_SizeCapExtra", m)
+		host.Size = UDim2.new(
+			base.X.Scale * m,
+			math.floor(base.X.Offset * m + 0.5),
+			base.Y.Scale * m,
+			math.floor(base.Y.Offset * m + 0.5)
+		)
+		UiPopupScale.attachHud(host)
+	end
+	if buttonScale and not presenting then
+		buttonScale.Scale = rollRestScale()
+	end
+	if helpTip then
+		local tipScale = rollTipScale()
+		helpTip.Size = UDim2.fromScale(tipScale, tipScale)
 	end
 end
 
@@ -290,6 +333,7 @@ local function ensureKeepRollin(): Frame?
 		host.Active = false
 		host.Visible = false
 		host.Parent = sg
+		UiPopupScale.attachHud(host)
 		local lay = Instance.new("UIListLayout")
 		lay.FillDirection = Enum.FillDirection.Horizontal
 		lay.HorizontalAlignment = Enum.HorizontalAlignment.Left
@@ -349,6 +393,7 @@ local function ensureKeepRollin(): Frame?
 		textStroke.Parent = text
 	end
 	keepRollinHost = host
+	UiPopupScale.attachHud(host)
 	-- Resize if an older smaller instance is still around.
 	local slot = host:FindFirstChild("ArrowSlot")
 	if slot and slot:IsA("GuiObject") then
@@ -418,7 +463,9 @@ local function refreshRollButtonVisibility()
 	if not anchor then
 		return
 	end
-	local show = not uiHidesRoll()
+	-- Manual spins hide ROLL. Auto-roll keeps the countdown / off button.
+	local wheelBusy = playerGui:GetAttribute("OceanTD_SeedWheelBusy") == true
+	local show = not uiHidesRoll() and (SeedWheelAutoRollState.isEnabled() or not wheelBusy)
 	anchor.Visible = show
 	anchor.Active = show
 	pcall(function()
@@ -974,7 +1021,8 @@ local function ensureHelpTip(host: GuiObject)
 	end
 	tip.AnchorPoint = Vector2.new(1, 0)
 	tip.Position = UDim2.new(1, 2, 0, -2)
-	tip.Size = UDim2.fromScale(0.42, 0.42)
+	local tipScale = rollTipScale()
+	tip.Size = UDim2.fromScale(tipScale, tipScale)
 	tip.BackgroundColor3 = HELP_BLUE
 	tip.BackgroundTransparency = 0
 	tip.BorderSizePixel = 0
@@ -1094,14 +1142,14 @@ local function pulseThenHideButton(onHidden: () -> ())
 		onHidden()
 		return
 	end
-	buttonScale.Scale = REST_SCALE
-	local down = tweenScale(buttonScale, REST_SCALE * 0.55, 0.12, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
+	buttonScale.Scale = rollRestScale()
+	local down = tweenScale(buttonScale, rollRestScale() * 0.55, 0.12, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
 	down.Completed:Once(function()
 		if not buttonScale then
 			onHidden()
 			return
 		end
-		local up = tweenScale(buttonScale, REST_SCALE * 1.25, 0.14, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
+		local up = tweenScale(buttonScale, rollRestScale() * 1.25, 0.14, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
 		up.Completed:Once(function()
 			if not buttonScale then
 				onHidden()
@@ -1125,8 +1173,8 @@ local function overscaleThenHideButton(onHidden: () -> ())
 		onHidden()
 		return
 	end
-	buttonScale.Scale = REST_SCALE
-	local up = tweenScale(buttonScale, REST_SCALE * 1.35, 0.16, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
+	buttonScale.Scale = rollRestScale()
+	local up = tweenScale(buttonScale, rollRestScale() * 1.35, 0.16, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
 	up.Completed:Once(function()
 		if not buttonScale then
 			onHidden()
@@ -1141,7 +1189,7 @@ local function restoreButton()
 	if not buttonScale then
 		return
 	end
-	tweenScale(buttonScale, REST_SCALE, 0.28, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
+	tweenScale(buttonScale, rollRestScale(), 0.28, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
 end
 
 -- Fires when the spin awards the seed and the circle finishes sliding to the backpack.
@@ -1237,9 +1285,10 @@ local function ensureChrome(host: GuiObject)
 	coralIcon.Visible = false
 	ensureLabel(host)
 	ensureHelpTip(host)
+	UiPopupScale.attachHud(host)
 	buttonScale = ensureScale(host, BUTTON_SCALE_NAME)
 	if not presenting then
-		buttonScale.Scale = REST_SCALE
+		buttonScale.Scale = rollRestScale()
 	end
 	if label then
 		labelScale = ensureScale(label, LABEL_SCALE_NAME)
@@ -1376,16 +1425,9 @@ local function canAcceptGamepadRoll(): boolean
 	if PlacementController.isActive() or RelocateController.isActive() then
 		return false
 	end
-	-- FishCam mid-wave: A aims food via WaveTapFeed crosshair.
-	if playerGui:GetAttribute("OceanTD_CamCycleMode") == "fishcam" then
-		local ok, WaveSim = pcall(function()
-			return require(script.Parent:WaitForChild("WaveSim"))
-		end)
-		if ok and typeof(WaveSim) == "table" and typeof((WaveSim :: any).isRunning) == "function" then
-			if (WaveSim :: any).isRunning() then
-				return false
-			end
-		end
+	-- During waves A also feeds. Still roll when the ROLL button is on screen.
+	if not anchor or not anchor.Visible then
+		return false
 	end
 	return true
 end
@@ -1671,6 +1713,7 @@ local function wireStopAutoRoll(leftOpt: Instance?)
 	end
 	refreshRollButtonVisibility()
 	refreshKeepRollin()
+	applyRollWideScale()
 end
 
 Remotes.get("SeedWheelAutoRollSync").OnClientEvent:Connect(function(enabled: any, remaining: any)
@@ -1733,6 +1776,7 @@ end)
 playerGui:GetAttributeChangedSignal("OceanTD_JoinIntroBusy"):Connect(function()
 	refreshKeepRollin()
 end)
+playerGui:GetAttributeChangedSignal("OceanTD_SeedWheelBusy"):Connect(refreshRollButtonVisibility)
 InventoryState.onOpenChanged(function()
 	refreshRollButtonVisibility()
 end)
@@ -1757,7 +1801,21 @@ end)
 
 UserInputService.LastInputTypeChanged:Connect(function()
 	refreshHelpTip()
+	applyRollWideScale()
 end)
+
+local function watchRollViewport()
+	local cam = workspace.CurrentCamera
+	if cam then
+		cam:GetPropertyChangedSignal("ViewportSize"):Connect(function()
+			task.defer(applyRollWideScale)
+		end)
+	end
+end
+watchRollViewport()
+workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(watchRollViewport)
+task.delay(0.5, applyRollWideScale)
+task.delay(1.5, applyRollWideScale)
 
 LeftHudLayout.watchMobileLeftUi(playerGui, wireStopAutoRoll)
 

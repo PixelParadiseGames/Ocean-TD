@@ -54,6 +54,7 @@ local hiddenHudGuis: { { gui: GuiObject, wasVisible: boolean, scale: UIScale?, w
 
 local SKILLS_OPEN_ATTR = "OceanTD_SkillsBubblesOpen"
 local SKILLS_DISMISS_KEY_ATTR = "OceanTD_SkillsDismissKey"
+local OTHER_SKILLS_EXPLAINER_ATTR = "OceanTD_OtherSkillsExplainerBusy"
 local skillsScaleConn: RBXScriptConnection? = nil
 
 local function stretchSkillsBackground(panel: Instance)
@@ -108,8 +109,12 @@ local function applySkillsViewportScale(panel: Instance)
 			continue
 		end
 		local lower = string.lower(ch.Name)
+		-- dPad is a screen-sized (or corner-anchored) parent. Scaling it from the
+		-- top-left shoves the power-up circle, close button, and stage labels
+		-- down-right. PowerUpTemplate is scaled from its own center instead.
 		if ch.Name == "_OceanTD_BubbleLayer"
 			or ch.Name == "_OceanTD_AmbientRiseLayer"
+			or ch.Name == "dPad"
 			or lower == "background"
 			or lower == "backgroundgradient"
 		then
@@ -820,24 +825,47 @@ task.spawn(function()
 		return true
 	end
 
+	local function explainerBusy(): boolean
+		return playerGui:GetAttribute(OTHER_SKILLS_EXPLAINER_ATTR) == true
+			or SkillsBubbleSim.isOtherSkillsExplainerBusy()
+	end
+
+	local function stampPlayerOpenedSkills()
+		-- Tutorial finger VO listens for a real Skills-button open (not ForceOpen).
+		playerGui:SetAttribute("OceanTD_SkillsPlayerOpened", os.clock())
+	end
+
 	local function toggle()
 		-- Hide Skills during waves; still allow close if bubbles are open.
 		if not open and WaveSim.isRunning() then
 			return
 		end
+		if explainerBusy() then
+			return
+		end
 		if not canToggle() then
 			return
 		end
-		applyOpen(not open)
+		local opening = not open
+		applyOpen(opening)
+		if opening then
+			stampPlayerOpenedSkills()
+		end
 	end
 
 	local function closeOnly()
+		if explainerBusy() then
+			return
+		end
 		-- Always run full teardown (even if open flag desynced after PlotSize cinematic).
 		lastToggleAt = os.clock()
 		applyOpen(false)
 	end
 
 	local function openFromDPadRight()
+		if playerGui:GetAttribute("OceanTD_TutorialGateLeftHud") == true then
+			return
+		end
 		if InventoryState.isOpen() then
 			return
 		end
@@ -852,6 +880,7 @@ task.spawn(function()
 			return
 		end
 		applyOpen(true)
+		stampPlayerOpenedSkills()
 	end
 
 	applyOpen(false)
@@ -887,6 +916,18 @@ task.spawn(function()
 		closeOnly()
 	end)
 
+	-- Tutorial other-skills explainer: hide Skills close until the pulse sequence finishes.
+	playerGui:GetAttributeChangedSignal(OTHER_SKILLS_EXPLAINER_ATTR):Connect(function()
+		if playerGui:GetAttribute(OTHER_SKILLS_EXPLAINER_ATTR) == true then
+			destroyCloseChrome()
+			if skillsBtn then
+				skillsBtn.Visible = false
+			end
+		elseif open and playerGui:GetAttribute("OceanTD_SkillPowerUpOpen") ~= true then
+			ensureSkillsCloseViable()
+		end
+	end)
+
 	playerGui:GetAttributeChangedSignal("OceanTD_SkillPowerUpOpen"):Connect(function()
 		if playerGui:GetAttribute("OceanTD_SkillPowerUpOpen") == true then
 			-- Hide left Skills chrome (don't restore the Skills icon).
@@ -895,6 +936,13 @@ task.spawn(function()
 				skillsBtn.Visible = false
 			end
 		elseif open then
+			if explainerBusy() then
+				destroyCloseChrome()
+				if skillsBtn then
+					skillsBtn.Visible = false
+				end
+				return
+			end
 			-- Bubbles back — always restore close chrome (ForceOpen via WaveSpeed/Skip too).
 			ensureSkillsCloseViable()
 		end

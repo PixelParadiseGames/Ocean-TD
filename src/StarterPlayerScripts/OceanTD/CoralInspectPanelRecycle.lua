@@ -282,6 +282,21 @@ function M.mount(row1: Frame, nm: TextLabel, opts: {
 	recycleIcon.Active = false
 	recycleIcon.Parent = recycle
 
+	local l1Lbl = Instance.new("TextLabel")
+	l1Lbl.Name = "L1"
+	l1Lbl.BackgroundTransparency = 1
+	l1Lbl.AnchorPoint = Vector2.new(0.5, 0.5)
+	l1Lbl.Position = UDim2.fromScale(0.5, 0.5)
+	l1Lbl.Size = UDim2.fromScale(0.8, 0.55)
+	l1Lbl.Font = UiTheme.Font
+	l1Lbl.Text = "L1"
+	l1Lbl.TextColor3 = Consts.WHITE
+	l1Lbl.TextScaled = true
+	l1Lbl.ZIndex = 5
+	l1Lbl.Visible = false
+	l1Lbl.Active = false
+	l1Lbl.Parent = recycle
+
 	local recycleCancel = Instance.new("TextButton")
 	recycleCancel.Name = "RecycleCancel"
 	recycleCancel.Text = "X"
@@ -327,6 +342,23 @@ function M.mount(row1: Frame, nm: TextLabel, opts: {
 	-- (same backup pattern as PlacementController PLANT).
 	recycle.Activated:Connect(M.onRecyclePressed)
 	recycle.MouseButton1Click:Connect(M.onRecyclePressed)
+	RunService.Heartbeat:Connect(function()
+		if confirmUi or not recycleIconLbl then
+			if l1Lbl.Parent then
+				l1Lbl.Visible = false
+			end
+			return
+		end
+		local root = if getRoot then getRoot() else nil
+		if not (isGamepad() and root and root.Visible) then
+			recycleIconLbl.Visible = true
+			l1Lbl.Visible = false
+			return
+		end
+		local showL1 = (math.floor(os.clock() / 2) % 2) == 1
+		recycleIconLbl.Visible = not showL1
+		l1Lbl.Visible = showL1
+	end)
 	recycleCancel.Activated:Connect(M.onCancelPressed)
 	recycleCancel.MouseButton1Click:Connect(M.onCancelPressed)
 	return recycle

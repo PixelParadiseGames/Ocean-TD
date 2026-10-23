@@ -98,6 +98,8 @@ local gamepadCursor: Vector2? = nil
 local checkPromptConn: RBXScriptConnection? = nil
 local gamepadReturnCbs: { () -> () } = {}
 local GAMEPAD_STICK_DEADZONE = 0.22
+local placeStickRotHeld = 0
+local placeStickRotWait = 0
 -- Precision aim: 50% of original, then another ~30% slower (980 → 343).
 local GAMEPAD_AIM_SPEED = 343 -- px/sec at full deflection
 -- Defined early so destroyConfirmUi / exitPlacement never hit a nil forward-ref.
@@ -1087,6 +1089,20 @@ end
 
 -- Chrome layout/hit-test live in PlaceConfirmChrome / PlaceConfirmHitTest (register budget).
 
+-- Manual plant train: final PLANT stays locked through upgrade + hue; unlocks on "plant" finger.
+local function tutorialBlocksFinalPlant(): boolean
+	if not confirmPlantedId then
+		return false
+	end
+	if playerGui:GetAttribute("OceanTD_FingerTutorialSkipped") == true then
+		return false
+	end
+	if playerGui:GetAttribute("OceanTD_TutorialChapter") ~= "manualPlant" then
+		return false
+	end
+	return playerGui:GetAttribute("OceanTD_RollFingerHint") ~= "plant"
+end
+
 local function syncConfirmButtonsImpl()
 	-- Arm intro also uses this (move+chrome on the ghost Billboard together).
 	local adornee = chromeAdornee()
@@ -1121,7 +1137,9 @@ local function syncConfirmButtonsImpl()
 	local hideForSoftDrag = confirmPlantedId ~= nil and confirmDragging
 	-- Soft-plant already occupies a slot — show PLANT even if place-cap evaluate is false.
 	local showPlant = validSpot or (confirmPlantedId ~= nil)
-	checkBtn.Visible = (not hideForSoftDrag) and showPlant and (mode == MODE_CONFIRM or gamepadPlacement)
+	-- Manual plant: hide PLANT until upgrade + hue are done (finger on "plant").
+	local plantLocked = tutorialBlocksFinalPlant()
+	checkBtn.Visible = (not hideForSoftDrag) and showPlant and (mode == MODE_CONFIRM or gamepadPlacement) and not plantLocked
 	-- Placement: Confirm only (Close hidden for now). Esc / X / B still cancel.
 	cancelBtn.Visible = false
 	local armedSid = if armedItemId then getSpeciesIdForItem(armedItemId) else nil
@@ -1713,6 +1731,35 @@ startAimLoop = function()
 					updateGhostAt(pos)
 				end
 			end
+			local rx = PlaceAimScreen.readThumbstick2().X
+			local rotDir = if rx >= 0.45 then -1 elseif rx <= -0.45 then 1 else 0
+			if rotDir == 0 then
+				placeStickRotHeld = 0
+				placeStickRotWait = 0
+			else
+				local function stepRot()
+					local rotBtn = if rotDir == 1 then rotLeftBtn else rotRightBtn
+					if rotBtn then
+						PlaceConfirmChrome.playRotatePressFeedback(rotBtn)
+					end
+					if placementBrainShouldOrbit() then
+						rotateBrainSnapOrbit(rotDir)
+					else
+						rotateSeaFanGhost(rotDir)
+					end
+				end
+				if rotDir ~= placeStickRotHeld then
+					placeStickRotHeld = rotDir
+					placeStickRotWait = 0.5
+					stepRot()
+				else
+					placeStickRotWait -= dt
+					if placeStickRotWait <= 0 then
+						placeStickRotWait = 0.5
+						stepRot()
+					end
+				end
+			end
 			syncConfirmButtons()
 			return
 		end
@@ -2032,6 +2079,9 @@ local function commitPlace(opts: { stayInConfirm: boolean? }?)
 					or hint == "closePlotSize"
 					or hint == "closeSkills"
 					or hint == "cam"
+					or hint == "selectCoral"
+					or hint == "relocateDrag"
+					or hint == "relocateConfirm"
 				local shouldUpgradeFinger = not pastUpgrade
 					and (
 						hint == "plot"
@@ -2228,6 +2278,9 @@ onCheck = function()
 	end
 	-- Soft-plant already done + powerup open: PLANT finishes and closes inspect.
 	if confirmPlantedId then
+		if tutorialBlocksFinalPlant() then
+			return
+		end
 		-- Tutorial: after hue → plant finger; PLANT advances to close-backpack.
 		if playerGui:GetAttribute("OceanTD_RollFingerHint") == "plant" then
 			playerGui:SetAttribute("OceanTD_RollFingerHint", "closeBackpack")
@@ -2891,7 +2944,7 @@ table.insert(inputConns, UserInputService.InputBegan:Connect(function(input, _pr
 	end
 	if PlaceArmDisarmAnim.isArmIntroAnimating() then
 		-- Allow cancel during the slot→hand fly-in; ignore aim/place.
-		if input.KeyCode == Enum.KeyCode.Escape or input.KeyCode == Enum.KeyCode.X or input.KeyCode == Enum.KeyCode.ButtonB then
+		if input.KeyCode == Enum.KeyCode.Escape or input.KeyCode == Enum.KeyCode.X then
 			onCancel()
 			return
 		end
@@ -2929,7 +2982,7 @@ table.insert(inputConns, UserInputService.InputBegan:Connect(function(input, _pr
 		return
 	end
 	if postPlaceWaiting then
-		if input.KeyCode == Enum.KeyCode.Escape or input.KeyCode == Enum.KeyCode.X or input.KeyCode == Enum.KeyCode.ButtonB then
+		if input.KeyCode == Enum.KeyCode.Escape or input.KeyCode == Enum.KeyCode.X then
 			onCancel()
 		end
 		return
@@ -2939,16 +2992,13 @@ table.insert(inputConns, UserInputService.InputBegan:Connect(function(input, _pr
 		return
 	end
 
-	-- Gamepad placement: A places immediately, B returns to backpack list.
+	-- Gamepad placement: A plants. B does not deselect.
 	if gamepadPlacement then
 		if input.KeyCode == Enum.KeyCode.ButtonA then
 			onCheck()
 			return
 		end
-		if input.KeyCode == Enum.KeyCode.ButtonB then
-			onCancel()
-			return
-		end
+		-- B does not back out while a coral is active. A plants. Esc / X still leave.
 	elseif input.KeyCode == Enum.KeyCode.Return or input.KeyCode == Enum.KeyCode.KeypadEnter then
 		-- Keyboard: Enter matches the confirm shortcut tip.
 		if mode == MODE_CONFIRM then

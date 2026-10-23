@@ -5,6 +5,7 @@
 	Close: button, B (gamepad), Backspace, Escape. Dim tap closes.
 ]]
 
+local ContextActionService = game:GetService("ContextActionService")
 local GuiService = game:GetService("GuiService")
 local Players = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
@@ -40,6 +41,9 @@ local VIEWPORT_MARGIN = 12
 
 local uiOpen = false
 local openedAt = 0
+local volumeFocus = 1
+local stickNudgeAt = 0
+local VOLUME_NAV_ACTION = "OceanTD_SettingsVolumeNav"
 
 local settingsAnchor: GuiObject? = nil
 local settingsHitBtn: GuiButton? = nil
@@ -161,6 +165,8 @@ local function applyMusicGlyph(host: GuiObject)
 	note.Parent = host
 end
 
+local refreshSettingsBGlyph: () -> ()
+
 local function wireStudioSettingsButton(leftOpt: Instance?)
 	local left = leftOpt or playerGui:FindFirstChild("MobileLeftUI") or playerGui:WaitForChild("MobileLeftUI", 60)
 	if not left then
@@ -196,6 +202,7 @@ local function wireStudioSettingsButton(leftOpt: Instance?)
 			SettingsUI.toggle()
 		end)
 	end
+	refreshSettingsBGlyph()
 end
 
 local function ensureViewportWatch()
@@ -231,6 +238,73 @@ local function isUsingGamepad(): boolean
 		or last == Enum.UserInputType.Gamepad2
 		or last == Enum.UserInputType.Gamepad3
 		or last == Enum.UserInputType.Gamepad4
+end
+
+local SETTINGS_B_GLYPH = "_OceanTD_SettingsBGlyph"
+local SETTINGS_B_BLUE = Color3.fromRGB(40, 130, 220)
+
+local function settingsBShortcutOn(): boolean
+	if not isUsingGamepad() then
+		return false
+	end
+	if playerGui:GetAttribute("OceanTD_SkillsBubblesOpen") == true then
+		return false
+	end
+	if playerGui:GetAttribute("OceanTD_StoreOpen") == true
+		or playerGui:GetAttribute("OceanTD_ReefReportOpen") == true
+	then
+		return false
+	end
+	if playerGui:GetAttribute("OceanTD_JoinIntroBusy") == true then
+		return true
+	end
+	return not InventoryState.isOpen()
+end
+
+function refreshSettingsBGlyph()
+	local host = settingsAnchor
+	if not (host and host.Parent) then
+		return
+	end
+	local stale = host:FindFirstChild("_OceanTD_IntroYGlyph")
+	if stale then
+		stale:Destroy()
+	end
+	local existing = host:FindFirstChild(SETTINGS_B_GLYPH)
+	local tip: TextLabel
+	if existing and existing:IsA("TextLabel") then
+		tip = existing
+	else
+		if existing then
+			existing:Destroy()
+		end
+		tip = Instance.new("TextLabel")
+		tip.Name = SETTINGS_B_GLYPH
+		tip.BackgroundColor3 = SETTINGS_B_BLUE
+		tip.BorderSizePixel = 0
+		tip.Font = Enum.Font.GothamBold
+		tip.Text = "B"
+		tip.TextColor3 = Color3.new(1, 1, 1)
+		tip.TextScaled = true
+		tip.ZIndex = host.ZIndex + 6
+		tip.Active = false
+		tip.Parent = host
+		local corner = Instance.new("UICorner")
+		corner.CornerRadius = UDim.new(1, 0)
+		corner.Parent = tip
+		local pad = Instance.new("UIPadding")
+		pad.PaddingTop = UDim.new(0.14, 0)
+		pad.PaddingBottom = UDim.new(0.14, 0)
+		pad.PaddingLeft = UDim.new(0.1, 0)
+		pad.PaddingRight = UDim.new(0.1, 0)
+		pad.Parent = tip
+	end
+	-- Halfway between the first (too far) spot and the last (too tight) spot, and a bit smaller.
+	tip.AnchorPoint = Vector2.new(0, 0)
+	tip.Position = UDim2.new(1, -8, 1, -7)
+	tip.Size = UDim2.fromOffset(22, 22)
+	host.ClipsDescendants = false
+	tip.Visible = settingsBShortcutOn()
 end
 
 local function refreshCloseLabel()
@@ -542,6 +616,168 @@ local function ensureSettingsUi()
 	refreshTransport()
 end
 
+local navWasEnabled: boolean? = nil
+
+local function volumeList(): { UiSlider.SliderHandle }
+	local list: { UiSlider.SliderHandle } = {}
+	if sfxSlider then
+		table.insert(list, sfxSlider)
+	end
+	if narratorSlider then
+		table.insert(list, narratorSlider)
+	end
+	if bgmSlider then
+		table.insert(list, bgmSlider)
+	end
+	return list
+end
+
+local function menuSelectables(): { GuiObject }
+	local items: { GuiObject } = {}
+	for _, slider in ipairs(volumeList()) do
+		local track = slider.root:FindFirstChild("Track")
+		if track and track:IsA("GuiObject") then
+			table.insert(items, track)
+		end
+	end
+	if shuffleBtn then
+		table.insert(items, shuffleBtn)
+	end
+	if playBtn then
+		table.insert(items, playBtn)
+	end
+	if skipBtn then
+		table.insert(items, skipBtn)
+	end
+	if closeBtn then
+		table.insert(items, closeBtn)
+	end
+	return items
+end
+
+local function paintVolumeFocus()
+	local items = menuSelectables()
+	if #items == 0 then
+		return
+	end
+	volumeFocus = math.clamp(volumeFocus, 1, #items)
+	for i, item in ipairs(items) do
+		local stroke = item:FindFirstChild("_OceanTD_VolFocus")
+		if not (stroke and stroke:IsA("UIStroke")) then
+			local made = Instance.new("UIStroke")
+			made.Name = "_OceanTD_VolFocus"
+			made.Color = Color3.new(1, 1, 1)
+			made.Thickness = 3
+			made.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+			made.Parent = item
+			stroke = made
+		end
+		if stroke and stroke:IsA("UIStroke") then
+			stroke.Enabled = i == volumeFocus
+		end
+		item.NextSelectionLeft = item
+		item.NextSelectionRight = item
+		item.NextSelectionUp = items[math.max(1, i - 1)]
+		item.NextSelectionDown = items[math.min(#items, i + 1)]
+	end
+	GuiService.SelectedObject = items[volumeFocus]
+end
+
+local function nudgeOrMove(dir: number)
+	local sliders = volumeList()
+	local slider = sliders[volumeFocus]
+	if slider then
+		slider.nudge(0.05 * dir)
+		paintVolumeFocus()
+		return
+	end
+	local transportStart = #sliders + 1
+	local transportEnd = #sliders + 3
+	if volumeFocus >= transportStart and volumeFocus <= transportEnd then
+		volumeFocus = math.clamp(volumeFocus + dir, transportStart, math.min(transportEnd, #menuSelectables()))
+		paintVolumeFocus()
+	end
+end
+
+local function stepVolumeFocus(dir: number)
+	local items = menuSelectables()
+	if #items == 0 then
+		return
+	end
+	volumeFocus = math.clamp(volumeFocus + dir, 1, #items)
+	paintVolumeFocus()
+end
+
+local function usingGamepad(): boolean
+	local t = UserInputService:GetLastInputType()
+	return t == Enum.UserInputType.Gamepad1
+		or t == Enum.UserInputType.Gamepad2
+		or t == Enum.UserInputType.Gamepad3
+		or t == Enum.UserInputType.Gamepad4
+end
+
+local function onVolumeNav(_name: string, state: Enum.UserInputState, input: InputObject)
+	if not uiOpen then
+		return Enum.ContextActionResult.Pass
+	end
+	local code = input.KeyCode
+	local dpad = code == Enum.KeyCode.DPadLeft
+		or code == Enum.KeyCode.DPadRight
+		or code == Enum.KeyCode.DPadUp
+		or code == Enum.KeyCode.DPadDown
+	local arrows = code == Enum.KeyCode.Left
+		or code == Enum.KeyCode.Right
+		or code == Enum.KeyCode.Up
+		or code == Enum.KeyCode.Down
+	if not dpad and not (arrows and usingGamepad()) then
+		return Enum.ContextActionResult.Pass
+	end
+	if state ~= Enum.UserInputState.Begin then
+		return Enum.ContextActionResult.Sink
+	end
+	if code == Enum.KeyCode.DPadLeft or code == Enum.KeyCode.Left then
+		nudgeOrMove(-1)
+	elseif code == Enum.KeyCode.DPadRight or code == Enum.KeyCode.Right then
+		nudgeOrMove(1)
+	elseif code == Enum.KeyCode.DPadUp or code == Enum.KeyCode.Up then
+		stepVolumeFocus(-1)
+	else
+		stepVolumeFocus(1)
+	end
+	return Enum.ContextActionResult.Sink
+end
+
+local function bindVolumeNav()
+	ContextActionService:BindActionAtPriority(
+		VOLUME_NAV_ACTION,
+		onVolumeNav,
+		false,
+		Enum.ContextActionPriority.High.Value + 50,
+		Enum.KeyCode.DPadLeft,
+		Enum.KeyCode.DPadRight,
+		Enum.KeyCode.DPadUp,
+		Enum.KeyCode.DPadDown,
+		Enum.KeyCode.Left,
+		Enum.KeyCode.Right,
+		Enum.KeyCode.Up,
+		Enum.KeyCode.Down
+	)
+end
+
+local function holdMenuNav()
+	if navWasEnabled == nil then
+		navWasEnabled = GuiService.GuiNavigationEnabled
+	end
+	GuiService.GuiNavigationEnabled = false
+end
+
+local function releaseMenuNav()
+	if navWasEnabled ~= nil then
+		GuiService.GuiNavigationEnabled = navWasEnabled
+		navWasEnabled = nil
+	end
+end
+
 function SettingsUI.isOpen(): boolean
 	return uiOpen
 end
@@ -552,6 +788,8 @@ function SettingsUI.close()
 	end
 	uiOpen = false
 	InventoryState.setSettingsOpen(false)
+	ContextActionService:UnbindAction(VOLUME_NAV_ACTION)
+	releaseMenuNav()
 	if settingsGui then
 		settingsGui.Enabled = false
 	end
@@ -585,11 +823,16 @@ function SettingsUI.open()
 	if settingsGui then
 		settingsGui.Enabled = true
 	end
-	task.defer(function()
-		if uiOpen and isUsingGamepad() and closeBtn then
-			GuiService.SelectedObject = closeBtn
-		end
-	end)
+	volumeFocus = 1
+	if isUsingGamepad() then
+		holdMenuNav()
+		bindVolumeNav()
+		task.defer(function()
+			if uiOpen then
+				paintVolumeFocus()
+			end
+		end)
+	end
 end
 
 function SettingsUI.toggle()
@@ -637,6 +880,44 @@ function SettingsUI.init()
 	end)
 end
 
-UserInputService.LastInputTypeChanged:Connect(refreshCloseLabel)
+UserInputService.LastInputTypeChanged:Connect(function()
+	refreshCloseLabel()
+	refreshSettingsBGlyph()
+	if uiOpen and usingGamepad() then
+		holdMenuNav()
+		bindVolumeNav()
+		paintVolumeFocus()
+	elseif uiOpen then
+		ContextActionService:UnbindAction(VOLUME_NAV_ACTION)
+		releaseMenuNav()
+	end
+end)
+UserInputService.InputChanged:Connect(function(input)
+	if not uiOpen or not usingGamepad() or input.KeyCode ~= Enum.KeyCode.Thumbstick1 then
+		return
+	end
+	local x = input.Position.X
+	local y = input.Position.Y
+	if math.abs(x) < 0.55 and math.abs(y) < 0.55 then
+		return
+	end
+	if os.clock() < stickNudgeAt then
+		return
+	end
+	if math.abs(x) >= math.abs(y) then
+		stickNudgeAt = os.clock() + 0.12
+		nudgeOrMove(if x < 0 then -1 else 1)
+	else
+		stickNudgeAt = os.clock() + 0.28
+		stepVolumeFocus(if y > 0 then -1 else 1)
+	end
+end)
+InventoryState.onOpenChanged(function()
+	refreshSettingsBGlyph()
+end)
+playerGui:GetAttributeChangedSignal("OceanTD_SkillsBubblesOpen"):Connect(refreshSettingsBGlyph)
+playerGui:GetAttributeChangedSignal("OceanTD_JoinIntroBusy"):Connect(refreshSettingsBGlyph)
+playerGui:GetAttributeChangedSignal("OceanTD_StoreOpen"):Connect(refreshSettingsBGlyph)
+playerGui:GetAttributeChangedSignal("OceanTD_ReefReportOpen"):Connect(refreshSettingsBGlyph)
 
 return SettingsUI

@@ -306,8 +306,21 @@ local function ensureAStatusLabel(): TextLabel?
 	if not (tip and tip:IsA("GuiObject")) then
 		return nil
 	end
-	local existing = tip:FindFirstChild("Status")
-	if existing and existing:IsA("TextLabel") then
+	-- Reloading reparents Status onto the crosshair. A second shot used to miss it
+	-- and spawn another label, so both stayed on screen.
+	local existing: TextLabel? = nil
+	if crossRoot then
+		for _, d in ipairs(crossRoot:GetDescendants()) do
+			if d.Name == "Status" and d:IsA("TextLabel") then
+				if existing then
+					d:Destroy()
+				else
+					existing = d
+				end
+			end
+		end
+	end
+	if existing then
 		return existing
 	end
 	local status = Instance.new("TextLabel")
@@ -868,6 +881,11 @@ local function centerAimPos(vp: Vector2): Vector2
 	return vp * 0.5
 end
 
+local function critterHighlightCam(): boolean
+	return playerGui:GetAttribute("OceanTD_PathTourPov") == true
+		or playerGui:GetAttribute("OceanTD_UrchinCamBusy") == true
+end
+
 local function syncShootTipLabel()
 	local tip = crossRoot and crossRoot:FindFirstChild("ATip")
 	if not (tip and tip:IsA("TextLabel")) then
@@ -894,6 +912,23 @@ local function canShowAimCrosshair(): boolean
 		or playerGui:GetAttribute("OceanTD_ReefReportOpen") == true
 		or playerGui:GetAttribute("OceanTD_HideUiActive") == true
 	then
+		return false
+	end
+	return true
+end
+
+-- Backpack open: left stick still walks. Show a center crosshair so aim stays readable.
+local function canShowBackpackCrosshair(): boolean
+	if not isGamepadMode() then
+		return false
+	end
+	if not InventoryState.isOpen() then
+		return false
+	end
+	if PlacementController.isActive() or RelocateController.isActive() then
+		return false
+	end
+	if canShowAimCrosshair() then
 		return false
 	end
 	return true
@@ -1174,6 +1209,18 @@ local function ensureAimCrosshair(): Frame
 	return f
 end
 
+local function hideAimStatus()
+	if not crossRoot then
+		return
+	end
+	for _, d in ipairs(crossRoot:GetDescendants()) do
+		if d.Name == "Status" and d:IsA("TextLabel") then
+			d.Visible = false
+			d.Text = ""
+		end
+	end
+end
+
 local function setDefaultCursorHidden(hidden: boolean)
 	-- Hide Roblox's default mouse / gamepad virtual-cursor dot while our feed crosshair is up.
 	if hidden then
@@ -1185,9 +1232,12 @@ local function setDefaultCursorHidden(hidden: boolean)
 		pcall(function()
 			UserInputService.MouseIcon = ""
 		end)
-		pcall(function()
-			GamepadService:DisableGamepadCursor()
-		end)
+		-- Stop-waves confirm needs the gamepad selection highlight on CONFIRM.
+		if playerGui:GetAttribute("OceanTD_StopWaveConfirm") ~= true then
+			pcall(function()
+				GamepadService:DisableGamepadCursor()
+			end)
+		end
 	elseif savedMouseIconEnabled ~= nil then
 		UserInputService.MouseIconEnabled = savedMouseIconEnabled
 		pcall(function()
@@ -1206,6 +1256,10 @@ local function setAimVisible(on: boolean)
 	end
 	local stickAim = on and usesStickMovedAim()
 	if on then
+		local tip = f:FindFirstChild("ATip")
+		if tip and tip:IsA("GuiObject") then
+			tip.Visible = not critterHighlightCam()
+		end
 		local vp = viewportSize()
 		if stickAim then
 			if aimPos.X < 1 and aimPos.Y < 1 then
@@ -1217,6 +1271,9 @@ local function setAimVisible(on: boolean)
 		end
 		f.Position = UDim2.fromOffset(aimPos.X, aimPos.Y)
 		syncShootTipLabel()
+	end
+	if not on then
+		hideAimStatus()
 	end
 	setDefaultCursorHidden(on)
 	-- Only Fish Cam steals left stick / freezes the avatar for free-aim.
@@ -1244,7 +1301,9 @@ local function bindAimLoop(on: boolean)
 		return
 	end
 	aimConn = RunService.RenderStepped:Connect(function(dt)
-		if not canShowAimCrosshair() then
+		local feed = canShowAimCrosshair()
+		local pack = not feed and canShowBackpackCrosshair()
+		if not feed and not pack then
 			if aimWanted then
 				aimWanted = false
 				setAimVisible(false)
@@ -1253,6 +1312,28 @@ local function bindAimLoop(on: boolean)
 					aimConn = nil
 				end
 			end
+			return
+		end
+		if pack then
+			local f = crossRoot
+			if not f or not f.Visible then
+				f = ensureAimCrosshair()
+				f.Visible = true
+				if aimGui then
+					aimGui.Enabled = true
+				end
+				setDefaultCursorHidden(true)
+			end
+			local vp = viewportSize()
+			local pos = vp * 0.5
+			f.Position = UDim2.fromOffset(pos.X, pos.Y)
+			local tip = f:FindFirstChild("ATip")
+			if tip and tip:IsA("GuiObject") then
+				tip.Visible = false
+			end
+			playerGui:SetAttribute(ATTR_AIM_ACTIVE, false)
+			playerGui:SetAttribute("OceanTD_FishFeedAimCenter", false)
+			setLocomotionLocked(false)
 			return
 		end
 		local stickAim = usesStickMovedAim()
@@ -1286,6 +1367,11 @@ local function bindAimLoop(on: boolean)
 		end
 		if f then
 			f.Position = UDim2.fromOffset(aimPos.X, aimPos.Y)
+			local tip = f:FindFirstChild("ATip")
+			if tip and tip:IsA("GuiObject") then
+				-- Path tour has no feed button. Keep the crosshair, hide the R1/A badge.
+				tip.Visible = not critterHighlightCam()
+			end
 		end
 		syncShootTipLabel()
 	end)
@@ -1302,10 +1388,29 @@ local function syncFeedHandOrb()
 end
 
 local function refreshAimMode()
-	local want = canShowAimCrosshair()
-	bindAimLoop(want)
-	if want then
+	local feed = canShowAimCrosshair()
+	local pack = not feed and canShowBackpackCrosshair()
+	bindAimLoop(feed or pack)
+	if feed then
 		setAimVisible(true)
+	elseif pack then
+		aHeld = false
+		local f = ensureAimCrosshair()
+		f.Visible = true
+		if aimGui then
+			aimGui.Enabled = true
+		end
+		local vp = viewportSize()
+		local pos = vp * 0.5
+		f.Position = UDim2.fromOffset(pos.X, pos.Y)
+		local tip = f:FindFirstChild("ATip")
+		if tip and tip:IsA("GuiObject") then
+			tip.Visible = false
+		end
+		setDefaultCursorHidden(true)
+		playerGui:SetAttribute(ATTR_AIM_ACTIVE, false)
+		playerGui:SetAttribute("OceanTD_FishFeedAimCenter", false)
+		setLocomotionLocked(false)
 	else
 		setAimVisible(false)
 		aHeld = false
@@ -1356,6 +1461,11 @@ local function onInput(input: InputObject, gameProcessed: boolean)
 		return
 	end
 	local shootKey = feedButtonKey()
+	if critterHighlightCam()
+		and (input.KeyCode == Enum.KeyCode.ButtonR1 or input.KeyCode == Enum.KeyCode.ButtonA)
+	then
+		return
+	end
 	if input.KeyCode == shootKey and input.UserInputState == Enum.UserInputState.Begin then
 		if canShowAimCrosshair() and not aHeld then
 			aHeld = true
@@ -1410,6 +1520,9 @@ UserInputService.LastInputTypeChanged:Connect(refreshAimMode)
 playerGui:GetAttributeChangedSignal("OceanTD_CamCycleMode"):Connect(refreshAimMode)
 playerGui:GetAttributeChangedSignal("OceanTD_ReloadFullAutoTrial"):Connect(refreshFullAutoLoop)
 InventoryState.onOpenChanged(refreshAimMode)
+RelocateController.onActiveChanged(function()
+	refreshAimMode()
+end)
 WaveSim.onHud(function()
 	refreshAimMode()
 	refreshFullAutoLoop()

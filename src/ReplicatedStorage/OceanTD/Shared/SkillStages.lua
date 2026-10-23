@@ -196,7 +196,7 @@ local STAGE_COST: { [string]: { [number]: number } } = {
 		[5] = 120,
 		[6] = 160,
 		[7] = 190,
-		[8] = 230,
+		[8] = 360,
 	},
 	ReloadSpeed = {
 		[2] = 20,
@@ -205,7 +205,7 @@ local STAGE_COST: { [string]: { [number]: number } } = {
 		[5] = 50,
 		[6] = 75,
 		[7] = 100,
-		[8] = 200,
+		[8] = 220,
 	},
 	AutoRoll = {
 		[2] = 20,
@@ -214,7 +214,7 @@ local STAGE_COST: { [string]: { [number]: number } } = {
 		[5] = 50,
 		[6] = 60,
 		[7] = 70,
-		[8] = 80,
+		[8] = 400,
 	},
 	Skip = {
 		[2] = 40,
@@ -223,7 +223,7 @@ local STAGE_COST: { [string]: { [number]: number } } = {
 		[5] = 100,
 		[6] = 120,
 		[7] = 160,
-		[8] = 1000,
+		[8] = 2000,
 	},
 	WaveSpeed = {
 		[2] = 100,
@@ -237,7 +237,7 @@ local STAGE_COST: { [string]: { [number]: number } } = {
 		[5] = 200,
 		[6] = 300,
 		[7] = 400,
-		[8] = 600,
+		[8] = 1200,
 	},
 	RHealth = {
 		[2] = 30,
@@ -246,7 +246,7 @@ local STAGE_COST: { [string]: { [number]: number } } = {
 		[5] = 120,
 		[6] = 160,
 		[7] = 200,
-		[8] = 250,
+		[8] = 800,
 	},
 	EarnMore = {
 		[2] = 200,
@@ -255,7 +255,7 @@ local STAGE_COST: { [string]: { [number]: number } } = {
 		[5] = 500,
 		[6] = 700,
 		[7] = 900,
-		[8] = 1000,
+		[8] = 1500,
 	},
 }
 

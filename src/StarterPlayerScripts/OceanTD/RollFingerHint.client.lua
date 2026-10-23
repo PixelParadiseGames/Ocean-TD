@@ -6,10 +6,11 @@
 	  roll → await (+ Auto Plant HUD intro center→dock) → seed spin → auto-plant
 	  → waves
 	  → (after first wave-session Finish) if defeat: roll again → skills; if win: skills
-	  → plotSize → plotSizeUpgrade → closePlotSize → closeSkills
+	  → plotSize → plotSizeUpgrade → closePlotSize → otherSkillsExplainer → closeSkills
 
 	Manual Plant chapter (after closeSkills):
-	  roll → await → backpack → equip → plot → upgrade → hue → plant → closeBackpack → cam
+	  roll → await → backpack → selectCoral → relocateDrag → relocateConfirm
+	  → equip → plot → upgrade → hue → plant → closeBackpack → cam
 	  (reselectCoral if inspect closes mid-upgrade / mid-hue)
 
 	After join intro ends (Skip Intro gone): bottom-left Skip Training clears all finger steps + tutorial gates.
@@ -17,6 +18,7 @@
 
 local GuiService = game:GetService("GuiService")
 local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 local Workspace = game:GetService("Workspace")
@@ -26,6 +28,7 @@ local playerGui = player:WaitForChild("PlayerGui") :: PlayerGui
 
 local oceanRoot = ReplicatedStorage:WaitForChild("OceanTD")
 local UiViewportTags = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiViewportTags"))
+local UiPopupScale = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiPopupScale"))
 local UiTheme = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiTheme"))
 local LeftHudLayout = require(oceanRoot:WaitForChild("Shared"):WaitForChild("LeftHudLayout"))
 
@@ -35,24 +38,35 @@ local SeedWheelRevealApi = require(script.Parent:WaitForChild("SeedWheelRevealAp
 local WaveSim = require(script.Parent:WaitForChild("WaveSim"))
 local WaveSlotSummary = require(script.Parent:WaitForChild("WaveSlotSummary"))
 local SkillPowerUpUI = require(script.Parent:WaitForChild("SkillPowerUpUI"))
+local SkillsBubbleSim = require(script.Parent:WaitForChild("SkillsBubbleSim"))
 local CoralInspectPanel = require(script.Parent:WaitForChild("CoralInspectPanel"))
 local PlacementController = require(script.Parent:WaitForChild("PlacementController"))
+local RelocateController = require(script.Parent:WaitForChild("RelocateController"))
 local RelocatePickHover = require(script.Parent:WaitForChild("RelocatePickHover"))
+local PlacedCoralIndex = require(script.Parent:WaitForChild("PlacedCoralIndex"))
 
 local HINT_ATTR = "OceanTD_RollFingerHint"
 local CHAPTER_ATTR = "OceanTD_TutorialChapter" -- "autoPlant" | "manualPlant"
 local AUTO_PLANT_DONE_ATTR = "OceanTD_TutorialAutoPlantDone"
 local HUE_PLACE_ATTR = "OceanTD_TutorialHuePlaceId"
+local OTHER_SKILLS_EXPLAINER_ATTR = "OceanTD_OtherSkillsExplainerBusy"
 local GUI_NAME = "OceanTD_RollFingerHint"
 local FINGER_PATH = "Plots.IntroElements.Finger"
 local PLANT_FIRST_CORAL_SOUND_ID = "rbxassetid://139678980175457"
 local HOW_MANY_WAVES_SOUND_ID = "rbxassetid://135876579370482"
 local WAVE_EXPLAINER_SOUND_ID = "rbxassetid://72069463774995"
-local FINGER_CAM_SOUND_ID = "rbxassetid://80359058869110"
+local FINGER_CAM_SOUND_ID = "rbxassetid://80359058869110" -- legacy; wave-3 / free-cam use dedicated clips
+local FISH_CAM_VO_ID = "rbxassetid://116779253231128"
+local FREE_CAM_VO_ID = "rbxassetid://100197872909244"
 local FINGER_SKILLS_SOUND_ID = "rbxassetid://125491130885745"
 local TRY_WAVES_AGAIN_SOUND_ID = "rbxassetid://107210999893937"
 local UPGRADE_EXPLAINER_VO_ID = "rbxassetid://83510865258719"
 local HUE_EXPLAINER_VO_ID = "rbxassetid://107456758453409"
+local AUTO_PLANT_EXPLAINER_VO_ID = "rbxassetid://108713452088272"
+local MORE_UPGRADES_EXPLAINER_VO_ID = "rbxassetid://135424394390803"
+local ROLL_AGAIN_MANUAL_PLANT_VO_ID = "rbxassetid://136401393424131"
+local MOVE_CORAL_EXPLAINER_VO_ID = "rbxassetid://114674116035117"
+local SMARTER_THAN_GUPPY_VO_ID = "rbxassetid://87436646085490"
 local TRY_WAVES_AGAIN_DELAY_SEC = 3
 local TutorialVo = require(script.Parent:WaitForChild("TutorialVo"))
 local WaveArrowPreview = require(script.Parent:WaitForChild("WaveArrowPreview"))
@@ -107,6 +121,9 @@ local TIP_ANCHOR = Vector2.new(0.32, 0.12)
 export type HintMode =
 	"roll"
 	| "backpack"
+	| "selectCoral"
+	| "relocateDrag"
+	| "relocateConfirm"
 	| "equip"
 	| "plot"
 	| "upgrade"
@@ -121,12 +138,16 @@ export type HintMode =
 	| "plotSize"
 	| "plotSizeUpgrade"
 	| "closePlotSize"
+	| "otherSkillsExplainer"
 	| "closeSkills"
 	| "cam"
 
 local MODE_SET: { [string]: boolean } = {
 	roll = true,
 	backpack = true,
+	selectCoral = true,
+	relocateDrag = true,
+	relocateConfirm = true,
 	equip = true,
 	plot = true,
 	upgrade = true,
@@ -141,12 +162,26 @@ local MODE_SET: { [string]: boolean } = {
 	plotSize = true,
 	plotSizeUpgrade = true,
 	closePlotSize = true,
+	otherSkillsExplainer = true,
 	closeSkills = true,
 	cam = true,
 }
 
+-- Manual-plant relocate teach: shrink to 75%, slide ±10% viewport width, rest 1s.
+local RELOCATE_DRAG_SCALE = 0.75
+local RELOCATE_SLIDE_FRAC = 0.10
+local RELOCATE_SLIDE_SEC = 0.4
+local RELOCATE_APPROACH_SEC = 0.55
+local RELOCATE_RECOVER_SEC = 0.35
+local RELOCATE_REST_SEC = 1
+local RELOCATE_BELOW_PX = 140
+local selectCoralPlaceId: string? = nil
+local relocateTeachMoved = false
+
 local SLOW_TRAVEL_MODES: { [string]: boolean } = {
 	backpack = true,
+	selectCoral = true,
+	relocateConfirm = true,
 	upgrade = true,
 	hue = true,
 	hueReroll = true,
@@ -166,6 +201,7 @@ local conn: RBXScriptConnection? = nil
 local waitingWaveEnd = false
 local wavesFingerConsumed = false
 local wavesFingerDelayGen = 0
+local skillsFingerAfterVoGen = 0
 local autoPlantWavesArmed = false
 local tapBurstRng = Random.new()
 local fingerTutorialSkipped = false
@@ -176,13 +212,23 @@ local howManyWavesSoundPlayed = false
 local waveExplainerSoundPlayed = false
 local upgradeExplainerVoPlayed = false
 local hueExplainerVoPlayed = false
-local fingerCamSoundPlayed = false
+local autoPlantExplainerVoPlayed = false
+local moreUpgradesExplainerVoPlayed = false
+local rollAgainManualPlantVoPlayed = false
+local moveCoralExplainerVoPlayed = false
+local smarterThanGuppyVoPlayed = false
+local fingerCamSoundPlayed = false -- legacy shared; wave-3 / free-cam use flags below
+local fishCamVoPlayed = false
+local freeCamVoPlayed = false
 local fingerSkillsSoundPlayed = false
 local tryWavesAgainSoundPlayed = false
 local tryWavesAgainGen = 0
 local camVoFinished = false
+-- Manual-plant Free Cam teach: point at Start Waves only after that VO finishes.
+local pendingStartWavesFinger = false
 local camButtonClicked = false
 local wavesHudWasRunning = false
+local lastHintAttr: any = nil
 local JOIN_INTRO_BUSY_ATTR = "OceanTD_JoinIntroBusy"
 local SKIP_TUTORIAL_GUI = "OceanTD_FingerTutorialSkip"
 local SKIP_BLUE = Color3.fromRGB(55, 160, 230) -- gradient top
@@ -195,7 +241,8 @@ local function playPlantFirstCoralSoundOnce()
 		return
 	end
 	plantFirstCoralSoundPlayed = true
-	TutorialVo.play(PLANT_FIRST_CORAL_SOUND_ID, "OceanTD_PlantFirstCoral")
+	-- After coral move in manual plant; queue if Move Coral explainer is still speaking.
+	TutorialVo.playWhenIdle(PLANT_FIRST_CORAL_SOUND_ID, "OceanTD_PlantFirstCoral")
 end
 
 local function playHowManyWavesSoundOnce()
@@ -236,20 +283,62 @@ local function tryScheduleTryWavesAgain()
 			return
 		end
 		tryWavesAgainSoundPlayed = true
-		TutorialVo.play(TRY_WAVES_AGAIN_SOUND_ID, "OceanTD_TryWavesAgain", { volume = 4 })
+		-- Never cut a priority line (out of reef health) or other active VO.
+		-- Finger to Start Waves waits until this clip (and anything queued ahead of it) ends.
+		TutorialVo.playWhenIdle(TRY_WAVES_AGAIN_SOUND_ID, "OceanTD_TryWavesAgain", {
+			volume = 4,
+			onEnded = function()
+				if not pendingStartWavesFinger or fingerTutorialSkipped then
+					return
+				end
+				pendingStartWavesFinger = false
+				local running = false
+				pcall(function()
+					running = require(script.Parent:WaitForChild("WaveSim")).isRunning()
+				end)
+				if running then
+					return
+				end
+				wavesFingerConsumed = false
+				playerGui:SetAttribute("OceanTD_TutorialLockStartWaves", false)
+				playerGui:SetAttribute(HINT_ATTR, "waves")
+			end,
+		})
 	end)
 end
 
 local function playFingerCamSoundOnce()
-	if fingerCamSoundPlayed or fingerTutorialSkipped then
-		-- Already played earlier this session — don't block "try waves again".
+	if fingerTutorialSkipped then
+		camVoFinished = true
+		return
+	end
+	-- Wave 3: Fish Cam teach (during waves).
+	if playerGui:GetAttribute("OceanTD_Wave3FishCamHint") == true then
+		if fishCamVoPlayed then
+			camVoFinished = true
+			return
+		end
+		fishCamVoPlayed = true
+		fingerCamSoundPlayed = true
+		camVoFinished = false
+		TutorialVo.play(FISH_CAM_VO_ID, "OceanTD_FishCam", {
+			volume = 4,
+			onEnded = function()
+				camVoFinished = true
+			end,
+		})
+		return
+	end
+	-- Manual plant: Free Cam teach after backpack close — wait for guppy VO.
+	if freeCamVoPlayed then
 		camVoFinished = true
 		tryScheduleTryWavesAgain()
 		return
 	end
+	freeCamVoPlayed = true
 	fingerCamSoundPlayed = true
 	camVoFinished = false
-	TutorialVo.play(FINGER_CAM_SOUND_ID, "OceanTD_FingerCam", {
+	TutorialVo.playWhenIdle(FREE_CAM_VO_ID, "OceanTD_FreeCam", {
 		volume = 4,
 		onEnded = function()
 			camVoFinished = true
@@ -263,8 +352,29 @@ local function playFingerSkillsSoundOnce()
 		return
 	end
 	fingerSkillsSoundPlayed = true
-	-- Don't cut "out of reef health" (or any active narrator) — queue until idle.
-	TutorialVo.playWhenIdle(FINGER_SKILLS_SOUND_ID, "OceanTD_FingerSkills", { volume = 4 })
+	-- Skills button click: speak now. Override so a leftover clip can't swallow it.
+	TutorialVo.playOverride(FINGER_SKILLS_SOUND_ID, "OceanTD_FingerSkills", { volume = 4 })
+end
+
+-- True while the skills-finger teach step is active (or just advanced by heartbeat).
+local function skillsTeachStepActive(): boolean
+	local v = playerGui:GetAttribute(HINT_ATTR)
+	return v == "skills" or (v == "plotSize" and not fingerSkillsSoundPlayed)
+end
+
+local function onSkillsOpenedForTutorial()
+	if fingerTutorialSkipped or fingerSkillsSoundPlayed then
+		return
+	end
+	local v = playerGui:GetAttribute(HINT_ATTR)
+	-- Accept "skills", or "plotSize" if heartbeat advanced before VO could fire.
+	if v ~= "skills" and v ~= "plotSize" then
+		return
+	end
+	playFingerSkillsSoundOnce()
+	if playerGui:GetAttribute(HINT_ATTR) == "skills" then
+		playerGui:SetAttribute(HINT_ATTR, "plotSize")
+	end
 end
 
 local function playUpgradeExplainerOnce()
@@ -283,6 +393,47 @@ local function playHueExplainerOnce()
 	hueExplainerVoPlayed = true
 	-- After first upgrade → hue finger; waits until upgrade explainer finishes.
 	TutorialVo.playWhenIdle(HUE_EXPLAINER_VO_ID, "OceanTD_HueExplainer")
+end
+
+local function playAutoPlantExplainerOnce()
+	if autoPlantExplainerVoPlayed or fingerTutorialSkipped then
+		return
+	end
+	autoPlantExplainerVoPlayed = true
+	TutorialVo.playWhenIdle(AUTO_PLANT_EXPLAINER_VO_ID, "OceanTD_AutoPlantExplainer")
+end
+
+local function playMoreUpgradesExplainerOnce()
+	if moreUpgradesExplainerVoPlayed or fingerTutorialSkipped then
+		return
+	end
+	moreUpgradesExplainerVoPlayed = true
+	TutorialVo.playWhenIdle(MORE_UPGRADES_EXPLAINER_VO_ID, "OceanTD_MoreUpgradesExplainer")
+end
+
+local function playRollAgainManualPlantOnce()
+	if rollAgainManualPlantVoPlayed or fingerTutorialSkipped then
+		return
+	end
+	rollAgainManualPlantVoPlayed = true
+	TutorialVo.playWhenIdle(ROLL_AGAIN_MANUAL_PLANT_VO_ID, "OceanTD_RollAgainManualPlant")
+end
+
+local function playMoveCoralExplainerOnce()
+	if moveCoralExplainerVoPlayed or fingerTutorialSkipped then
+		return
+	end
+	moveCoralExplainerVoPlayed = true
+	TutorialVo.playWhenIdle(MOVE_CORAL_EXPLAINER_VO_ID, "OceanTD_MoveCoralExplainer")
+end
+
+local function playSmarterThanGuppyOnce()
+	if smarterThanGuppyVoPlayed or fingerTutorialSkipped then
+		return
+	end
+	smarterThanGuppyVoPlayed = true
+	-- After hue change + hue explainer finishes.
+	TutorialVo.playWhenIdle(SMARTER_THAN_GUPPY_VO_ID, "OceanTD_SmarterThanGuppy")
 end
 
 local function onCamButtonClickedForTryWaves()
@@ -576,6 +727,113 @@ local function tutorialHueCoralScreenCenter(): Vector2?
 	return Vector2.new(sp.X, sp.Y)
 end
 
+local function coralScreenCenterForPlaceId(placeId: string): Vector2?
+	local part = RelocatePickHover.findByPlaceId(placeId)
+	local cam = Workspace.CurrentCamera
+	if not (part and cam) then
+		return nil
+	end
+	local sp, onScreen = cam:WorldToViewportPoint(part.Position)
+	if not onScreen or sp.Z <= 0 then
+		return nil
+	end
+	return Vector2.new(sp.X, sp.Y)
+end
+
+local function ensureMidPlotCoralPlaceId(): string?
+	if typeof(selectCoralPlaceId) == "string" and selectCoralPlaceId ~= "" then
+		if RelocatePickHover.findByPlaceId(selectCoralPlaceId) then
+			return selectCoralPlaceId
+		end
+	end
+	local plot = ClientPlot.get()
+	if not plot then
+		return nil
+	end
+	local parts = PlacedCoralIndex.getParts(plot.plotId)
+	local center = plot.cframe.Position
+	local best: BasePart? = nil
+	local bestD = math.huge
+	for _, part in ipairs(parts) do
+		local dx = part.Position.X - center.X
+		local dz = part.Position.Z - center.Z
+		local d = dx * dx + dz * dz
+		if d < bestD then
+			bestD = d
+			best = part
+		end
+	end
+	if not best then
+		return nil
+	end
+	local pid = best:GetAttribute("OceanTD_PlaceId")
+	if typeof(pid) ~= "string" or pid == "" then
+		return nil
+	end
+	selectCoralPlaceId = pid
+	return pid
+end
+
+-- Manual plant: pan Plot Cam so the teach coral (and finger) sit on-screen.
+local function focusPlotCamOnSelectCoral()
+	local pid = ensureMidPlotCoralPlaceId()
+	if not pid then
+		return
+	end
+	local part = RelocatePickHover.findByPlaceId(pid)
+	if not part then
+		return
+	end
+	local worldPos = part.Position
+	task.spawn(function()
+		if playerGui:GetAttribute("OceanTD_CamCycleMode") ~= "plotcam" then
+			playerGui:SetAttribute("OceanTD_ForceCamMode", "plotcam")
+			playerGui:SetAttribute("OceanTD_ForceCamStamp", os.clock())
+		end
+		playerGui:SetAttribute("OceanTD_EnsurePlotCam", os.clock())
+		local deadline = os.clock() + 1.5
+		while os.clock() < deadline do
+			local ok, PlotCam2 = pcall(function()
+				return require(script.Parent:WaitForChild("PlotCam2"))
+			end)
+			if ok and typeof(PlotCam2) == "table" and PlotCam2.isActive and PlotCam2.isActive() then
+				if PlotCam2.focusWorldPoint then
+					PlotCam2.focusWorldPoint(worldPos)
+				end
+				-- Snap the Scriptable lens to the new focus this frame.
+				playerGui:SetAttribute("OceanTD_EnsurePlotCam", os.clock())
+				return
+			end
+			task.wait()
+		end
+	end)
+end
+
+local function midPlotCoralScreenCenter(): Vector2?
+	local pid = ensureMidPlotCoralPlaceId()
+	if not pid then
+		return nil
+	end
+	return coralScreenCenterForPlaceId(pid)
+end
+
+local function relocateMoveDiscScreenCenter(): Vector2?
+	-- guiPosFromWorld / WorldToViewport — same space as selectCoral (not Billboard AbsolutePosition).
+	local c = RelocateController.getMoveHandleScreenCenter()
+	if not c or (c.X < 12 and c.Y < 12) then
+		return nil
+	end
+	return clampFingerToViewport(c)
+end
+
+local function relocateConfirmScreenCenter(): Vector2?
+	local c = RelocateController.getConfirmScreenCenter()
+	if not c or (c.X < 12 and c.Y < 12) then
+		return nil
+	end
+	return clampFingerToViewport(c)
+end
+
 local function viewportCenter(): Vector2
 	local cam = Workspace.CurrentCamera
 	local vp = if cam then cam.ViewportSize else Vector2.new(1280, 720)
@@ -811,6 +1069,7 @@ local function destroySkipTutorialBtn()
 		GuiService.SelectedObject = nil
 	end
 	skipTutorialBtn = nil
+	game:GetService("ContextActionService"):UnbindAction("OceanTD_SkipTrainingR1")
 	if skipTutorialGui and skipTutorialGui.Parent then
 		skipTutorialGui:Destroy()
 	end
@@ -841,6 +1100,7 @@ local function skipEntireFingerTutorial()
 	playerGui:SetAttribute("OceanTD_TutorialHueResume", nil)
 	playerGui:SetAttribute("OceanTD_TutorialGateBackpack", false)
 	playerGui:SetAttribute("OceanTD_TutorialGateWaves", false)
+	playerGui:SetAttribute("OceanTD_TutorialLockStartWaves", false)
 	playerGui:SetAttribute("OceanTD_TutorialGateLeftHud", false)
 	playerGui:SetAttribute("OceanTD_TutorialGateCam", false)
 	playerGui:SetAttribute("OceanTD_TutorialGateFreeCam", false)
@@ -849,8 +1109,15 @@ local function skipEntireFingerTutorial()
 	playerGui:SetAttribute("OceanTD_TutorialSummaryFinished", nil)
 	playerGui:SetAttribute("OceanTD_TutorialRollThenSkills", nil)
 	playerGui:SetAttribute("OceanTD_FingerTutorialLock", false)
+	playerGui:SetAttribute(OTHER_SKILLS_EXPLAINER_ATTR, false)
 	playerGui:SetAttribute(CHAPTER_ATTR, nil)
 	playerGui:SetAttribute(AUTO_PLANT_DONE_ATTR, nil)
+	selectCoralPlaceId = nil
+	relocateTeachMoved = false
+	skillsFingerAfterVoGen += 1
+	pcall(function()
+		SkillsBubbleSim.cancelOtherSkillsExplainer()
+	end)
 	if playerGui:GetAttribute("OceanTD_Wave3FishCamHint") == true then
 		playerGui:SetAttribute("OceanTD_Wave3FishCamHint", nil)
 	end
@@ -940,6 +1207,7 @@ local function ensureSkipTutorialBtn()
 	btn.Selectable = true
 	btn.Active = true
 	btn.ZIndex = 3
+	btn.ClipsDescendants = false
 	btn.Parent = sg
 	local corner = Instance.new("UICorner")
 	corner.CornerRadius = UDim.new(0, 8)
@@ -975,6 +1243,95 @@ local function ensureSkipTutorialBtn()
 	lbl.ZIndex = 4
 	lbl.Active = false
 	lbl.Parent = btn
+	UiPopupScale.attachHud(btn)
+
+	-- 720p+: sit between the lifted $D count and the reef bar. Phone stays on the corner.
+	local function layoutSkipTraining()
+		local cam = Workspace.CurrentCamera
+		local vp = if cam then cam.ViewportSize else Vector2.new(1280, 720)
+		if UiViewportTags.is720p(vp) then
+			local scale = UiPopupScale.getHud()
+			local reefTop = 10 + 26 * scale
+			local bottom = math.floor(reefTop + 16 + 0.5)
+			btn.Position = UDim2.new(0, 28, 1, -bottom)
+		else
+			btn.Position = UDim2.new(0, 28, 1, -28)
+		end
+	end
+	layoutSkipTraining()
+	local skipLayoutConn: RBXScriptConnection? = nil
+	local function bindSkipLayout(cam: Camera)
+		if skipLayoutConn then
+			skipLayoutConn:Disconnect()
+		end
+		skipLayoutConn = cam:GetPropertyChangedSignal("ViewportSize"):Connect(layoutSkipTraining)
+	end
+	local liveCam = Workspace.CurrentCamera
+	if liveCam then
+		bindSkipLayout(liveCam)
+	end
+	Workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function()
+		layoutSkipTraining()
+		local nextCam = Workspace.CurrentCamera
+		if nextCam then
+			bindSkipLayout(nextCam)
+		end
+	end)
+
+	local r1Tip = Instance.new("TextLabel")
+	r1Tip.Name = "_OceanTD_SkipR1Glyph"
+	r1Tip.AnchorPoint = Vector2.new(0, 1)
+	r1Tip.Position = UDim2.new(1, 8, 0, -4)
+	r1Tip.Size = UDim2.fromOffset(36, 26)
+	r1Tip.BackgroundColor3 = Color3.fromRGB(200, 45, 50)
+	r1Tip.BorderSizePixel = 0
+	r1Tip.Font = Enum.Font.GothamBold
+	r1Tip.Text = "R1"
+	r1Tip.TextColor3 = Color3.new(1, 1, 1)
+	r1Tip.TextScaled = true
+	r1Tip.ZIndex = btn.ZIndex + 6
+	r1Tip.Active = false
+	r1Tip.Visible = false
+	r1Tip.Parent = btn
+	local r1Corner = Instance.new("UICorner")
+	r1Corner.CornerRadius = UDim.new(1, 0)
+	r1Corner.Parent = r1Tip
+	local r1Pad = Instance.new("UIPadding")
+	r1Pad.PaddingTop = UDim.new(0.12, 0)
+	r1Pad.PaddingBottom = UDim.new(0.12, 0)
+	r1Pad.PaddingLeft = UDim.new(0.08, 0)
+	r1Pad.PaddingRight = UDim.new(0.08, 0)
+	r1Pad.Parent = r1Tip
+
+	local function skipTrainingR1Ready(): boolean
+		if not btn.Parent or not btn.Visible then
+			return false
+		end
+		if WaveSim.isRunning() or InventoryState.isOpen() then
+			return false
+		end
+		if PlacementController.isActive() or RelocateController.isActive() then
+			return false
+		end
+		if InventoryState.isSettingsOpen() then
+			return false
+		end
+		return true
+	end
+
+	local glyphConn: RBXScriptConnection
+	glyphConn = RunService.Heartbeat:Connect(function()
+		if not btn.Parent then
+			glyphConn:Disconnect()
+			return
+		end
+		local t = UserInputService:GetLastInputType()
+		local pad = t == Enum.UserInputType.Gamepad1
+			or t == Enum.UserInputType.Gamepad2
+			or t == Enum.UserInputType.Gamepad3
+			or t == Enum.UserInputType.Gamepad4
+		r1Tip.Visible = pad and skipTrainingR1Ready()
+	end)
 
 	local skipping = false
 	local function flashThenSkip()
@@ -989,6 +1346,13 @@ local function ensureSkipTutorialBtn()
 
 	btn.Activated:Connect(flashThenSkip)
 	btn.MouseButton1Click:Connect(flashThenSkip)
+	game:GetService("ContextActionService"):BindActionAtPriority("OceanTD_SkipTrainingR1", function(_name, state)
+		if state ~= Enum.UserInputState.Begin or not skipTrainingR1Ready() then
+			return Enum.ContextActionResult.Pass
+		end
+		flashThenSkip()
+		return Enum.ContextActionResult.Sink
+	end, false, Enum.ContextActionPriority.High.Value + 5, Enum.KeyCode.ButtonR1)
 
 	skipTutorialGui = sg
 	skipTutorialBtn = btn
@@ -1017,9 +1381,11 @@ syncSkipTutorialBtn = function()
 end
 
 local function ensureGui(imageId: string): ImageLabel?
+	local fingerPx = math.max(1, math.floor(FINGER_PX * UiPopupScale.getHud() + 0.5))
 	if gui and finger and finger.Parent then
 		gui.DisplayOrder = FINGER_DISPLAY_ORDER
 		finger.Image = imageId
+		finger.Size = UDim2.fromOffset(fingerPx, fingerPx)
 		return finger
 	end
 	destroyGui()
@@ -1042,7 +1408,7 @@ local function ensureGui(imageId: string): ImageLabel?
 	img.Name = "Finger"
 	img.BackgroundTransparency = 1
 	img.AnchorPoint = TIP_ANCHOR
-	img.Size = UDim2.fromOffset(FINGER_PX, FINGER_PX)
+	img.Size = UDim2.fromOffset(fingerPx, fingerPx)
 	img.Image = imageId
 	img.ScaleType = Enum.ScaleType.Fit
 	img.ZIndex = 10
@@ -1106,6 +1472,20 @@ local function resolveTarget(mode: HintMode): Vector2?
 		end
 		local c = InventoryState.getItemSlotScreenCenter(id)
 		return if c then absoluteCenterToInsetInclusive(c) else nil
+	elseif mode == "selectCoral" then
+		return midPlotCoralScreenCenter() or plotScreenCenter()
+	elseif mode == "relocateDrag" then
+		-- Always the taught/selected coral — never fall back to a different mid-plot pick.
+		local disc = relocateMoveDiscScreenCenter()
+		if disc then
+			return disc
+		end
+		if typeof(selectCoralPlaceId) == "string" and selectCoralPlaceId ~= "" then
+			return coralScreenCenterForPlaceId(selectCoralPlaceId)
+		end
+		return nil
+	elseif mode == "relocateConfirm" then
+		return relocateConfirmScreenCenter()
 	elseif mode == "plot" then
 		return plotTapScreenPos()
 	elseif mode == "reselectCoral" then
@@ -1185,8 +1565,10 @@ local function restOf(mode: HintMode, btn: Vector2): Vector2
 		return btn:Lerp(viewportCenter(), alpha)
 	elseif mode == "plot" then
 		return plotCoralSlotRest(btn)
-	elseif mode == "reselectCoral" then
+	elseif mode == "selectCoral" or mode == "reselectCoral" then
 		return Vector2.new(btn.X, btn.Y + PLOT_REST_DOWN_PX)
+	elseif mode == "relocateConfirm" then
+		return Vector2.new(btn.X, btn.Y + BELOW_PAD_PX)
 	elseif mode == "skills" or mode == "closeSkills" or mode == "cam" or mode == "roll" then
 		return btn:Lerp(viewportCenter(), WAVE_REST_TOWARD_CENTER)
 	end
@@ -1237,6 +1619,8 @@ end
 
 local function beginManualPlantChapter()
 	autoPlantWavesArmed = false
+	selectCoralPlaceId = nil
+	relocateTeachMoved = false
 	playerGui:SetAttribute(CHAPTER_ATTR, "manualPlant")
 	playerGui:SetAttribute(AUTO_PLANT_DONE_ATTR, nil)
 	pcall(function()
@@ -1264,6 +1648,7 @@ local function beginManualPlantChapter()
 	end)
 	-- Teach BUILD again from a fresh roll.
 	playerGui:SetAttribute("OceanTD_TutorialGateBackpack", true)
+	playRollAgainManualPlantOnce()
 	playerGui:SetAttribute(HINT_ATTR, "roll")
 end
 
@@ -1273,7 +1658,13 @@ local function beginCamAfterManualPlant()
 	end
 	-- Free Cam stays locked through manual plant; unlock only after backpack closes.
 	playerGui:SetAttribute("OceanTD_TutorialGateFreeCam", false)
+	-- Hint "cam" first so requestSetEnabled gates allow ON during manualPlant chapter.
 	playerGui:SetAttribute(HINT_ATTR, "cam")
+	-- Manual plant turned Auto Plant off; restore ON after they finish and close backpack.
+	pcall(function()
+		local AutoPlantUI = require(script.Parent:WaitForChild("AutoPlantUI"))
+		AutoPlantUI.requestTutorialPrep(true)
+	end)
 end
 
 local function playAutoPlantChapterIntro()
@@ -1289,11 +1680,239 @@ local function playAutoPlantChapterIntro()
 	end)
 end
 
+local function startRelocateDragHint(myGen: number)
+	task.spawn(function()
+		local src = waitFingerSource(8)
+		if myGen ~= gen or not src then
+			return
+		end
+		local imageId = resolveFingerImage(src)
+		if not imageId then
+			warn("[RollFingerHint] IntroElements.Finger has no Image/Decal")
+			return
+		end
+		local img = ensureGui(imageId)
+		if not img or myGen ~= gen then
+			return
+		end
+		if conn then
+			conn:Disconnect()
+			conn = nil
+		end
+
+		local phase = "approach"
+		local t0 = os.clock()
+		local fromPos = Vector2.zero
+		local toPos = Vector2.zero
+		local discCenter = Vector2.zero
+		local slideAmp = 0
+		local laidOut = false
+
+		local function refreshDisc(): Vector2?
+			local sel = RelocateController.getSelectedPart()
+			if not sel then
+				return nil
+			end
+			local selId = sel:GetAttribute("OceanTD_PlaceId")
+			-- Keep the demo glued to the coral the finger told them to pick.
+			if typeof(selectCoralPlaceId) == "string" and selectCoralPlaceId ~= "" then
+				if typeof(selId) ~= "string" or selId ~= selectCoralPlaceId then
+					return nil
+				end
+			elseif typeof(selId) == "string" and selId ~= "" then
+				selectCoralPlaceId = selId
+			end
+			local c = relocateMoveDiscScreenCenter()
+			if not c and typeof(selectCoralPlaceId) == "string" then
+				c = coralScreenCenterForPlaceId(selectCoralPlaceId)
+			end
+			if not c then
+				return nil
+			end
+			discCenter = c
+			local cam = Workspace.CurrentCamera
+			local vp = if cam then cam.ViewportSize else Vector2.new(1280, 720)
+			slideAmp = vp.X * RELOCATE_SLIDE_FRAC
+			return c
+		end
+
+		conn = RunService.Heartbeat:Connect(function()
+			if myGen ~= gen then
+				return
+			end
+			local f = finger
+			local sc = scaleObj
+			if not (f and f.Parent and sc) then
+				return
+			end
+
+			if not InventoryState.isOpen() then
+				f.Visible = false
+				laidOut = false
+				return
+			end
+			if playerGui:GetAttribute(REPORT_OPEN_ATTR) == true
+				or playerGui:GetAttribute(HIDE_UI_ACTIVE_ATTR) == true
+			then
+				f.Visible = false
+				laidOut = false
+				return
+			end
+
+			if not RelocateController.isActive() then
+				playerGui:SetAttribute(HINT_ATTR, "selectCoral")
+				return
+			end
+
+			-- Wrong coral selected vs teach target — send them back to select.
+			do
+				local sel = RelocateController.getSelectedPart()
+				local selId = if sel then sel:GetAttribute("OceanTD_PlaceId") else nil
+				if typeof(selectCoralPlaceId) == "string"
+					and selectCoralPlaceId ~= ""
+					and typeof(selId) == "string"
+					and selId ~= selectCoralPlaceId
+				then
+					playerGui:SetAttribute(HINT_ATTR, "selectCoral")
+					return
+				end
+			end
+
+			-- Hide demo for the whole press/drag; only advance to Confirm after release.
+			local playerDragging = RelocateController.isDragging()
+				or RelocateController.isCoralMovePointerDown()
+			if RelocateController.hasMovedSelection() then
+				relocateTeachMoved = true
+			end
+			if playerDragging then
+				f.Visible = false
+				laidOut = false
+				return
+			end
+			if relocateTeachMoved then
+				playerGui:SetAttribute(HINT_ATTR, "relocateConfirm")
+				return
+			end
+
+			local disc = refreshDisc()
+			if not disc then
+				f.Visible = false
+				laidOut = false
+				return
+			end
+
+			f.Visible = true
+			local now = os.clock()
+			local elapsed = now - t0
+
+			if not laidOut then
+				phase = "approach"
+				fromPos = Vector2.new(disc.X, disc.Y + RELOCATE_BELOW_PX)
+				toPos = disc
+				t0 = now
+				laidOut = true
+				f.Position = UDim2.fromOffset(fromPos.X, fromPos.Y)
+				f.Rotation = 0
+				sc.Scale = 1
+			end
+
+			if phase == "approach" then
+				local u = easeOutCubic(math.clamp(elapsed / RELOCATE_APPROACH_SEC, 0, 1))
+				local p = fromPos:Lerp(toPos, u)
+				f.Position = UDim2.fromOffset(p.X, p.Y)
+				f.Rotation = PRESS_ROT_DEG * u
+				sc.Scale = 1 + (RELOCATE_DRAG_SCALE - 1) * u
+				if elapsed >= RELOCATE_APPROACH_SEC then
+					f.Position = UDim2.fromOffset(discCenter.X, discCenter.Y)
+					sc.Scale = RELOCATE_DRAG_SCALE
+					spawnTapBurst(discCenter)
+					phase = "slideLeft"
+					t0 = now
+					fromPos = discCenter
+					toPos = Vector2.new(discCenter.X - slideAmp, discCenter.Y)
+				end
+			elseif phase == "slideLeft" then
+				local u = smoothstep(math.clamp(elapsed / RELOCATE_SLIDE_SEC, 0, 1))
+				local p = fromPos:Lerp(toPos, u)
+				f.Position = UDim2.fromOffset(p.X, p.Y)
+				f.Rotation = PRESS_ROT_DEG
+				sc.Scale = RELOCATE_DRAG_SCALE
+				if elapsed >= RELOCATE_SLIDE_SEC then
+					phase = "slideRight"
+					t0 = now
+					fromPos = toPos
+					toPos = Vector2.new(discCenter.X + slideAmp, discCenter.Y)
+				end
+			elseif phase == "slideRight" then
+				local u = smoothstep(math.clamp(elapsed / (RELOCATE_SLIDE_SEC * 2), 0, 1))
+				local p = fromPos:Lerp(toPos, u)
+				f.Position = UDim2.fromOffset(p.X, p.Y)
+				f.Rotation = PRESS_ROT_DEG
+				sc.Scale = RELOCATE_DRAG_SCALE
+				if elapsed >= RELOCATE_SLIDE_SEC * 2 then
+					phase = "recover"
+					t0 = now
+					fromPos = Vector2.new(f.Position.X.Offset, f.Position.Y.Offset)
+					toPos = discCenter
+				end
+			elseif phase == "recover" then
+				local u = smoothstep(math.clamp(elapsed / RELOCATE_RECOVER_SEC, 0, 1))
+				local p = fromPos:Lerp(toPos, u)
+				f.Position = UDim2.fromOffset(p.X, p.Y)
+				f.Rotation = PRESS_ROT_DEG * (1 - u)
+				sc.Scale = RELOCATE_DRAG_SCALE + (1 - RELOCATE_DRAG_SCALE) * u
+				if elapsed >= RELOCATE_RECOVER_SEC then
+					f.Position = UDim2.fromOffset(discCenter.X, discCenter.Y)
+					sc.Scale = 1
+					f.Rotation = 0
+					phase = "rest"
+					t0 = now
+				end
+			elseif phase == "rest" then
+				f.Position = UDim2.fromOffset(discCenter.X, discCenter.Y)
+				sc.Scale = 1
+				f.Rotation = 0
+				if elapsed >= RELOCATE_REST_SEC then
+					-- Next cycle: tap-hold at center (no approach from below).
+					phase = "pressIn"
+					t0 = now
+				end
+			elseif phase == "pressIn" then
+				local u = smoothstep(math.clamp(elapsed / PRESS_SEC, 0, 1))
+				f.Position = UDim2.fromOffset(discCenter.X, discCenter.Y)
+				f.Rotation = PRESS_ROT_DEG * u
+				sc.Scale = 1 + (RELOCATE_DRAG_SCALE - 1) * u
+				if elapsed >= PRESS_SEC then
+					spawnTapBurst(discCenter)
+					phase = "slideLeft"
+					t0 = now
+					fromPos = discCenter
+					toPos = Vector2.new(discCenter.X - slideAmp, discCenter.Y)
+					sc.Scale = RELOCATE_DRAG_SCALE
+				end
+			end
+		end)
+	end)
+end
+
 local function startHint(mode: HintMode)
 	gen += 1
 	local myGen = gen
+	if conn then
+		conn:Disconnect()
+		conn = nil
+	end
 
-	if mode == "equip" then
+	if mode == "selectCoral" then
+		relocateTeachMoved = false
+		selectCoralPlaceId = nil
+		ensureMidPlotCoralPlaceId()
+		focusPlotCamOnSelectCoral()
+		playMoveCoralExplainerOnce()
+	elseif mode == "relocateDrag" then
+		startRelocateDragHint(myGen)
+		return
+	elseif mode == "equip" then
 		local id = SeedWheelRevealApi.lastAwardedItemId
 		if typeof(id) == "string" then
 			InventoryState.revealItemInBackpack(id)
@@ -1330,9 +1949,13 @@ local function startHint(mode: HintMode)
 		if playerGui:GetAttribute("OceanTD_TutorialGateCam") == true then
 			playerGui:SetAttribute("OceanTD_TutorialGateCam", false)
 		end
-		playFingerSkillsSoundOnce()
+		-- Skills VO waits until they click Skills (see SKILLS_OPEN handler).
 	elseif mode == "cam" then
 		playFingerCamSoundOnce()
+		-- Wave-3 fish-cam teach replaces the Slot5 finger; keep End Waves → roll/skills armed.
+		if wavesFingerConsumed then
+			waitingWaveEnd = true
+		end
 	elseif mode == "closeBackpack" then
 		-- Soft-plant PLANT may leave backpack already closed — don't stall the pipeline.
 		if not InventoryState.isOpen() then
@@ -1346,6 +1969,25 @@ local function startHint(mode: HintMode)
 				end
 			end)
 		end
+	elseif mode == "otherSkillsExplainer" then
+		-- No finger — pulse skill bubbles, then hand off to closeSkills.
+		destroyGui()
+		playerGui:SetAttribute(OTHER_SKILLS_EXPLAINER_ATTR, true)
+		playMoreUpgradesExplainerOnce()
+		SkillsBubbleSim.playOtherSkillsExplainer(function()
+			if myGen ~= gen or fingerTutorialSkipped then
+				playerGui:SetAttribute(OTHER_SKILLS_EXPLAINER_ATTR, false)
+				return
+			end
+			if playerGui:GetAttribute(HINT_ATTR) ~= "otherSkillsExplainer" then
+				playerGui:SetAttribute(OTHER_SKILLS_EXPLAINER_ATTR, false)
+				return
+			end
+			playerGui:SetAttribute(OTHER_SKILLS_EXPLAINER_ATTR, false)
+			playerGui:SetAttribute(HINT_ATTR, "closeSkills")
+		end)
+		syncSkipTutorialBtn()
+		return
 	end
 	-- closeSkills: wait for Skills open in the heartbeat (don't clear the hint early).
 
@@ -1460,6 +2102,43 @@ local function startHint(mode: HintMode)
 				laidOut = false
 				return
 			end
+			if (mode == "selectCoral" or mode == "relocateConfirm") and not InventoryState.isOpen() then
+				f.Visible = false
+				laidOut = false
+				return
+			end
+			if mode == "selectCoral" then
+				local sel = RelocateController.getSelectedPart()
+				if sel then
+					local want = ensureMidPlotCoralPlaceId()
+					local selId = sel:GetAttribute("OceanTD_PlaceId")
+					local wantAlive = typeof(want) == "string"
+						and want ~= ""
+						and RelocatePickHover.findByPlaceId(want) ~= nil
+					local matched = typeof(selId) == "string" and typeof(want) == "string" and selId == want
+					-- Mid-plot coral, or any coral if the target despawned.
+					if matched or not wantAlive then
+						-- Lock drag demo to whatever they actually selected.
+						if typeof(selId) == "string" and selId ~= "" then
+							selectCoralPlaceId = selId
+						end
+						playerGui:SetAttribute(HINT_ATTR, "relocateDrag")
+						return
+					end
+				end
+			elseif mode == "relocateConfirm" then
+				if RelocateController.hasMovedSelection() then
+					relocateTeachMoved = true
+				end
+				if not RelocateController.isActive() then
+					if relocateTeachMoved then
+						playerGui:SetAttribute(HINT_ATTR, "equip")
+					else
+						playerGui:SetAttribute(HINT_ATTR, "selectCoral")
+					end
+					return
+				end
+			end
 			if mode == "waves" then
 				if WaveSim.isRunning() then
 					wavesFingerConsumed = true
@@ -1475,6 +2154,8 @@ local function startHint(mode: HintMode)
 				end
 			end
 			if mode == "skills" and playerGui:GetAttribute(SKILLS_OPEN_ATTR) == true then
+				-- Don't advance past skills without the teach VO (AttributeChanged can miss).
+				playFingerSkillsSoundOnce()
 				playerGui:SetAttribute(HINT_ATTR, "plotSize")
 				return
 			elseif mode == "plotSize" and playerGui:GetAttribute(POWERUP_OPEN_ATTR) == true then
@@ -1494,10 +2175,12 @@ local function startHint(mode: HintMode)
 				if plotSizeCineBlocksTutorialAdvance() then
 					-- wait
 				elseif playerGui:GetAttribute(SKILLS_OPEN_ATTR) == true then
-					-- Power-up already closed (or never open) — advance to skills close.
-					playerGui:SetAttribute(HINT_ATTR, "closeSkills")
+					-- Power-up closed — spotlight the other skills, then close finger.
+					playerGui:SetAttribute(HINT_ATTR, "otherSkillsExplainer")
 					return
 				end
+			elseif mode == "otherSkillsExplainer" then
+				-- Finger hidden; SkillsBubbleSim drives the pulse, then sets closeSkills.
 			elseif mode == "closeSkills" and playerGui:GetAttribute(SKILLS_OPEN_ATTR) ~= true then
 				-- Same: cinematic teardown must not skip into Manual Plant early.
 				if not plotSizeCineBlocksTutorialAdvance() then
@@ -1511,7 +2194,7 @@ local function startHint(mode: HintMode)
 
 			local hideChrome = uiHidesChrome()
 			-- Skills/powerup open is expected for later tutorial steps.
-			if mode == "plotSize" or mode == "plotSizeUpgrade" or mode == "closePlotSize" or mode == "closeSkills" or mode == "upgrade" or mode == "hue" or mode == "hueReroll" or mode == "plant" or mode == "cam" then
+			if mode == "plotSize" or mode == "plotSizeUpgrade" or mode == "closePlotSize" or mode == "otherSkillsExplainer" or mode == "closeSkills" or mode == "upgrade" or mode == "hue" or mode == "hueReroll" or mode == "plant" or mode == "cam" or mode == "selectCoral" or mode == "relocateConfirm" then
 				hideChrome = playerGui:GetAttribute(REPORT_OPEN_ATTR) == true
 					or playerGui:GetAttribute(HIDE_UI_ACTIVE_ATTR) == true
 			elseif mode == "plot" or mode == "reselectCoral" then
@@ -1635,6 +2318,12 @@ local function startHint(mode: HintMode)
 end
 
 local function applyAttr(raw: any)
+	local prevHint = lastHintAttr
+	lastHintAttr = raw
+	-- After hue: wait for PLANT/CONFIRM press (plant → closeBackpack), then guppy VO.
+	if raw == "closeBackpack" and prevHint == "plant" then
+		playSmarterThanGuppyOnce()
+	end
 	if raw == "await" then
 		stopHint()
 		-- Auto Plant chapter: show the HUD button as they start the roll spin.
@@ -1661,8 +2350,12 @@ local function applyAttr(raw: any)
 		if mode == "backpack" then
 			-- Unlock BUILD when the finger points at it (after roll finishes).
 			playerGui:SetAttribute("OceanTD_TutorialGateBackpack", false)
-			-- Manual Plant chapter → finger on BUILD: VO once.
-			playPlantFirstCoralSoundOnce()
+			-- "Plant first coral" VO waits until they move a coral (relocateConfirm).
+		elseif mode == "relocateConfirm" then
+			-- Manual plant: after they drag the coral, then plant-first-coral VO.
+			if playerGui:GetAttribute(CHAPTER_ATTR) == "manualPlant" then
+				playPlantFirstCoralSoundOnce()
+			end
 		elseif mode == "upgrade" then
 			-- First coral planted → upgrade finger + upgrade explainer VO.
 			playUpgradeExplainerOnce()
@@ -1672,7 +2365,8 @@ local function applyAttr(raw: any)
 		end
 		startHint(mode)
 	else
-		waitingWaveEnd = false
+		-- Do not clear waitingWaveEnd here. Wave-3 cam teach + hardCleanup set the hint
+		-- false while the run is still active; End Waves must still hand off to roll/skills.
 		stopHint()
 	end
 	syncSkipTutorialBtn()
@@ -1738,15 +2432,43 @@ playerGui:GetAttributeChangedSignal(AUTO_PLANT_DONE_ATTR):Connect(function()
 	end
 end)
 
+-- First tutorial auto-plant orb launch → Auto Plant explainer VO.
+playerGui:GetAttributeChangedSignal("OceanTD_TutorialAutoPlantOrbFired"):Connect(function()
+	if typeof(playerGui:GetAttribute("OceanTD_TutorialAutoPlantOrbFired")) ~= "number" then
+		return
+	end
+	if playerGui:GetAttribute(CHAPTER_ATTR) ~= "autoPlant" then
+		return
+	end
+	playAutoPlantExplainerOnce()
+end)
+
 InventoryState.onOpenChanged(function(isOpen: boolean)
 	local v = playerGui:GetAttribute(HINT_ATTR)
 	if isOpen then
+		-- Manual plant BUILD: seat Plot Cam if they opened from Fish/Player/Drone.
+		if playerGui:GetAttribute(CHAPTER_ATTR) == "manualPlant" then
+			if playerGui:GetAttribute("OceanTD_CamCycleMode") ~= "plotcam" then
+				playerGui:SetAttribute("OceanTD_ForceCamMode", "plotcam")
+				playerGui:SetAttribute("OceanTD_ForceCamStamp", os.clock())
+			end
+			-- Opening BUILD for move-coral teach: center Plot Cam on the target coral.
+			if v == "backpack" or v == "await" or v == "selectCoral" then
+				focusPlotCamOnSelectCoral()
+			end
+		end
 		if v == "backpack" or v == "await" then
-			playerGui:SetAttribute(HINT_ATTR, "equip")
+			if playerGui:GetAttribute(CHAPTER_ATTR) == "manualPlant" then
+				playerGui:SetAttribute(HINT_ATTR, "selectCoral")
+			else
+				playerGui:SetAttribute(HINT_ATTR, "equip")
+			end
 		end
 		return
 	end
 	if v == "equip" then
+		playerGui:SetAttribute(HINT_ATTR, "backpack")
+	elseif v == "selectCoral" or v == "relocateDrag" or v == "relocateConfirm" then
 		playerGui:SetAttribute(HINT_ATTR, "backpack")
 	elseif v == "closeBackpack" then
 		if playerGui:GetAttribute(CHAPTER_ATTR) == "manualPlant" then
@@ -1770,8 +2492,8 @@ end)
 playerGui:GetAttributeChangedSignal(SKILLS_OPEN_ATTR):Connect(function()
 	local v = playerGui:GetAttribute(HINT_ATTR)
 	local open = playerGui:GetAttribute(SKILLS_OPEN_ATTR) == true
-	if open and v == "skills" then
-		playerGui:SetAttribute(HINT_ATTR, "plotSize")
+	if open and skillsTeachStepActive() then
+		onSkillsOpenedForTutorial()
 	elseif not open then
 		-- Plot size grow/dial shot force-closes skills; ignore until chrome is restored.
 		if plotSizeCineBlocksTutorialAdvance() then
@@ -1780,6 +2502,11 @@ playerGui:GetAttributeChangedSignal(SKILLS_OPEN_ATTR):Connect(function()
 		if v == "closeSkills" then
 			-- After plot-size upgrade + closing skills → Manual Plant chapter.
 			beginManualPlantChapter()
+		elseif v == "otherSkillsExplainer" then
+			-- Explainer blocked close; if skills still closed, resume from Skills finger.
+			playerGui:SetAttribute(OTHER_SKILLS_EXPLAINER_ATTR, false)
+			SkillsBubbleSim.cancelOtherSkillsExplainer()
+			playerGui:SetAttribute(HINT_ATTR, "skills")
 		elseif v == "plotSize" or v == "plotSizeUpgrade" or v == "closePlotSize" then
 			-- Closed skills without finishing the plot-size tutorial — back to Skills finger.
 			playerGui:SetAttribute(HINT_ATTR, "skills")
@@ -1787,11 +2514,20 @@ playerGui:GetAttributeChangedSignal(SKILLS_OPEN_ATTR):Connect(function()
 	end
 end)
 
+-- Real Skills button press (not ForceOpen) — most reliable teach VO trigger.
+playerGui:GetAttributeChangedSignal("OceanTD_SkillsPlayerOpened"):Connect(function()
+	if typeof(playerGui:GetAttribute("OceanTD_SkillsPlayerOpened")) ~= "number" then
+		return
+	end
+	onSkillsOpenedForTutorial()
+end)
+
 playerGui:GetAttributeChangedSignal("OceanTD_CamCycleMode"):Connect(function()
 	if playerGui:GetAttribute(HINT_ATTR) ~= "cam" then
 		return
 	end
 	local wave3FishPov = playerGui:GetAttribute("OceanTD_Wave3FishCamHint") == true
+	local wasManualPlant = playerGui:GetAttribute(CHAPTER_ATTR) == "manualPlant"
 	playerGui:SetAttribute(HINT_ATTR, false)
 	playerGui:SetAttribute(CHAPTER_ATTR, nil)
 	if wave3FishPov then
@@ -1816,6 +2552,19 @@ playerGui:GetAttributeChangedSignal("OceanTD_CamCycleMode"):Connect(function()
 		end)
 		return
 	end
+	-- Manual plant Free Cam teach: jump straight to Free Cam (not the next carousel step).
+	if wasManualPlant then
+		pendingStartWavesFinger = true
+		playerGui:SetAttribute("OceanTD_TutorialLockStartWaves", false)
+		playerGui:SetAttribute("OceanTD_ForceCamMode", "dronecam")
+		playerGui:SetAttribute("OceanTD_ForceCamStamp", os.clock())
+		task.defer(function()
+			if playerGui:GetAttribute("OceanTD_ForceCamMode") == "dronecam" then
+				playerGui:SetAttribute("OceanTD_ForceCamMode", "")
+			end
+			playerGui:SetAttribute("OceanTD_RefreshCamCycleHits", os.clock())
+		end)
+	end
 	onCamButtonClickedForTryWaves()
 end)
 
@@ -1835,25 +2584,43 @@ playerGui:GetAttributeChangedSignal(POWERUP_OPEN_ATTR):Connect(function()
 end)
 
 local function tryStartSkillsFingerFromTutorial()
-	if not waitingWaveEnd then
+	if fingerTutorialSkipped then
 		return
+	end
+	-- Primary: waitingWaveEnd from the waves finger. Recover if mid-run hint clears
+	-- (W3 cam / hardCleanup) wiped the flag while LeftHud is still tutorial-gated.
+	if not waitingWaveEnd then
+		local leftGated = playerGui:GetAttribute("OceanTD_TutorialGateLeftHud") == true
+		if not (leftGated and wavesFingerConsumed) then
+			return
+		end
 	end
 	waitingWaveEnd = false
-	if playerGui:GetAttribute("OceanTD_TutorialGateCam") == true then
-		playerGui:SetAttribute("OceanTD_TutorialGateCam", false)
-	end
-	-- First loss: point at roll again so they grab more corals, then skills.
-	-- First win (or non-defeat summary): go straight to skills.
-	local wasDefeat = playerGui:GetAttribute("OceanTD_TutorialSummaryWasDefeat") == true
+	-- After End Waves (win or loss): skills next. Roll-again is later (manual plant).
 	playerGui:SetAttribute("OceanTD_TutorialSummaryWasDefeat", nil)
-	if wasDefeat then
-		playerGui:SetAttribute("OceanTD_TutorialRollThenSkills", true)
-		-- Keep LeftHud gated so Skills stays locked until they start a roll.
-		playerGui:SetAttribute(HINT_ATTR, "roll")
-		return
-	end
-	playerGui:SetAttribute("OceanTD_TutorialGateLeftHud", false)
-	playerGui:SetAttribute(HINT_ATTR, "skills")
+	playerGui:SetAttribute("OceanTD_TutorialRollThenSkills", nil)
+	-- Keep Skills locked + no finger until out-of-reef-health (or any) VO finishes.
+	skillsFingerAfterVoGen += 1
+	local my = skillsFingerAfterVoGen
+	task.spawn(function()
+		local deadline = os.clock() + 45
+		while TutorialVo.isPlaying() and os.clock() < deadline do
+			if my ~= skillsFingerAfterVoGen or fingerTutorialSkipped then
+				return
+			end
+			task.wait()
+		end
+		if my ~= skillsFingerAfterVoGen or fingerTutorialSkipped then
+			return
+		end
+		if playerGui:GetAttribute("OceanTD_TutorialGateCam") == true then
+			playerGui:SetAttribute("OceanTD_TutorialGateCam", false)
+		end
+		-- Block Start Waves until skills + manual plant training finish.
+		playerGui:SetAttribute("OceanTD_TutorialLockStartWaves", true)
+		playerGui:SetAttribute("OceanTD_TutorialGateLeftHud", false)
+		playerGui:SetAttribute(HINT_ATTR, "skills")
+	end)
 end
 
 playerGui:GetAttributeChangedSignal("OceanTD_TutorialSummaryFinished"):Connect(function()
@@ -2044,9 +2811,11 @@ local function applyLeftHudGate()
 			ch.Visible = true
 		end
 	end
-	-- $D / $DCount stay hidden while Skills is tutorial-locked.
+	-- $D / $DCount stay hidden while Skills is tutorial-locked — except during
+	-- live waves, where the balance must stay visible as fish pay out.
 	local skillsLocked = gate and not skillsOpen
-	setSandDollarChromeVisible(left, not skillsLocked)
+	local wavesLive = WaveSim.isRunning() == true and not WaveSim.isJoinIntroDemo()
+	setSandDollarChromeVisible(left, (not skillsLocked) or wavesLive)
 	local dPad = left:FindFirstChild("dPad")
 	if not (dPad and dPad:IsA("GuiObject")) then
 		return
@@ -2079,8 +2848,13 @@ local function applyLeftHudGate()
 			-- Skills close must stay usable while bubbles are open (WaveSpeed/Skip ForceOpen).
 			shouldLock = gate and not (skillsOpen and ch.Name == "Skills")
 		elseif lockCam or lockFreeCam then
-			-- All cams while GateCam; Free Cam alone until manual plant + backpack close.
-			shouldLock = gateCam or (gateFreeCam and lockFreeCam)
+			-- All cams while GateCam. Player Cam (OffCam) + Free Cam stay locked
+			-- until Free Cam unlocks (manual plant + backpack close).
+			if ch.Name == "OffCam" then
+				shouldLock = gateCam or gateFreeCam
+			else
+				shouldLock = gateCam or (gateFreeCam and lockFreeCam)
+			end
 		end
 		if shouldLock then
 			ensureTutorialLockOn(ch)
@@ -2147,6 +2921,194 @@ do
 end
 task.defer(applyLeftHudGate)
 
+-- Joypad skills / camera teach: pulse the center D-pad graphic until they do it.
+local dpadTeachConn: RBXScriptConnection? = nil
+
+local function gamepadTeachInput(): boolean
+	local t = UserInputService:GetLastInputType()
+	return t == Enum.UserInputType.Gamepad1
+		or t == Enum.UserInputType.Gamepad2
+		or t == Enum.UserInputType.Gamepad3
+		or t == Enum.UserInputType.Gamepad4
+end
+
+local function dpadTeachWanted(): boolean
+	if not gamepadTeachInput() or InventoryState.isOpen() then
+		return false
+	end
+	-- Skills pulses d-pad right. Free-cam and wave-3 fish cam pulse d-pad down.
+	local hint = playerGui:GetAttribute(HINT_ATTR)
+	if hint == "skills" then
+		return playerGui:GetAttribute(SKILLS_OPEN_ATTR) ~= true
+	end
+	if hint ~= "cam" then
+		return false
+	end
+	return true
+end
+
+local function stopDpadTeachPulse()
+	if dpadTeachConn then
+		dpadTeachConn:Disconnect()
+		dpadTeachConn = nil
+	end
+	local left = playerGui:FindFirstChild("MobileLeftUI")
+	local dPad = left and left:FindFirstChild("dPad")
+	local mid = dPad and dPad:FindFirstChild("dPadIcon")
+	if mid and mid:IsA("GuiObject") and mid.Visible then
+		local sc = mid:FindFirstChild("_OceanTD_DPadTeachScale")
+		if sc and sc:IsA("UIScale") then
+			sc.Scale = 1
+		end
+		local teachSheet = mid:FindFirstChild("_OceanTD_DPadTeachSheet")
+		if teachSheet and teachSheet:IsA("GuiObject") then
+			teachSheet.Visible = false
+		end
+		if mid:IsA("ImageLabel") or mid:IsA("ImageButton") then
+			local saved = mid:GetAttribute("_OceanTD_TeachImgT")
+			if typeof(saved) == "number" then
+				mid.ImageTransparency = saved
+			end
+		end
+		mid.ZIndex = 80
+	end
+	local dPadReset = dPad
+	if dPadReset then
+		for _, ch in ipairs(dPadReset:GetChildren()) do
+			if ch:IsA("GuiObject") then
+				local extra = ch:FindFirstChild("_OceanTD_TeachBtnScale")
+				if extra and extra:IsA("UIScale") then
+					extra.Scale = 1
+				end
+			end
+		end
+	end
+end
+
+local function syncDpadTeachPulse()
+	if not dpadTeachWanted() then
+		stopDpadTeachPulse()
+		return
+	end
+	if dpadTeachConn then
+		return
+	end
+	local t0 = os.clock()
+	dpadTeachConn = RunService.RenderStepped:Connect(function()
+		if not dpadTeachWanted() then
+			stopDpadTeachPulse()
+			return
+		end
+		local left = playerGui:FindFirstChild("MobileLeftUI")
+		local dPad = left and left:FindFirstChild("dPad")
+		local mid = dPad and dPad:FindFirstChild("dPadIcon")
+		if not (mid and mid:IsA("GuiObject")) then
+			return
+		end
+		mid.Visible = true
+		mid.Active = false
+		if mid:IsA("ImageLabel") or mid:IsA("ImageButton") then
+			if mid:GetAttribute("_OceanTD_TeachImgSaved") ~= true then
+				mid:SetAttribute("_OceanTD_TeachImgSaved", true)
+				mid:SetAttribute("_OceanTD_TeachImgT", mid.ImageTransparency)
+			end
+			mid.ImageTransparency = 1
+		end
+		pcall(function()
+			(mid :: any).Interactable = false
+		end)
+		mid.ZIndex = 200
+		for _, d in ipairs(mid:GetDescendants()) do
+			if d:IsA("GuiObject") then
+				d.Active = false
+				d.ZIndex = math.max(d.ZIndex, 201)
+			end
+		end
+		local sc = mid:FindFirstChild("_OceanTD_DPadTeachScale")
+		if sc and sc:IsA("UIScale") then
+			sc.Scale = 1
+		end
+		local wave = (math.sin((os.clock() - t0) * 5) + 1) * 0.5
+		local pulse = 1 + 0.28 * wave
+		local hintNow = playerGui:GetAttribute(HINT_ATTR)
+		local lit = math.sin((os.clock() - t0) * 5) > 0
+		local token = "DPad"
+		if hintNow == "skills" then
+			token = if lit then "DRight" else "DPad"
+		elseif hintNow == "cam" then
+			token = if lit then "DDown" else "DPad"
+		end
+		local teachWin = mid:FindFirstChild("_OceanTD_DPadTeachSheet")
+		if not (teachWin and teachWin:IsA("Frame")) then
+			if teachWin then
+				teachWin:Destroy()
+			end
+			local made = Instance.new("Frame")
+			made.Name = "_OceanTD_DPadTeachSheet"
+			made.BackgroundTransparency = 1
+			made.BorderSizePixel = 0
+			made.AnchorPoint = Vector2.new(0.5, 0.5)
+			made.Position = UDim2.fromScale(0.5, 0.5)
+			made.Size = UDim2.fromScale(1, 1)
+			made.ClipsDescendants = true
+			made.Active = false
+			made.ZIndex = mid.ZIndex + 3
+			made.Parent = mid
+			local sheet = Instance.new("ImageLabel")
+			sheet.Name = "Sheet"
+			sheet.BackgroundTransparency = 1
+			sheet.BorderSizePixel = 0
+			sheet.Active = false
+			sheet.ZIndex = made.ZIndex
+			sheet.Parent = made
+			teachWin = made
+		end
+		if teachWin and teachWin:IsA("Frame") then
+			teachWin.Visible = true
+			local sheet = teachWin:FindFirstChild("Sheet")
+			if sheet and sheet:IsA("ImageLabel") then
+				local sheets = require(oceanRoot:WaitForChild("Shared"):WaitForChild("GamepadButtonGlyph"))
+				sheets.placeCell(sheet, token)
+			end
+		end
+		-- Also grow the button the finger is pointing at (Free Cam / Skills).
+		local teachBtn: GuiObject? = nil
+		if hintNow == "skills" then
+			teachBtn = findSkillsButton()
+		elseif hintNow == "cam" then
+			teachBtn = findCamButton()
+		end
+		if dPad then
+			for _, ch in ipairs(dPad:GetChildren()) do
+				if ch:IsA("GuiObject") and ch ~= teachBtn then
+					local extra = ch:FindFirstChild("_OceanTD_TeachBtnScale")
+					if extra and extra:IsA("UIScale") then
+						extra.Scale = 1
+					end
+				end
+			end
+		end
+		if teachBtn then
+			local extra = teachBtn:FindFirstChild("_OceanTD_TeachBtnScale")
+			if not (extra and extra:IsA("UIScale")) then
+				local made = Instance.new("UIScale")
+				made.Name = "_OceanTD_TeachBtnScale"
+				made.Parent = teachBtn
+				extra = made
+			end
+			if extra and extra:IsA("UIScale") then
+				extra.Scale = pulse
+			end
+		end
+	end)
+end
+
+playerGui:GetAttributeChangedSignal(HINT_ATTR):Connect(syncDpadTeachPulse)
+playerGui:GetAttributeChangedSignal("OceanTD_Wave3FishCamHint"):Connect(syncDpadTeachPulse)
+playerGui:GetAttributeChangedSignal(SKILLS_OPEN_ATTR):Connect(syncDpadTeachPulse)
+UserInputService.LastInputTypeChanged:Connect(syncDpadTeachPulse)
+task.defer(syncDpadTeachPulse)
+
 applyAttr(playerGui:GetAttribute(HINT_ATTR))
 
 -- First real Start Waves: wave explainer VO (waits if "how many waves" is still playing).
@@ -2156,10 +3118,14 @@ WaveSim.onHud(function(snap)
 	end
 	if snap.running and not wavesHudWasRunning then
 		wavesHudWasRunning = true
+		task.defer(applyLeftHudGate)
 		if (snap.wave or 0) <= 1 then
 			playWaveExplainerSoundOnce()
 		end
 	elseif not snap.running then
+		if wavesHudWasRunning then
+			task.defer(applyLeftHudGate)
+		end
 		wavesHudWasRunning = false
 	end
 end)

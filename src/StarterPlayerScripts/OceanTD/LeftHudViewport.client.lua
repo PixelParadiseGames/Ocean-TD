@@ -131,7 +131,12 @@ local function layoutSandDollar720p(left: ScreenGui, dLabel: GuiObject?, dCount:
 	local row = ensureSandDollarRow(left)
 	row.AnchorPoint = Vector2.new(0, 1)
 	local margin = math.floor(CORNER_MARGIN * scale + 0.5)
-	row.Position = UDim2.new(0, margin, 1, -margin)
+	-- Skip Training sits on the bottom-left, and the reef/wave bars sit on the bottom edge.
+	-- Lift $D above both. Phone layout is restored separately and stays put.
+	local skipClear = 28 + math.floor(28 * scale) + 18
+	local reefClear = 10 + math.floor((28 + 4 + 36) * scale) + 18
+	local lift = math.max(margin, skipClear, reefClear)
+	row.Position = UDim2.new(0, margin, 1, -lift)
 	row.ZIndex = math.max(dCount.ZIndex, if dLabel then dLabel.ZIndex else 0, 40)
 
 	if dLabel then

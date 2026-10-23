@@ -18,6 +18,8 @@ local playerGui = player:WaitForChild("PlayerGui")
 local oceanRoot = game:GetService("ReplicatedStorage"):WaitForChild("OceanTD")
 local LeftHudLayout = require(oceanRoot:WaitForChild("Shared"):WaitForChild("LeftHudLayout"))
 local UiTheme = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiTheme"))
+local UiPopupScale = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiPopupScale"))
+local UiViewportTags = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiViewportTags"))
 
 local StoreUI = {}
 
@@ -27,7 +29,7 @@ local SKILLS_OPEN_ATTR = "OceanTD_SkillsBubblesOpen"
 local REPORT_OPEN_ATTR = "OceanTD_ReefReportOpen"
 local STORE_GUI_NAME = "OceanTD_Store"
 local STORE_DISPLAY_ORDER = 9200
-local STORE_LAYOUT_VER = 2 -- bump when pack column spacing / chrome layout changes
+local STORE_LAYOUT_VER = 4 -- bump when pack column spacing / chrome layout changes
 -- Cart / close chrome must sit above the store dim (same pattern as Reef Report).
 local STORE_LEFT_HUD_ORDER = STORE_DISPLAY_ORDER + 80
 -- Match SkillPowerUpUI close X pulse (glyph only, not the red circle).
@@ -279,6 +281,23 @@ local function neutralizeCloneInteractives(root: GuiObject)
 	if root:IsA("ImageButton") or root:IsA("ImageLabel") then
 		(root :: ImageButton).ImageTransparency = 0
 	end
+	local function dropRuntimeChrome(inst: Instance)
+		if inst:IsA("UIScale")
+			or inst.Name == "_OceanTD_CloseX"
+			or inst.Name == "_OceanTD_CloseXScale"
+			or inst.Name == "_OceanTD_RHealthCloseScale"
+			or inst.Name == "_OceanTD_PowerUpCloseX"
+			or inst.Name == "_OceanTD_PopupScale"
+			or inst.Name == "_OceanTD_ClosePadScale"
+		then
+			inst:Destroy()
+		end
+	end
+	-- CloseBTN carries the 720p HUD UIScale. The cart already sits in that
+	-- scaled left HUD, so keeping the clone's scale draws the Back sheet 3x.
+	for _, ch in ipairs(root:GetChildren()) do
+		dropRuntimeChrome(ch)
+	end
 	for _, d in ipairs(root:GetDescendants()) do
 		if d:IsA("GuiObject") then
 			d.Active = false
@@ -290,13 +309,9 @@ local function neutralizeCloneInteractives(root: GuiObject)
 				d.Selectable = false
 			end
 			-- Drop power-up/runtime overlays; keep Studio art children.
-			if d.Name == "_OceanTD_CloseX"
-				or d.Name == "_OceanTD_CloseXScale"
-				or d.Name == "_OceanTD_RHealthCloseScale"
-				or d.Name == "_OceanTD_PowerUpCloseX"
-			then
-				d:Destroy()
-			end
+			dropRuntimeChrome(d)
+		elseif d:IsA("UIScale") then
+			d:Destroy()
 		end
 	end
 end
@@ -489,6 +504,14 @@ local function popLeftHudFromStore()
 	end
 end
 
+-- Phone layout stays at 1. Larger screens scale the fixed-pixel shop chrome.
+local function storePx(n: number): number
+	if not UiViewportTags.is720p() then
+		return n
+	end
+	return math.floor(n * UiPopupScale.getHud() + 0.5)
+end
+
 local function formatDollarAmount(n: number): string
 	local s = tostring(math.floor(n))
 	local out = s
@@ -524,7 +547,7 @@ local function buildPackColumn(parent: Instance, pack: DollarPack, zBase: number
 	artSlot.Name = "GraphicSlot"
 	artSlot.BackgroundTransparency = 1
 	artSlot.BorderSizePixel = 0
-	artSlot.Size = UDim2.fromOffset(160, 160)
+	artSlot.Size = UDim2.fromOffset(storePx(160), storePx(160))
 	artSlot.LayoutOrder = 1
 	artSlot.ZIndex = zBase + 1
 	artSlot.Parent = col
@@ -548,10 +571,10 @@ local function buildPackColumn(parent: Instance, pack: DollarPack, zBase: number
 	local amount = Instance.new("TextLabel")
 	amount.Name = "Amount"
 	amount.BackgroundTransparency = 1
-	amount.Size = UDim2.new(1, 0, 0, 44)
+	amount.Size = UDim2.new(1, 0, 0, storePx(44))
 	amount.Font = UiTheme.Font
 	amount.Text = formatDollarAmount(pack.amount)
-	amount.TextSize = 48
+	amount.TextSize = storePx(48)
 	amount.TextColor3 = AMOUNT_WHITE
 	amount.TextXAlignment = Enum.TextXAlignment.Center
 	amount.TextYAlignment = Enum.TextYAlignment.Top
@@ -564,7 +587,7 @@ local function buildPackColumn(parent: Instance, pack: DollarPack, zBase: number
 	buy.AutoButtonColor = true
 	buy.BackgroundColor3 = Color3.new(1, 1, 1) -- white base so UIGradient shows true greens
 	buy.BorderSizePixel = 0
-	buy.Size = UDim2.fromOffset(160, 52)
+	buy.Size = UDim2.fromOffset(storePx(160), storePx(52))
 	buy.Text = "" -- label is a child so UIGradient doesn't tint the text
 	buy.LayoutOrder = 3
 	buy.ZIndex = zBase + 2
@@ -590,7 +613,7 @@ local function buildPackColumn(parent: Instance, pack: DollarPack, zBase: number
 	buyLbl.Size = UDim2.fromScale(1, 1)
 	buyLbl.Font = UiTheme.Font
 	buyLbl.Text = pack.priceLabel
-	buyLbl.TextSize = 22
+	buyLbl.TextSize = storePx(22)
 	buyLbl.TextColor3 = AMOUNT_WHITE
 	buyLbl.TextXAlignment = Enum.TextXAlignment.Center
 	buyLbl.TextYAlignment = Enum.TextYAlignment.Center
@@ -848,11 +871,11 @@ local function ensureStoreGui(): ScreenGui
 	title.Name = "Title"
 	title.BackgroundTransparency = 1
 	title.AnchorPoint = Vector2.new(0.5, 0)
-	title.Position = UDim2.new(0.5, 0, 0, 18)
-	title.Size = UDim2.new(0.78, 0, 0, 40)
+	title.Position = UDim2.new(0.5, 0, 0, storePx(18))
+	title.Size = UDim2.new(0.78, 0, 0, storePx(40))
 	title.Font = UiTheme.Font
 	title.Text = "SHOP"
-	title.TextSize = 36
+	title.TextSize = storePx(36)
 	title.TextColor3 = Color3.fromRGB(230, 245, 255)
 	title.TextXAlignment = Enum.TextXAlignment.Center
 	title.ZIndex = 3
@@ -896,7 +919,7 @@ local function ensureStoreGui(): ScreenGui
 	row.HorizontalAlignment = Enum.HorizontalAlignment.Center
 	row.VerticalAlignment = Enum.VerticalAlignment.Center
 	row.SortOrder = Enum.SortOrder.LayoutOrder
-	row.Padding = UDim.new(0, 28)
+	row.Padding = UDim.new(0, storePx(28))
 	row.Parent = offers
 
 	for i, pack in ipairs(DOLLAR_PACKS) do

@@ -185,6 +185,8 @@ type OrbitLock = {
 }
 
 local orbitLocks: { OrbitLock } = {}
+-- Tutorial other-skills explainer: force red lock look until each skill's scale-up starts.
+local explainerForceLockedIds: { [string]: boolean } = {}
 
 -- Purchase progress (gates / lock icons). Active stage can be dialed below this.
 -- Must be defined before syncOrbitLocks (local function scope).
@@ -233,7 +235,13 @@ local function isFutureSkillBubble(b: Bubble): boolean
 	return b.btn.Name == FUTURE_SKILL_BTN
 end
 
+local otherSkillsExplainerToken = 0
+local otherSkillsExplainerBusy = false
+
 local function activateBubble(b: Bubble)
+	if otherSkillsExplainerBusy then
+		return
+	end
 	if isFutureSkillBubble(b) then
 		SkillsBubbleSim.playLockedRejectFx(FUTURE_SKILL_ID)
 		return
@@ -349,9 +357,27 @@ local function clearLockedStrokes()
 	end
 end
 
+local function lockStrokeThickness(): number
+	-- Phone stays at the authored 2px ring. Large screens: twice as thick.
+	if UiPopupScale.getHud() > 1.01 then
+		return LOCK_STROKE_THICKNESS * 2
+	end
+	return LOCK_STROKE_THICKNESS
+end
+
+local function lockIconPx(): number
+	local hud = UiPopupScale.getHud()
+	if hud <= 1.01 then
+		return LOCK_SIZE_PX
+	end
+	-- Circles are baked to hud * HUD_BUBBLE_SIZE_MULT; the orbit icon was left at phone pixels.
+	return math.max(LOCK_SIZE_PX, math.floor(LOCK_SIZE_PX * hud * HUD_BUBBLE_SIZE_MULT + 0.5))
+end
+
 local function ensureLockedStroke(btn: GuiButton): UIStroke
 	local existing = btn:FindFirstChild(LOCK_STROKE_NAME)
 	if existing and existing:IsA("UIStroke") then
+		existing.Thickness = lockStrokeThickness()
 		return existing
 	end
 	if existing then
@@ -359,9 +385,9 @@ local function ensureLockedStroke(btn: GuiButton): UIStroke
 	end
 	local stroke = Instance.new("UIStroke")
 	stroke.Name = LOCK_STROKE_NAME
-	stroke.Thickness = LOCK_STROKE_THICKNESS
 	stroke.Color = LOCK_STROKE_COLOR
 	stroke.Transparency = LOCK_STROKE_TRANSPARENCY
+	stroke.Thickness = lockStrokeThickness()
 	stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
 	stroke.LineJoinMode = Enum.LineJoinMode.Round
 	stroke.Parent = btn
@@ -378,7 +404,11 @@ local function syncOrbitLocks()
 	local rng = Random.new()
 	for _, b in ipairs(bubbles) do
 		local id = skillIdForBubble(b)
-		if id and SkillStages.isSkillLocked(id, stages) and b.btn.Parent then
+		local forceLocked = typeof(id) == "string" and explainerForceLockedIds[id] == true
+		local gateLocked = typeof(id) == "string" and SkillStages.isSkillLocked(id, stages)
+		-- "?" placeholder is never a real skill — always keep red lock + orbit icon.
+		local futureLocked = id == FUTURE_SKILL_ID or isFutureSkillBubble(b)
+		if id and (forceLocked or gateLocked or futureLocked) and b.btn.Parent then
 			local old = b.btn:FindFirstChild("OceanTD_SkillGateLock")
 			if old then
 				old:Destroy()
@@ -387,7 +417,7 @@ local function syncOrbitLocks()
 			icon.Name = "OceanTD_SkillGateLock"
 			icon.BackgroundTransparency = 1
 			icon.Image = LOCK_IMAGE
-			icon.Size = UDim2.fromOffset(LOCK_SIZE_PX, LOCK_SIZE_PX)
+			icon.Size = UDim2.fromOffset(lockIconPx(), lockIconPx())
 			icon.AnchorPoint = Vector2.new(0.5, 0.5)
 			icon.Position = UDim2.fromScale(0.5, 0.5)
 			icon.ZIndex = math.max(b.btn.ZIndex + 8, 90)
@@ -407,6 +437,18 @@ local function updateOrbitLocks(dt: number)
 	for _, o in ipairs(orbitLocks) do
 		if not o.icon.Parent or not o.bubble.btn.Parent then
 			continue
+		end
+		local px = lockIconPx()
+		if o.icon.Size.X.Offset ~= px then
+			o.icon.Size = UDim2.fromOffset(px, px)
+		end
+		local gateStroke = o.bubble.btn:FindFirstChild(LOCK_STROKE_NAME)
+		if gateStroke and gateStroke:IsA("UIStroke") then
+			local thick = lockStrokeThickness()
+			-- Only lift a phone-thickness ring. Reject flash animates thickness above this.
+			if gateStroke.Thickness == LOCK_STROKE_THICKNESS and thick ~= LOCK_STROKE_THICKNESS then
+				gateStroke.Thickness = thick
+			end
 		end
 		o.angle += LOCK_ORBIT_SPEED * dt
 		local r = math.max(14, o.bubble.radius * LOCK_ORBIT_FRAC)
@@ -1067,8 +1109,14 @@ local function readButtonAbs(btn: GuiButton): (Vector2, Vector2)
 	return absPos, absSize
 end
 
+local function bubblePhysRadius(b: Bubble): number
+	-- b.radius is layout/base; UIScale (focus / other-skills explainer) grows the hit circle.
+	local sc = if b.scale and b.scale.Parent then math.max(b.scale.Scale, 0.01) else 1
+	return math.max(8, b.radius * sc)
+end
+
 local function clampBubble(b: Bubble, ox: number, oy: number, sw: number, sh: number)
-	local r = b.radius
+	local r = bubblePhysRadius(b)
 	local minX, maxX = ox + r, ox + sw - r
 	local minY, maxY = oy + r, oy + sh - r
 	if minX > maxX then
@@ -1536,7 +1584,9 @@ local function softSeparate(a: Bubble, b: Bubble)
 	local dx = b.x - a.x
 	local dy = b.y - a.y
 	local distSq = dx * dx + dy * dy
-	local minDist = a.radius + b.radius
+	local ra = bubblePhysRadius(a)
+	local rb = bubblePhysRadius(b)
+	local minDist = ra + rb
 	if distSq >= minDist * minDist or distSq < 1e-6 then
 		return
 	end
@@ -1544,7 +1594,9 @@ local function softSeparate(a: Bubble, b: Bubble)
 	local overlap = minDist - dist
 	local nx = dx / dist
 	local ny = dy / dist
-	local strength = SEPARATION * overlap * (0.32 + overlap * 0.015)
+	-- Explainer peaks get large fast — push harder so neighbors clear instead of stacking.
+	local sep = if otherSkillsExplainerBusy then SEPARATION * 1.85 else SEPARATION
+	local strength = sep * overlap * (0.32 + overlap * 0.015)
 	-- Held bubble is kinematic: only the free one moves (avoids grab snap from neighbors).
 	if aHeld then
 		b.x += nx * strength
@@ -1556,8 +1608,8 @@ local function softSeparate(a: Bubble, b: Bubble)
 		a.y -= ny * strength
 		return
 	end
-	local invA = 1 / a.mass
-	local invB = 1 / b.mass
+	local invA = 1 / math.max(ra, 1)
+	local invB = 1 / math.max(rb, 1)
 	local sum = invA + invB
 	local pushA = strength * (invA / sum)
 	local pushB = strength * (invB / sum)
@@ -1602,10 +1654,14 @@ local function physStep(dt: number)
 	end
 
 	local n = #bubbles
-	for i = 1, n - 1 do
-		local a = bubbles[i]
-		for j = i + 1, n do
-			softSeparate(a, bubbles[j])
+	-- Extra passes while explainer scales up so overlaps resolve in the same frame burst.
+	local sepPasses = if otherSkillsExplainerBusy then 3 else 1
+	for _ = 1, sepPasses do
+		for i = 1, n - 1 do
+			local a = bubbles[i]
+			for j = i + 1, n do
+				softSeparate(a, bubbles[j])
+			end
 		end
 	end
 
@@ -2046,6 +2102,7 @@ function SkillsBubbleSim.stop(onDone: (() -> ())?)
 
 	stopToken += 1
 	rejectFxToken += 1
+	SkillsBubbleSim.cancelOtherSkillsExplainer()
 	closing = true
 	suppressed = false
 	pendingStopDone = onDone
@@ -2638,6 +2695,9 @@ function SkillsBubbleSim.clearGamepadFocus()
 end
 
 function SkillsBubbleSim.setGamepadFocus(index: number)
+	if otherSkillsExplainerBusy then
+		return
+	end
 	if not running or closing or #bubbles == 0 then
 		SkillsBubbleSim.clearGamepadFocus()
 		return
@@ -2764,7 +2824,7 @@ function SkillsBubbleSim.playLockedRejectFx(skillId: string)
 			return
 		end
 		if stroke and stroke.Parent then
-			stroke.Thickness = LOCK_STROKE_THICKNESS
+			stroke.Thickness = lockStrokeThickness()
 			stroke.Transparency = LOCK_STROKE_TRANSPARENCY
 			stroke.Color = LOCK_STROKE_COLOR
 			-- Placeholder isn't a real gated skill — don't leave the lock ring on.
@@ -2816,6 +2876,155 @@ function SkillsBubbleSim.activateGamepadFocus(): boolean
 	end
 	activateBubble(b)
 	return true
+end
+
+-- Tutorial after Plot Size close: spotlight other skills (scale up → hold → down), staggered.
+local OTHER_SKILLS_EXPLAIN_ORDER = {
+	"AutoRoll",
+	"WaveSpeed",
+	"Skip",
+	"PlaceMore",
+	"RHealth",
+	"EarnMore",
+	"ReloadSpeed",
+}
+local OTHER_SKILLS_UP_SEC = 0.5
+local OTHER_SKILLS_HOLD_SEC = 2
+local OTHER_SKILLS_DOWN_SEC = 0.5
+-- Next bubble starts scaling up when the previous reaches full size (end of up tween).
+local OTHER_SKILLS_STAGGER_SEC = OTHER_SKILLS_UP_SEC
+-- Peak = resting full size × 1.2 (selected) × 1.4 → 40% bigger than that full showcase size.
+local OTHER_SKILLS_PEAK_MULT = SELECTED_BUBBLE_SCALE * 1.4
+local OTHER_SKILLS_UP_INFO = TweenInfo.new(OTHER_SKILLS_UP_SEC, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+local OTHER_SKILLS_DOWN_INFO = TweenInfo.new(OTHER_SKILLS_DOWN_SEC, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
+
+function SkillsBubbleSim.isOtherSkillsExplainerBusy(): boolean
+	return otherSkillsExplainerBusy
+end
+
+local function finishOtherSkillsExplainerVisuals()
+	table.clear(explainerForceLockedIds)
+	otherSkillsExplainerBusy = false
+	for _, b in ipairs(bubbles) do
+		if b.btn.Parent then
+			b.btn.Active = not suppressed
+			if b.scale and b.scale.Parent then
+				b.scale.Scale = b.settledScale
+			end
+		end
+	end
+	syncOrbitLocks()
+end
+
+function SkillsBubbleSim.cancelOtherSkillsExplainer()
+	otherSkillsExplainerToken += 1
+	if not otherSkillsExplainerBusy and next(explainerForceLockedIds) == nil then
+		return
+	end
+	finishOtherSkillsExplainerVisuals()
+end
+
+function SkillsBubbleSim.playOtherSkillsExplainer(onDone: (() -> ())?)
+	SkillsBubbleSim.cancelOtherSkillsExplainer()
+	if not running or closing or suppressed or #bubbles == 0 then
+		if onDone then
+			onDone()
+		end
+		return
+	end
+	otherSkillsExplainerToken += 1
+	local my = otherSkillsExplainerToken
+	otherSkillsExplainerBusy = true
+	rejectFxToken += 1
+	SkillsBubbleSim.clearGamepadFocus()
+
+	local byId: { [string]: Bubble } = {}
+	for _, b in ipairs(bubbles) do
+		if b.btn.Parent then
+			local id = skillIdForBubble(b)
+			if typeof(id) == "string" and id ~= "" then
+				byId[id] = b
+			end
+			b.btn.Active = false
+			if b.scale and b.scale.Parent then
+				b.scale.Scale = b.settledScale
+			end
+		end
+	end
+
+	local sequence: { Bubble } = {}
+	table.clear(explainerForceLockedIds)
+	for _, skillId in ipairs(OTHER_SKILLS_EXPLAIN_ORDER) do
+		local b = byId[skillId]
+		if b then
+			table.insert(sequence, b)
+			explainerForceLockedIds[skillId] = true
+		end
+	end
+	-- Start red + locked; each skill unlocks when its scale-up begins.
+	syncOrbitLocks()
+
+	if #sequence == 0 then
+		finishOtherSkillsExplainerVisuals()
+		if onDone then
+			onDone()
+		end
+		return
+	end
+
+	task.spawn(function()
+		local finished = 0
+		local total = #sequence
+		local function noteFinished()
+			finished += 1
+			if finished >= total and my == otherSkillsExplainerToken then
+				finishOtherSkillsExplainerVisuals()
+				if onDone then
+					onDone()
+				end
+			end
+		end
+		for i, b in ipairs(sequence) do
+			task.spawn(function()
+				if i > 1 then
+					task.wait((i - 1) * OTHER_SKILLS_STAGGER_SEC)
+				end
+				if my ~= otherSkillsExplainerToken or not running or closing then
+					return
+				end
+				if not b.btn.Parent or not b.scale.Parent then
+					noteFinished()
+					return
+				end
+				-- Unlock this skill as its spotlight starts (drop red stroke + orbit lock).
+				local skillId = skillIdForBubble(b)
+				if typeof(skillId) == "string" then
+					explainerForceLockedIds[skillId] = nil
+					syncOrbitLocks()
+				end
+				local settled = b.settledScale
+				local peak = settled * OTHER_SKILLS_PEAK_MULT
+				setBubbleZ(b.btn, 95)
+				local up = TweenService:Create(b.scale, OTHER_SKILLS_UP_INFO, { Scale = peak })
+				up:Play()
+				up.Completed:Wait()
+				if my ~= otherSkillsExplainerToken or not b.scale.Parent then
+					return
+				end
+				task.wait(OTHER_SKILLS_HOLD_SEC)
+				if my ~= otherSkillsExplainerToken or not b.scale.Parent then
+					return
+				end
+				local down = TweenService:Create(b.scale, OTHER_SKILLS_DOWN_INFO, { Scale = settled })
+				down:Play()
+				down.Completed:Wait()
+				if b.scale.Parent then
+					b.scale.Scale = settled
+				end
+				noteFinished()
+			end)
+		end
+	end)
 end
 
 return SkillsBubbleSim

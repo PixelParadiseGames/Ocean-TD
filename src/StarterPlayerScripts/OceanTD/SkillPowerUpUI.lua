@@ -17,6 +17,8 @@ local oceanRoot = ReplicatedStorage:WaitForChild("OceanTD")
 local Remotes = require(oceanRoot:WaitForChild("Remotes"))
 local SkillStages = require(oceanRoot:WaitForChild("Shared"):WaitForChild("SkillStages"))
 local UiTheme = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiTheme"))
+local UiPopupScale = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiPopupScale"))
+local UiViewportTags = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiViewportTags"))
 local SkillsBubbleSim = require(script.Parent:WaitForChild("SkillsBubbleSim"))
 
 local SkillPowerUpUI = {}
@@ -340,6 +342,9 @@ local function syncSideSubFromDesc(pulseColor: Color3?)
 	sideSubLbl.Text = string.format('<font color="%s">%s</font>', rgbFontTag(c), safe)
 	sideSubLbl.TextColor3 = c
 	sideSubLbl.Visible = true
+	local hud = UiPopupScale.getHud()
+	local subLines = if string.find(safe, "\n", 1, true) then 96 else 64
+	sideSubLbl.Size = UDim2.new(1, -24, 0, math.floor(subLines * hud + 0.5))
 end
 
 local function startUnlockDescPulse(skillId: string, buildRichText: (Color3) -> string)
@@ -490,8 +495,8 @@ local function stopCloseXPulse()
 	if closeBtn then
 		local lbl = closeBtn:FindFirstChild("_OceanTD_CloseX")
 		if lbl then
-			local scale = lbl:FindFirstChildOfClass("UIScale")
-			if scale then
+			local scale = lbl:FindFirstChild("_OceanTD_CloseXScale")
+			if scale and scale:IsA("UIScale") then
 				scale.Scale = 1
 			end
 		end
@@ -511,8 +516,11 @@ local function startCloseXPulse()
 	lbl.AnchorPoint = Vector2.new(0.5, 0.5)
 	lbl.Position = UDim2.fromScale(0.5, 0.5)
 	lbl.Size = UDim2.fromScale(1, 1)
-	local scale = lbl:FindFirstChildOfClass("UIScale")
-	if not scale then
+	local found = lbl:FindFirstChild("_OceanTD_CloseXScale")
+	local scale: UIScale
+	if found and found:IsA("UIScale") then
+		scale = found
+	else
 		scale = Instance.new("UIScale")
 		scale.Name = "_OceanTD_CloseXScale"
 		scale.Parent = lbl
@@ -522,15 +530,78 @@ local function startCloseXPulse()
 	closeXPulseTween:Play()
 end
 
+local function syncCloseBackCaption(lbl: TextLabel)
+	local sheets = require(oceanRoot:WaitForChild("Shared"):WaitForChild("GamepadButtonGlyph"))
+	local show = isGamepadMode() and sheets.isPlayStation()
+	local cap = lbl:FindFirstChild("_OceanTD_CloseBack")
+	if not show then
+		if cap and cap:IsA("GuiObject") then
+			cap.Visible = false
+		end
+		return
+	end
+	if not (cap and cap:IsA("TextLabel")) then
+		if cap then
+			cap:Destroy()
+		end
+		local made = Instance.new("TextLabel")
+		made.Name = "_OceanTD_CloseBack"
+		made.BackgroundTransparency = 1
+		made.AnchorPoint = Vector2.new(0.5, 0.5)
+		made.Position = UDim2.fromScale(0.5, 0.5)
+		made.Size = UDim2.fromScale(0.92, 0.46)
+		made.Font = Enum.Font.GothamBold
+		made.Text = "BACK:"
+		made.TextColor3 = Color3.new(1, 1, 1)
+		made.TextScaled = true
+		made.Active = false
+		made.Parent = lbl
+		local stroke = Instance.new("UIStroke")
+		stroke.Color = Color3.new(0, 0, 0)
+		stroke.Thickness = 2
+		stroke.Parent = made
+		cap = made
+	end
+	if cap and cap:IsA("TextLabel") then
+		cap.Visible = true
+		cap.ZIndex = lbl.ZIndex + 12
+	end
+end
+
 local function syncCloseGlyph()
 	if not closeBtn then
 		return
 	end
 	local lbl = closeBtn:FindFirstChild("_OceanTD_CloseX")
 	if lbl and lbl:IsA("TextLabel") then
-		lbl.Text = if isGamepadMode() then "B" else "X"
+		local pad = isGamepadMode()
+		lbl.Text = if pad then "B" else "X"
 		lbl.TextColor3 = Color3.new(1, 1, 1)
-		lbl.TextTransparency = 0
+		-- The sheet draws the circle. Keep the letter hidden so "B" does not sit on it.
+		if pad then
+			lbl.TextTransparency = 1
+			lbl.TextStrokeTransparency = 1
+		else
+			lbl.TextTransparency = 0
+		end
+		local padScale = lbl:FindFirstChild("_OceanTD_ClosePadScale")
+		if pad then
+			if not (padScale and padScale:IsA("UIScale")) then
+				if padScale then
+					padScale:Destroy()
+				end
+				local made = Instance.new("UIScale")
+				made.Name = "_OceanTD_ClosePadScale"
+				made.Parent = lbl
+				padScale = made
+			end
+			if padScale and padScale:IsA("UIScale") then
+				padScale.Scale = 0.8
+			end
+		elseif padScale and padScale:IsA("UIScale") then
+			padScale.Scale = 1
+		end
+		syncCloseBackCaption(lbl)
 	end
 end
 
@@ -566,6 +637,9 @@ end
 local ReloadTrialUI = (function()
 	local SEC = 60
 	local TAIL_SEC = 5 -- last N display-seconds stretch + flash
+	local TICK_FROM_SEC = 10 -- tick sound only when ≤10s left
+	local CENTER_HOLD_SEC = 2 -- big center text before docking bottom-right
+	local DOCK_TWEEN_SEC = 0.65
 	local ATTR = "OceanTD_ReloadFullAutoTrial"
 	local LABEL = "Try Full Auto"
 	local HUD_GUI = "OceanTD_FullAutoReloadHud"
@@ -582,6 +656,10 @@ local ReloadTrialUI = (function()
 		hudScale = nil :: UIScale?,
 		conn = nil :: RBXScriptConnection?,
 		token = 0,
+		lastClock = 0,
+		introPhase = "rest" :: "center" | "tween" | "rest",
+		introT0 = 0,
+		dockTween = nil :: Tween?,
 	}
 	local tickSound = Instance.new("Sound")
 	tickSound.Name = "OceanTD_FullAutoReloadTick"
@@ -621,33 +699,97 @@ local ReloadTrialUI = (function()
 	end
 
 	local function destroyHud()
+		if st.dockTween then
+			st.dockTween:Cancel()
+			st.dockTween = nil
+		end
 		if st.hudGui then
 			st.hudGui:Destroy()
 			st.hudGui = nil
 		end
 		st.hudLabel = nil
 		st.hudScale = nil
+		st.introPhase = "rest"
 	end
 
 	local function hudTextSize(): number
 		local cam = Workspace.CurrentCamera
 		local vp = if cam then cam.ViewportSize else Vector2.new(1280, 720)
 		-- Phones / short viewports: keep clear of the wave N bar.
-		if vp.X <= 900 or vp.Y <= 500 then
-			return 20
+		local base = if vp.X <= 900 or vp.Y <= 500 then 20 else 26
+		local hud = UiPopupScale.getHud()
+		if hud <= 1.01 then
+			return base
 		end
-		return 26
+		return math.floor(base * hud + 0.5)
+	end
+
+	local function hudCenterTextSize(): number
+		return math.floor(hudTextSize() * 1.75 + 0.5)
 	end
 
 	-- Bottom-right corner, flush to the right edge.
-	local function layoutHud(lab: TextLabel)
+	local function layoutHudRest(lab: TextLabel)
+		lab.AnchorPoint = Vector2.new(1, 1)
 		lab.Position = UDim2.new(1, -4, 1, -10)
 		lab.TextSize = hudTextSize()
+		lab.TextXAlignment = Enum.TextXAlignment.Right
+		lab.TextYAlignment = Enum.TextYAlignment.Bottom
+	end
+
+	local function layoutHudCenter(lab: TextLabel)
+		lab.AnchorPoint = Vector2.new(0.5, 0.5)
+		lab.Position = UDim2.fromScale(0.5, 0.48)
+		lab.TextSize = hudCenterTextSize()
+		lab.TextXAlignment = Enum.TextXAlignment.Center
+		lab.TextYAlignment = Enum.TextYAlignment.Center
+	end
+
+	local function beginDockTween(lab: TextLabel)
+		if st.dockTween then
+			st.dockTween:Cancel()
+			st.dockTween = nil
+		end
+		st.introPhase = "tween"
+		-- Keep visual continuity: AP 1,1 at current bottom-right of the center label.
+		local absPos = lab.AbsolutePosition
+		local absSize = lab.AbsoluteSize
+		local brX = absPos.X + absSize.X
+		local brY = absPos.Y + absSize.Y
+		lab.AnchorPoint = Vector2.new(1, 1)
+		lab.Position = UDim2.fromOffset(brX, brY)
+		lab.TextXAlignment = Enum.TextXAlignment.Right
+		lab.TextYAlignment = Enum.TextYAlignment.Bottom
+		local tw = TweenService:Create(
+			lab,
+			TweenInfo.new(DOCK_TWEEN_SEC, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+			{
+				Position = UDim2.new(1, -4, 1, -10),
+				TextSize = hudTextSize(),
+			}
+		)
+		st.dockTween = tw
+		tw:Play()
+		tw.Completed:Once(function()
+			if st.dockTween == tw then
+				st.dockTween = nil
+			end
+			if st.introPhase == "tween" then
+				st.introPhase = "rest"
+				if lab.Parent then
+					layoutHudRest(lab)
+				end
+			end
+		end)
 	end
 
 	local function ensureHud(): TextLabel?
 		if st.hudLabel and st.hudLabel.Parent and st.hudGui and st.hudGui.Parent then
-			layoutHud(st.hudLabel)
+			if st.introPhase == "rest" then
+				layoutHudRest(st.hudLabel)
+			elseif st.introPhase == "center" then
+				layoutHudCenter(st.hudLabel)
+			end
 			return st.hudLabel
 		end
 		destroyHud()
@@ -662,14 +804,10 @@ local ReloadTrialUI = (function()
 		local lab = Instance.new("TextLabel")
 		lab.Name = "Countdown"
 		lab.BackgroundTransparency = 1
-		lab.AnchorPoint = Vector2.new(1, 1)
 		lab.AutomaticSize = Enum.AutomaticSize.XY
 		lab.Size = UDim2.fromOffset(0, 0)
 		lab.Font = UI_FONT
-		lab.TextSize = hudTextSize()
 		lab.TextColor3 = WHITE
-		lab.TextXAlignment = Enum.TextXAlignment.Right
-		lab.TextYAlignment = Enum.TextYAlignment.Bottom
 		lab.ZIndex = 10
 		lab.Active = false
 		lab.Parent = sg
@@ -682,7 +820,11 @@ local ReloadTrialUI = (function()
 		scale.Parent = lab
 		st.hudLabel = lab
 		st.hudScale = scale
-		layoutHud(lab)
+		if st.introPhase == "center" then
+			layoutHudCenter(lab)
+		else
+			layoutHudRest(lab)
+		end
 		return lab
 	end
 
@@ -699,6 +841,26 @@ local ReloadTrialUI = (function()
 		end)
 	end
 
+	-- Freeze countdown while wave speed / cinematic pause holds the sim.
+	local function wavesPaused(): boolean
+		local ok, WaveSim = pcall(function()
+			return require(script.Parent:WaitForChild("WaveSim"))
+		end)
+		if not ok or typeof(WaveSim) ~= "table" then
+			return false
+		end
+		if WaveSim.isRunning and WaveSim.isRunning() ~= true then
+			return false
+		end
+		if WaveSim.isSpeedPaused and WaveSim.isSpeedPaused() == true then
+			return true
+		end
+		if WaveSim.isCinematicSpeedPaused and WaveSim.isCinematicSpeedPaused() == true then
+			return true
+		end
+		return false
+	end
+
 	local function refreshHud()
 		local lab = ensureHud()
 		if not lab then
@@ -710,7 +872,13 @@ local ReloadTrialUI = (function()
 		if st.hudGui then
 			st.hudGui.Enabled = left > 0
 		end
-		layoutHud(lab)
+		if st.introPhase == "center" and (os.clock() - st.introT0) >= CENTER_HOLD_SEC then
+			beginDockTween(lab)
+		elseif st.introPhase == "center" then
+			layoutHudCenter(lab)
+		elseif st.introPhase == "rest" then
+			layoutHudRest(lab)
+		end
 		local inTail = left > 0 and left <= TAIL_SEC
 		if inTail then
 			-- Flash red ↔ white + gentle scale pulse (driven by clock).
@@ -800,8 +968,15 @@ local ReloadTrialUI = (function()
 		end
 		local dur = math.max(1, math.floor(if typeof(durationSec) == "number" and durationSec > 0 then durationSec else SEC))
 		stopTimer()
+		if st.dockTween then
+			st.dockTween:Cancel()
+			st.dockTween = nil
+		end
 		st.displayLeft = dur
-		st.nextTickAt = os.clock() + tickIntervalForLeft(dur)
+		st.lastClock = os.clock()
+		st.nextTickAt = st.lastClock + tickIntervalForLeft(dur)
+		st.introPhase = "center"
+		st.introT0 = os.clock()
 		publish()
 		refreshHud()
 		st.token += 1
@@ -815,8 +990,19 @@ local ReloadTrialUI = (function()
 				return
 			end
 			local now = os.clock()
+			local dt = math.max(0, now - st.lastClock)
+			st.lastClock = now
+			-- Don't burn trial time while waves are paused (wave-speed / W3 cam hold / path tours).
+			if wavesPaused() then
+				st.nextTickAt += dt
+				refreshHud()
+				return
+			end
 			if now >= st.nextTickAt then
-				playTick()
+				-- Tick SFX only in the final TICK_FROM_SEC seconds.
+				if st.displayLeft <= TICK_FROM_SEC then
+					playTick()
+				end
 				st.displayLeft -= 1
 				publish()
 				if st.displayLeft <= 0 then
@@ -1799,7 +1985,8 @@ local function restoreTextLayout(lbl: TextLabel?, backup: TitleLayoutBackup?)
 end
 
 local function absToParentOffset(parent: GuiObject, absPos: Vector2): Vector2
-	return absPos - parent.AbsolutePosition
+	local scale = UiPopupScale.ancestorScale(parent)
+	return (absPos - parent.AbsolutePosition) / scale
 end
 
 local function destroySideTextGui()
@@ -1813,9 +2000,39 @@ local function destroySideTextGui()
 	ReloadTrialUI.clearRefs()
 end
 
+local function sideHudScale(): number
+	local hud = UiPopupScale.getHud()
+	return if hud > 1.01 then hud else 1
+end
+
+local function applySideColumnMetrics()
+	local hud = sideHudScale()
+	local col = sideTextGui and sideTextGui:FindFirstChild("SideColumn")
+	if col and col:IsA("GuiObject") then
+		local old = col:FindFirstChild("_OceanTD_PopupScale")
+		if old then
+			old:Destroy()
+		end
+	end
+	if sideIconLbl then
+		local iconPx = math.floor(96 * hud + 0.5)
+		sideIconLbl.Size = UDim2.fromOffset(iconPx, iconPx)
+	end
+	if sideTitleLbl then
+		sideTitleLbl.TextSize = math.min(100, math.floor(SIDE_TITLE_TEXT_SIZE * hud + 0.5))
+		sideTitleLbl.Size = UDim2.new(1, -24, 0, math.floor(44 * hud + 0.5))
+	end
+	if sideSubLbl then
+		sideSubLbl.TextSize = math.min(100, math.floor(SIDE_SUB_TEXT_SIZE * hud + 0.5))
+		local subLines = if string.find(sideSubLbl.Text, "\n", 1, true) then 96 else 64
+		sideSubLbl.Size = UDim2.new(1, -24, 0, math.floor(subLines * hud + 0.5))
+	end
+end
+
 local function ensureSideTextGui(): ScreenGui
 	-- Rebuild if an older layout (no icon column / try button) is still around.
 	if sideTextGui and sideTextGui.Parent and sideIconLbl and sideIconLbl.Parent and ReloadTrialUI.hasButton() then
+		applySideColumnMetrics()
 		return sideTextGui
 	end
 	destroySideTextGui()
@@ -1843,6 +2060,8 @@ local function ensureSideTextGui(): ScreenGui
 	col.Size = UDim2.fromScale(0.30, 0.55)
 	col.ZIndex = 5
 	col.Parent = sg
+	-- Keep the column a fraction of the screen. A UIScale on this frame multiplies
+	-- that fraction and spills the titles onto the power-up circle.
 
 	local list = Instance.new("UIListLayout")
 	list.FillDirection = Enum.FillDirection.Vertical
@@ -1952,6 +2171,7 @@ local function ensureSideTextGui(): ScreenGui
 	sideTitleLbl = title
 	sideSubLbl = sub
 	ReloadTrialUI.setButton(tryBtn, tryLbl)
+	applySideColumnMetrics()
 	return sg
 end
 
@@ -1980,13 +2200,12 @@ local function layoutTitleBesideSkillBubble()
 			sideIconLbl.Visible = false
 		end
 	end
+	applySideColumnMetrics()
 	if sideTitleLbl then
 		sideTitleLbl.Text = titleText
-		sideTitleLbl.TextSize = SIDE_TITLE_TEXT_SIZE
 		sideTitleLbl.Visible = titleText ~= ""
 	end
 	if sideSubLbl then
-		sideSubLbl.TextSize = SIDE_SUB_TEXT_SIZE
 		if unlockDescPulseConn then
 			-- Pulse owns colored rich text; just keep visibility in sync.
 			sideSubLbl.Visible = subText ~= ""
@@ -2098,8 +2317,9 @@ local function layoutUnlockCostBelow(nextS: number?)
 		local p = parent :: GuiObject
 		local centerAbs = unlockBtn.AbsolutePosition + Vector2.new(uw * 0.5, uh + 4)
 		local localPos = absToParentOffset(p, centerAbs)
+		local layoutScale = UiPopupScale.ancestorScale(p)
 		lbl.Position = UDim2.fromOffset(math.floor(localPos.X), math.floor(localPos.Y))
-		lbl.Size = UDim2.fromOffset(math.max(120, math.floor(uw)), 40)
+		lbl.Size = UDim2.fromOffset(math.max(120, math.floor(uw / layoutScale)), 40)
 	else
 		local ux, uy, us = unlockBtn.Position, unlockBtn.Position, unlockBtn.Size
 		local ap = unlockBtn.AnchorPoint
@@ -2152,8 +2372,9 @@ local function layoutStageLabelAboveUnlock(nextS: number?)
 		local centerAbs = unlockBtn.AbsolutePosition + Vector2.new(uw * 0.5, 0)
 		local topAbs = Vector2.new(centerAbs.X, unlockBtn.AbsolutePosition.Y - 6)
 		local localPos = absToParentOffset(parent, topAbs)
+		local layoutScale = UiPopupScale.ancestorScale(parent)
 		nextStageLbl.Position = UDim2.fromOffset(math.floor(localPos.X), math.floor(localPos.Y))
-		nextStageLbl.Size = UDim2.fromOffset(math.max(120, math.floor(uw)), 28)
+		nextStageLbl.Size = UDim2.fromOffset(math.max(120, math.floor(uw / layoutScale)), 28)
 	else
 		-- AbsoluteSize not ready — mirror unlock UDim and account for unlock AnchorPoint.
 		local ux, uy, us = unlockBtn.Position, unlockBtn.Position, unlockBtn.Size
@@ -3025,7 +3246,10 @@ refreshTemplate = function()
 			elseif activeSkillId == "AutoRoll" then
 				if SkillStages.isAutoRollUnlimited(active) then
 					startUnlockDescPulse("AutoRoll", function(c: Color3)
-						return string.format('<font color="%s">Unlimited auto rolls</font>', rgbFontTag(c))
+						return string.format(
+							'<font color="%s">Unlimited auto rolls</font>\nHold ROLL button to use',
+							rgbFontTag(c)
+						)
 					end)
 				else
 					local n = SkillStages.autoRollBudgetAtStage(active)
@@ -3037,7 +3261,7 @@ refreshTemplate = function()
 					else
 						startUnlockDescPulse("AutoRoll", function(c: Color3)
 							return string.format(
-								'<font color="%s">%d</font> auto rolls',
+								'<font color="%s">%d</font> auto rolls\nHold ROLL button to use',
 								rgbFontTag(c),
 								n
 							)
@@ -3155,7 +3379,10 @@ refreshTemplate = function()
 			elseif activeSkillId == "AutoRoll" then
 				if SkillStages.isAutoRollUnlimited(descStage) then
 					startUnlockDescPulse("AutoRoll", function(c: Color3)
-						return string.format('<font color="%s">Unlimited auto rolls</font>', rgbFontTag(c))
+						return string.format(
+							'<font color="%s">Unlimited auto rolls</font>\nHold ROLL button to use',
+							rgbFontTag(c)
+						)
 					end)
 				else
 					local inc = SkillStages.autoRollIncrementAtStage(descStage)
@@ -3167,7 +3394,7 @@ refreshTemplate = function()
 					else
 						startUnlockDescPulse("AutoRoll", function(c: Color3)
 							return string.format(
-								'<font color="%s">+%d</font> auto rolls',
+								'<font color="%s">+%d</font> auto rolls\nHold ROLL button to use',
 								rgbFontTag(c),
 								inc
 							)
@@ -3502,6 +3729,7 @@ local function showConfirmUnlock()
 	panel.ZIndex = 2
 	panel.Selectable = false
 	panel.Parent = sg
+	UiPopupScale.attachHud(panel)
 	local pc = Instance.new("UICorner")
 	pc.CornerRadius = UDim.new(0, 14)
 	pc.Parent = panel
@@ -3698,6 +3926,11 @@ function SkillPowerUpUI.close()
 		playPowerUpCloseBubbleSound()
 	end
 	SkillsBubbleSim.setSuppressed(false)
+	local advanceOtherSkillsExplainer = playerGui:GetAttribute("OceanTD_RollFingerHint") == "closePlotSize"
+	if advanceOtherSkillsExplainer then
+		-- Hide Skills close before POWERUP clears (avoids a one-frame close flash).
+		playerGui:SetAttribute("OceanTD_OtherSkillsExplainerBusy", true)
+	end
 	playerGui:SetAttribute(POWERUP_OPEN_ATTR, false)
 	endGamepadNav()
 	stopCloseXOverlay()
@@ -3714,11 +3947,13 @@ function SkillPowerUpUI.close()
 	if closeBtn and (not template or not closeBtn:IsDescendantOf(template)) then
 		closeBtn.Visible = false
 	end
-	if playerGui:GetAttribute("OceanTD_RollFingerHint") == "closePlotSize" then
-		-- Defer so MobileSkillsA can restore Skills close chrome before the finger aims.
+	if advanceOtherSkillsExplainer then
+		-- Defer so bubbles are unsuppressed before the other-skills explainer pulses.
 		task.defer(function()
-			if playerGui:GetAttribute("OceanTD_RollFingerHint") == "closePlotSize" then
-				playerGui:SetAttribute("OceanTD_RollFingerHint", "closeSkills")
+			if playerGui:GetAttribute("OceanTD_RollFingerHint") == "closePlotSize"
+				or playerGui:GetAttribute("OceanTD_RollFingerHint") == "otherSkillsExplainer"
+			then
+				playerGui:SetAttribute("OceanTD_RollFingerHint", "otherSkillsExplainer")
 			end
 		end)
 	end
@@ -3726,6 +3961,8 @@ function SkillPowerUpUI.close()
 		onClosedCb()
 	end
 end
+
+local layoutWidePowerUp: () -> ()
 
 function SkillPowerUpUI.open(skillId: string)
 	if not template then
@@ -3784,6 +4021,8 @@ function SkillPowerUpUI.open(skillId: string)
 	if lockedTemplate then
 		lockedTemplate.Visible = false
 	end
+	-- Scale and center before stage/cost labels measure the circle.
+	layoutWidePowerUp()
 	refreshTemplate() -- also beginGamepadNav
 	-- refreshTemplate can re-order stage chrome; keep interactives on top.
 	if closeBtn then
@@ -3797,6 +4036,7 @@ function SkillPowerUpUI.open(skillId: string)
 		raiseInteractive(unlockBtn, POWERUP_Z + 650)
 	end
 	-- Bubble AbsoluteSize is ready after suppress/layout — place title to its right.
+	task.defer(layoutWidePowerUp)
 	task.defer(layoutTitleBesideSkillBubble)
 end
 
@@ -3806,6 +4046,91 @@ function SkillPowerUpUI.openFromButtonName(buttonName: string)
 		SkillPowerUpUI.open(def.id)
 	else
 		warn("[SkillPowerUp] No skill for button", buttonName)
+	end
+end
+
+type GuiHome = { pos: UDim2, anchor: Vector2 }
+
+local templateHome: GuiHome? = nil
+local closeHome: GuiHome? = nil
+local powerUpViewportBound = false
+
+local function unscaledCenter(gui: GuiObject): Vector2?
+	local parent = gui.Parent
+	if not parent or not parent:IsA("GuiObject") then
+		return nil
+	end
+	local ps = parent.AbsoluteSize
+	if ps.X < 2 or ps.Y < 2 then
+		return nil
+	end
+	local x = gui.Position.X.Scale * ps.X + gui.Position.X.Offset
+	local y = gui.Position.Y.Scale * ps.Y + gui.Position.Y.Offset
+	local w = gui.Size.X.Scale * ps.X + gui.Size.X.Offset
+	local h = gui.Size.Y.Scale * ps.Y + gui.Size.Y.Offset
+	return Vector2.new(x + (0.5 - gui.AnchorPoint.X) * w, y + (0.5 - gui.AnchorPoint.Y) * h)
+end
+
+-- Phone keeps the Studio layout. Larger screens pin the power-up circle to
+-- screen center (so it covers the Plot Size bubble) and grow it with the HUD.
+function layoutWidePowerUp()
+	if not template or not hostScreenGui then
+		return
+	end
+	if not templateHome then
+		templateHome = { pos = template.Position, anchor = template.AnchorPoint }
+	end
+	if closeBtn and not closeHome and not closeBtn:IsDescendantOf(template) then
+		closeHome = { pos = closeBtn.Position, anchor = closeBtn.AnchorPoint }
+	end
+	if not UiViewportTags.is720p() then
+		template.AnchorPoint = templateHome.anchor
+		template.Position = templateHome.pos
+		local sc = template:FindFirstChild("_OceanTD_PopupScale")
+		if sc and sc:IsA("UIScale") then
+			sc.Scale = 1
+		end
+		if closeBtn and closeHome and not closeBtn:IsDescendantOf(template) then
+			closeBtn.AnchorPoint = closeHome.anchor
+			closeBtn.Position = closeHome.pos
+			local csc = closeBtn:FindFirstChild("_OceanTD_PopupScale")
+			if csc and csc:IsA("UIScale") then
+				csc.Scale = 1
+			end
+		end
+		return
+	end
+	local parent = template.Parent
+	if not (parent and parent:IsA("GuiObject")) then
+		return
+	end
+	if hostScreenGui.AbsoluteSize.X < 2 or parent.AbsoluteSize.X < 2 then
+		return
+	end
+	local templateLocal = unscaledCenter(template)
+	local closeLocal = if closeBtn and not closeBtn:IsDescendantOf(template) then unscaledCenter(closeBtn) else nil
+	local closeParent = if closeBtn then closeBtn.Parent else nil
+	local templateBefore = if templateLocal then parent.AbsolutePosition + templateLocal else nil
+	local closeBefore = if closeLocal and closeParent and closeParent:IsA("GuiObject")
+		then closeParent.AbsolutePosition + closeLocal
+		else nil
+
+	UiPopupScale.attachHud(template)
+	local pScale = UiPopupScale.ancestorScale(parent)
+	local screenCenter = hostScreenGui.AbsolutePosition + hostScreenGui.AbsoluteSize * 0.5
+	local localPt = (screenCenter - parent.AbsolutePosition) / pScale
+	template.AnchorPoint = Vector2.new(0.5, 0.5)
+	template.Position = UDim2.fromOffset(localPt.X, localPt.Y)
+
+	if closeBtn and closeBefore and templateBefore and closeParent and closeParent:IsA("GuiObject")
+		and not closeBtn:IsDescendantOf(template)
+	then
+		UiPopupScale.attachHud(closeBtn)
+		local target = closeBefore + (screenCenter - templateBefore)
+		local cScale = UiPopupScale.ancestorScale(closeParent)
+		local cLocal = (target - closeParent.AbsolutePosition) / cScale
+		closeBtn.AnchorPoint = Vector2.new(0.5, 0.5)
+		closeBtn.Position = UDim2.fromOffset(cLocal.X, cLocal.Y)
 	end
 end
 
@@ -3942,6 +4267,21 @@ function SkillPowerUpUI.bind(mobileSkillsRoot: Instance)
 	end
 	bound = true
 	ReloadTrialUI.publish()
+	task.defer(layoutWidePowerUp)
+	if not powerUpViewportBound then
+		powerUpViewportBound = true
+		local cam = Workspace.CurrentCamera
+		if cam then
+			cam:GetPropertyChangedSignal("ViewportSize"):Connect(layoutWidePowerUp)
+		end
+		Workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function()
+			local nextCam = Workspace.CurrentCamera
+			if nextCam then
+				nextCam:GetPropertyChangedSignal("ViewportSize"):Connect(layoutWidePowerUp)
+			end
+			task.defer(layoutWidePowerUp)
+		end)
+	end
 
 	task.spawn(function()
 		local ok, payload = pcall(function()

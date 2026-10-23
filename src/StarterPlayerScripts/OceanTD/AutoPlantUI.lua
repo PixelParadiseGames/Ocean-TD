@@ -1260,6 +1260,10 @@ function AutoPlantUI.getAddMaxButton(): TextButton?
 	return addMaxBtn
 end
 
+function AutoPlantUI.getShuffleButton(): ImageButton?
+	return shuffleBtn
+end
+
 -- Visible chrome (stroke / fill); prefer this for UIScale so the whole button animates.
 function AutoPlantUI.getAddMaxShell(): Frame?
 	return addMaxShell
@@ -1269,7 +1273,10 @@ function AutoPlantUI.mount(parent: Instance): Frame
 	local wrap = Instance.new("Frame")
 	wrap.Name = "AutoPlantHeader"
 	wrap.BackgroundTransparency = 1
-	wrap.Size = UDim2.new(1, -4, 0, if SHOW_BACKPACK_TOGGLE then 108 else 56)
+	local hud = UiPopupScale.getHud()
+	local btnH = if hud > 1.01 then math.floor(40 * hud + 0.5) else 40
+	local rowH = if hud > 1.01 then math.floor(44 * hud + 0.5) else 44
+	wrap.Size = UDim2.new(1, -4, 0, if SHOW_BACKPACK_TOGGLE then 108 else rowH + 8)
 	wrap.AutomaticSize = Enum.AutomaticSize.Y
 	wrap.LayoutOrder = 0
 	wrap.Parent = parent
@@ -1327,7 +1334,7 @@ function AutoPlantUI.mount(parent: Instance): Frame
 	local bottom = Instance.new("Frame")
 	bottom.Name = "AutoPlantBottom"
 	bottom.BackgroundTransparency = 1
-	bottom.Size = UDim2.new(1, 0, 0, 44)
+	bottom.Size = UDim2.new(1, 0, 0, rowH)
 	bottom.LayoutOrder = 2
 	bottom.Parent = wrap
 
@@ -1341,7 +1348,7 @@ function AutoPlantUI.mount(parent: Instance): Frame
 
 	local addShell = Instance.new("Frame")
 	addShell.Name = "AddMaxShell"
-	addShell.Size = UDim2.new(0.55, 0, 0, 40)
+	addShell.Size = UDim2.new(0.55, 0, 0, btnH)
 	addShell.BorderSizePixel = 0
 	addShell.LayoutOrder = 1
 	addShell.Parent = bottom
@@ -1370,7 +1377,7 @@ function AutoPlantUI.mount(parent: Instance): Frame
 
 	local dice = Instance.new("ImageButton")
 	dice.Name = "AutoPlantShuffle"
-	dice.Size = UDim2.fromOffset(40, 40)
+	dice.Size = UDim2.fromOffset(btnH, btnH)
 	dice.BackgroundColor3 = GREEN
 	dice.Image = ""
 	dice.LayoutOrder = 2
@@ -1410,6 +1417,25 @@ function AutoPlantUI.mount(parent: Instance): Frame
 	dice.Activated:Connect(function()
 		openConfirm()
 	end)
+
+	local function applyWideAddMax()
+		local wide = UiPopupScale.getHud()
+		local h = if wide > 1.01 then math.floor(40 * wide + 0.5) else 40
+		local rowPx = if wide > 1.01 then math.floor(44 * wide + 0.5) else 44
+		bottom.Size = UDim2.new(1, 0, 0, rowPx)
+		addShell.Size = UDim2.new(0.55, 0, 0, h)
+		dice.Size = UDim2.fromOffset(h, h)
+		if not SHOW_BACKPACK_TOGGLE then
+			wrap.Size = UDim2.new(1, -4, 0, rowPx + 8)
+		end
+	end
+	applyWideAddMax()
+	local cam = workspace.CurrentCamera
+	if cam then
+		cam:GetPropertyChangedSignal("ViewportSize"):Connect(applyWideAddMax)
+	end
+	task.delay(0.5, applyWideAddMax)
+	task.delay(1.5, applyWideAddMax)
 
 	local lock = Instance.new("TextLabel")
 	lock.Name = "UnlockHint"
@@ -1541,6 +1567,11 @@ local function playOrbArrive(payload: any, opts: {
 	light.Range = 18
 	light.Color = orbColor
 	light.Parent = orb
+
+	-- Training: first auto-plant orb → RollFingerHint plays Auto Plant explainer VO.
+	if playerGui:GetAttribute("OceanTD_TutorialChapter") == "autoPlant" then
+		playerGui:SetAttribute("OceanTD_TutorialAutoPlantOrbFired", os.clock())
+	end
 
 	playWooshSfx()
 

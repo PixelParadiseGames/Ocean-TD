@@ -52,16 +52,20 @@ function UiViewportTags.is720p(viewport: Vector2?): boolean
 		return false
 	end
 	local aspect = long / short
-	-- Real phones: touch without a hardware keyboard, tall aspect, even if DPI ≥720.
-	-- Studio's device emulator usually still has KeyboardEnabled from the PC — then
-	-- short-edge <720 keeps Mobile, matching what already worked in the emulator.
+	if short < UiViewportTags.HEIGHT_BREAKPOINT then
+		return false
+	end
+	-- High-DPI phones only. 16:9 (720p / 1080p / PS5 / Xbox) must stay large-screen
+	-- even when the Studio device emulator turns on touch and turns off the keyboard.
+	-- Phone landscape is ~19.5:9 (aspect ≥ 2). Consoles and HD presets are ~16:9.
 	local touchPhone = UserInputService.TouchEnabled
 		and not UserInputService.KeyboardEnabled
-		and aspect >= 1.6
+		and not UserInputService.GamepadEnabled
+		and aspect >= 2
 	if touchPhone then
 		return false
 	end
-	return short >= UiViewportTags.HEIGHT_BREAKPOINT
+	return true
 end
 
 function UiViewportTags.isMobile(viewport: Vector2?): boolean

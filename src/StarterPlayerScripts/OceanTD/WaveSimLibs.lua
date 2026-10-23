@@ -22,6 +22,7 @@ return {
 	ItemCatalog = require(oceanRoot:WaitForChild("Shared"):WaitForChild("ItemCatalog")),
 	SpeciesCatalog = require(oceanRoot:WaitForChild("Shared"):WaitForChild("SpeciesCatalog")),
 	UiTheme = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiTheme")),
+	UiPopupScale = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiPopupScale")),
 	CoralVisual = require(oceanRoot:WaitForChild("Shared"):WaitForChild("CoralVisual")),
 	CoralSize = require(oceanRoot:WaitForChild("Shared"):WaitForChild("CoralSize")),
 	BrainStack = require(oceanRoot:WaitForChild("Shared"):WaitForChild("BrainStack")),
@@ -47,8 +48,10 @@ return {
 	-- First-time / defeat tutorial VO asset ids.
 	VO_REEF_EMPTY = "rbxassetid://80635392364728",
 	VO_FIRST_URCHIN = "rbxassetid://101008832074415",
+	VO_URCHIN_PATH = "rbxassetid://76226160799510",
 	VO_FIRST_CRAB = "rbxassetid://73529365912447",
 	VO_FIRST_SHARK = "rbxassetid://81763997714855",
+	VO_SHARK_PATH = "rbxassetid://104246255951581",
 	-- Wave 2 (first time, tutorial not skipped): full-auto reload trial VO.
 	VO_TRY_FULL_AUTO_RELOAD = "rbxassetid://78472293544660",
 }

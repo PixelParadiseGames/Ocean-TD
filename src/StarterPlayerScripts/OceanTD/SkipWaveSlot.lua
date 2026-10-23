@@ -161,6 +161,14 @@ local function startSkipLockOrbit(host: GuiObject)
 		if not icon or not icon.Parent or not icon.Visible then
 			return
 		end
+		local lockPx = SKIP_LOCK_SIZE_PX
+		local hud = UiPopupScale.getHud()
+		if hud > 1.01 then
+			lockPx = math.max(SKIP_LOCK_SIZE_PX, math.floor(SKIP_LOCK_SIZE_PX * hud + 0.5))
+		end
+		if icon.Size.X.Offset ~= lockPx then
+			icon.Size = UDim2.fromOffset(lockPx, lockPx)
+		end
 		skipLockOrbitAngle += SKIP_LOCK_ORBIT_SPEED * dt
 		local abs = host.AbsoluteSize
 		local radius = math.max(10, math.min(abs.X, abs.Y) * 0.5 * SKIP_LOCK_ORBIT_FRAC)
@@ -215,7 +223,12 @@ local function syncSkipLock()
 			icon.Name = "OceanTD_SkipLock"
 			icon.BackgroundTransparency = 1
 			icon.Image = SKIP_LOCK_IMAGE
-			icon.Size = UDim2.fromOffset(SKIP_LOCK_SIZE_PX, SKIP_LOCK_SIZE_PX)
+			local lockPx = SKIP_LOCK_SIZE_PX
+			local hud = UiPopupScale.getHud()
+			if hud > 1.01 then
+				lockPx = math.max(SKIP_LOCK_SIZE_PX, math.floor(SKIP_LOCK_SIZE_PX * hud + 0.5))
+			end
+			icon.Size = UDim2.fromOffset(lockPx, lockPx)
 			icon.AnchorPoint = Vector2.new(0.5, 0.5)
 			icon.Position = UDim2.fromScale(0.5, 0.5)
 			icon.Active = false
@@ -225,7 +238,12 @@ local function syncSkipLock()
 			skipLockOrbitAngle = Random.new():NextNumber(0, math.pi * 2)
 		else
 			icon.Visible = true
-			icon.Size = UDim2.fromOffset(SKIP_LOCK_SIZE_PX, SKIP_LOCK_SIZE_PX)
+			local lockPx = SKIP_LOCK_SIZE_PX
+			local hud = UiPopupScale.getHud()
+			if hud > 1.01 then
+				lockPx = math.max(SKIP_LOCK_SIZE_PX, math.floor(SKIP_LOCK_SIZE_PX * hud + 0.5))
+			end
+			icon.Size = UDim2.fromOffset(lockPx, lockPx)
 			icon.ZIndex = host.ZIndex + 22
 		end
 		startSkipLockOrbit(host)

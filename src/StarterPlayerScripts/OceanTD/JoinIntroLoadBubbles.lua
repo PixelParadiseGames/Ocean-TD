@@ -7,6 +7,9 @@
 
 local RunService = game:GetService("RunService")
 local Workspace = game:GetService("Workspace")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local UiPopupScale = require(ReplicatedStorage:WaitForChild("OceanTD"):WaitForChild("Shared"):WaitForChild("UiPopupScale"))
 
 local JoinIntroLoadBubbles = {}
 
@@ -29,7 +32,7 @@ local CORE_COLOR = Color3.fromRGB(195, 230, 255)
 type RiseBubble = {
 	gui: Frame,
 	sizePx: number,
-	x: number,
+	xNorm: number,
 	y: number,
 	speed: number,
 	phase: number,
@@ -155,23 +158,37 @@ local function makeBubbleGui(parent: Frame, sizePx: number): Frame
 	return f
 end
 
+local function placeBubble(b: RiseBubble, sh: number)
+	local drift = math.sin(tClock * b.driftFreq * math.pi * 2 + b.phase) * DRIFT_AMP
+	local parent = b.gui.Parent
+	local sw = if parent and parent:IsA("GuiObject") then parent.AbsoluteSize.X else 0
+	local xPx = b.xNorm * math.max(sw, 1) + drift
+	-- Scale coords span the whole layer. Offset coords were only covering the left
+	-- half once a parent UIScale (large-screen HUD) multiplied them again.
+	if sw > 1 then
+		b.gui.Position = UDim2.fromScale((xPx) / sw, b.y / math.max(sh, 1))
+	else
+		b.gui.Position = UDim2.fromScale(b.xNorm, b.y / math.max(sh, 1))
+	end
+end
+
 local function spawnBelow(parent: Frame, belowFrac: number): RiseBubble
-	local sw, sh = screenSize()
+	local _, sh = screenSize()
+	local hud = UiPopupScale.getLoadBubble()
 	local t = rng:NextNumber()
-	local sizePx = SIZE_MIN + (SIZE_MAX - SIZE_MIN) * (t * t)
+	local sizePx = (SIZE_MIN + (SIZE_MAX - SIZE_MIN) * (t * t)) * hud
 	local gui = makeBubbleGui(parent, sizePx)
-	local x = rng:NextNumber(sizePx * 0.5, math.max(sizePx * 0.5 + 1, sw - sizePx * 0.5))
 	local y = sh + sizePx * 0.5 + math.max(0, belowFrac) * sh
 	local b: RiseBubble = {
 		gui = gui,
 		sizePx = sizePx,
-		x = x,
+		xNorm = rng:NextNumber(0.03, 0.97),
 		y = y,
 		speed = speedForSize(sizePx) * rng:NextNumber(0.92, 1.08),
 		phase = rng:NextNumber(0, math.pi * 2),
 		driftFreq = rng:NextNumber(0.12, 0.35),
 	}
-	gui.Position = UDim2.fromOffset(b.x, b.y)
+	placeBubble(b, sh)
 	return b
 end
 
@@ -214,8 +231,8 @@ local function bindHeartbeat()
 				continue
 			end
 			b.y -= b.speed * step
-			local drift = math.sin(tClock * b.driftFreq * math.pi * 2 + b.phase) * DRIFT_AMP
-			b.gui.Position = UDim2.fromOffset(b.x + drift, b.y)
+			local _, sh = screenSize()
+			placeBubble(b, sh)
 			local fullyOut = b.y + b.sizePx * 0.5 < -2
 			if fullyOut then
 				b.gui:Destroy()

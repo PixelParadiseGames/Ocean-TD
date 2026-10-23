@@ -21,6 +21,9 @@ export type PlayOpts = {
 	volume: number?,
 	-- Skip leading silence / dead air at the start of the clip (seconds).
 	startOffsetSec: number?,
+	-- When true, this clip cannot be cut by a later play() (only stop/playOverride).
+	-- Used for round-ending lines like out-of-reef-health.
+	priority: boolean?,
 }
 
 -- Roblox Sound.Volume allows >1; keep dialogue above ducked BGM even if masters are quiet.
@@ -41,8 +44,14 @@ local active: Sound? = nil
 local ducking = false
 local pending: Pending? = nil
 local playGen = 0
+-- While set, normal play() queues instead of cutting (playOverride/stop clear it).
+local priorityGen: number? = nil
 
 local playNow: (string, string?, PlayOpts?) -> ()
+
+local function priorityHoldActive(): boolean
+	return priorityGen ~= nil and priorityGen == playGen and TutorialVo.isPlaying()
+end
 
 local function clearDuck()
 	local was = ducking
@@ -92,6 +101,9 @@ playNow = function(soundId: string, name: string?, opts: PlayOpts?)
 		if isCurrent then
 			if active == s then
 				active = nil
+			end
+			if priorityGen == my then
+				priorityGen = nil
 			end
 			clearDuck()
 		end
@@ -176,6 +188,7 @@ end
 
 function TutorialVo.stop()
 	pending = nil
+	priorityGen = nil
 	playGen += 1
 	local s = active
 	active = nil
@@ -190,7 +203,13 @@ function TutorialVo.stop()
 end
 
 function TutorialVo.play(soundId: string, name: string?, opts: PlayOpts?)
+	-- Round-ending priority clip (e.g. out of reef health) must finish first.
+	if priorityHoldActive() then
+		pending = { soundId = soundId, name = name, opts = opts }
+		return
+	end
 	pending = nil
+	priorityGen = nil
 	-- Invalidate prior Ended/Ancestry callbacks so they can't unduck the new clip.
 	playGen += 1
 	local s = active
@@ -203,6 +222,17 @@ function TutorialVo.play(soundId: string, name: string?, opts: PlayOpts?)
 	end
 	-- Keep BGM ducked across a hard VO swap; playNow refreshes the factor.
 	playNow(soundId, name, opts)
+	if opts and opts.priority == true then
+		priorityGen = playGen
+	end
+end
+
+-- Cut whatever is speaking (including a priority clip) and play this as the new priority line.
+function TutorialVo.playOverride(soundId: string, name: string?, opts: PlayOpts?)
+	local merged: PlayOpts = if opts then table.clone(opts) else {}
+	merged.priority = true
+	priorityGen = nil
+	TutorialVo.play(soundId, name, merged)
 end
 
 -- If a clip is already playing, run this after it ends (does not cut the current VO).

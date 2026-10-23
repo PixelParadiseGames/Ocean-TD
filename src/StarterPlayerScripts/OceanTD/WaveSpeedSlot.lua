@@ -1,7 +1,7 @@
 --!strict
 --[[
 	Slot7 Wave Speed — slides out from under Slot5 while waves run.
-	Cycles 1x → 1.5x → 2x → pause (stage 4) → 1x. Shortcuts: T / L2.
+	Cycles 1x → 1.5x → 2x → pause (stage 4) → 1x. Shortcuts: T / L1 (gamepad, during waves).
 	Stage 1: locked (red overlay) → opens Wave Speed powerup. Stage 2: up to 1.5x.
 	Stage 3: up to 2x. Stage 4: pause after 2x. Help badge; idle text opposite Skip.
 ]]
@@ -17,6 +17,7 @@ local UiCircles = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiCircl
 local UiTheme = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiTheme"))
 local UiIdleCycle = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiIdleCycle"))
 local UiHaptics = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiHaptics"))
+local UiPopupScale = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiPopupScale"))
 local Remotes = require(oceanRoot:WaitForChild("Remotes"))
 local SkillStages = require(oceanRoot:WaitForChild("Shared"):WaitForChild("SkillStages"))
 
@@ -139,6 +140,14 @@ local function stopSpeedLockOrbit()
 	end
 end
 
+local function speedLockPx(): number
+	local hud = UiPopupScale.getHud()
+	if hud <= 1.01 then
+		return SPEED_LOCK_SIZE_PX
+	end
+	return math.max(SPEED_LOCK_SIZE_PX, math.floor(SPEED_LOCK_SIZE_PX * hud + 0.5))
+end
+
 local function startSpeedLockOrbit(host: GuiObject)
 	if speedLockOrbitConn then
 		return
@@ -147,6 +156,10 @@ local function startSpeedLockOrbit(host: GuiObject)
 		local icon = speedLockIcon
 		if not icon or not icon.Parent or not icon.Visible then
 			return
+		end
+		local lockPx = speedLockPx()
+		if icon.Size.X.Offset ~= lockPx then
+			icon.Size = UDim2.fromOffset(lockPx, lockPx)
 		end
 		speedLockOrbitAngle += SPEED_LOCK_ORBIT_SPEED * dt
 		local abs = host.AbsoluteSize
@@ -210,7 +223,7 @@ local function syncSpeedLock()
 			icon.Name = "OceanTD_SpeedLock"
 			icon.BackgroundTransparency = 1
 			icon.Image = SPEED_LOCK_IMAGE
-			icon.Size = UDim2.fromOffset(SPEED_LOCK_SIZE_PX, SPEED_LOCK_SIZE_PX)
+			icon.Size = UDim2.fromOffset(speedLockPx(), speedLockPx())
 			icon.AnchorPoint = Vector2.new(0.5, 0.5)
 			icon.Position = UDim2.fromScale(0.5, 0.5)
 			icon.Active = false
@@ -220,7 +233,7 @@ local function syncSpeedLock()
 			speedLockOrbitAngle = Random.new():NextNumber(0, math.pi * 2)
 		else
 			icon.Visible = true
-			icon.Size = UDim2.fromOffset(SPEED_LOCK_SIZE_PX, SPEED_LOCK_SIZE_PX)
+			icon.Size = UDim2.fromOffset(speedLockPx(), speedLockPx())
 			icon.ZIndex = host.ZIndex + 22
 		end
 		icon.Visible = true
@@ -705,7 +718,7 @@ local function styleHelpBadge(): boolean
 	helpSlot.BackgroundTransparency = 0
 	helpSlot.Active = false
 	UiCircles.ensure(helpSlot)
-	helpLetter.Text = if mode == "gamepad" then "L2" else "T"
+	helpLetter.Text = if mode == "gamepad" then "L1" else "T"
 	helpLetter.TextColor3 = Color3.new(1, 1, 1)
 	helpLetter.Visible = true
 	return true

@@ -638,6 +638,20 @@ function PlotCam2.setFocusToPlotCenter()
 	focus = Vector3.new(plotCf.Position.X, groundY(plotCf, plotSize), plotCf.Position.Z)
 end
 
+-- Pan focus XZ onto a world point (keeps current zoom). Used by manual-plant coral finger.
+function PlotCam2.focusWorldPoint(worldPos: Vector3): boolean
+	if not active or typeof(worldPos) ~= "Vector3" then
+		return false
+	end
+	local plotCf, plotSize = getPlot()
+	if not plotCf or not plotSize then
+		return false
+	end
+	focus = clampFocus(Vector3.new(worldPos.X, groundY(plotCf, plotSize), worldPos.Z), plotCf, plotSize)
+	persistTune()
+	return true
+end
+
 -- Apply yaw + center focus and return the resulting camera CFrame (for cinematic drivers).
 -- Optional distOverride sets liveDist for slow zoom-out during orbits.
 function PlotCam2.cinematicPose(yawDeg: number, distOverride: number?): CFrame?

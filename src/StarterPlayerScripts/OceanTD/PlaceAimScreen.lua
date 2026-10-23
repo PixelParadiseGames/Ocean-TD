@@ -126,6 +126,21 @@ function PlaceAimScreen.resetGamepadCursor(): Vector2
 	return UserInputService:GetMouseLocation()
 end
 
+function PlaceAimScreen.readThumbstick2(): Vector2
+	local ok, states = pcall(function()
+		return UserInputService:GetGamepadState(Enum.UserInputType.Gamepad1)
+	end)
+	if not ok or typeof(states) ~= "table" then
+		return Vector2.zero
+	end
+	for _, input in ipairs(states :: { InputObject }) do
+		if input.KeyCode == Enum.KeyCode.Thumbstick2 then
+			return Vector2.new(input.Position.X, input.Position.Y)
+		end
+	end
+	return Vector2.zero
+end
+
 function PlaceAimScreen.readThumbstick1(): Vector2
 	local ok, states = pcall(function()
 		return UserInputService:GetGamepadState(Enum.UserInputType.Gamepad1)

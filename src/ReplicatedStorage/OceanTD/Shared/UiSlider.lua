@@ -5,6 +5,7 @@
 
 local UserInputService = game:GetService("UserInputService")
 local GuiService = game:GetService("GuiService")
+local ContextActionService = game:GetService("ContextActionService")
 
 local UiTheme = require(script.Parent:WaitForChild("UiTheme"))
 
@@ -22,11 +23,13 @@ export type SliderHandle = {
 	root: Frame,
 	setValue: (number, boolean?) -> (),
 	getValue: () -> number,
+	nudge: (number) -> (),
 	destroy: () -> (),
 }
 
 local DRAG_SENS = Enum.UserInputType.MouseButton1
 local TOUCH_SENS = Enum.UserInputType.Touch
+local sliderSeq = 0
 
 local function pctLabel(v: number): string
 	return string.format("%d%%", math.floor(v * 100 + 0.5))
@@ -67,6 +70,9 @@ function UiSlider.create(parent: Instance, opts: SliderOptions?): SliderHandle
 	trackBtn.AutoButtonColor = false
 	trackBtn.ClipsDescendants = true
 	trackBtn.Selectable = true
+	-- Left/right stay on this slider. Gui navigation was leaving the settings menu.
+	trackBtn.NextSelectionLeft = trackBtn
+	trackBtn.NextSelectionRight = trackBtn
 	trackBtn.Parent = root
 	local trackCorner = Instance.new("UICorner")
 	trackCorner.CornerRadius = UDim.new(0, 8)
@@ -150,19 +156,35 @@ function UiSlider.create(parent: Instance, opts: SliderOptions?): SliderHandle
 		applyVisual(value + delta, true)
 	end
 
-	table.insert(conns, UserInputService.InputBegan:Connect(function(input, gp)
-		if gp or dragging then
-			return
+	sliderSeq += 1
+	local nudgeAction = "OceanTD_UiSliderNudge_" .. tostring(sliderSeq)
+	local function onSliderNudge(_action: string, state: Enum.UserInputState, input: InputObject)
+		if state ~= Enum.UserInputState.Begin or dragging then
+			return Enum.ContextActionResult.Pass
 		end
 		if GuiService.SelectedObject ~= trackBtn then
-			return
+			return Enum.ContextActionResult.Pass
 		end
-		if input.KeyCode == Enum.KeyCode.DPadLeft or input.KeyCode == Enum.KeyCode.Left or input.KeyCode == Enum.KeyCode.ButtonD then
+		if input.KeyCode == Enum.KeyCode.DPadLeft or input.KeyCode == Enum.KeyCode.Left then
 			nudge(-0.05)
-		elseif input.KeyCode == Enum.KeyCode.DPadRight or input.KeyCode == Enum.KeyCode.Right or input.KeyCode == Enum.KeyCode.ButtonDP then
-			nudge(0.05)
+			return Enum.ContextActionResult.Sink
 		end
-	end))
+		if input.KeyCode == Enum.KeyCode.DPadRight or input.KeyCode == Enum.KeyCode.Right then
+			nudge(0.05)
+			return Enum.ContextActionResult.Sink
+		end
+		return Enum.ContextActionResult.Pass
+	end
+	ContextActionService:BindActionAtPriority(
+		nudgeAction,
+		onSliderNudge,
+		false,
+		Enum.ContextActionPriority.High.Value + 25,
+		Enum.KeyCode.DPadLeft,
+		Enum.KeyCode.DPadRight,
+		Enum.KeyCode.Left,
+		Enum.KeyCode.Right
+	)
 
 	applyVisual(1, false)
 
@@ -175,7 +197,11 @@ function UiSlider.create(parent: Instance, opts: SliderOptions?): SliderHandle
 		getValue = function()
 			return value
 		end,
+		nudge = function(delta: number)
+			nudge(delta)
+		end,
 		destroy = function()
+			ContextActionService:UnbindAction(nudgeAction)
 			for _, c in ipairs(conns) do
 				c:Disconnect()
 			end

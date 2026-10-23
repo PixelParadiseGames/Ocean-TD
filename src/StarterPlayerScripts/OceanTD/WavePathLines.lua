@@ -21,6 +21,7 @@ local TutorialVo = require(script.Parent:WaitForChild("TutorialVo"))
 local WaveFeedPayout = require(script.Parent:WaitForChild("WaveFeedPayout"))
 local SkillStages = require(ReplicatedStorage:WaitForChild("OceanTD"):WaitForChild("Shared"):WaitForChild("SkillStages"))
 local UiTheme = require(ReplicatedStorage:WaitForChild("OceanTD"):WaitForChild("Shared"):WaitForChild("UiTheme"))
+local UiPopupScale = require(ReplicatedStorage:WaitForChild("OceanTD"):WaitForChild("Shared"):WaitForChild("UiPopupScale"))
 local ReefHealthBarFx = require(ReplicatedStorage:WaitForChild("OceanTD"):WaitForChild("Shared"):WaitForChild("ReefHealthBarFx"))
 
 -- Join-intro narrator beats tied to the green path + GAME OVER.
@@ -178,6 +179,7 @@ type TipFishEmoji = {
 
 local tipLeadFish: TipFishEmoji? = nil
 local tipTrailFish: TipFishEmoji? = nil
+local tipDrawFish: TipFishEmoji? = nil
 local endRatingAnchor: BasePart? = nil
 local revealDoneEvent = Instance.new("BindableEvent")
 local paintFullPathIfPossible: () -> boolean
@@ -247,6 +249,10 @@ local function destroyTipFishEmojis()
 	if tipTrailFish then
 		tipTrailFish.anchor:Destroy()
 		tipTrailFish = nil
+	end
+	if tipDrawFish then
+		tipDrawFish.anchor:Destroy()
+		tipDrawFish = nil
 	end
 end
 
@@ -336,6 +342,7 @@ local function showIntroReefBarFull()
 	hostFr.Position = UDim2.new(0.5, 0, 1, -10)
 	hostFr.Size = UDim2.fromOffset(INTRO_REEF_BAR_W, INTRO_REEF_BAR_H)
 	hostFr.Parent = sg
+	UiPopupScale.attachHud(hostFr)
 	introReefHost = hostFr
 
 	local reefBar = Instance.new("Frame")
@@ -396,7 +403,7 @@ local function slideOutIntroReefBar(myToken: number)
 		return
 	end
 	local startPos = hostFr.Position
-	local endPos = UDim2.new(startPos.X.Scale, startPos.X.Offset, 1, INTRO_REEF_BAR_H + 40)
+	local endPos = UDim2.new(startPos.X.Scale, startPos.X.Offset, 1, INTRO_REEF_BAR_H * UiPopupScale.getHud() + 40)
 	local t0 = os.clock()
 	while myToken == inkToken and hostFr.Parent do
 		local u = math.clamp((os.clock() - t0) / INTRO_REEF_SLIDE_SEC, 0, 1)
@@ -442,8 +449,9 @@ local function makeTipHungerBillboard(adornee: BasePart): (BillboardGui, Frame, 
 	bb.AlwaysOnTop = true
 	bb.LightInfluence = 0
 	bb.MaxDistance = 4000
-	bb.Size = UDim2.fromScale(TIP_HUNGER_STUDS_W, TIP_HUNGER_STUDS_H)
-	bb.StudsOffset = Vector3.new(0, TIP_FISH_STUDS * 0.55 + TIP_HUNGER_STUDS_H * 0.55, 0)
+	local hud = UiPopupScale.getHud()
+	bb.Size = UDim2.fromScale(TIP_HUNGER_STUDS_W * hud, TIP_HUNGER_STUDS_H * hud)
+	bb.StudsOffset = Vector3.new(0, TIP_FISH_STUDS * 0.55 + TIP_HUNGER_STUDS_H * hud * 0.55, 0)
 	bb.Parent = adornee
 	local hungerScale = Instance.new("UIScale")
 	hungerScale.Scale = 1
@@ -617,6 +625,27 @@ local function updateTipFishEmojis(
 		-- Trail appears only once it starts moving; stays until its own path scale-out at the heart.
 		updateOneTipFish(tipTrailFish, trailPos, trailU, trailFill, trailVisible and trailU < 1, true)
 	end
+end
+
+-- Third fish: rides the ink tip while the green line draws, then leaves when the heart appears.
+local function destroyDrawFish()
+	if tipDrawFish then
+		tipDrawFish.anchor:Destroy()
+		tipDrawFish = nil
+	end
+end
+
+local function updateDrawFish(worldPos: Vector3)
+	if hiddenByUi then
+		destroyDrawFish()
+		return
+	end
+	if not tipDrawFish or not tipDrawFish.anchor then
+		tipDrawFish = createTipFishEmoji("InkDrawFish")
+		tipDrawFish.hungerBb.Enabled = false
+	end
+	updateOneTipFish(tipDrawFish, worldPos, 0, 1, true, false)
+	tipDrawFish.hungerBb.Enabled = false
 end
 
 -- Directional firework burst from a world origin (sideDir should be unit-ish).
@@ -1807,8 +1836,9 @@ function WavePathLines.playInkReveal(durationSec: number?)
 			})
 		end)
 
-		-- 1) Introduce the path — green ink only (no fish yet).
+		-- 1) Draw the path. A fish emoji leads the ink from the first moment, then leaves as the heart appears.
 		local t0 = os.clock()
+		updateDrawFish(h.sampleFishPath(path, 0))
 		while my == inkToken do
 			local u = (os.clock() - t0) / dur
 			if u >= 1 then
@@ -1819,14 +1849,18 @@ function WavePathLines.playInkReveal(durationSec: number?)
 			inkDrawLen = len
 			WavePathLines.rebuildForPath(path, len)
 			updateTipHead(path, len, h)
+			updateDrawFish(h.sampleFishPath(path, len))
 			RunService.RenderStepped:Wait()
 		end
 		if my ~= inkToken then
+			destroyDrawFish()
 			return
 		end
 		inkDrawLen = fullLen
 		WavePathLines.rebuildForPath(path, fullLen)
 		updateTipHead(path, fullLen, h)
+		updateDrawFish(h.sampleFishPath(path, fullLen))
+		destroyDrawFish()
 		local endPos = path.endPos or h.sampleFishPath(path, fullLen)
 
 		-- 2) Introduce the heart — scale-up + both heartbeat sounds must finish.
@@ -1900,7 +1934,7 @@ function WavePathLines.playInkReveal(durationSec: number?)
 					local plot = ClientPlot.get()
 					local focus = if plot then plot.cframe.Position else tipPos
 					local IntroCamPunch = require(script.Parent:WaitForChild("IntroCamPunch"))
-					local punch = IntroCamPunch.beginHold(focus, 0.38, 0.4, { freezeFocus = true })
+					local punch = IntroCamPunch.beginHold(focus, 0.75, 0.4, { freezeFocus = true })
 					if punch then
 						task.delay(2.2 + 0.4, function()
 							punch.release(0.5)

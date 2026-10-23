@@ -155,7 +155,7 @@ local function styleSlot3HelpBadge(): boolean
 	helpSlot3.BackgroundTransparency = 0
 	helpSlot3.Active = false
 	UiCircles.ensure(helpSlot3)
-	helpSlot3Letter.Text = if mode == "gamepad" then "L2" else "Z"
+	helpSlot3Letter.Text = if mode == "gamepad" then "X" else "Z"
 	helpSlot3Letter.TextColor3 = Color3.new(1, 1, 1)
 	helpSlot3Letter.Visible = true
 	return true

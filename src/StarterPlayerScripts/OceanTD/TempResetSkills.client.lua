@@ -17,6 +17,7 @@ local oceanRoot = ReplicatedStorage:WaitForChild("OceanTD")
 local Remotes = require(oceanRoot:WaitForChild("Remotes"))
 local SkillStages = require(oceanRoot:WaitForChild("Shared"):WaitForChild("SkillStages"))
 local UiTheme = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiTheme"))
+local UiPopupScale = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiPopupScale"))
 local SkillPowerUpUI = require(script.Parent:WaitForChild("SkillPowerUpUI"))
 
 local resetRf = Remotes.getFunction("RequestResetSkillStages")
@@ -48,6 +49,31 @@ btn.TextColor3 = Color3.new(1, 1, 1)
 btn.Text = "Refund Skills"
 btn.AutoButtonColor = true
 btn.Parent = sg
+UiPopupScale.attachHud(btn)
+local xTip = Instance.new("TextLabel")
+xTip.Name = "_OceanTD_RefundX"
+xTip.AnchorPoint = Vector2.new(1, 1)
+xTip.Position = UDim2.new(1, 4, 0, 10)
+xTip.Size = UDim2.fromOffset(22, 22)
+xTip.BackgroundColor3 = Color3.fromRGB(40, 130, 220)
+xTip.BorderSizePixel = 0
+xTip.Font = Enum.Font.GothamBold
+xTip.Text = "X"
+xTip.TextColor3 = Color3.new(1, 1, 1)
+xTip.TextScaled = true
+xTip.ZIndex = btn.ZIndex + 4
+xTip.Active = false
+xTip.Visible = false
+xTip.Parent = btn
+local xCorner = Instance.new("UICorner")
+xCorner.CornerRadius = UDim.new(1, 0)
+xCorner.Parent = xTip
+local xPad = Instance.new("UIPadding")
+xPad.PaddingTop = UDim.new(0.12, 0)
+xPad.PaddingBottom = UDim.new(0.12, 0)
+xPad.PaddingLeft = UDim.new(0.08, 0)
+xPad.PaddingRight = UDim.new(0.08, 0)
+xPad.Parent = xTip
 local corner = Instance.new("UICorner")
 corner.CornerRadius = UDim.new(0, 8)
 corner.Parent = btn
@@ -188,6 +214,7 @@ local function showConfirm()
 	panel.ZIndex = 2
 	panel.Selectable = false
 	panel.Parent = csg
+	UiPopupScale.attachHud(panel)
 	local pc = Instance.new("UICorner")
 	pc.CornerRadius = UDim.new(0, 14)
 	pc.Parent = panel
@@ -285,6 +312,7 @@ end
 local function syncVisible()
 	local open = playerGui:GetAttribute(SKILLS_OPEN_ATTR) == true
 	sg.Enabled = open
+	xTip.Visible = open and isGamepadMode()
 	if not open then
 		hideConfirm()
 	end
@@ -301,6 +329,16 @@ btn.Activated:Connect(function()
 end)
 
 UserInputService.InputBegan:Connect(function(input, gameProcessed)
+	if input.KeyCode == Enum.KeyCode.ButtonX then
+		if playerGui:GetAttribute(SKILLS_OPEN_ATTR) ~= true or busy then
+			return
+		end
+		if confirmGui then
+			return
+		end
+		showConfirm()
+		return
+	end
 	if gameProcessed or not confirmGui then
 		return
 	end
@@ -310,3 +348,4 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
 		hideConfirm()
 	end
 end)
+UserInputService.LastInputTypeChanged:Connect(syncVisible)

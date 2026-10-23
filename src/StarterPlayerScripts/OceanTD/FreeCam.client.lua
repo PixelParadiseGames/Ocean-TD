@@ -388,12 +388,16 @@ end
 
 local function nextCamMode(m: CamMode): CamMode
 	local i = modeIndex(m)
-	local next = FC.MODE_ORDER[(i % #FC.MODE_ORDER) + 1]
-	-- Skip Free Cam (dronecam) until manual plant training + backpack close.
-	if next == "dronecam" and freeCamTutorialLocked() then
-		return FC.MODE_ORDER[(modeIndex(next) % #FC.MODE_ORDER) + 1]
+	-- Skip Free Cam + Player Cam until Free Cam unlocks (manual plant + backpack close).
+	for _ = 1, #FC.MODE_ORDER do
+		i = (i % #FC.MODE_ORDER) + 1
+		local next = FC.MODE_ORDER[i]
+		if freeCamTutorialLocked() and (next == "dronecam" or next == "off") then
+			continue
+		end
+		return next
 	end
-	return next
+	return "plotcam"
 end
 
 local function slotForIconMode(iconMode: CamMode, relativeTo: CamMode): (string, number, number)
@@ -440,11 +444,22 @@ local function camModeIconsBackpackOnly(): boolean
 	return InventoryState.isOpen() and not skillsBubblesOpen()
 end
 
+local function gamepadBackpackOpen(): boolean
+	if not InventoryState.isOpen() then
+		return false
+	end
+	local t = UserInputService:GetLastInputType()
+	return t == Enum.UserInputType.Gamepad1
+		or t == Enum.UserInputType.Gamepad2
+		or t == Enum.UserInputType.Gamepad3
+		or t == Enum.UserInputType.Gamepad4
+end
+
 local function applyIconChrome(icon: ModeIcon, relativeTo: CamMode, collapsed: boolean)
 	local isActive = icon.mode == relativeTo
 	-- Collapsed stack: only the front (active) icon should eat clicks / hand cursor.
 	local interactive = isActive or not collapsed
-	if camModeIconsSuppressed() then
+	if gamepadBackpackOpen() or camModeIconsSuppressed() then
 		icon.root.Visible = false
 		interactive = false
 	elseif camModeIconsBackpackOnly() and collapsed then
@@ -505,8 +520,19 @@ local function raiseDPadIconLayer()
 	if not icon then
 		return
 	end
-	-- Above FreeCam / FishCam / OffCam roots (Z 10â€“30) and other dPad siblings.
-	local z = 80
+	-- Above FreeCam / FishCam / OffCam roots (Z 10–30) and other dPad siblings.
+	-- Skills / camera finger teach: sit above those buttons, but stay non-interactive.
+	local hint = playerGui:GetAttribute("OceanTD_RollFingerHint")
+	local skillsTeach = hint == "skills"
+		and playerGui:GetAttribute("OceanTD_SkillsBubblesOpen") ~= true
+	local camTeach = hint == "cam"
+	local teach = (skillsTeach or camTeach) and not InventoryState.isOpen()
+	local last = UserInputService:GetLastInputType()
+	local gamepad = last == Enum.UserInputType.Gamepad1
+		or last == Enum.UserInputType.Gamepad2
+		or last == Enum.UserInputType.Gamepad3
+		or last == Enum.UserInputType.Gamepad4
+	local z = if teach and gamepad then 200 else 80
 	icon.ZIndex = z
 	for _, d in ipairs(icon:GetDescendants()) do
 		if d:IsA("GuiObject") then
@@ -1138,7 +1164,9 @@ local function tickMouseDragLook()
 end
 
 local function tickLookInput(dt: number)
-	if lookStick.Magnitude > 0.12 then
+	-- Right stick rotates a selected coral; don't also orbit the camera.
+	local coralOwnsLook = RelocateController.isActive() or PlacementController.isActive()
+	if lookStick.Magnitude > 0.12 and not coralOwnsLook then
 		-- Free/Drone cam: stick Y+ is up — negate so lookPitch matches (mouse path stays as-is).
 		local stickY = if mode == "dronecam" then -lookStick.Y else lookStick.Y
 		applyLookDelta(lookStick.X * FC.LOOK_SENS_STICK * dt, stickY * FC.LOOK_SENS_STICK * dt)
@@ -2206,8 +2234,8 @@ setMode = function(nextMode: CamMode)
 	if not forceModeOverride and playerGui:GetAttribute("OceanTD_JoinIntroBusy") == true then
 		return
 	end
-	-- Free Cam locked through manual coral placement + backpack close.
-	if nextMode == "dronecam" and not forceModeOverride and freeCamTutorialLocked() then
+	-- Free Cam + Player Cam locked through manual coral placement + backpack close.
+	if not forceModeOverride and freeCamTutorialLocked() and (nextMode == "dronecam" or nextMode == "off") then
 		return
 	end
 	if nextMode ~= "off" then
@@ -2430,6 +2458,15 @@ end
 
 local function cycleMode()
 	if camCycleGated() then
+		return
+	end
+	-- Free Cam teach VO (manual plant): first cam tap seats Free Cam to try it.
+	if playerGui:GetAttribute("OceanTD_RollFingerHint") == "cam"
+		and playerGui:GetAttribute("OceanTD_TutorialChapter") == "manualPlant"
+	then
+		forceModeOverride = true
+		setMode("dronecam")
+		forceModeOverride = false
 		return
 	end
 	setMode(nextCamMode(mode))
@@ -2835,7 +2872,7 @@ local function wireModeIcon(btn: GuiObject, camMode: CamMode)
 				if camCycleGated() then
 					return
 				end
-				if camMode == "dronecam" and freeCamTutorialLocked() then
+				if freeCamTutorialLocked() and (camMode == "dronecam" or camMode == "off") then
 					return
 				end
 				setMode(camMode)
@@ -3365,8 +3402,11 @@ local function bindMobileLeftUi(left: Instance)
 				PlotCam2Tune.setVisible(false)
 				FishCamTune.setVisible(false)
 				-- Internal "off" so Resume can setMode(plotcam) again; keep CamCycleMode on the stash.
-				-- Must clear fish-cam POV FOV here — setMode/publishMode are skipped.
-				if stashed == "fishcam" then
+				-- Clear fish-cam POV FOV so urchin/shark tours don't snapshot ~105.
+				if stashed == "fishcam"
+					or playerGui:GetAttribute("OceanTD_UrchinCamBusy") == true
+					or playerGui:GetAttribute("OceanTD_SharkCamBusy") == true
+				then
 					clearPovFovForCinematic()
 				end
 				mode = "off"
@@ -3520,7 +3560,7 @@ local function bindMobileLeftUi(left: Instance)
 			if raw ~= "off" and raw ~= "plotcam" and raw ~= "fishcam" and raw ~= "dronecam" then
 				return
 			end
-			if raw == "dronecam" and freeCamTutorialLocked() then
+			if freeCamTutorialLocked() and (raw == "dronecam" or raw == "off") then
 				return
 			end
 			-- During join intro the cinematic owns Scriptable framing (CamStart→CamEnd / path VO).
@@ -3529,6 +3569,47 @@ local function bindMobileLeftUi(left: Instance)
 				if raw ~= "plotcam" then
 					return
 				end
+			end
+			-- END WAVES / explicit reset: Plot Cam at default start seat (not preserved wave pose).
+			local resetDefault = playerGui:GetAttribute("OceanTD_ResetPlotCamDefault") ~= nil
+			if resetDefault then
+				playerGui:SetAttribute("OceanTD_ResetPlotCamDefault", nil)
+			end
+			if resetDefault and raw == "plotcam" then
+				forceModeOverride = true
+				resumePreserveView = false
+				if mode ~= "plotcam" then
+					setMode("plotcam")
+				end
+				if FC.PLOT_CAM_VARIANT == 2 then
+					PlotCam2.beginIntroOverview()
+					local cam = getCamera()
+					local cf = PlotCam2.getCFrame()
+					if cam and cf then
+						cam.CameraType = Enum.CameraType.Scriptable
+						cam.CFrame = cf
+						camPos = cf.Position
+						syncLookFromCFrame(cf)
+					end
+					PlotCam2Tune.setVisible(true)
+					if not renderConn then
+						startRenderLoop()
+					end
+				else
+					local pose = resolveSkyPose()
+					local cam = getCamera()
+					if pose and cam then
+						cam.CameraType = Enum.CameraType.Scriptable
+						camPos = clampToSkyPose(pose.skyCFrame.Position, pose)
+						cam.CFrame = lookAtFocus(pose.focusPos)
+						syncLookFromCFrame(cam.CFrame)
+					end
+					if not renderConn then
+						startRenderLoop()
+					end
+				end
+				forceModeOverride = false
+				return
 			end
 			-- Wave-1 Tang handoff: keep the behind-fish / heart-ahead framing.
 			-- Post-intro: JoinIntro already tweened into PlotCam2 — keep that seat (no snap).
@@ -3573,12 +3654,13 @@ local function bindMobileLeftUi(left: Instance)
 		end)
 
 		local function onResumeCinematicCam()
+			-- ATTR can override the ForceClose stash (e.g. crab intro → Plot Cam).
+			local attr = playerGui:GetAttribute(FC.ATTR_CINEMATIC_RESUME_MODE)
 			local resume = cinematicResumeMode
-			if not resume or resume == "off" then
-				local attr = playerGui:GetAttribute(FC.ATTR_CINEMATIC_RESUME_MODE)
-				if attr == "plotcam" or attr == "fishcam" or attr == "dronecam" then
-					resume = attr :: CamMode
-				end
+			if attr == "plotcam" or attr == "fishcam" or attr == "dronecam" then
+				resume = attr :: CamMode
+			elseif not resume or resume == "off" then
+				-- keep resume nil / off
 			end
 			-- RETRY WAVE: don't keep defeat-end pose — snap Fish Cam to path start.
 			local wantPathStart = playerGui:GetAttribute("OceanTD_ResetFishCamPathStart") ~= nil
