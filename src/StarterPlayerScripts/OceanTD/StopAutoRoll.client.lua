@@ -1559,6 +1559,11 @@ local function rollOnce(fromPressSound: boolean?)
 	refreshKeepRollin()
 	spinVisibleIcon()
 	SeedWheelAutoRollState.armManual()
+	if playerGui:GetAttribute("OceanTD_TutorialChapter") == "manualPlant" then
+		pcall(function()
+			require(script.Parent:WaitForChild("JoinFunnelReport")).mark("manual_roll")
+		end)
+	end
 	Remotes.get("SeedWheelRollOnce"):FireServer()
 	local cycleDone = false
 	local hideDone = false

@@ -504,6 +504,9 @@ local function bootstrapImmediateLoadBar()
 	loadBarFillDone = false
 	loadBarAnimating = false
 	setLoadFillProgress(fill, 0)
+	pcall(function()
+		require(script.Parent:WaitForChild("JoinFunnelReport")).mark("load_bar_shown")
+	end)
 end
 
 bootstrapImmediateLoadBar()
@@ -1413,6 +1416,9 @@ local function waitEarlyLoadBarMin()
 			-- Bar full: stop spawning; on-screen bubbles keep rising off the top.
 			stopLoadAmbientBubbles()
 			playIntroExplainerSound()
+			pcall(function()
+				require(script.Parent:WaitForChild("JoinFunnelReport")).mark("load_bar_filled")
+			end)
 		end
 	end
 end
@@ -2482,6 +2488,11 @@ local function runIntro()
 			playerGui:SetAttribute("OceanTD_TutorialGateFreeCam", true)
 			playerGui:SetAttribute("OceanTD_TutorialGateShop", true)
 			playerGui:SetAttribute("OceanTD_TutorialWavesSlotReady", false)
+			pcall(function()
+				local JoinFunnel = require(script.Parent:WaitForChild("JoinFunnelReport"))
+				JoinFunnel.mark("plot_landed")
+				JoinFunnel.mark("training_ready")
+			end)
 			task.spawn(function()
 				pcall(function()
 					local AutoPlantUI = require(script.Parent:WaitForChild("AutoPlantUI"))
@@ -2566,6 +2577,11 @@ local function runIntro()
 		playerGui:SetAttribute("OceanTD_TutorialGateFreeCam", true)
 		playerGui:SetAttribute("OceanTD_TutorialGateShop", true)
 		playerGui:SetAttribute("OceanTD_TutorialWavesSlotReady", false)
+		pcall(function()
+			local JoinFunnel = require(script.Parent:WaitForChild("JoinFunnelReport"))
+			JoinFunnel.mark("plot_landed")
+			JoinFunnel.mark("training_ready")
+		end)
 		task.spawn(function()
 			pcall(function()
 				local AutoPlantUI = require(script.Parent:WaitForChild("AutoPlantUI"))
@@ -2582,6 +2598,9 @@ local function runIntro()
 			return
 		end
 		skipRequested = true
+		pcall(function()
+			require(script.Parent:WaitForChild("JoinFunnelReport")).mark("showcase_exit", "skip")
+		end)
 		if skipBtn then
 			flashSkipButton(skipBtn)
 		end
@@ -2807,6 +2826,9 @@ local function runIntro()
 	end))
 
 	local camT0 = os.clock()
+	pcall(function()
+		require(script.Parent:WaitForChild("JoinFunnelReport")).mark("showcase_started")
+	end)
 	camState.tweenDone = false
 	camState.hold = true
 	camConn = RunService.RenderStepped:Connect(function()
@@ -2909,6 +2931,9 @@ local function runIntro()
 	if not token.cancelled and #showcaseParts > 0 then
 		fallWindow = bleachAndFall(showcaseParts, token)
 		didBleach = true
+		pcall(function()
+			require(script.Parent:WaitForChild("JoinFunnelReport")).mark("showcase_exit", "watched")
+		end)
 	elseif savedPlot then
 		restorePlotMirror(savedPlot)
 	end

@@ -281,9 +281,9 @@ end
 
 -- L2/R2 read larger than the other face icons at the shared 10% scale.
 local function iconScaleFor(cell: Vector2): number
-	-- L2/R2: under the shared size, then 15%, then another 10% (zoom − / +).
+	-- Zoom − / +: slightly larger than the circle.
 	if cell.Y == 1 and (cell.X == 2 or cell.X == 3) then
-		return PAD_ICON_SCALE * 0.9 * 0.85 * 0.9
+		return 1.35
 	end
 	-- Cross (X) and Circle sit a little large in the cell.
 	if cell.Y == 0 and (cell.X == 0 or cell.X == 3) then

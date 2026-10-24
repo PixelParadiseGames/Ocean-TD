@@ -910,6 +910,7 @@ local function canShowAimCrosshair(): boolean
 	if playerGui:GetAttribute("OceanTD_SkillsBubblesOpen") == true
 		or playerGui:GetAttribute("OceanTD_SkillPowerUpOpen") == true
 		or playerGui:GetAttribute("OceanTD_ReefReportOpen") == true
+		or playerGui:GetAttribute("OceanTD_StoreOpen") == true
 		or playerGui:GetAttribute("OceanTD_HideUiActive") == true
 	then
 		return false

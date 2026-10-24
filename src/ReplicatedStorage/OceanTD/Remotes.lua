@@ -41,6 +41,7 @@ local REMOTE_EVENTS = {
 	"AutoPlantShuffleApplied",
 	"AutoPlantAddMaxApplied",
 	"AutoPlantRevealCoral",
+	"FunnelStep",
 }
 
 local REMOTE_FUNCTIONS = {

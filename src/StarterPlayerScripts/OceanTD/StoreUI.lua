@@ -7,7 +7,9 @@
 ]]
 
 local Players = game:GetService("Players")
+local ContextActionService = game:GetService("ContextActionService")
 local GuiService = game:GetService("GuiService")
+local MarketplaceService = game:GetService("MarketplaceService")
 local RunService = game:GetService("RunService")
 local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
@@ -17,6 +19,7 @@ local playerGui = player:WaitForChild("PlayerGui")
 
 local oceanRoot = game:GetService("ReplicatedStorage"):WaitForChild("OceanTD")
 local LeftHudLayout = require(oceanRoot:WaitForChild("Shared"):WaitForChild("LeftHudLayout"))
+local SandDollarProducts = require(oceanRoot:WaitForChild("Shared"):WaitForChild("SandDollarProducts"))
 local UiTheme = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiTheme"))
 local UiPopupScale = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiPopupScale"))
 local UiViewportTags = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiViewportTags"))
@@ -29,15 +32,15 @@ local SKILLS_OPEN_ATTR = "OceanTD_SkillsBubblesOpen"
 local REPORT_OPEN_ATTR = "OceanTD_ReefReportOpen"
 local STORE_GUI_NAME = "OceanTD_Store"
 local STORE_DISPLAY_ORDER = 9200
-local STORE_LAYOUT_VER = 4 -- bump when pack column spacing / chrome layout changes
+local STORE_LAYOUT_VER = 8 -- bump when pack column spacing / chrome layout changes
 -- Cart / close chrome must sit above the store dim (same pattern as Reef Report).
 local STORE_LEFT_HUD_ORDER = STORE_DISPLAY_ORDER + 80
 -- Match SkillPowerUpUI close X pulse (glyph only, not the red circle).
 local CLOSE_X_PULSE = TweenInfo.new(0.85, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true)
 
-local BUY_GREEN_DARK = Color3.fromRGB(18, 110, 45)
-local BUY_GREEN_BRIGHT = Color3.fromRGB(50, 230, 90)
-local BUY_STROKE_GREEN = Color3.fromRGB(70, 255, 110)
+local BUY_BLUE_DARK = Color3.fromRGB(16, 72, 168)
+local BUY_BLUE_BRIGHT = Color3.fromRGB(64, 156, 255)
+local BUY_STROKE_BLUE = Color3.fromRGB(150, 206, 255)
 local AMOUNT_WHITE = Color3.fromRGB(255, 255, 255)
 local PANEL_STROKE_TEAL = Color3.fromRGB(40, 220, 210)
 local PANEL_STROKE_GREEN = Color3.fromRGB(70, 255, 110)
@@ -51,29 +54,25 @@ local GRAPHIC_INTRO_INFO = TweenInfo.new(GRAPHIC_INTRO_SEC, Enum.EasingStyle.Bac
 
 type DollarPack = {
 	id: string,
+	productKey: string,
 	imageId: string,
-	amount: number,
-	priceLabel: string,
 }
 
 local DOLLAR_PACKS: { DollarPack } = {
 	{
 		id = "Stacks",
+		productKey = "d500",
 		imageId = "rbxassetid://99049838462637",
-		amount = 100,
-		priceLabel = "BUY $1",
 	},
 	{
 		id = "Sack",
+		productKey = "d3000",
 		imageId = "rbxassetid://86639674396031",
-		amount = 1000,
-		priceLabel = "BUY $5",
 	},
 	{
 		id = "Chest",
+		productKey = "d7000",
 		imageId = "rbxassetid://88016584740069",
-		amount = 10000,
-		priceLabel = "BUY $10",
 	},
 }
 
@@ -525,6 +524,77 @@ local function formatDollarAmount(n: number): string
 	return out .. " $D"
 end
 
+local function formatRobux(n: number): string
+	local s = tostring(math.floor(n))
+	local out = s
+	while true do
+		local nextS, count = string.gsub(out, "^(-?%d+)(%d%d%d)", "%1,%2")
+		out = nextS
+		if count == 0 then
+			break
+		end
+	end
+	return out .. " Robux"
+end
+
+-- Extra $D per Robux versus the 100 Robux pack. 0 for that pack itself.
+local function bonusPercentVsSmall(packKey: string): number
+	local pack = SandDollarProducts.fromId(packKey)
+	local small = SandDollarProducts.fromId(DOLLAR_PACKS[1].productKey)
+	if not pack or not small or pack == small or pack.robux <= 0 or small.robux <= 0 or small.sandDollars <= 0 then
+		return 0
+	end
+	local baseRate = small.sandDollars / small.robux
+	local rate = pack.sandDollars / pack.robux
+	return math.floor((rate / baseRate - 1) * 100 + 0.5)
+end
+
+local promptOpen = false
+local missingPackWarned: { [string]: boolean } = {}
+
+-- Same pack can be bought again as soon as the Roblox window closes.
+MarketplaceService.PromptProductPurchaseFinished:Connect(function(userId: number, _productId: number, _purchased: boolean)
+	if userId == Players.LocalPlayer.UserId then
+		promptOpen = false
+	end
+end)
+
+local function promptPack(productKey: string)
+	-- Only block while a purchase window is already up. A finished buy does not lock the pack.
+	if promptOpen then
+		return
+	end
+	local folder = oceanRoot:FindFirstChild(SandDollarProducts.RESOLVED_FOLDER)
+	if folder and folder:GetAttribute("Ready") ~= true then
+		local deadline = os.clock() + 5
+		while folder.Parent and folder:GetAttribute("Ready") ~= true and os.clock() < deadline do
+			task.wait(0.1)
+		end
+	end
+	local productId = SandDollarProducts.liveProductId(productKey)
+	if productId <= 0 then
+		if not missingPackWarned[productKey] then
+			missingPackWarned[productKey] = true
+			local pack = SandDollarProducts.fromId(productKey)
+			warn(
+				"[StoreUI] No Developer Product for",
+				productKey,
+				if pack then pack.robux else 0,
+				"Robux. Create it in Creator Dashboard, or set productId in SandDollarProducts.lua"
+			)
+		end
+		return
+	end
+	promptOpen = true
+	local ok, err = pcall(function()
+		MarketplaceService:PromptProductPurchase(Players.LocalPlayer, productId)
+	end)
+	if not ok then
+		promptOpen = false
+		warn("[StoreUI] PromptProductPurchase failed", productId, err)
+	end
+end
+
 local function buildPackColumn(parent: Instance, pack: DollarPack, zBase: number): Frame
 	local col = Instance.new("Frame")
 	col.Name = "Pack_" .. pack.id
@@ -573,7 +643,10 @@ local function buildPackColumn(parent: Instance, pack: DollarPack, zBase: number
 	amount.BackgroundTransparency = 1
 	amount.Size = UDim2.new(1, 0, 0, storePx(44))
 	amount.Font = UiTheme.Font
-	amount.Text = formatDollarAmount(pack.amount)
+	local offer = SandDollarProducts.fromId(pack.productKey)
+	local sandDollars = if offer then offer.sandDollars else 0
+	local robux = if offer then offer.robux else 0
+	amount.Text = formatDollarAmount(sandDollars)
 	amount.TextSize = storePx(48)
 	amount.TextColor3 = AMOUNT_WHITE
 	amount.TextXAlignment = Enum.TextXAlignment.Center
@@ -582,46 +655,65 @@ local function buildPackColumn(parent: Instance, pack: DollarPack, zBase: number
 	amount.ZIndex = zBase + 1
 	amount.Parent = col
 
+	local bonusPct = bonusPercentVsSmall(pack.productKey)
+	local bonus = Instance.new("TextLabel")
+	bonus.Name = "Bonus"
+	bonus.BackgroundTransparency = 1
+	bonus.Size = UDim2.new(1, 0, 0, storePx(28))
+	bonus.Font = UiTheme.Font
+	bonus.Text = if bonusPct > 0 then string.format("+%d%% Extra", bonusPct) else ""
+	bonus.TextSize = storePx(26)
+	bonus.TextColor3 = Color3.fromRGB(186, 224, 255)
+	bonus.TextXAlignment = Enum.TextXAlignment.Center
+	bonus.TextYAlignment = Enum.TextYAlignment.Center
+	bonus.LayoutOrder = 3
+	bonus.ZIndex = zBase + 1
+	bonus.Parent = col
+
 	local buy = Instance.new("TextButton")
 	buy.Name = "Buy"
 	buy.AutoButtonColor = true
-	buy.BackgroundColor3 = Color3.new(1, 1, 1) -- white base so UIGradient shows true greens
+	buy.BackgroundColor3 = Color3.new(1, 1, 1) -- white base so UIGradient shows true blues
 	buy.BorderSizePixel = 0
-	buy.Size = UDim2.fromOffset(storePx(160), storePx(52))
+	buy.Size = UDim2.fromOffset(storePx(196), storePx(52))
 	buy.Text = "" -- label is a child so UIGradient doesn't tint the text
-	buy.LayoutOrder = 3
+	buy.LayoutOrder = 4
 	buy.ZIndex = zBase + 2
+	buy.Selectable = true
+	buy:SetAttribute("OceanTD_PackId", pack.productKey)
 	buy.Parent = col
 	local buyCorner = Instance.new("UICorner")
 	buyCorner.CornerRadius = UDim.new(0, 12)
 	buyCorner.Parent = buy
 	local buyGrad = Instance.new("UIGradient")
 	buyGrad.Color = ColorSequence.new({
-		ColorSequenceKeypoint.new(0, BUY_GREEN_DARK),
-		ColorSequenceKeypoint.new(1, BUY_GREEN_BRIGHT),
+		ColorSequenceKeypoint.new(0, BUY_BLUE_DARK),
+		ColorSequenceKeypoint.new(1, BUY_BLUE_BRIGHT),
 	})
 	buyGrad.Rotation = 90
 	buyGrad.Parent = buy
 	local buyStroke = Instance.new("UIStroke")
 	buyStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
 	buyStroke.Thickness = 2.5
-	buyStroke.Color = BUY_STROKE_GREEN
+	buyStroke.Color = BUY_STROKE_BLUE
 	buyStroke.Parent = buy
 	local buyLbl = Instance.new("TextLabel")
 	buyLbl.Name = "Label"
 	buyLbl.BackgroundTransparency = 1
 	buyLbl.Size = UDim2.fromScale(1, 1)
 	buyLbl.Font = UiTheme.Font
-	buyLbl.Text = pack.priceLabel
-	buyLbl.TextSize = storePx(22)
+	buyLbl.Text = formatRobux(robux)
+	buyLbl.TextSize = storePx(20)
 	buyLbl.TextColor3 = AMOUNT_WHITE
 	buyLbl.TextXAlignment = Enum.TextXAlignment.Center
 	buyLbl.TextYAlignment = Enum.TextYAlignment.Center
 	buyLbl.ZIndex = zBase + 3
 	buyLbl.Active = false
 	buyLbl.Parent = buy
-	-- Stub: purchases wired later.
-	buy.Activated:Connect(function() end)
+	local productKey = pack.productKey
+	buy.Activated:Connect(function()
+		promptPack(productKey)
+	end)
 
 	return col
 end
@@ -728,6 +820,123 @@ local function prepareContentPivot(content: Frame, scale: UIScale)
 	scale.Scale = 0
 end
 
+local function packBuyButtons(sg: ScreenGui): { GuiButton }
+	local list: { GuiButton } = {}
+	local content = sg:FindFirstChild("Content")
+	local panel = content and content:FindFirstChild("Panel")
+	local offers = panel and panel:FindFirstChild("Offers")
+	if not offers then
+		return list
+	end
+	for i = 1, #DOLLAR_PACKS do
+		local col = offers:FindFirstChild("Col" .. tostring(i))
+		local buy = col and col:FindFirstChild("Buy", true)
+		if buy and buy:IsA("GuiButton") then
+			table.insert(list, buy)
+		end
+	end
+	return list
+end
+
+local PACK_NAV_ACTION = "OceanTD_StorePackNav"
+local packFocus = 1
+local packStickArmed = true
+local packStickConn: RBXScriptConnection? = nil
+
+local function paintPackFocus()
+	local sg = storeGui
+	if not sg then
+		return
+	end
+	local buys = packBuyButtons(sg)
+	for i, buy in ipairs(buys) do
+		local stroke = buy:FindFirstChildOfClass("UIStroke")
+		if stroke then
+			local on = open and i == packFocus
+			stroke.Color = if on then Color3.new(1, 1, 1) else BUY_STROKE_BLUE
+			stroke.Thickness = if on then 5 else 2.5
+		end
+	end
+end
+
+local function stepPack(dir: number)
+	local sg = storeGui
+	if not open or not sg then
+		return
+	end
+	local n = #packBuyButtons(sg)
+	if n < 1 then
+		return
+	end
+	packFocus = math.clamp(packFocus + dir, 1, n)
+	paintPackFocus()
+end
+
+local function thumbstick1X(): number
+	local ok, state = pcall(function()
+		return UserInputService:GetGamepadState(Enum.UserInputType.Gamepad1)
+	end)
+	if not ok or typeof(state) ~= "table" then
+		return 0
+	end
+	for _, input in ipairs(state :: { InputObject }) do
+		if input.KeyCode == Enum.KeyCode.Thumbstick1 then
+			return input.Position.X
+		end
+	end
+	return 0
+end
+
+local function stopPackNav()
+	ContextActionService:UnbindAction(PACK_NAV_ACTION)
+	if packStickConn then
+		packStickConn:Disconnect()
+		packStickConn = nil
+	end
+	packFocus = 1
+	paintPackFocus()
+end
+
+-- Own the row. Gui selection was dropped while the shop scaled up from the cart.
+local function startPackNav()
+	stopPackNav()
+	packFocus = 1
+	packStickArmed = true
+	paintPackFocus()
+	ContextActionService:BindActionAtPriority(PACK_NAV_ACTION, function(_name, state, input)
+		if not open then
+			return Enum.ContextActionResult.Pass
+		end
+		local code = input.KeyCode
+		if code ~= Enum.KeyCode.DPadLeft and code ~= Enum.KeyCode.DPadRight and code ~= Enum.KeyCode.Thumbstick1 then
+			return Enum.ContextActionResult.Pass
+		end
+		if state == Enum.UserInputState.Begin then
+			if code == Enum.KeyCode.DPadLeft then
+				stepPack(-1)
+			elseif code == Enum.KeyCode.DPadRight then
+				stepPack(1)
+			end
+		end
+		return Enum.ContextActionResult.Sink
+	end, false, Enum.ContextActionPriority.High.Value + 60, Enum.KeyCode.DPadLeft, Enum.KeyCode.DPadRight, Enum.KeyCode.Thumbstick1)
+	packStickConn = RunService.RenderStepped:Connect(function()
+		if not open then
+			return
+		end
+		local x = thumbstick1X()
+		if math.abs(x) < 0.4 then
+			packStickArmed = true
+			return
+		end
+		if not packStickArmed then
+			return
+		end
+		packStickArmed = false
+		stepPack(if x > 0 then 1 else -1)
+	end)
+end
+
 local function playShopOpenFromCart(sg: ScreenGui)
 	cancelShopOpenTween()
 	cancelGraphicIntros()
@@ -769,6 +978,7 @@ local function playShopOpenFromCart(sg: ScreenGui)
 				return
 			end
 			playGraphicIntros(sg)
+			paintPackFocus()
 		end)
 	end)
 end
@@ -957,6 +1167,7 @@ function StoreUI.close()
 	end
 	lastToggleAt = os.clock()
 	open = false
+	stopPackNav()
 	playerGui:SetAttribute(STORE_OPEN_ATTR, false)
 	stopPanelStrokeCycle()
 	cancelShopOpenTween()
@@ -1018,6 +1229,7 @@ function StoreUI.open()
 	end
 	-- Expand shop from cart first; pack graphics start after that finishes.
 	playShopOpenFromCart(sg)
+	startPackNav()
 	ensureCloseChrome()
 	task.defer(function()
 		if not open then
@@ -1124,6 +1336,13 @@ function StoreUI.init()
 	-- X / B / Escape still close while store is open.
 	UserInputService.InputBegan:Connect(function(input, _gameProcessed)
 		if not open then
+			return
+		end
+		if input.KeyCode == Enum.KeyCode.ButtonA then
+			local pack = DOLLAR_PACKS[packFocus]
+			if pack then
+				promptPack(pack.productKey)
+			end
 			return
 		end
 		if input.KeyCode == Enum.KeyCode.X

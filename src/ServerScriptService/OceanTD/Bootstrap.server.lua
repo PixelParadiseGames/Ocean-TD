@@ -31,11 +31,13 @@ local FriendPlotPreviewService = require(Services:WaitForChild("FriendPlotPrevie
 local JoinIntroPackageService = require(Services:WaitForChild("JoinIntroPackageService"))
 local EconomyStatsService = require(Services:WaitForChild("EconomyStatsService"))
 local AutoPlantService = require(Services:WaitForChild("AutoPlantService"))
+local FunnelService = require(Services:WaitForChild("FunnelService"))
 
 local Constants = require(oceanRoot:WaitForChild("Shared"):WaitForChild("Constants"))
 local AutoPlantSpots = require(oceanRoot:WaitForChild("Shared"):WaitForChild("AutoPlantSpots"))
 
 Remotes.initServer()
+FunnelService.init()
 PersistenceService.init()
 EconomyService.init()
 PlotService.init()

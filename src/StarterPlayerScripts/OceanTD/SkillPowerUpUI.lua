@@ -155,6 +155,7 @@ local sideTextGui: ScreenGui? = nil
 local sideIconLbl: ImageLabel? = nil
 local sideTitleLbl: TextLabel? = nil
 local sideSubLbl: TextLabel? = nil
+local sideFpsLbl: TextLabel? = nil
 local confirmGui: ScreenGui? = nil
 local toastGui: ScreenGui? = nil
 local bound = false
@@ -1997,6 +1998,7 @@ local function destroySideTextGui()
 	sideIconLbl = nil
 	sideTitleLbl = nil
 	sideSubLbl = nil
+	sideFpsLbl = nil
 	ReloadTrialUI.clearRefs()
 end
 
@@ -2027,11 +2029,15 @@ local function applySideColumnMetrics()
 		local subLines = if string.find(sideSubLbl.Text, "\n", 1, true) then 96 else 64
 		sideSubLbl.Size = UDim2.new(1, -24, 0, math.floor(subLines * hud + 0.5))
 	end
+	if sideFpsLbl then
+		sideFpsLbl.TextSize = math.min(100, math.floor(SIDE_SUB_TEXT_SIZE * hud + 0.5))
+		sideFpsLbl.Size = UDim2.new(1, -24, 0, math.floor(36 * hud + 0.5))
+	end
 end
 
 local function ensureSideTextGui(): ScreenGui
 	-- Rebuild if an older layout (no icon column / try button) is still around.
-	if sideTextGui and sideTextGui.Parent and sideIconLbl and sideIconLbl.Parent and ReloadTrialUI.hasButton() then
+	if sideTextGui and sideTextGui.Parent and sideIconLbl and sideIconLbl.Parent and sideFpsLbl and sideFpsLbl.Parent and ReloadTrialUI.hasButton() then
 		applySideColumnMetrics()
 		return sideTextGui
 	end
@@ -2115,6 +2121,23 @@ local function ensureSideTextGui(): ScreenGui
 	sub.ZIndex = 10
 	sub.Parent = col
 
+	local fps = Instance.new("TextLabel")
+	fps.Name = "SideFpsWarn"
+	fps.BackgroundTransparency = 1
+	fps.Size = UDim2.new(1, -24, 0, 36)
+	fps.LayoutOrder = 4
+	fps.Font = UI_FONT
+	fps.TextSize = SIDE_SUB_TEXT_SIZE
+	fps.TextScaled = false
+	fps.Text = "Can Cause Low FPS"
+	fps.TextColor3 = WHITE
+	fps.TextXAlignment = Enum.TextXAlignment.Center
+	fps.TextYAlignment = Enum.TextYAlignment.Top
+	fps.TextWrapped = true
+	fps.Visible = false
+	fps.ZIndex = 10
+	fps.Parent = col
+
 	-- Store-style green CTA under the Reload Speed subheading.
 	local tryBtn = Instance.new("TextButton")
 	tryBtn.Name = "TryFullAuto"
@@ -2123,7 +2146,7 @@ local function ensureSideTextGui(): ScreenGui
 	tryBtn.BorderSizePixel = 0
 	tryBtn.Size = UDim2.fromOffset(188, 48)
 	tryBtn.Text = ""
-	tryBtn.LayoutOrder = 4
+	tryBtn.LayoutOrder = 5
 	tryBtn.ZIndex = 12
 	tryBtn.Visible = false
 	tryBtn.Selectable = false
@@ -2170,6 +2193,7 @@ local function ensureSideTextGui(): ScreenGui
 	sideIconLbl = icon
 	sideTitleLbl = title
 	sideSubLbl = sub
+	sideFpsLbl = fps
 	ReloadTrialUI.setButton(tryBtn, tryLbl)
 	applySideColumnMetrics()
 	return sg
@@ -2214,6 +2238,15 @@ local function layoutTitleBesideSkillBubble()
 		end
 	end
 	ReloadTrialUI.syncButton()
+	if sideFpsLbl then
+		local warn = false
+		if activeSkillId == "PlaceMore" and popupOpen then
+			local nextS = SkillStages.nextStageFor("PlaceMore", currentStage("PlaceMore"))
+			warn = nextS == 7 or nextS == 8
+		end
+		sideFpsLbl.Visible = warn
+		sideFpsLbl.TextColor3 = WHITE
+	end
 
 	-- Keep Studio labels hidden inside the circle — side layer owns the copy.
 	if unlockNameLbl then
