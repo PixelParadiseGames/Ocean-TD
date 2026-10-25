@@ -43,6 +43,7 @@ local RelocateHitTest = require(script.Parent:WaitForChild("RelocateHitTest"))
 local BrainSnapPreview = require(script.Parent:WaitForChild("BrainSnapPreview"))
 local RelocateMultiSelect = require(script.Parent:WaitForChild("RelocateMultiSelect"))
 local RelocatePickHover = require(script.Parent:WaitForChild("RelocatePickHover"))
+local PlaceAimScreen = require(script.Parent:WaitForChild("PlaceAimScreen"))
 local CamPinchZoom = require(script.Parent:WaitForChild("CamPinchZoom"))
 
 local RelocateController = {}
@@ -211,36 +212,14 @@ local function isUsingGamepad(): boolean
 end
 
 local function readThumbstick2(): Vector2
-	local ok, states = pcall(function()
-		return UserInputService:GetGamepadState(Enum.UserInputType.Gamepad1)
-	end)
-	if not ok or typeof(states) ~= "table" then
-		return Vector2.zero
-	end
-	for _, input in ipairs(states :: { InputObject }) do
-		if input.KeyCode == Enum.KeyCode.Thumbstick2 then
-			return Vector2.new(input.Position.X, input.Position.Y)
-		end
-	end
-	return Vector2.zero
+	return PlaceAimScreen.readThumbstick2()
 end
 
 local stickRotHeld = 0
 local stickRotWait = 0
 
 local function readThumbstick1(): Vector2
-	local ok, states = pcall(function()
-		return UserInputService:GetGamepadState(Enum.UserInputType.Gamepad1)
-	end)
-	if not ok or typeof(states) ~= "table" then
-		return Vector2.zero
-	end
-	for _, input in ipairs(states :: { InputObject }) do
-		if input.KeyCode == Enum.KeyCode.Thumbstick1 then
-			return Vector2.new(input.Position.X, -input.Position.Y)
-		end
-	end
-	return Vector2.zero
+	return PlaceAimScreen.readThumbstick1()
 end
 
 local function clampGamepadCursor(pos: Vector2): Vector2
@@ -1493,9 +1472,6 @@ local function updateAt(worldPos: Vector3)
 	if recyclePending then
 		return
 	end
-	if cinematicHold then
-		return
-	end
 	-- Soft-plant bridge: PlacementController owns pinch abort + drag. Never no-op
 	-- preview moves here or the planted coral freezes until PLANT.
 	if not placeConfirmBridge and pinchOrMultiTouch() then
@@ -1673,10 +1649,12 @@ local function startLoop()
 		keepCameraFrozen()
 		updateRelocateFlash()
 		syncMoveIconToGround()
-		if gamepadRelocate and not busy and not recyclePending and not introAnimating and not recycleFlying then
+		-- Left stick moves the selected coral (camera holds). Hue close-up sets busy; stick still moves it.
+		if not recyclePending and not recycleFlying and (not busy or cinematicHold) then
 			local stick = readThumbstick1()
 			local mag = stick.Magnitude
 			if mag > C.GAMEPAD_STICK_DEADZONE then
+				gamepadRelocate = true
 				local screen = if part then worldToViewport(Workspace.CurrentCamera :: Camera, coralChromeWorldPos(part)) else nil
 				if not gamepadCursor then
 					gamepadCursor = screen or UserInputService:GetMouseLocation()

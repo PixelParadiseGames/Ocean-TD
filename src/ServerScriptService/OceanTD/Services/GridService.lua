@@ -440,6 +440,10 @@ function GridService.copyCellMeta(from: CellData, to: CellData)
 	if typeof(from.fedTotal) == "number" and from.fedTotal > 0 then
 		to.fedTotal = math.max(to.fedTotal or 0, math.floor(from.fedTotal))
 	end
+	-- Placement hue is not the paint color. Reframe must not drop it.
+	if typeof(from.seedHue) == "number" then
+		to.seedHue = from.seedHue
+	end
 	if typeof(from.wavesTotal) == "number" and from.wavesTotal > 0 then
 		to.wavesTotal = math.max(to.wavesTotal or 0, math.floor(from.wavesTotal))
 	end
@@ -684,6 +688,11 @@ function GridService.hydrate(plotId: PlotId, ownerUserId: number, layout: { Layo
 					local wavesTotal = tonumber(obj.wavesTotal)
 					if wavesTotal and wavesTotal > 0 then
 						cell.wavesTotal = math.floor(wavesTotal)
+					end
+					-- Keep the hue that was spent to place this coral. Paint is separate.
+					local seedHue = tonumber(obj.seedHue)
+					if seedHue then
+						cell.seedHue = math.clamp(math.floor(seedHue), 1, 14)
 					end
 				end
 			end

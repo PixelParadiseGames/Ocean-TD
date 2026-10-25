@@ -201,8 +201,6 @@ local function enrichLayoutObjFromVisual(obj: any, visual: BasePart)
 		local seedAttr = visual:GetAttribute("OceanTD_SeedHue")
 		if typeof(seedAttr) == "number" then
 			obj.seedHue = PlotOutlineColors.clampCoralIndex(seedAttr)
-		elseif typeof(obj.colorIndex) == "number" then
-			obj.seedHue = PlotOutlineColors.clampCoralIndex(obj.colorIndex)
 		end
 	end
 	local hasCellPaint = typeof(obj.colorIndex) == "number"
@@ -915,11 +913,9 @@ function PlacementService.hydrateVisuals(plotId: string, boundsCFrame: CFrame)
 			local seedHue: number? = if typeof(cell.seedHue) == "number"
 				then PlotOutlineColors.clampCoralIndex(cell.seedHue)
 				else nil
-			if not seedHue and paintIdx then
-				-- Legacy saves: painted corals consumed a seed at placement before seedHue was persisted.
-				seedHue = paintIdx
-				cell.seedHue = paintIdx
-			end
+			-- Do not copy the paint color into seedHue. That made a rejoin treat
+			-- painted corals as if they had been placed with that hue, so the
+			-- backpack seeds came back.
 			if seedHue then
 				stampSeedHue(plotId, cell.gx, cell.gy, cell.gz, visual, seedHue)
 			end

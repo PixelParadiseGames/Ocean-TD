@@ -248,9 +248,6 @@ local function sanitizeLayout(raw: any): { LayoutObject }
 			local seedHue = tonumber(obj.seedHue)
 			if seedHue then
 				entry.seedHue = math.clamp(math.floor(seedHue), 1, 14)
-			elseif entry.colorIndex then
-				-- Legacy layouts: painted corals spent that hue at place time.
-				entry.seedHue = entry.colorIndex
 			end
 			local colorR = tonumber(obj.colorR)
 			local colorG = tonumber(obj.colorG)

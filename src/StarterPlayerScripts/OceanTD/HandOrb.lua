@@ -531,6 +531,23 @@ function HandOrb.disarm(durationSec: number?)
 	end)
 end
 
+-- Orb appears in the hand, then flies to the plant. Used by common-area autoplant.
+function HandOrb.playPlantFly(color: Color3, worldPos: Vector3)
+	if flying then
+		animToken += 1
+		flying = false
+		destroyOrb()
+	end
+	HandOrb.arm(color)
+	local token = animToken
+	task.delay(0.2, function()
+		if token ~= animToken or not armed then
+			return
+		end
+		HandOrb.flyToPlant(worldPos)
+	end)
+end
+
 function HandOrb.flyToPlant(worldPos: Vector3)
 	if not armed then
 		return

@@ -12,6 +12,18 @@ local PlaceAimScreen = {}
 local GHOST_SCREEN_OFFSET_Y = 32 -- was 105; 70% less raise above finger
 local touchHeld = 0
 local touchGraceUntil = 0 -- ignore synthesized mouse briefly after last touch ends
+-- Studio's gamepad emulator fires InputChanged and often leaves GetGamepadState at zero.
+-- This is the same Thumbstick position that used to pan the plot camera.
+local liveStick1 = Vector2.zero
+local liveStick2 = Vector2.zero
+
+UserInputService.InputChanged:Connect(function(input)
+	if input.KeyCode == Enum.KeyCode.Thumbstick1 then
+		liveStick1 = Vector2.new(input.Position.X, input.Position.Y)
+	elseif input.KeyCode == Enum.KeyCode.Thumbstick2 then
+		liveStick2 = Vector2.new(input.Position.X, input.Position.Y)
+	end
+end)
 
 function PlaceAimScreen.trackTouch(input: InputObject, ended: boolean)
 	if input.UserInputType ~= Enum.UserInputType.Touch then
@@ -126,34 +138,58 @@ function PlaceAimScreen.resetGamepadCursor(): Vector2
 	return UserInputService:GetMouseLocation()
 end
 
-function PlaceAimScreen.readThumbstick2(): Vector2
-	local ok, states = pcall(function()
-		return UserInputService:GetGamepadState(Enum.UserInputType.Gamepad1)
+local function strongestStick(code: Enum.KeyCode, cached: Vector2): Vector2
+	local bestX, bestY = cached.X, cached.Y
+	local bestMag = cached.Magnitude
+	local pads: { Enum.UserInputType } = { Enum.UserInputType.Gamepad1 }
+	local okPads, connected = pcall(function()
+		return UserInputService:GetConnectedGamepads()
 	end)
-	if not ok or typeof(states) ~= "table" then
-		return Vector2.zero
+	if okPads and typeof(connected) == "table" and #connected > 0 then
+		pads = connected
 	end
-	for _, input in ipairs(states :: { InputObject }) do
-		if input.KeyCode == Enum.KeyCode.Thumbstick2 then
-			return Vector2.new(input.Position.X, input.Position.Y)
+	for _, pad in pads do
+		local ok, states = pcall(function()
+			return UserInputService:GetGamepadState(pad)
+		end)
+		if ok and typeof(states) == "table" then
+			for _, input in ipairs(states :: { InputObject }) do
+				if input.KeyCode == code then
+					local mag = Vector2.new(input.Position.X, input.Position.Y).Magnitude
+					if mag > bestMag then
+						bestX = input.Position.X
+						bestY = input.Position.Y
+						bestMag = mag
+					end
+				end
+			end
 		end
 	end
-	return Vector2.zero
+	return Vector2.new(bestX, bestY)
+end
+
+-- Raw stick from InputChanged (Y+ is up). Used when GetGamepadState stays at zero.
+function PlaceAimScreen.liveStick1(): Vector2
+	return liveStick1
+end
+
+function PlaceAimScreen.liveStick2(): Vector2
+	return liveStick2
+end
+
+-- Hardware state only. Near-zero while the Studio emulator is the thing actually moving.
+function PlaceAimScreen.stateStick(code: Enum.KeyCode): Vector2
+	return strongestStick(code, Vector2.zero)
+end
+
+function PlaceAimScreen.readThumbstick2(): Vector2
+	return strongestStick(Enum.KeyCode.Thumbstick2, liveStick2)
 end
 
 function PlaceAimScreen.readThumbstick1(): Vector2
-	local ok, states = pcall(function()
-		return UserInputService:GetGamepadState(Enum.UserInputType.Gamepad1)
-	end)
-	if not ok or typeof(states) ~= "table" then
-		return Vector2.zero
-	end
-	for _, input in ipairs(states :: { InputObject }) do
-		if input.KeyCode == Enum.KeyCode.Thumbstick1 then
-			return Vector2.new(input.Position.X, -input.Position.Y)
-		end
-	end
-	return Vector2.zero
+	-- Y+ on the stick is up; screen Y+ is down.
+	local stick = strongestStick(Enum.KeyCode.Thumbstick1, liveStick1)
+	return Vector2.new(stick.X, -stick.Y)
 end
 
 function PlaceAimScreen.clampGamepadCursor(pos: Vector2): Vector2

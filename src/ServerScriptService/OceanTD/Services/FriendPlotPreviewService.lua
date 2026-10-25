@@ -1,7 +1,7 @@
 --!strict
 --[[
-	Fill free world seats with friends' saved reefs (offline DataStore layouts).
-	Seats stay unowned so real joins claim them normally; preview is evicted first.
+	Fill free world seats with saved reefs. Friends with more than 5 corals first,
+	then top reef-report scores. Seats stay unowned so real joins claim them normally.
 ]]
 
 local Players = game:GetService("Players")
@@ -36,14 +36,12 @@ local layoutCache: {
 } =
 	{}
 local FRIEND_CACHE_TTL = 300
--- Studio GetAsync budget is tiny; keep probes sparse and abort on rate-limit.
-local MAX_OFFLINE_PROBES_PER_PICK = 3
-local MAX_OFFLINE_PROBES_PER_PLOT = 5
-local MAX_OFFLINE_PROBES_PER_FILL = 12
-local PROBE_GAP_SEC = 0.85
+-- One pass reads the top reef-report list in score order, then friends.
+-- Seats are chosen from those loaded reefs, biggest first.
+local MAX_OFFLINE_PROBES_PER_FILL = 25
+local PROBE_GAP_SEC = 0.4
 local fillGen = 0
 local fillQueued = false
-local plotProbeCount = 0
 local fillProbeCount = 0
 local fillPaused = false
 
@@ -239,106 +237,124 @@ local function hydrateFriend(
 	return true
 end
 
-local function pickFromCandidates(candidates: { number }, allowReuse: boolean): (number?, { LayoutObject }, number, number?)
-	-- Probe one-at-a-time (shuffled) and stop at first nonempty — do not GetAsync every friend/top entry.
-	local order = table.clone(candidates)
-	shuffleInPlace(order)
-	local probed = 0
-	for _, uid in ipairs(order) do
-		if fillPaused or PersistenceService.isOfflineGetPaused() then
-			fillPaused = true
-			break
-		end
-		if plotProbeCount >= MAX_OFFLINE_PROBES_PER_PLOT or fillProbeCount >= MAX_OFFLINE_PROBES_PER_FILL then
-			break
-		end
-		if allowReuse or not usedPreviewIds[uid] then
-			if probed >= MAX_OFFLINE_PROBES_PER_PICK then
-				break
-			end
-			probed += 1
-			plotProbeCount += 1
-			fillProbeCount += 1
-			local layout, stage, saved, empty, paused = readOfflineLayout(uid)
-			if paused then
-				fillPaused = true
-				log("Offline GetAsync paused — stopping preview probes")
-				break
-			end
-			if not empty then
-				return uid, layout, stage, saved
-			end
-			task.wait(PROBE_GAP_SEC)
-		end
-	end
-	return nil, {}, 1, nil
-end
+type LoadedReef = {
+	userId: number,
+	layout: { LayoutObject },
+	plotSizeStage: number,
+	savedLayoutStage: number?,
+	corals: number,
+}
 
-local function topReefCandidates(allowReuse: boolean): { number }
-	local top = PersistenceService.getTopReefUserIds(25)
-	local inServer = playersInServer()
-	local filtered: { number } = {}
-	for _, topId in ipairs(top) do
-		-- Never mirror a seated player's own live reef onto a neighbor seat.
-		if not inServer[topId] and (allowReuse or not usedPreviewIds[topId]) then
-			table.insert(filtered, topId)
-		end
+local function rememberLoaded(bucket: { LoadedReef }, seen: { [number]: boolean }, userId: number): boolean
+	if seen[userId] then
+		return true
 	end
-	shuffleInPlace(filtered)
-	return filtered
-end
-
-local function pickPreviewForFill(friendCandidates: { number }): (number?, { LayoutObject }, number, number?)
-	if fillPaused or PersistenceService.isOfflineGetPaused() then
+	local wasCached = layoutCache[userId] ~= nil
+	if not wasCached and fillProbeCount >= MAX_OFFLINE_PROBES_PER_FILL then
+		return true
+	end
+	if not wasCached then
+		fillProbeCount += 1
+	end
+	local layout, stage, saved, _empty, paused = readOfflineLayout(userId)
+	if paused then
 		fillPaused = true
-		return nil, {}, 1, nil
+		log("Offline GetAsync paused — stopping preview probes")
+		return false
 	end
-	-- 1) Unique friends with reefs
-	local uid, layout, stage, saved = pickFromCandidates(friendCandidates, false)
-	if uid or fillPaused then
-		return uid, layout, stage, saved
+	seen[userId] = true
+	if #layout > 0 then
+		table.insert(bucket, {
+			userId = userId,
+			layout = layout,
+			plotSizeStage = stage,
+			savedLayoutStage = saved,
+			corals = #layout,
+		})
 	end
-	-- 2) Unique top-25 reef scores
-	uid, layout, stage, saved = pickFromCandidates(topReefCandidates(false), false)
-	if uid or fillPaused then
-		if uid then
-			log("Top-reef unique pick", uid)
-		end
-		return uid, layout, stage, saved
+	if not wasCached then
+		task.wait(PROBE_GAP_SEC)
 	end
-	-- 3) Reuse top-25 (high-score reefs can fill multiple empty seats)
-	uid, layout, stage, saved = pickFromCandidates(topReefCandidates(true), true)
-	if uid or fillPaused then
-		if uid then
-			log("Top-reef reuse pick", uid)
-		end
-		return uid, layout, stage, saved
-	end
-	-- 4) Last resort: reuse friend reefs
-	uid, layout, stage, saved = pickFromCandidates(friendCandidates, true)
-	if uid then
-		log("Friend reuse pick", uid)
-	else
-		log("No preview candidate (friends=", #friendCandidates, "top=", #PersistenceService.getTopReefUserIds(25), ")")
-	end
-	return uid, layout, stage, saved
+	return true
 end
 
-local function fillPlotId(plotId: string, friendCandidates: { number }): boolean
-	local slot = PlotService.getSlot(plotId)
-	if not slot or slot.owner ~= nil then
-		return false
+-- Friends with more than 5 corals, then everyone else, both by coral count.
+-- A 1-coral reef is dropped once any loaded reef has more than 5.
+local function rankedQueue(bucket: { LoadedReef }, friendIds: { number }): { LoadedReef }
+	local isFriend: { [number]: boolean } = {}
+	for _, id in ipairs(friendIds) do
+		isFriend[id] = true
 	end
-	if previewByPlot[plotId] then
-		forgetPreview(plotId)
-		GridService.clearPlot(plotId)
-		PlacementService.clearPlotVisuals(plotId)
+	local best = 0
+	for _, row in ipairs(bucket) do
+		if row.corals > best then
+			best = row.corals
+		end
 	end
-	local pickUid, layout, stage, saved = pickPreviewForFill(friendCandidates)
-	if not pickUid then
-		return false
+	local minKeep = if best > 5 then 5 else 0
+	local friends: { LoadedReef } = {}
+	local tops: { LoadedReef } = {}
+	for _, row in ipairs(bucket) do
+		if row.corals <= minKeep then
+			continue
+		end
+		if isFriend[row.userId] and row.corals > 5 then
+			table.insert(friends, row)
+		else
+			table.insert(tops, row)
+		end
 	end
-	return hydrateFriend(plotId, pickUid, layout, stage, saved)
+	table.sort(friends, function(a, b)
+		return a.corals > b.corals
+	end)
+	table.sort(tops, function(a, b)
+		return a.corals > b.corals
+	end)
+	local queue: { LoadedReef } = {}
+	for _, row in ipairs(friends) do
+		table.insert(queue, row)
+	end
+	for _, row in ipairs(tops) do
+		table.insert(queue, row)
+	end
+	return queue
+end
+
+local function collectRoster(friendIds: { number }): { LoadedReef }
+	local bucket: { LoadedReef } = {}
+	local seen: { [number]: boolean } = {}
+	local inServer = playersInServer()
+	-- Score order, not shuffled — the published #1 is read before a 1-coral tail entry.
+	local top = PersistenceService.getTopReefUserIds(25)
+	for _, uid in ipairs(top) do
+		if inServer[uid] then
+			continue
+		end
+		if layoutCache[uid] == nil and fillProbeCount >= MAX_OFFLINE_PROBES_PER_FILL then
+			break
+		end
+		if not rememberLoaded(bucket, seen, uid) then
+			break
+		end
+	end
+	if not fillPaused then
+		for _, uid in ipairs(friendIds) do
+			if layoutCache[uid] == nil and fillProbeCount >= MAX_OFFLINE_PROBES_PER_FILL then
+				break
+			end
+			if not rememberLoaded(bucket, seen, uid) then
+				break
+			end
+		end
+	end
+	local queue = rankedQueue(bucket, friendIds)
+	local best = if queue[1] then queue[1].corals else 0
+	log("Roster loaded=", #bucket, "seatable=", #queue, "bestCorals=", best, "probes=", fillProbeCount)
+	return queue
+end
+
+local function seatReef(plotId: string, row: LoadedReef): boolean
+	return hydrateFriend(plotId, row.userId, row.layout, row.plotSizeStage, row.savedLayoutStage)
 end
 
 function FriendPlotPreviewService.fillEmptyPlots()
@@ -359,42 +375,52 @@ function FriendPlotPreviewService.fillEmptyPlots()
 	end
 	local friends = unionFriendCandidates()
 	local free = PlotService.listFreePlotIds()
-	shuffleInPlace(free)
+	local queue = collectRoster(friends)
 	local filled = 0
-	local skipped = 0
-	local probesTotal = 0
+	local seatN = 0
 	for _, plotId in ipairs(free) do
 		if token ~= fillGen then
 			return
 		end
-		if fillPaused or fillProbeCount >= MAX_OFFLINE_PROBES_PER_FILL then
-			log("Stopping fill early paused=", fillPaused, "probes=", fillProbeCount)
+		if #queue == 0 then
 			break
 		end
+		if PlotService.getPlotOwner(plotId) ~= nil or previewByPlot[plotId] ~= nil then
+			continue
+		end
+		seatN += 1
+		local row = queue[((seatN - 1) % #queue) + 1]
+		if seatReef(plotId, row) then
+			filled += 1
+			log("Seated", plotId, "userId=", row.userId, "corals=", row.corals)
+		end
+	end
+	local stillOpen = false
+	for _, plotId in ipairs(PlotService.listFreePlotIds()) do
 		if PlotService.getPlotOwner(plotId) == nil and previewByPlot[plotId] == nil then
-			plotProbeCount = 0
-			if fillPlotId(plotId, friends) then
-				filled += 1
-			else
-				skipped += 1
-			end
-			probesTotal += plotProbeCount
-			task.wait(0.75)
+			stillOpen = true
+			break
 		end
 	end
 	log(
 		"Fill empty done filled=",
 		filled,
-		"skipped=",
-		skipped,
+		"open=",
+		stillOpen,
 		"probes=",
-		probesTotal,
+		fillProbeCount,
 		"friendPool=",
 		#friends,
 		"topPool=",
 		#PersistenceService.getTopReefUserIds(25)
 	)
 	WaveWatchService.broadcastRoster(nil)
+	if stillOpen and fillPaused then
+		log("Empty seats remain — retry after DataStore cooldown")
+		task.delay(46, function()
+			FriendPlotPreviewService.scheduleFillEmpty()
+		end)
+	end
 end
 
 function FriendPlotPreviewService.fillVacated(plotId: string)
@@ -405,8 +431,20 @@ function FriendPlotPreviewService.fillVacated(plotId: string)
 	forgetPreview(plotId)
 	GridService.clearPlot(plotId)
 	PlacementService.clearPlotVisuals(plotId)
+	if PersistenceService.isOfflineGetPaused() then
+		fillPaused = true
+		task.delay(46, function()
+			FriendPlotPreviewService.scheduleFillEmpty()
+		end)
+		return
+	end
 	local friends = unionFriendCandidates()
-	fillPlotId(plotId, friends)
+	local queue = collectRoster(friends)
+	local row = queue[1]
+	if row then
+		seatReef(plotId, row)
+		log("Seated vacated", plotId, "userId=", row.userId, "corals=", row.corals)
+	end
 	WaveWatchService.broadcastRoster(nil)
 end
 

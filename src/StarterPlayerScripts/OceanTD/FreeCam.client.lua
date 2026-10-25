@@ -46,6 +46,7 @@ local PlotCam2 = require(script.Parent:WaitForChild("PlotCam2"))
 local PlotCam2Tune = require(script.Parent:WaitForChild("PlotCam2Tune"))
 local FishCamTune = require(script.Parent:WaitForChild("FishCamTune"))
 local CamPinchZoom = require(script.Parent:WaitForChild("CamPinchZoom"))
+local PlaceAimScreen = require(script.Parent:WaitForChild("PlaceAimScreen"))
 local SkillPowerUpUI = require(script.Parent:WaitForChild("SkillPowerUpUI"))
 
 playerGui:SetAttribute(FC.ATTR_CAROUSEL_COLLAPSED, false)
@@ -1010,8 +1011,9 @@ local function readMoveWish(cf: CFrame): Vector3
 		end
 		return Vector3.zero
 	end
-	-- Gamepad left stick: Y+ is up â€” do not negate (was inverted).
-	if moveStick.Magnitude > 0.12 then
+	-- Selected coral / place ghost owns the left stick. Camera holds.
+	local coralOwnsStick = RelocateController.isActive() or PlacementController.isActive()
+	if not coralOwnsStick and moveStick.Magnitude > 0.12 then
 		wish += flatLook * moveStick.Y + right * moveStick.X
 	end
 
@@ -2648,15 +2650,15 @@ UserInputService.InputBegan:Connect(function(input, _gameProcessed)
 end)
 
 UserInputService.InputChanged:Connect(function(input, _gameProcessed)
-	if mode == "off" then
-		return
-	end
 	if input.KeyCode == Enum.KeyCode.Thumbstick1 then
 		moveStick = Vector2.new(input.Position.X, input.Position.Y)
 		return
 	end
 	if input.KeyCode == Enum.KeyCode.Thumbstick2 then
 		lookStick = Vector2.new(input.Position.X, input.Position.Y)
+		return
+	end
+	if mode == "off" then
 		return
 	end
 	if input.UserInputType == Enum.UserInputType.MouseMovement and plotMousePanOrigin then
@@ -2717,6 +2719,264 @@ UserInputService.InputEnded:Connect(function(input, _gameProcessed)
 	if input == moveTouch then
 		clearTouchMove()
 	end
+end)
+
+-- Own function frame: the main script is at Luau's 200-local limit.
+local function initPlayerCamSticksAndHud()
+-- Player Cam's MoveAction / CameraRotationAction gamepad bindings swallow the
+-- sticks (InputChanged never updates) without the emulator filling GetState.
+-- Park those two bindings while Player Cam is up, then walk after simulation
+-- and turn the existing Custom camera after it has already followed the avatar.
+local PLAYER_STICK_DZ = 0.18
+local PLAYER_LOOK_RATE = 2.5
+
+local moveActionRef: InputAction? = nil
+local lookActionRef: InputAction? = nil
+local actionsReady = false
+local parkedGamepad: { [InputBinding]: Instance } = {}
+
+local function playerCamStickBlocked(): boolean
+	if mode ~= "off" then
+		return true
+	end
+	if skillsBubblesOpen() or InventoryState.isSettingsOpen() then
+		return true
+	end
+	if PlacementController.isActive() or RelocateController.isActive() then
+		return true
+	end
+	if playerGui:GetAttribute("OceanTD_JoinIntroBusy") == true
+		or playerGui:GetAttribute("OceanTD_PlantWorkerBusy") == true
+		or playerGui:GetAttribute("OceanTD_PlantDigCamBusy") == true
+		or playerGui:GetAttribute("OceanTD_PlotSizeCinematicBusy") == true
+		or playerGui:GetAttribute("OceanTD_HueCamBusy") == true
+		or playerGui:GetAttribute("OceanTD_SharkCamBusy") == true
+		or playerGui:GetAttribute("OceanTD_UrchinCamBusy") == true
+		or playerGui:GetAttribute("OceanTD_TangCamBusy") == true
+		or playerGui:GetAttribute("OceanTD_ReefDefeatCamBusy") == true
+		or RelocateController.isCinematicHold()
+	then
+		return true
+	end
+	return false
+end
+
+local function strongerStick(a: Vector2, b: Vector2): Vector2
+	if b.Magnitude > a.Magnitude then
+		return b
+	end
+	return a
+end
+
+local function readStick(code: Enum.KeyCode, cached: Vector2): Vector2
+	local live = if code == Enum.KeyCode.Thumbstick1 then PlaceAimScreen.liveStick1() else PlaceAimScreen.liveStick2()
+	return strongerStick(strongerStick(cached, live), PlaceAimScreen.stateStick(code))
+end
+
+local function resolvePlayerActions(): boolean
+	if actionsReady then
+		return true
+	end
+	local ps = player:FindFirstChild("PlayerScripts")
+	local pm = ps and ps:FindFirstChild("PlayerModule")
+	local contexts = pm and pm:FindFirstChild("InputContexts")
+	local character = contexts and contexts:FindFirstChild("CharacterContext")
+	local cameraCtx = contexts and contexts:FindFirstChild("CameraContext")
+	local moveAction = character and character:FindFirstChild("MoveAction")
+	local lookAction = cameraCtx and cameraCtx:FindFirstChild("CameraRotationAction")
+	if not (moveAction and moveAction:IsA("InputAction") and lookAction and lookAction:IsA("InputAction")) then
+		return false
+	end
+	moveActionRef = moveAction
+	lookActionRef = lookAction
+	actionsReady = true
+	return true
+end
+
+local function parkGamepadBinding(action: InputAction)
+	local binding = action:FindFirstChild("GamepadBinding")
+	if binding and binding:IsA("InputBinding") and parkedGamepad[binding] == nil then
+		parkedGamepad[binding] = action
+		binding.Parent = nil
+	end
+end
+
+local function restoreParkedGamepad()
+	for binding, parent in parkedGamepad do
+		if binding.Parent == nil and parent.Parent ~= nil then
+			binding.Parent = parent
+		end
+	end
+	table.clear(parkedGamepad)
+end
+
+local function actionStateMag(action: InputAction?): number
+	if not action then
+		return 0
+	end
+	local ok, state = pcall(function()
+		return action:GetState()
+	end)
+	if ok and typeof(state) == "Vector2" then
+		return state.Magnitude
+	end
+	return 0
+end
+
+-- High priority, Pass: record the stick even while a binding still has it.
+ContextActionService:BindActionAtPriority("OceanTD_PlayerStickRead", function(_name, _state, input)
+	if input.KeyCode == Enum.KeyCode.Thumbstick1 then
+		moveStick = Vector2.new(input.Position.X, input.Position.Y)
+	elseif input.KeyCode == Enum.KeyCode.Thumbstick2 then
+		lookStick = Vector2.new(input.Position.X, input.Position.Y)
+	end
+	return Enum.ContextActionResult.Pass
+end, false, Enum.ContextActionPriority.High.Value + 50, Enum.KeyCode.Thumbstick1, Enum.KeyCode.Thumbstick2)
+
+local function syncPlayerGamepadPark()
+	if not resolvePlayerActions() then
+		return
+	end
+	if playerCamStickBlocked() then
+		if next(parkedGamepad) ~= nil then
+			restoreParkedGamepad()
+		end
+		local idleFeed = moveActionRef and moveActionRef:FindFirstChild("OceanTD_PlayerMoveFeed")
+		if idleFeed and idleFeed:IsA("InputBinding") then
+			pcall(function()
+				idleFeed:Fire(Vector2.zero)
+			end)
+		end
+		return
+	end
+	-- Left stick: always park. A live MoveAction state was skipping our walk
+	-- while the avatar still stood still. Right stick stays on the idle check
+	-- that already turns the camera.
+	if moveActionRef then
+		parkGamepadBinding(moveActionRef)
+	end
+	if lookActionRef and actionStateMag(lookActionRef) <= PLAYER_STICK_DZ then
+		parkGamepadBinding(lookActionRef)
+	end
+	if not moveActionRef then
+		return
+	end
+	local feedInst = moveActionRef:FindFirstChild("OceanTD_PlayerMoveFeed")
+	local feed = if feedInst and feedInst:IsA("InputBinding") then feedInst else nil
+	if not feed then
+		local created = Instance.new("InputBinding")
+		created.Name = "OceanTD_PlayerMoveFeed"
+		created.Type = Enum.InputBindingType.Scriptable
+		created.Parent = moveActionRef
+		feed = created
+	end
+	local move = readStick(Enum.KeyCode.Thumbstick1, moveStick)
+	local wish = Vector2.zero
+	if move.Magnitude > PLAYER_STICK_DZ then
+		local mag = math.clamp((move.Magnitude - PLAYER_STICK_DZ) / (1 - PLAYER_STICK_DZ), 0, 1)
+		wish = move.Unit * mag
+		if controlsDisabled then
+			setControlsEnabled(true)
+		end
+		local character = player.Character
+		local hum = character and character:FindFirstChildOfClass("Humanoid")
+		if hum and hum.WalkSpeed <= 0 then
+			setCharacterLocked(false)
+			if hum.WalkSpeed <= 0 then
+				hum.WalkSpeed = if savedWalkSpeed > 0 then savedWalkSpeed else 16
+			end
+		end
+	end
+	pcall(function()
+		feed:Fire(wish)
+	end)
+end
+
+RunService:BindToRenderStep("OceanTD_PlayerCamStickFeed", Enum.RenderPriority.Input.Value, function()
+	syncPlayerGamepadPark()
+end)
+
+local function nudgePlayerCamLook(dt: number)
+	if playerCamStickBlocked() then
+		return
+	end
+	if actionStateMag(lookActionRef) > PLAYER_STICK_DZ then
+		return
+	end
+	local cam = getCamera()
+	if not cam or cam.CameraType ~= Enum.CameraType.Custom then
+		return
+	end
+	local look = readStick(Enum.KeyCode.Thumbstick2, lookStick)
+	if look.Magnitude <= PLAYER_STICK_DZ then
+		return
+	end
+	local focus = cam.Focus.Position
+	local offset = cam.CFrame.Position - focus
+	local dist = offset.Magnitude
+	if dist < 0.05 then
+		return
+	end
+	local sens = PLAYER_LOOK_RATE * dt
+	offset = CFrame.Angles(0, -look.X * sens, 0):VectorToWorldSpace(offset)
+	local horiz = Vector3.new(offset.X, 0, offset.Z)
+	local pitch = math.atan2(offset.Y, math.max(horiz.Magnitude, 1e-4))
+	pitch = math.clamp(pitch - look.Y * sens, math.rad(-75), math.rad(70))
+	local yawFlat = if horiz.Magnitude > 1e-4 then horiz.Unit else Vector3.new(0, 0, 1)
+	local newOffset = yawFlat * (math.cos(pitch) * dist) + Vector3.new(0, math.sin(pitch) * dist, 0)
+	cam.CFrame = CFrame.lookAt(focus + newOffset, focus)
+end
+
+-- After the default camera (priority Camera) has placed the third-person view.
+RunService:BindToRenderStep("OceanTD_PlayerCamLook", Enum.RenderPriority.Last.Value, function(dt)
+	nudgePlayerCamLook(dt)
+end)
+
+-- Default walk samples MoveAction on the animation step or the simulation step
+-- and will Move(0) if that state is empty. Fire() above fills the state; this
+-- also applies the stick on both steps so a later zero cannot be the only write.
+task.defer(function()
+	local function applyWalk()
+		if playerCamStickBlocked() then
+			return
+		end
+		local move = readStick(Enum.KeyCode.Thumbstick1, moveStick)
+		if move.Magnitude <= PLAYER_STICK_DZ then
+			return
+		end
+		local character = player.Character
+		local hum = character and character:FindFirstChildOfClass("Humanoid")
+		local cam = getCamera()
+		if not hum or not cam then
+			return
+		end
+		if controlsDisabled then
+			setControlsEnabled(true)
+		end
+		if hum.WalkSpeed <= 0 then
+			setCharacterLocked(false)
+		end
+		if hum.WalkSpeed <= 0 then
+			hum.WalkSpeed = if savedWalkSpeed > 0 then savedWalkSpeed else 16
+		end
+		local flat = Vector3.new(cam.CFrame.LookVector.X, 0, cam.CFrame.LookVector.Z)
+		if flat.Magnitude < 1e-3 then
+			return
+		end
+		flat = flat.Unit
+		local right = flat:Cross(Vector3.yAxis)
+		if right.Magnitude < 1e-3 then
+			return
+		end
+		right = right.Unit
+		local mag = math.clamp((move.Magnitude - PLAYER_STICK_DZ) / (1 - PLAYER_STICK_DZ), 0, 1)
+		local dir = move.Unit * mag
+		hum:Move(flat * dir.Y + right * dir.X, false)
+	end
+	pcall(function()
+		RunService:BindToAnimation(applyWalk, Enum.StepFrequency.Hz60)
+	end)
+	RunService:BindToSimulation(applyWalk, Enum.StepFrequency.Hz60)
 end)
 
 player.CharacterAdded:Connect(function()
@@ -3796,3 +4056,6 @@ task.spawn(function()
 		end
 	end)
 end)
+end
+
+initPlayerCamSticksAndHud()
