@@ -17,6 +17,7 @@ local REMOTE_EVENTS = {
 	"ReportWaveRecords",
 	"PlotRoster",
 	"WaveWatchPush",
+	"WaveVisitFeed",
 	"SkillStagesSync",
 	"InventorySync",
 	"ReportFishFed",

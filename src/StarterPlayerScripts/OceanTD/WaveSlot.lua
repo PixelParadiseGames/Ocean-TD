@@ -22,6 +22,7 @@ local UiIdleCycle = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiIdl
 local UiPopupScale = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiPopupScale"))
 local UiViewportTags = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiViewportTags"))
 local ReefHealthBarFx = require(oceanRoot:WaitForChild("Shared"):WaitForChild("ReefHealthBarFx"))
+local GamepadButtonGlyph = require(oceanRoot:WaitForChild("Shared"):WaitForChild("GamepadButtonGlyph"))
 
 local InventoryState = require(script.Parent:WaitForChild("InventoryState"))
 local WaveSim = require(script.Parent:WaitForChild("WaveSim"))
@@ -118,12 +119,18 @@ local hudWaveTrail: Frame? = nil
 local hudWaveTrailState = ReefHealthBarFx.makeState(0)
 local nextWaveRockState = ReefHealthBarFx.makeState(0)
 local hudWaveLabel: TextLabel? = nil
+local hudFeedRow: Frame? = nil
 local hudWaveHit: TextButton? = nil
 local hudCritterBarsEye: TextButton? = nil
+local hudNextWave: TextButton? = nil
+local hudAutoNext: TextButton? = nil
+local autoNextOn = false
+local hudWaveDollar: TextButton? = nil
 local hudWaveStroke: UIStroke? = nil
 local hudBarFork: TextLabel? = nil
 local hudBarHeart: TextLabel? = nil
 local hudBarHeartScale: UIScale? = nil
+local critterEmojiMarks: { TextLabel } = {}
 local hudFinishHint: TextLabel? = nil
 local hudReefBar: Frame? = nil
 local hudReefFill: Frame? = nil
@@ -137,6 +144,10 @@ local hudFishNeed: TextLabel? = nil
 local hudLayoutConn: RBXScriptConnection? = nil
 local finishFlashToken = 0
 local feedCompleteUi = false
+local nextPressAnimating = false
+local nextCircleAnimToken = 0
+local critterRevealBusy = false
+local critterRevealToken = 0
 local lastHungryMissToken = -1
 local fillHurtToken = 0
 local lastFishFull = 0
@@ -152,8 +163,9 @@ local tempW100Btn: TextButton? = nil
 
 local BAR_BG = Color3.fromRGB(0x9e, 0x0b, 0x00)
 local BAR_FILL = Color3.fromRGB(0x12, 0xd9, 0x00)
+local NEXT_WAVE_BLUE = Color3.fromRGB(32, 104, 210)
 local BAR_DANGER_BG = Color3.fromRGB(255, 40, 45)
-local REEF_BAR_BG = Color3.fromRGB(0x00, 0x03, 0x29)
+local REEF_BAR_BG = Color3.new(0, 0, 0)
 local REEF_BAR_FILL = Color3.fromRGB(0xff, 0x18, 0x14)
 local REEF_PLUS_GREEN = Color3.fromRGB(50, 230, 100)
 local REEF_PLUS_DARK = Color3.fromRGB(0, 110, 35)
@@ -190,8 +202,7 @@ local WAVE_HUD_LAYOUT: "right" | "bottomRight" = "bottomRight"
 local WAVE_HUD_BOTTOM_PAD = 10
 local WAVE_HUD_RIGHT_PAD = 10
 local WAVE_HUD_SIDE_GAP = 10 -- gap between reef + wave bars in bottomRight
-local WAVE_HUD_BOTTOM_BAR_W = 260 -- design width for reef bar (before UIScale)
-local WAVE_HUD_BOTTOM_WAVE_BAR_W = math.floor(260 * 1.2 + 0.5) -- wave bar +20%
+local WAVE_HUD_BOTTOM_WAVE_BAR_W = math.floor(260 * 1.2 + 0.5) -- hunger bar width (unchanged)
 local REEF_PANEL_W = 360
 local REEF_PANEL_H = 200
 local REEF_SCALE_IN = TweenInfo.new(0.28, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
@@ -341,27 +352,10 @@ local function styleHelpBadge(): boolean
 end
 
 local function refreshFinishHint()
-	if not hudFinishHint then
-		return
-	end
-	if not feedCompleteUi or not hudFrame or not hudFrame.Visible then
+	-- Shortcut now flashes inside the Next Wave circle. Keep the old right-side hint off.
+	if hudFinishHint then
 		hudFinishHint.Visible = false
-		return
 	end
-	if InventoryState.isOpen() then
-		hudFinishHint.Visible = false
-		return
-	end
-	if not deps then
-		return
-	end
-	local mode = deps.getShortcutMode()
-	if mode == "touch" then
-		hudFinishHint.Visible = false
-		return
-	end
-	hudFinishHint.Text = if mode == "gamepad" then "R1" else "ENTER"
-	hudFinishHint.Visible = true
 end
 
 local function setSlot5Interactable(on: boolean)
@@ -435,7 +429,7 @@ local flashFillHurt: () -> ()
 local refreshForkLabel: () -> ()
 local refreshCritterEmojisInWaveBar: () -> ()
 local refreshCritterBarsEye: () -> ()
-local playFinishFirework: (emojis: { string }) -> ()
+local playFinishFirework: (emojis: { string }, from: GuiObject?, fountain: boolean?) -> ()
 do
 	local dangerFlashToken = 0
 	local fireworkToken = 0
@@ -480,36 +474,43 @@ end
 		hudBarHeartScale.Scale = 1
 	end
 	local my = finishFlashToken
-	if not hudWaveLabel or not hudWaveStroke then
-		return
+	if hudWaveStroke then
+		hudWaveStroke.Thickness = 1.5
+		hudWaveStroke.Color = Color3.new(1, 1, 1)
 	end
-	hudWaveLabel.TextStrokeTransparency = 0.15
-	hudWaveStroke.Thickness = 1.5
 	if hudWaveBar then
 		hudWaveBar.BackgroundColor3 = BAR_BG
 		hudWaveBar.BackgroundTransparency = 0.5
 	end
 	task.spawn(function()
+		local showWords = true
 		while my == finishFlashToken and feedCompleteUi do
-			if hudWaveLabel then
-				hudWaveLabel.TextColor3 = Color3.new(1, 1, 1)
-				hudWaveLabel.TextStrokeColor3 = FLASH_GREEN
+			local btn = hudNextWave
+			if btn then
+				local mode = if deps then deps.getShortcutMode() else "keyboard"
+				local flashOn = math.floor(os.clock() / 0.45) % 2 == 0
+				btn.BackgroundColor3 = if flashOn then BAR_FILL else NEXT_WAVE_BLUE
+				if mode == "touch" then
+					btn.Text = "NEXT\nWAVE"
+					btn.TextSize = 8
+				else
+					if showWords then
+						btn.Text = "NEXT\nWAVE"
+						btn.TextSize = 8
+					elseif mode == "gamepad" then
+						btn.Text = "R1"
+						btn.TextSize = 14
+					else
+						btn.Text = "ENTER"
+						btn.TextSize = 7
+					end
+				end
 			end
-			if hudWaveStroke then
-				hudWaveStroke.Color = FLASH_GREEN
-			end
-			task.wait(0.35)
+			showWords = not showWords
+			task.wait(0.45)
 			if my ~= finishFlashToken or not feedCompleteUi then
 				break
 			end
-			if hudWaveLabel then
-				hudWaveLabel.TextColor3 = FLASH_DARK
-				hudWaveLabel.TextStrokeColor3 = FLASH_DARK
-			end
-			if hudWaveStroke then
-				hudWaveStroke.Color = FLASH_DARK
-			end
-			task.wait(0.35)
 		end
 	end)
 end
@@ -559,39 +560,41 @@ end
 	end)
 end
 
--- NEXT WAVE unlock: bar + label pop to 500% height, then ease down over 1.5s.
+-- Next Wave circle scales up from its center. The hunger bar stays its normal height.
 	animateNextWaveUnlockPop = function()
 	waveBarAnimToken += 1
-	local my = waveBarAnimToken
-	local peakH = BAR_H * WAVE_NEXT_UNLOCK_PEAK_MULT
-	local settleH = BAR_H * WAVE_NEXT_HEIGHT_MULT
-	local peakText = LABEL_TEXT_SIZE * WAVE_NEXT_UNLOCK_PEAK_MULT
-	local settleText = LABEL_TEXT_SIZE * math.min(WAVE_NEXT_HEIGHT_MULT, 1.75)
+	waveBarAnimH = BAR_H
+	setWaveLabelTextSize(LABEL_TEXT_SIZE)
+	nextCircleAnimToken += 1
+	local my = nextCircleAnimToken
+	local btn = hudNextWave
+	local scaleInst = btn and btn:FindFirstChild("Pop")
+	if not (scaleInst and scaleInst:IsA("UIScale")) then
+		return
+	end
+	local scale = scaleInst :: UIScale
+	scale.Scale = 1
 	task.spawn(function()
-		local function tweenPair(destH: number, destText: number, dur: number, easeOut: boolean)
+		local function tweenScale(dest: number, dur: number)
 			local t0 = os.clock()
-			local fromH = waveBarAnimH
-			local fromText = if hudWaveLabel then hudWaveLabel.TextSize else LABEL_TEXT_SIZE
-			while my == waveBarAnimToken do
+			local from = scale.Scale
+			while my == nextCircleAnimToken do
 				local u = math.clamp((os.clock() - t0) / math.max(dur, 1e-3), 0, 1)
-				local e = if easeOut
-					then (1 - (1 - u) * (1 - u) * (1 - u)) -- ease-out cubic
-					else (u * u * (3 - 2 * u))
-				waveBarAnimH = fromH + (destH - fromH) * e
-				setWaveLabelTextSize(fromText + (destText - fromText) * e)
+				local e = 1 - (1 - u) * (1 - u) * (1 - u)
+				scale.Scale = from + (dest - from) * e
 				if u >= 1 then
-					waveBarAnimH = destH
-					setWaveLabelTextSize(destText)
+					scale.Scale = dest
 					break
 				end
 				RunService.Heartbeat:Wait()
 			end
 		end
-		tweenPair(peakH, peakText, WAVE_NEXT_UNLOCK_POP_SEC, false)
-		if my ~= waveBarAnimToken then
+		-- 600% of the bar, then settle at 300%, growing from the circle's center.
+		tweenScale(6, 0.2)
+		if my ~= nextCircleAnimToken then
 			return
 		end
-		tweenPair(settleH, settleText, WAVE_NEXT_UNLOCK_SETTLE_SEC, true)
+		tweenScale(3, 0.32)
 	end)
 end
 
@@ -612,7 +615,7 @@ end
 				hudWaveStroke.Thickness = 2
 			end
 			if hudBarHeartScale then
-				hudBarHeartScale.Scale = 1.4
+				hudBarHeartScale.Scale = 1
 			end
 			task.wait(0.28)
 			if my ~= dangerFlashToken or not hungerDangerUi or feedCompleteUi then
@@ -627,7 +630,7 @@ end
 				hudWaveStroke.Thickness = 1.5
 			end
 			if hudBarHeartScale then
-				hudBarHeartScale.Scale = 0.85
+				hudBarHeartScale.Scale = 1
 			end
 			task.wait(0.28)
 		end
@@ -667,27 +670,156 @@ end
 	hudBarFork.Text = string.format("%d of %d", lastFishFull, lastFishTotal + lastCrabTotal + lastUrchinTotal)
 end
 
-	local function formatCritterEmojis(fishTotal: number, crabs: number, urchins: number, sharks: number): string
-	local fishCount = math.max(fishTotal, 0)
-	local line = "🐟:" .. tostring(fishCount)
-	if crabs > 0 then
-		line ..= " 🦀:" .. tostring(crabs)
+	-- +1 flies: at most 2 per second, straight from the emoji center to the green Fed circle.
+	local fedPlusQueue: { TextLabel } = {}
+	local fedPlusHungry: { [TextLabel]: number } = {}
+	local fedPlusNextAt = 0
+	local fedPlusPumping = false
+	local fedPlusWave = -1
+	local function dropQueuedPlus(lbl: TextLabel)
+		local i = 1
+		while i <= #fedPlusQueue do
+			if fedPlusQueue[i] == lbl then
+				table.remove(fedPlusQueue, i)
+			else
+				i += 1
+			end
+		end
 	end
-	if urchins > 0 then
-		line ..= " ✴:" .. tostring(urchins)
+	local function launchFedPlus(src: TextLabel)
+		local fed = hudFeedRow and hudFeedRow:FindFirstChild("Fed")
+		if not fed or not fed:IsA("GuiObject") or not fed.Parent then
+			return
+		end
+		if not src.Parent or src.AbsoluteSize.X < 2 or fed.AbsoluteSize.Y < 2 then
+			return
+		end
+		local host = src:FindFirstAncestorOfClass("ScreenGui")
+		if not host then
+			return
+		end
+		local origin = host.AbsolutePosition
+		local from = src.AbsolutePosition + src.AbsoluteSize * 0.5 - origin
+		local to = fed.AbsolutePosition + fed.AbsoluteSize * 0.5 - origin
+		local px = fed.AbsoluteSize.Y
+		local textSize = math.max(10, math.floor(px * 0.62 + 0.5))
+		local box = math.max(12, math.floor(px + 0.5))
+		local fly = Instance.new("TextLabel")
+		fly.Name = "FedPlus"
+		fly.BackgroundTransparency = 1
+		fly.AnchorPoint = Vector2.new(0.5, 0.5)
+		fly.Position = UDim2.fromOffset(from.X, from.Y)
+		fly.Size = UDim2.fromOffset(box * 2, box)
+		fly.Font = UiTheme.Font
+		fly.TextSize = textSize
+		fly.Text = "+1"
+		fly.TextColor3 = Color3.new(1, 1, 1)
+		fly.TextStrokeTransparency = 0.15
+		fly.TextStrokeColor3 = Color3.new(0, 0, 0)
+		fly.ZIndex = 80
+		fly.Parent = host
+		task.spawn(function()
+			local t0 = os.clock()
+			local dur = 0.42
+			while fly.Parent do
+				RunService.RenderStepped:Wait()
+				local u = math.clamp((os.clock() - t0) / dur, 0, 1)
+				fly.Position = UDim2.fromOffset(from.X + (to.X - from.X) * u, from.Y + (to.Y - from.Y) * u)
+				local fade = if u < 0.82 then 0 else (u - 0.82) / 0.18
+				fly.TextTransparency = fade
+				fly.TextStrokeTransparency = 0.15 + 0.85 * fade
+				if u >= 1 then
+					break
+				end
+			end
+			fly:Destroy()
+		end)
 	end
-	if sharks > 0 then
-		line ..= " 🦈:" .. tostring(sharks)
+	local function pumpFedPlus()
+		if fedPlusPumping then
+			return
+		end
+		fedPlusPumping = true
+		task.spawn(function()
+			while #fedPlusQueue > 0 do
+				local now = os.clock()
+				if now < fedPlusNextAt then
+					task.wait(fedPlusNextAt - now)
+				end
+				if #fedPlusQueue == 0 then
+					break
+				end
+				local src = table.remove(fedPlusQueue, 1)
+				fedPlusNextAt = os.clock() + 0.5
+				if src then
+					launchFedPlus(src)
+				end
+			end
+			fedPlusPumping = false
+		end)
 	end
-	return line
-end
 
 	refreshCritterEmojisInWaveBar = function()
-	if not hudBarHeart then
+	if hudWaveDollar then
+		local earned = math.floor(WaveFeedPayout.getWaveDollarsEarned() + 0.5)
+		local showCount = earned > 0 and math.floor(os.clock() / 0.55) % 2 == 1
+		if showCount then
+			local face = hudWaveDollar:FindFirstChild("Face")
+			local digits = #tostring(earned)
+			local size = if digits >= 4 then 9 elseif digits >= 3 then 11 else 14
+			if face and face:IsA("TextLabel") then
+				face.Text = tostring(earned)
+				face.TextSize = size
+			end
+		else
+			local face = hudWaveDollar:FindFirstChild("Face")
+			if face and face:IsA("TextLabel") then
+				face.Text = "$D"
+				face.TextSize = 12
+			end
+		end
+		-- Shrink starts the moment the wave payout flies, even while the title / emoji show is up.
+		local pop = hudWaveDollar:FindFirstChild("Pop")
+		if pop and pop:IsA("UIScale") then
+			local shrinking = WaveSlot._dollarShrinkTw
+			if earned <= 0 then
+				if pop.Scale > 1.01 and not shrinking then
+					local tw = TweenService:Create(
+						pop,
+						TweenInfo.new(0.32, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+						{ Scale = 1 }
+					)
+					WaveSlot._dollarShrinkTw = tw
+					tw.Completed:Connect(function(state)
+						if WaveSlot._dollarShrinkTw == tw then
+							WaveSlot._dollarShrinkTw = nil
+						end
+						if state == Enum.PlaybackState.Completed then
+							pop.Scale = 1
+						end
+					end)
+					tw:Play()
+				end
+			else
+				if shrinking then
+					shrinking:Cancel()
+					WaveSlot._dollarShrinkTw = nil
+				end
+				local t = math.clamp(math.log(1 + earned) / math.log(1 + 48), 0, 1)
+				-- Next button settles at 3× the bar. This circle tops out 25% smaller.
+				local target = 1 + t * 1.25
+				pop.Scale = pop.Scale + (target - pop.Scale) * 0.12
+			end
+		end
+	end
+	if not hudBarHeart or not hudWaveBar then
 		return
 	end
-	if feedCompleteUi then
+	if critterRevealBusy then
 		hudBarHeart.Visible = false
+		for _, lbl in ipairs(critterEmojiMarks) do
+			lbl.Visible = false
+		end
 		return
 	end
 	local pg = Players.LocalPlayer:FindFirstChild("PlayerGui")
@@ -696,8 +828,127 @@ end
 		return
 	end
 	hudBarHeart.Visible = true
-	hudBarHeart.Text = formatCritterEmojis(lastFishTotal, lastCrabTotal, lastUrchinTotal, lastSharkTotal)
-	hudBarHeart.TextSize = FORK_COUNT_TEXT_SIZE
+	local anc = UiPopupScale.ancestorScale(hudWaveBar)
+	if anc < 0.001 then
+		anc = 1
+	end
+	local fishU, crabU, urchinU, sharkU = WaveSim.getCritterPathFracs()
+	local fishH, crabH, urchinH, sharkH = WaveSim.getHungryLeft()
+	local specs = {
+		{ glyph = "🐟", hungry = fishH, show = lastFishTotal > 0, frac = fishU },
+		{ glyph = "🦀", hungry = crabH, show = lastCrabTotal > 0, frac = crabU },
+		{ glyph = "✴", hungry = urchinH, show = lastUrchinTotal > 0, frac = urchinU },
+		{ glyph = "🦈", hungry = sharkH, show = lastSharkTotal > 0, frac = sharkU },
+	}
+	local shown: { { lbl: TextLabel, frac: number, w: number, order: number, hungry: number } } = {}
+	if fedPlusWave ~= lastWaveIndex then
+		table.clear(fedPlusQueue)
+		table.clear(fedPlusHungry)
+		fedPlusWave = lastWaveIndex
+		for _, mark in ipairs(critterEmojiMarks) do
+			mark:SetAttribute("HungryN", nil)
+		end
+	end
+	for i, spec in ipairs(specs) do
+		local lbl = critterEmojiMarks[i]
+		if lbl then
+			local arrived = lbl:GetAttribute("ArrivedWave") == lastWaveIndex
+			if spec.show and not arrived then
+				lbl.Visible = true
+				lbl.Parent = hudFrame or lbl.Parent
+				local prevHungry = fedPlusHungry[lbl]
+				if typeof(prevHungry) == "number" and spec.hungry < prevHungry then
+					local grow = lbl:FindFirstChild("Grow")
+					if grow and grow:IsA("UIScale") then
+						grow.Scale = 1.45
+					end
+					local lost = math.max(1, math.floor(prevHungry - spec.hungry + 0.5))
+					if spec.hungry <= 0 then
+						-- Last one in this school. Do not keep dripping +1s after nothing is left to fill.
+						dropQueuedPlus(lbl)
+						table.insert(fedPlusQueue, lbl)
+					else
+						for _ = 1, lost do
+							table.insert(fedPlusQueue, lbl)
+						end
+					end
+					pumpFedPlus()
+				end
+				fedPlusHungry[lbl] = spec.hungry
+				lbl:SetAttribute("HungryN", spec.hungry)
+				lbl.Text = if spec.hungry > 0
+					then spec.glyph .. " " .. tostring(spec.hungry)
+					else spec.glyph .. " 👍"
+				lbl.TextSize = FORK_COUNT_TEXT_SIZE
+				local w = lbl.TextBounds.X / anc
+				if w < 8 then
+					w = math.max(28, #lbl.Text * FORK_COUNT_TEXT_SIZE * 0.55)
+				end
+				table.insert(shown, { lbl = lbl, frac = spec.frac, w = w, order = i, hungry = spec.hungry })
+			else
+				lbl.Visible = false
+				if not spec.show then
+					lbl:SetAttribute("ArrivedWave", nil)
+					lbl:SetAttribute("HungryN", nil)
+				end
+			end
+		end
+	end
+	table.sort(shown, function(a, b)
+		if a.frac ~= b.frac then
+			return a.frac < b.frac
+		end
+		return a.order < b.order
+	end)
+	local frameScale = 1
+	local frameUi = hudFrame and hudFrame:FindFirstChild(WAVE_HUD_SCALE_NAME)
+	if frameUi and frameUi:IsA("UIScale") and frameUi.Scale > 0.001 then
+		frameScale = frameUi.Scale
+	end
+	local origin = if hudFrame then hudFrame.AbsolutePosition else Vector2.zero
+	local barAbs = hudWaveBar.AbsolutePosition
+	local barSz = hudWaveBar.AbsoluteSize / frameScale
+	local barTL = (barAbs - origin) / frameScale
+	local startX = barTL.X + 8
+	local endX = barTL.X + barSz.X
+	local y = barTL.Y + barSz.Y * 0.5
+	local gap = 4
+	local placed: { number } = {}
+	local cursor = startX
+	local span = math.max(1, endX - startX)
+	for i, item in ipairs(shown) do
+		local desired = startX + item.frac * math.max(0, span - item.w * 0.5)
+		local x = math.max(desired, cursor)
+		placed[i] = x
+		cursor = x + item.w + gap
+	end
+	local overflow = (cursor - gap) - (startX + span)
+	if overflow > 0 then
+		for i = 1, #placed do
+			placed[i] -= overflow
+		end
+	end
+	for i, item in ipairs(shown) do
+		local lbl = item.lbl
+		local centerX = placed[i] + item.w * 0.5
+		if item.frac >= 0.98 or centerX >= endX - 2 then
+			lbl.Visible = false
+			lbl:SetAttribute("ArrivedWave", lastWaveIndex)
+		else
+			lbl.AnchorPoint = Vector2.new(0.5, 0.5)
+			lbl.Size = UDim2.fromOffset(math.max(8, item.w), barSz.Y)
+			lbl.Position = UDim2.fromOffset(centerX, y)
+			lbl.ZIndex = 32
+		end
+		local grow = lbl:FindFirstChild("Grow")
+		if grow and grow:IsA("UIScale") then
+			if grow.Scale > 1.02 then
+				grow.Scale = grow.Scale + (1 - grow.Scale) * 0.35
+			else
+				grow.Scale = 1
+			end
+		end
+	end
 end
 
 	refreshCritterBarsEye = function()
@@ -708,14 +959,20 @@ end
 	hudCritterBarsEye.BackgroundColor3 = if on then HELP_GREEN else HELP_RED
 end
 
-	playFinishFirework = function(emojis: { string })
-	if not hudWaveBar or not deps.mainHUD then
+	playFinishFirework = function(emojis: { string }, from: GuiObject?, fountain: boolean?)
+	if not deps.mainHUD then
+		return
+	end
+	local source: GuiObject? = from
+	if not source or not source.Parent then
+		source = hudWaveBar
+	end
+	if not source then
 		return
 	end
 	fireworkToken += 1
 	local my = fireworkToken
-	local bar = hudWaveBar
-	local origin = bar.AbsolutePosition + bar.AbsoluteSize * 0.5
+	local origin = source.AbsolutePosition + source.AbsoluteSize * 0.5
 	local parentPos = deps.mainHUD.AbsolutePosition
 	local ox = origin.X - parentPos.X
 	local oy = origin.Y - parentPos.Y
@@ -746,14 +1003,31 @@ end
 		scale.Scale = 0.12
 		scale.Parent = lbl
 
-		local angle = rng:NextNumber(0, math.pi * 2)
-		local speed = rng:NextNumber(260, 620)
-		local vx = math.cos(angle) * speed
-		local vy = math.sin(angle) * speed - rng:NextNumber(120, 280)
-		local grav = rng:NextNumber(820, 1200)
-		local life = rng:NextNumber(1.15, 1.9)
+		local vx: number
+		local vy: number
+		local grav: number
+		local life: number
+		if fountain then
+			-- Half as tall as the old fountain, but quicker so they still arc down before they vanish.
+			local spread = rng:NextNumber(-1, 1)
+			vx = spread * rng:NextNumber(120, 380)
+			vy = -rng:NextNumber(520, 760)
+			grav = rng:NextNumber(1500, 2000)
+			life = rng:NextNumber(1.15, 1.9) * 1.3
+		else
+			local angle = rng:NextNumber(0, math.pi * 2)
+			local speed = rng:NextNumber(260, 620)
+			vx = math.cos(angle) * speed
+			vy = math.sin(angle) * speed - rng:NextNumber(120, 280)
+			grav = rng:NextNumber(820, 1200)
+			life = rng:NextNumber(1.15, 1.9)
+		end
 		local popAt = rng:NextNumber(0.1, 0.24)
 		local peak = rng:NextNumber(1.15, 1.85)
+		if fountain then
+			lbl.TextSize = math.max(10, math.floor(lbl.TextSize * 0.5 + 0.5))
+			peak *= 0.5
+		end
 		local x = ox
 		local y = oy
 		task.spawn(function()
@@ -767,7 +1041,7 @@ end
 				vy += grav * dt
 				x += vx * dt
 				y += vy * dt
-				vx *= (1 - 0.55 * dt)
+				vx *= (1 - (if fountain then 0.02 else 0.55) * dt)
 				lbl.Position = UDim2.fromOffset(x, y)
 				if age < popAt then
 					scale.Scale = 0.12 + (peak - 0.12) * (age / popAt)
@@ -775,14 +1049,15 @@ end
 					local u = math.clamp((age - popAt) / math.max(0.05, life - popAt), 0, 1)
 					scale.Scale = peak * (1 - 0.3 * u)
 				end
-				lbl.TextTransparency = math.clamp((age - life * 0.6) / (life * 0.4), 0, 1)
+				local fadeAt = if fountain then 0.72 else 0.6
+				lbl.TextTransparency = math.clamp((age - life * fadeAt) / (life * (1 - fadeAt)), 0, 1)
 			end
 			if lbl.Parent then
 				lbl:Destroy()
 			end
 		end)
 	end
-	task.delay(2.5, function()
+	task.delay(if fountain then 3.25 else 2.5, function()
 		if layer.Parent and my == fireworkToken then
 			layer:Destroy()
 		end
@@ -796,34 +1071,312 @@ end
 
 -- NEXT WAVE hit target (for tutorial finger).
 function WaveSlot.getNextWaveHit(): GuiObject?
-	local hit = hudWaveHit
-	if hit and hit.Parent and hit.Visible then
-		return hit
+	if not feedCompleteUi or nextPressAnimating then
+		return nil
+	end
+	local btn = hudNextWave
+	if btn and btn.Parent and btn.Visible then
+		return btn
 	end
 	return nil
 end
 
 do
 	local greenSphereFireworkToken = 0
-	local SPHERE_GREEN_LIGHT = Color3.fromRGB(90, 255, 130)
-	local SPHERE_GREEN_DARK = Color3.fromRGB(20, 160, 55)
-	local SPHERE_STROKE_GREEN = Color3.fromRGB(40, 230, 80)
-	-- L / M / S diameters (px).
-	local SPHERE_DIAMS = { 56, 38, 22 }
-	function WaveSlot.tryFinishFromShortcut(): boolean
-		if not WaveSlot.isFinishReady() then
-			return false
+	-- Old largest circle was 56. Cap is 70% of that, with a wider spread down to small.
+	local SPHERE_DIAM_MAX = math.floor(56 * 0.7 + 0.5)
+
+	local REVEAL_FLY_SEC = 0.55
+	local REVEAL_HOLD_SEC = 1
+	local REVEAL_STAGGER_SEC = 0.25
+	local REVEAL_DOWN_SEC = 0.42
+	local REVEAL_FROM_SCALE = 0.22 * 0.85
+	local REVEAL_PEAK_SCALE = 2.5 * 0.85
+	local REVEAL_SOUND_ID = "rbxassetid://138913815716094"
+
+	local function playCountLandSound(count: number, lo: number, hi: number)
+		local t = 0.5
+		if hi > lo then
+			t = math.clamp((count - lo) / (hi - lo), 0, 1)
 		end
-		-- Half the reef-health rock when the player taps NEXT WAVE.
+		-- High roll → low pitch. Low roll → high pitch.
+		local pitch = 1.5 - t * 0.9
+		local sound = Instance.new("Sound")
+		sound.Name = "OceanTD_CritterCount"
+		sound.SoundId = REVEAL_SOUND_ID
+		sound.PlaybackSpeed = pitch
+		sound.Volume = 0.85
+		sound.Parent = SoundService
+		sound:Play()
+		task.delay(2.5, function()
+			sound:Destroy()
+		end)
+	end
+
+	local function playCritterCountReveal(origin: Vector2)
+		critterRevealToken += 1
+		local my = critterRevealToken
+		local specs = WaveSim.getCritterReveal()
+		if #specs == 0 then
+			critterRevealBusy = false
+			return
+		end
+		critterRevealBusy = true
+		refreshCritterEmojisInWaveBar()
+		local pg = Players.LocalPlayer:FindFirstChildOfClass("PlayerGui")
+		if not pg then
+			critterRevealBusy = false
+			return
+		end
+		local gui = Instance.new("ScreenGui")
+		gui.Name = "OceanTD_CritterCountReveal"
+		gui.ResetOnSpawn = false
+		gui.IgnoreGuiInset = true
+		gui.DisplayOrder = 4200
+		gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+		gui.Parent = pg
+
+		local cam = Workspace.CurrentCamera
+		local vp = if cam then cam.ViewportSize else Vector2.new(1280, 720)
+		local n = #specs
+		local spread = 150
+		local rowLeft = vp.X * 0.5 - (n - 1) * spread * 0.5
+		local centerY = vp.Y * 0.5
+		local cellH = 36
+		local cellW = 42
+
+		type Row = {
+			holder: Frame,
+			scale: UIScale,
+			strip: Frame,
+			ticker: CanvasGroup,
+			target: number,
+			count: number,
+			lo: number,
+			hi: number,
+			center: Vector2,
+			landed: boolean,
+		}
+		local rows: { Row } = {}
+		for i, spec in ipairs(specs) do
+			local holder = Instance.new("Frame")
+			holder.Name = "Reveal"
+			holder.BackgroundTransparency = 1
+			holder.AnchorPoint = Vector2.new(0.5, 0.5)
+			holder.Position = UDim2.fromOffset(origin.X, origin.Y)
+			holder.Size = UDim2.fromOffset(160, 108)
+			holder.ZIndex = 20
+			holder.Parent = gui
+			local emoji = Instance.new("TextLabel")
+			emoji.Name = "Emoji"
+			emoji.BackgroundTransparency = 1
+			emoji.Size = UDim2.fromOffset(160, 64)
+			emoji.Font = UiTheme.Font
+			emoji.TextSize = 48
+			emoji.TextColor3 = Color3.new(1, 1, 1)
+			emoji.TextStrokeTransparency = 0.25
+			emoji.TextStrokeColor3 = Color3.new(0, 0, 0)
+			emoji.TextXAlignment = Enum.TextXAlignment.Center
+			emoji.TextYAlignment = Enum.TextYAlignment.Center
+			emoji.Text = spec.glyph
+			emoji.ZIndex = 21
+			emoji.Parent = holder
+			local ticker = Instance.new("CanvasGroup")
+			ticker.Name = "Ticker"
+			ticker.BackgroundColor3 = Color3.fromRGB(10, 16, 28)
+			ticker.BackgroundTransparency = 0.28
+			ticker.AnchorPoint = Vector2.new(0.5, 0)
+			ticker.Position = UDim2.new(0.5, 0, 0, 66)
+			ticker.Size = UDim2.fromOffset(cellW, cellH)
+			ticker.ZIndex = 22
+			ticker.Parent = holder
+			local tickCorner = Instance.new("UICorner")
+			tickCorner.CornerRadius = UDim.new(0, 8)
+			tickCorner.Parent = ticker
+			local strokeColor = Color3.fromRGB(57, 255, 70)
+			if spec.glyph == "🦈" then
+				strokeColor = Color3.fromRGB(255, 140, 20)
+			elseif spec.glyph == "🦀" or spec.glyph == "✴" then
+				strokeColor = Color3.fromRGB(255, 36, 48)
+			end
+			local tickStroke = Instance.new("UIStroke")
+			tickStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+			tickStroke.Color = strokeColor
+			tickStroke.Thickness = 3
+			tickStroke.Transparency = 0
+			tickStroke.LineJoinMode = Enum.LineJoinMode.Round
+			tickStroke.Parent = ticker
+			local strip = Instance.new("Frame")
+			strip.Name = "Strip"
+			strip.BackgroundTransparency = 1
+			strip.Size = UDim2.fromOffset(cellW, cellH)
+			strip.ZIndex = 23
+			strip.Parent = ticker
+			local function addNum(value: number, index: number)
+				local num = Instance.new("TextLabel")
+				num.BackgroundTransparency = 1
+				num.Size = UDim2.fromOffset(cellW, cellH)
+				num.Position = UDim2.fromOffset(0, (index - 1) * cellH)
+				num.Font = UiTheme.Font
+				num.TextSize = 28
+				num.TextColor3 = Color3.new(1, 1, 1)
+				num.TextXAlignment = Enum.TextXAlignment.Center
+				num.TextYAlignment = Enum.TextYAlignment.Center
+				num.Text = tostring(value)
+				num.ZIndex = 24
+				num.Parent = strip
+			end
+			local landIndex = 1
+			local idx = 0
+			local span = math.max(1, spec.hi - spec.lo + 1)
+			-- One legal count still rolls: the same number repeats down the strip.
+			local cycles = if span > 1 then 7 else 10
+			for _ = 1, cycles do
+				for v = spec.lo, spec.hi do
+					idx += 1
+					addNum(v, idx)
+					if v == spec.count then
+						landIndex = idx
+					end
+				end
+			end
+			strip.Size = UDim2.fromOffset(cellW, math.max(1, idx) * cellH)
+			local sc = Instance.new("UIScale")
+			sc.Scale = REVEAL_FROM_SCALE
+			sc.Parent = holder
+			table.insert(rows, {
+				holder = holder,
+				scale = sc,
+				strip = strip,
+				ticker = ticker,
+				target = (landIndex - 1) * cellH,
+				count = spec.count,
+				lo = spec.lo,
+				hi = spec.hi,
+				center = Vector2.new(rowLeft + (i - 1) * spread, centerY),
+				landed = false,
+			})
+		end
+
+		local function barSlot(index: number): Vector2
+			local bar = hudWaveBar
+			if not bar then
+				return Vector2.new(origin.X, origin.Y)
+			end
+			local anc = UiPopupScale.ancestorScale(bar)
+			if anc < 0.001 then
+				anc = 1
+			end
+			local step = 78 * anc
+			local x = bar.AbsolutePosition.X + (waveBarHeight() + 8) * anc + (index - 1) * step
+			local y = bar.AbsolutePosition.Y + bar.AbsoluteSize.Y * 0.5
+			return Vector2.new(x, y)
+		end
+
+		local t0 = os.clock()
+		local conn: RBXScriptConnection
+		conn = RunService.RenderStepped:Connect(function()
+			if my ~= critterRevealToken or not gui.Parent then
+				conn:Disconnect()
+				if gui.Parent then
+					gui:Destroy()
+				end
+				if my == critterRevealToken then
+					critterRevealBusy = false
+					refreshCritterEmojisInWaveBar()
+				end
+				return
+			end
+			local now = os.clock() - t0
+			local allDone = true
+			for i, row in ipairs(rows) do
+				local holdEnd = REVEAL_FLY_SEC + REVEAL_HOLD_SEC + (i - 1) * REVEAL_STAGGER_SEC
+				local downEnd = holdEnd + REVEAL_DOWN_SEC
+				if now < REVEAL_FLY_SEC then
+					local u = math.clamp(now / REVEAL_FLY_SEC, 0, 1)
+					local e = 1 - (1 - u) * (1 - u) * (1 - u)
+					local p = origin:Lerp(row.center, e)
+					row.holder.Position = UDim2.fromOffset(p.X, p.Y)
+					row.scale.Scale = REVEAL_FROM_SCALE + (REVEAL_PEAK_SCALE - REVEAL_FROM_SCALE) * e
+					row.ticker.GroupTransparency = 0
+				elseif now < holdEnd then
+					row.holder.Position = UDim2.fromOffset(row.center.X, row.center.Y)
+					row.scale.Scale = REVEAL_PEAK_SCALE
+					row.ticker.GroupTransparency = 0
+				else
+					local u = math.clamp((now - holdEnd) / REVEAL_DOWN_SEC, 0, 1)
+					local e = u * u * (3 - 2 * u)
+					local slot = barSlot(i)
+					local p = row.center:Lerp(slot, e)
+					row.holder.Position = UDim2.fromOffset(p.X, p.Y)
+					local anc = if hudWaveBar then UiPopupScale.ancestorScale(hudWaveBar) else 1
+					if anc < 0.001 then
+						anc = 1
+					end
+					local endScale = math.clamp(FORK_COUNT_TEXT_SIZE * anc / 48, 0.25, 1.4) * 0.85
+					row.scale.Scale = REVEAL_PEAK_SCALE + (endScale - REVEAL_PEAK_SCALE) * e
+					row.ticker.GroupTransparency = e
+				end
+				local spinU = math.clamp(now / math.max(holdEnd, 1e-3), 0, 1)
+				local eased = 1 - (1 - spinU) * (1 - spinU) * (1 - spinU)
+				row.strip.Position = UDim2.fromOffset(0, -row.target * eased)
+				if not row.landed and now >= holdEnd then
+					row.landed = true
+					row.strip.Position = UDim2.fromOffset(0, -row.target)
+					playCountLandSound(row.count, row.lo, row.hi)
+				end
+				if now < downEnd then
+					allDone = false
+				end
+			end
+			if allDone then
+				conn:Disconnect()
+				gui:Destroy()
+				if my == critterRevealToken then
+					critterRevealBusy = false
+					refreshCritterEmojisInWaveBar()
+				end
+			end
+		end)
+	end
+	local nextShowRunning = false
+	local function launchNextWaveShow(finishFirst: boolean)
+		if nextShowRunning then
+			return
+		end
+		nextShowRunning = true
+		critterRevealBusy = true
+		refreshCritterEmojisInWaveBar()
+		-- Half the reef-health rock when the next wave starts.
 		if hudWaveBar then
 			ReefHealthBarFx.rockBar(hudWaveBar, nextWaveRockState, 0.5)
 		end
-		-- Happy emoji burst already fired when NEXT WAVE unlocked; green spheres on press.
-		if hudWaveBar and deps.mainHUD then
+		local startedEarly = true
+		if finishFirst then
+			startedEarly = WaveSim.finishWaveEarly()
+			if not startedEarly then
+				nextShowRunning = false
+				nextPressAnimating = false
+				critterRevealBusy = false
+				refreshCritterEmojisInWaveBar()
+				return
+			end
+		end
+		if hudNextWave then
+			hudNextWave.Text = tostring(WaveSim.getWaveIndex())
+			hudNextWave.TextSize = 16
+			hudNextWave.BackgroundColor3 = NEXT_WAVE_BLUE
+			hudNextWave.Active = false
+		end
+		-- Title and the $D fly start immediately. Emojis follow 1s after the title begins.
+		-- Wave 1's title waits 2s for the overview camera, so the emojis wait that out too.
+		local emojiDelay = if WaveSim.getWaveIndex() == 1 then 3 else 1
+		-- Happy emoji burst already fired when NEXT WAVE unlocked; green spheres with the emoji reveal.
+		local sphereFrom = hudNextWave or hudWaveBar
+		if sphereFrom and deps.mainHUD then
 			greenSphereFireworkToken += 1
 			local my = greenSphereFireworkToken
-			local bar = hudWaveBar
-			local origin = bar.AbsolutePosition + bar.AbsoluteSize * 0.5
+			local origin = sphereFrom.AbsolutePosition + sphereFrom.AbsoluteSize * 0.5
 			local parentPos = deps.mainHUD.AbsolutePosition
 			local ox = origin.X - parentPos.X
 			local oy = origin.Y - parentPos.Y
@@ -838,34 +1391,70 @@ do
 
 			local rng = Random.new()
 			for i = 1, 20 do
-				local diam = SPHERE_DIAMS[((i - 1) % 3) + 1]
-				local ball = Instance.new("Frame")
-				ball.Name = "GreenSphere"
+				local diam = rng:NextInteger(10, SPHERE_DIAM_MAX)
+				local waveEmoji = i % 2 == 0
+				local blues = {
+					Color3.fromRGB(0, 140, 255),
+					Color3.fromRGB(40, 90, 255),
+					Color3.fromRGB(0, 200, 255),
+					Color3.fromRGB(70, 120, 255),
+					Color3.fromRGB(20, 60, 230),
+					Color3.fromRGB(90, 190, 255),
+					Color3.fromRGB(0, 100, 220),
+					Color3.fromRGB(120, 160, 255),
+				}
+				local blueFill = blues[rng:NextInteger(1, #blues)]
+				local blueEdge = Color3.fromRGB(180, 220, 255)
+				local ball: GuiObject
+				local stroke: UIStroke? = nil
+				if waveEmoji then
+					local lbl = Instance.new("TextLabel")
+					lbl.Name = "WaveEmoji"
+					lbl.BackgroundTransparency = 1
+					lbl.Text = "🌊"
+					lbl.Font = UiTheme.Font
+					lbl.TextSize = math.max(14, math.floor(diam * 0.9))
+					lbl.TextColor3 = Color3.new(1, 1, 1)
+					lbl.TextStrokeColor3 = blueEdge
+					lbl.TextStrokeTransparency = 0.15
+					ball = lbl
+				else
+					local fr = Instance.new("Frame")
+					fr.Name = "BlueSphere"
+					-- White base so a gradient cannot multiply the fill down to black.
+					fr.BackgroundColor3 = Color3.new(1, 1, 1)
+					fr.BackgroundTransparency = 0
+					fr.BorderSizePixel = 0
+					ball = fr
+					local corner = Instance.new("UICorner")
+					corner.CornerRadius = UDim.new(1, 0)
+					corner.Parent = fr
+					local grad = Instance.new("UIGradient")
+					grad.Color = ColorSequence.new(blueFill, blueFill)
+					grad.Parent = fr
+					local disc = Instance.new("TextLabel")
+					disc.Name = "Disc"
+					disc.BackgroundTransparency = 1
+					disc.Size = UDim2.fromScale(1, 1)
+					disc.Font = UiTheme.Font
+					disc.Text = "●"
+					disc.TextScaled = true
+					disc.TextColor3 = blueFill
+					disc.ZIndex = fr.ZIndex + 1
+					disc.Parent = fr
+					local ring = Instance.new("UIStroke")
+					ring.Color = blueEdge
+					ring.Thickness = 2.5
+					ring.Transparency = 0
+					ring.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+					ring.Parent = fr
+					stroke = ring
+				end
 				ball.AnchorPoint = Vector2.new(0.5, 0.5)
 				ball.Position = UDim2.fromOffset(ox, oy)
 				ball.Size = UDim2.fromOffset(diam, diam)
-				-- White base so UIGradient greens read true.
-				ball.BackgroundColor3 = Color3.new(1, 1, 1)
-				ball.BackgroundTransparency = 0
-				ball.BorderSizePixel = 0
 				ball.ZIndex = 83
 				ball.Parent = layer
-				local corner = Instance.new("UICorner")
-				corner.CornerRadius = UDim.new(1, 0)
-				corner.Parent = ball
-				local grad = Instance.new("UIGradient")
-				grad.Color = ColorSequence.new({
-					ColorSequenceKeypoint.new(0, SPHERE_GREEN_LIGHT),
-					ColorSequenceKeypoint.new(1, SPHERE_GREEN_DARK),
-				})
-				grad.Rotation = 90
-				grad.Parent = ball
-				local stroke = Instance.new("UIStroke")
-				stroke.Color = SPHERE_STROKE_GREEN
-				stroke.Thickness = 2.5
-				stroke.Transparency = 0
-				stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
-				stroke.Parent = ball
 				local scale = Instance.new("UIScale")
 				scale.Scale = 0.15
 				scale.Parent = ball
@@ -877,7 +1466,7 @@ do
 				local grav = rng:NextNumber(900, 1300)
 				local life = rng:NextNumber(0.85, 1.35)
 				local popAt = rng:NextNumber(0.08, 0.18)
-				local peak = rng:NextNumber(1.05, 1.35)
+				local peak = rng:NextNumber(0.82, 1)
 				local x = ox
 				local y = oy
 				task.spawn(function()
@@ -900,8 +1489,19 @@ do
 							scale.Scale = peak * (1 - 0.45 * u)
 						end
 						local fade = math.clamp((age - life * 0.45) / (life * 0.55), 0, 1)
-						ball.BackgroundTransparency = fade
-						stroke.Transparency = fade
+						if ball:IsA("TextLabel") then
+							ball.TextTransparency = fade
+							ball.TextStrokeTransparency = 0.15 + 0.85 * fade
+						else
+							ball.BackgroundTransparency = fade
+							local disc = ball:FindFirstChild("Disc")
+							if disc and disc:IsA("TextLabel") then
+								disc.TextTransparency = fade
+							end
+							if stroke then
+								stroke.Transparency = fade
+							end
+						end
 					end
 					if ball.Parent then
 						ball:Destroy()
@@ -914,8 +1514,99 @@ do
 				end
 			end)
 		end
-		WaveSim.finishWaveEarly()
+		nextCircleAnimToken += 1
+		local myAnim = nextCircleAnimToken
+		local scaleInst = hudNextWave and hudNextWave:FindFirstChild("Pop")
+		task.spawn(function()
+			local function tweenScale(dest: number, dur: number)
+				if not (scaleInst and scaleInst:IsA("UIScale")) then
+					return
+				end
+				local scale = scaleInst :: UIScale
+				local t0 = os.clock()
+				local from = scale.Scale
+				while myAnim == nextCircleAnimToken do
+					local u = math.clamp((os.clock() - t0) / math.max(dur, 1e-3), 0, 1)
+					local e = 1 - (1 - u) * (1 - u) * (1 - u)
+					scale.Scale = from + (dest - from) * e
+					if u >= 1 then
+						scale.Scale = dest
+						break
+					end
+					RunService.Heartbeat:Wait()
+				end
+			end
+			local tWait = os.clock()
+			while os.clock() - tWait < emojiDelay do
+				if myAnim ~= nextCircleAnimToken then
+					nextPressAnimating = false
+					nextShowRunning = false
+					critterRevealBusy = false
+					refreshCritterEmojisInWaveBar()
+					return
+				end
+				RunService.Heartbeat:Wait()
+			end
+			if myAnim ~= nextCircleAnimToken then
+				nextPressAnimating = false
+				nextShowRunning = false
+				critterRevealBusy = false
+				refreshCritterEmojisInWaveBar()
+				return
+			end
+			tweenScale(6, 0.16)
+			if myAnim ~= nextCircleAnimToken then
+				nextPressAnimating = false
+				nextShowRunning = false
+				critterRevealBusy = false
+				refreshCritterEmojisInWaveBar()
+				return
+			end
+			local revealFrom = Vector2.new(0, 0)
+			if hudNextWave then
+				local absPos = hudNextWave.AbsolutePosition
+				local absSize = hudNextWave.AbsoluteSize
+				revealFrom = Vector2.new(absPos.X + absSize.X * 0.5, absPos.Y + absSize.Y * 0.5)
+				hudNextWave.Text = tostring(WaveSim.getWaveIndex())
+				hudNextWave.TextSize = 16
+				hudNextWave.BackgroundColor3 = NEXT_WAVE_BLUE
+				hudNextWave.Active = false
+			end
+			if startedEarly then
+				playCritterCountReveal(revealFrom)
+			else
+				critterRevealBusy = false
+				refreshCritterEmojisInWaveBar()
+			end
+			tweenScale(1, 0.28)
+			nextPressAnimating = false
+			nextShowRunning = false
+		end)
+	end
+	function WaveSlot.tryFinishFromShortcut(): boolean
+		if nextPressAnimating or nextShowRunning or not WaveSlot.isFinishReady() then
+			return false
+		end
+		nextPressAnimating = true
+		stopFinishFlash()
+		launchNextWaveShow(true)
 		return true
+	end
+	function WaveSlot.prepareAdvanceCeremony()
+		if nextShowRunning or nextPressAnimating then
+			return
+		end
+		nextPressAnimating = true
+		critterRevealBusy = true
+		refreshCritterEmojisInWaveBar()
+	end
+	function WaveSlot.playAdvanceCeremony()
+		if nextShowRunning then
+			return
+		end
+		nextPressAnimating = true
+		stopFinishFlash()
+		launchNextWaveShow(false)
 	end
 end
 
@@ -1376,7 +2067,7 @@ local function ensureHud()
 	local reefBar = Instance.new("Frame")
 	reefBar.Name = "ReefProgress"
 	reefBar.BackgroundColor3 = REEF_BAR_BG
-	reefBar.BackgroundTransparency = 0.5
+	reefBar.BackgroundTransparency = 0.15
 	reefBar.BorderSizePixel = 0
 	reefBar.Active = false
 	reefBar.Size = UDim2.new(1, -4, 0, BAR_H)
@@ -1408,6 +2099,7 @@ local function ensureHud()
 	local reefFillCorner = Instance.new("UICorner")
 	reefFillCorner.CornerRadius = UDim.new(1, 0)
 	reefFillCorner.Parent = reefFill
+	ReefHealthBarFx.applyFillStyle(reefFill, 1)
 	hudReefFill = reefFill
 
 	local reefLabel = Instance.new("TextLabel")
@@ -1419,12 +2111,13 @@ local function ensureHud()
 	reefLabel.TextColor3 = Color3.new(1, 1, 1)
 	reefLabel.TextStrokeTransparency = 0.35
 	reefLabel.TextStrokeColor3 = Color3.new(0, 0, 0)
-	reefLabel.TextXAlignment = Enum.TextXAlignment.Center
+	reefLabel.TextXAlignment = Enum.TextXAlignment.Left
 	reefLabel.TextYAlignment = Enum.TextYAlignment.Center
 	reefLabel.ZIndex = 29
 	reefLabel.Text = "🤍 Reef Health 10/10"
 	reefLabel.Parent = reefBar
 	local reefPad = Instance.new("UIPadding")
+	reefPad.PaddingLeft = UDim.new(0, 8)
 	reefPad.PaddingRight = UDim.new(0, REEF_PLUS_SIZE + 4)
 	reefPad.Parent = reefLabel
 	hudReefLabel = reefLabel
@@ -1510,16 +2203,66 @@ local function ensureHud()
 	label.TextColor3 = Color3.new(1, 1, 1)
 	label.TextStrokeTransparency = 0.35
 	label.TextStrokeColor3 = Color3.new(0, 0, 0)
-	label.TextXAlignment = Enum.TextXAlignment.Left
+	label.TextXAlignment = Enum.TextXAlignment.Center
 	label.TextYAlignment = Enum.TextYAlignment.Center
 	label.ZIndex = 29
-	label.Text = "🍴 Wave 1"
+	label.Text = ""
+	label.Visible = false
 	label.Parent = bar
 	hudWaveLabel = label
 	local wavePad = Instance.new("UIPadding")
-	wavePad.PaddingLeft = UDim.new(0, BAR_H + 6)
-	wavePad.PaddingRight = UDim.new(0, 8)
+	wavePad.PaddingLeft = UDim.new(0, 0)
+	wavePad.PaddingRight = UDim.new(0, 0)
 	wavePad.Parent = label
+
+	local feedRow = Instance.new("Frame")
+	feedRow.Name = "FedForkRow"
+	feedRow.BackgroundTransparency = 1
+	feedRow.BorderSizePixel = 0
+	feedRow.Size = UDim2.fromOffset(120, LINE_H)
+	feedRow.ZIndex = 29
+	feedRow.Visible = false
+	feedRow.Active = false
+	feedRow.Parent = f
+	local feedList = Instance.new("UIListLayout")
+	feedList.FillDirection = Enum.FillDirection.Horizontal
+	feedList.HorizontalAlignment = Enum.HorizontalAlignment.Center
+	feedList.VerticalAlignment = Enum.VerticalAlignment.Center
+	feedList.Padding = UDim.new(0, 6)
+	feedList.SortOrder = Enum.SortOrder.LayoutOrder
+	feedList.Parent = feedRow
+	local function countCircle(name: string, color: Color3, order: number)
+		local c = Instance.new("TextLabel")
+		c.Name = name
+		c.BackgroundColor3 = color
+		c.BackgroundTransparency = 0
+		c.BorderSizePixel = 0
+		c.Size = UDim2.fromOffset(22, 22)
+		c.Font = UiTheme.Font
+		c.TextSize = 14
+		c.TextColor3 = Color3.new(1, 1, 1)
+		c.Text = "0"
+		c.LayoutOrder = order
+		c.ZIndex = 30
+		c.Parent = feedRow
+		local corner = Instance.new("UICorner")
+		corner.CornerRadius = UDim.new(1, 0)
+		corner.Parent = c
+	end
+	countCircle("Fed", Color3.fromRGB(36, 168, 62), 1)
+	local forkMark = Instance.new("TextLabel")
+	forkMark.Name = "Fork"
+	forkMark.BackgroundTransparency = 1
+	forkMark.Size = UDim2.fromOffset(24, 24)
+	forkMark.Font = UiTheme.Font
+	forkMark.TextSize = 20
+	forkMark.Text = "🍴"
+	forkMark.TextColor3 = Color3.new(1, 1, 1)
+	forkMark.LayoutOrder = 2
+	forkMark.ZIndex = 30
+	forkMark.Parent = feedRow
+	countCircle("Unfed", Color3.fromRGB(196, 42, 48), 3)
+	hudFeedRow = feedRow
 
 	local function mkSide(name: string, text: string, align: Enum.TextXAlignment): TextLabel
 		local t = Instance.new("TextLabel")
@@ -1544,15 +2287,46 @@ local function ensureHud()
 		t.Parent = bar
 		return t
 	end
-	-- Fed count kept for finish/"100%" logic but hidden — title is left-aligned after the eye.
+	-- Fed count kept for finish/"100%" logic but hidden. Wave title sits above the bar.
 	hudBarFork = mkSide("ForkCount", "0 of 0", Enum.TextXAlignment.Left)
 	hudBarFork.TextSize = FORK_COUNT_TEXT_SIZE
 	hudBarFork.Visible = false
-	hudBarHeart = mkSide("CritterEmojis", "🐟:0", Enum.TextXAlignment.Right)
+	hudBarHeart = mkSide("CritterEmojis", "", Enum.TextXAlignment.Right)
+	hudBarHeart.Size = UDim2.fromScale(1, 1)
+	hudBarHeart.Position = UDim2.fromScale(0, 0)
+	hudBarHeart.AnchorPoint = Vector2.zero
+	hudBarHeart.Text = ""
+	hudBarHeart.TextXAlignment = Enum.TextXAlignment.Left
 	local heartScale = Instance.new("UIScale")
 	heartScale.Scale = 1
 	heartScale.Parent = hudBarHeart
 	hudBarHeartScale = heartScale
+	local markGlyphs = { "🐟:0", "🦀:0", "✴:0", "🦈:0" }
+	local markNames = { "Fish", "Crab", "Urchin", "Shark" }
+	for i, name in ipairs(markNames) do
+		local t = Instance.new("TextLabel")
+		t.Name = name
+		t.BackgroundTransparency = 1
+		t.AnchorPoint = Vector2.new(0.5, 0.5)
+		t.Position = UDim2.fromOffset(0, BAR_H * 0.5)
+		t.Size = UDim2.fromOffset(120, BAR_H)
+		t.Font = UiTheme.Font
+		t.TextSize = FORK_COUNT_TEXT_SIZE
+		t.TextColor3 = Color3.new(1, 1, 1)
+		t.TextStrokeTransparency = 0.35
+		t.TextStrokeColor3 = Color3.new(0, 0, 0)
+		t.TextXAlignment = Enum.TextXAlignment.Center
+		t.TextYAlignment = Enum.TextYAlignment.Center
+		t.ZIndex = 29
+		t.Visible = false
+		t.Text = markGlyphs[i]
+		t.Parent = hudBarHeart
+		local grow = Instance.new("UIScale")
+		grow.Name = "Grow"
+		grow.Scale = 1
+		grow.Parent = t
+		critterEmojiMarks[i] = t
+	end
 
 	local finishHint = Instance.new("TextLabel")
 	finishHint.Name = "FinishHint"
@@ -1620,6 +2394,247 @@ local function ensureHud()
 		refreshCritterBarsEye()
 	end)
 	hudCritterBarsEye = eyeBtn
+	eyeBtn.Visible = false
+	eyeBtn.Active = false
+
+	-- Next Wave takes the eye's spot. Hidden until every fish is fed.
+	local nextBtn = Instance.new("TextButton")
+	nextBtn.Name = "NextWaveCircle"
+	nextBtn.BackgroundColor3 = NEXT_WAVE_BLUE
+	nextBtn.BackgroundTransparency = 0
+	nextBtn.BorderSizePixel = 0
+	nextBtn.AutoButtonColor = false
+	nextBtn.Text = "1"
+	nextBtn.TextWrapped = true
+	nextBtn.LineHeight = 0.85
+	nextBtn.AnchorPoint = Vector2.new(0.5, 0.5)
+	nextBtn.Size = UDim2.fromOffset(BAR_H, BAR_H)
+	nextBtn.Position = UDim2.fromOffset(BAR_H * 0.5, BAR_H * 0.5)
+	nextBtn.Font = UiTheme.Font
+	nextBtn.TextSize = 16
+	nextBtn.TextColor3 = Color3.new(1, 1, 1)
+	nextBtn.TextStrokeTransparency = 0.2
+	nextBtn.TextStrokeColor3 = Color3.new(0, 0, 0)
+	nextBtn.TextXAlignment = Enum.TextXAlignment.Center
+	nextBtn.TextYAlignment = Enum.TextYAlignment.Center
+	nextBtn.ZIndex = 40
+	nextBtn.Visible = false
+	nextBtn.Active = false
+	nextBtn.Selectable = false
+	nextBtn.Parent = f
+	UiCircles.ensure(nextBtn)
+	local nextStroke = Instance.new("UIStroke")
+	nextStroke.Color = Color3.new(1, 1, 1)
+	nextStroke.Thickness = 1.5
+	nextStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+	nextStroke.Parent = nextBtn
+	local nextScale = Instance.new("UIScale")
+	nextScale.Name = "Pop"
+	nextScale.Scale = 1
+	nextScale.Parent = nextBtn
+	hudNextWave = nextBtn
+	nextBtn:SetAttribute("_OceanTD_PadScaleMul", 0.55)
+	GamepadButtonGlyph.apply(nextBtn, true)
+	nextBtn.Activated:Connect(function()
+		WaveSlot.tryFinishFromShortcut()
+	end)
+
+	local autoBtn = Instance.new("TextButton")
+	autoBtn.Name = "AutoNext"
+	autoBtn.BackgroundColor3 = Color3.fromRGB(176, 36, 42)
+	autoBtn.BackgroundTransparency = 0
+	autoBtn.BorderSizePixel = 0
+	autoBtn.AutoButtonColor = false
+	autoBtn.Text = "AUTO"
+	autoBtn.Font = UiTheme.Font
+	autoBtn.TextScaled = true
+	autoBtn.TextColor3 = Color3.new(1, 1, 1)
+	autoBtn.TextStrokeTransparency = 0.35
+	autoBtn.TextStrokeColor3 = Color3.new(0, 0, 0)
+	autoBtn.AnchorPoint = Vector2.new(1, 0.5)
+	autoBtn.Size = UDim2.fromOffset(54, BAR_H)
+	autoBtn.ZIndex = 40
+	autoBtn.Visible = false
+	autoBtn.Active = false
+	autoBtn.Selectable = false
+	autoBtn.Parent = f
+	local autoCorner = Instance.new("UICorner")
+	autoCorner.CornerRadius = UDim.new(0, 6)
+	autoCorner.Parent = autoBtn
+	local autoStroke = Instance.new("UIStroke")
+	autoStroke.Name = "Edge"
+	autoStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+	autoStroke.Thickness = 2.5
+	autoStroke.Color = Color3.fromRGB(255, 40, 40)
+	autoStroke.Parent = autoBtn
+	local autoPad = Instance.new("UIPadding")
+	autoPad.PaddingTop = UDim.new(0.06, 0)
+	autoPad.PaddingBottom = UDim.new(0.06, 0)
+	autoPad.PaddingLeft = UDim.new(0.06, 0)
+	autoPad.PaddingRight = UDim.new(0.06, 0)
+	autoPad.Parent = autoBtn
+	local holdRow = Instance.new("Frame")
+	holdRow.Name = "HoldRow"
+	holdRow.BackgroundTransparency = 1
+	holdRow.BorderSizePixel = 0
+	holdRow.Size = UDim2.fromScale(1, 1)
+	holdRow.ZIndex = 52
+	holdRow.Visible = false
+	holdRow.Active = false
+	holdRow.Parent = autoBtn
+	local holdLayout = Instance.new("UIListLayout")
+	holdLayout.FillDirection = Enum.FillDirection.Horizontal
+	holdLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+	holdLayout.VerticalAlignment = Enum.VerticalAlignment.Center
+	holdLayout.Padding = UDim.new(0, 1)
+	holdLayout.SortOrder = Enum.SortOrder.LayoutOrder
+	holdLayout.Parent = holdRow
+	local holdWord = Instance.new("TextLabel")
+	holdWord.Name = "HoldWord"
+	holdWord.BackgroundTransparency = 1
+	holdWord.BorderSizePixel = 0
+	holdWord.Size = UDim2.fromOffset(28, BAR_H)
+	holdWord.Font = UiTheme.Font
+	holdWord.TextScaled = true
+	holdWord.Text = "HOLD"
+	holdWord.TextColor3 = Color3.new(1, 1, 1)
+	holdWord.TextStrokeTransparency = 0.35
+	holdWord.TextStrokeColor3 = Color3.new(0, 0, 0)
+	holdWord.LayoutOrder = 1
+	holdWord.ZIndex = 53
+	holdWord.Active = false
+	holdWord.Parent = holdRow
+	local padHost = Instance.new("TextLabel")
+	padHost.Name = "PadHost"
+	padHost.BackgroundTransparency = 1
+	padHost.BorderSizePixel = 0
+	padHost.Size = UDim2.fromOffset(BAR_H, BAR_H)
+	padHost.Font = UiTheme.Font
+	padHost.Text = "R1"
+	padHost.TextTransparency = 1
+	padHost.TextScaled = true
+	padHost.LayoutOrder = 2
+	padHost.ZIndex = 53
+	padHost.Active = false
+	padHost.Parent = holdRow
+	padHost:SetAttribute("_OceanTD_PadScaleMul", 0.92)
+	GamepadButtonGlyph.apply(padHost, true)
+	hudAutoNext = autoBtn
+	function WaveSlot.enableAutoFromHold()
+		if not WaveSlot.autoNextUnlocked() then
+			return
+		end
+		autoNextOn = not autoNextOn
+		WaveSim.setAutoNext(autoNextOn)
+		autoBtn.BackgroundColor3 = if autoNextOn
+			then Color3.fromRGB(18, 168, 52)
+			else Color3.fromRGB(176, 36, 42)
+		local edge = autoBtn:FindFirstChild("Edge")
+		if edge and edge:IsA("UIStroke") then
+			edge.Color = if autoNextOn then Color3.fromRGB(80, 255, 90) else Color3.fromRGB(255, 40, 40)
+		end
+		UiHaptics.pulseShort()
+		if autoNextOn then
+			WaveSlot.tryFinishFromShortcut()
+		end
+	end
+	function WaveSlot.armR1Hold()
+		if WaveSlot._r1Watching == true or WaveSlot._r1Latched == true then
+			return
+		end
+		WaveSlot._r1Watching = true
+		WaveSlot._r1Released = false
+		local t0 = os.clock()
+		task.spawn(function()
+			while WaveSlot._r1Watching == true do
+				local down = UserInputService:IsKeyDown(Enum.KeyCode.ButtonR1)
+				if not down then
+					for _, pad in ipairs(UserInputService:GetConnectedGamepads()) do
+						if UserInputService:IsGamepadButtonDown(pad, Enum.KeyCode.ButtonR1) then
+							down = true
+							break
+						end
+					end
+				end
+				local released = WaveSlot._r1Released == true and not down and os.clock() - t0 >= 0.08
+				if not released and os.clock() - t0 >= 0.16 then
+					WaveSlot._r1Watching = false
+					WaveSlot._r1Latched = true
+					WaveSlot.enableAutoFromHold()
+					return
+				end
+				if released then
+					WaveSlot._r1Watching = false
+					if not InventoryState.isOpen() then
+						WaveSlot.tryFinishFromShortcut()
+					end
+					return
+				end
+				RunService.Heartbeat:Wait()
+			end
+		end)
+	end
+	function WaveSlot.releaseR1()
+		WaveSlot._r1Released = true
+		WaveSlot._r1Latched = false
+	end
+	autoBtn.Activated:Connect(function()
+		autoNextOn = not autoNextOn
+		WaveSim.setAutoNext(autoNextOn)
+		autoBtn.BackgroundColor3 = if autoNextOn
+			then Color3.fromRGB(18, 168, 52)
+			else Color3.fromRGB(176, 36, 42)
+		local edge = autoBtn:FindFirstChild("Edge")
+		if edge and edge:IsA("UIStroke") then
+			edge.Color = if autoNextOn then Color3.fromRGB(80, 255, 90) else Color3.fromRGB(255, 40, 40)
+		end
+		UiHaptics.pulseShort()
+		if autoNextOn then
+			WaveSlot.tryFinishFromShortcut()
+		end
+	end)
+
+	local dollar = Instance.new("TextButton")
+	dollar.Name = "WaveDollar"
+	dollar.BackgroundColor3 = Color3.fromRGB(6, 90, 38)
+	dollar.BackgroundTransparency = 0
+	dollar.BorderSizePixel = 0
+	dollar.AutoButtonColor = false
+	dollar.Text = ""
+	dollar.AnchorPoint = Vector2.new(0.5, 0.5)
+	dollar.Size = UDim2.fromOffset(BAR_H, BAR_H)
+	dollar.ZIndex = 48
+	dollar.Active = false
+	dollar.Selectable = false
+	dollar.Parent = f
+	UiCircles.ensure(dollar)
+	local dollarImage = Instance.new("ImageLabel")
+	dollarImage.Name = "SandDollar"
+	dollarImage.BackgroundTransparency = 1
+	dollarImage.Size = UDim2.fromScale(1, 1)
+	dollarImage.Image = "rbxassetid://74290598144610"
+	dollarImage.ScaleType = Enum.ScaleType.Fit
+	dollarImage.ZIndex = 49
+	dollarImage.Active = false
+	dollarImage.Parent = dollar
+	local dollarFace = Instance.new("TextLabel")
+	dollarFace.Name = "Face"
+	dollarFace.BackgroundTransparency = 1
+	dollarFace.Size = UDim2.fromScale(1, 1)
+	dollarFace.Font = UiTheme.Font
+	dollarFace.TextSize = 12
+	dollarFace.Text = "$D"
+	dollarFace.TextColor3 = Color3.new(1, 1, 1)
+	dollarFace.TextStrokeTransparency = 0.35
+	dollarFace.TextStrokeColor3 = Color3.new(0, 0, 0)
+	dollarFace.ZIndex = 50
+	dollarFace.Active = false
+	dollarFace.Parent = dollar
+	local dollarScale = Instance.new("UIScale")
+	dollarScale.Name = "Pop"
+	dollarScale.Scale = 1
+	dollarScale.Parent = dollar
+	hudWaveDollar = dollar
 
 	local timeLabel = Instance.new("TextLabel")
 	timeLabel.Name = "Time"
@@ -1680,6 +2695,7 @@ end
 local layoutHud: () -> ()
 local syncTempW100Button: (wavesOn: boolean) -> ()
 local setHudVisible: (on: boolean) -> ()
+local paintFedForkRow: () -> ()
 do
 local layoutTempW100Button: () -> ()
 local function applyWaveHudScale(root: GuiObject): number
@@ -1707,6 +2723,165 @@ local function applyWaveHudScale(root: GuiObject): number
 end
 
 -- Saved layout: reef stacked above meta + wave, anchored to Slot5 on the right HUD.
+-- 🍴 Wave N stays centered above the hunger bar. Next Wave is the left circle.
+local function placeWaveTitle()
+	if not hudWaveLabel or not hudWaveBar or not hudFrame then
+		return
+	end
+	local pad = hudWaveLabel:FindFirstChildOfClass("UIPadding")
+	if pad then
+		pad.PaddingLeft = UDim.new(0, 0)
+		pad.PaddingRight = UDim.new(0, 0)
+	end
+	local bar = hudWaveBar
+	local pos = bar.Position
+	local size = bar.Size
+	local wh = waveBarHeight()
+	hudWaveLabel.Parent = hudFrame
+	hudWaveLabel.TextXAlignment = Enum.TextXAlignment.Center
+	hudWaveLabel.TextYAlignment = Enum.TextYAlignment.Center
+	hudWaveLabel.ZIndex = 29
+	if bar.AnchorPoint.Y >= 0.5 then
+		hudWaveLabel.AnchorPoint = Vector2.new(0.5, 1)
+		hudWaveLabel.Size = UDim2.new(size.X.Scale / 3, math.floor(size.X.Offset / 3), 0, LINE_H)
+		hudWaveLabel.Position = UDim2.new(
+			pos.X.Scale + size.X.Scale * 0.5,
+			pos.X.Offset + size.X.Offset * 0.5,
+			pos.Y.Scale,
+			pos.Y.Offset - wh - 4
+		)
+	else
+		hudWaveLabel.AnchorPoint = Vector2.new(0.5, 0)
+		hudWaveLabel.Position = UDim2.new(
+			pos.X.Scale + size.X.Scale * 0.5,
+			pos.X.Offset + size.X.Offset * 0.5,
+			pos.Y.Scale,
+			pos.Y.Offset - LINE_H - 4
+		)
+		hudWaveLabel.Size = UDim2.new(size.X.Scale / 3, math.floor(size.X.Offset / 3), 0, LINE_H)
+	end
+	hudWaveLabel.Visible = false
+	if hudFeedRow then
+		hudFeedRow.Visible = true
+		hudFeedRow.AnchorPoint = hudWaveLabel.AnchorPoint
+		hudFeedRow.Position = hudWaveLabel.Position
+		hudFeedRow.Size = hudWaveLabel.Size
+		hudFeedRow.ZIndex = 29
+	end
+end
+
+local function placeAutoNextButton()
+	if not hudAutoNext or not hudWaveBar then
+		return
+	end
+	if not WaveSlot.autoNextUnlocked() then
+		hudAutoNext.Visible = false
+		hudAutoNext.Active = false
+		return
+	end
+	hudAutoNext.Visible = true
+	hudAutoNext.Active = true
+	local bar = hudWaveBar
+	local pos = bar.Position
+	local wh = waveBarHeight()
+	local btnW = math.max(54, math.floor(wh * 2.05 + 0.5))
+	hudAutoNext.Size = UDim2.fromOffset(btnW, wh)
+	hudAutoNext.AnchorPoint = Vector2.new(1, 0.5)
+	local popScale = 1
+	local pop = hudNextWave and hudNextWave:FindFirstChild("Pop")
+	if pop and pop:IsA("UIScale") and pop.Scale > 0 then
+		popScale = pop.Scale
+	end
+	-- Next circle is centered wh/2 in from the bar's left edge and grows from that center.
+	local nextSize = wh * 0.9
+	local circleLeft = pos.X.Offset + wh * 0.5 - nextSize * 0.5 * popScale
+	local right = circleLeft - 8
+	local edge = hudAutoNext:FindFirstChild("Edge")
+	if edge and edge:IsA("UIStroke") then
+		edge.Color = if autoNextOn then Color3.fromRGB(80, 255, 90) else Color3.fromRGB(255, 40, 40)
+	end
+	local hold = hudAutoNext:FindFirstChild("HoldRow")
+	local faces = if isUsingGamepad() then 3 else 2
+	local face = math.floor(os.clock() / 2) % faces
+	if face == 0 then
+		hudAutoNext.Text = "AUTO"
+		if hold and hold:IsA("GuiObject") then
+			hold.Visible = false
+		end
+	elseif face == 1 then
+		hudAutoNext.Text = "NEXT🌊"
+		if hold and hold:IsA("GuiObject") then
+			hold.Visible = false
+		end
+	else
+		hudAutoNext.Text = ""
+		if hold and hold:IsA("GuiObject") then
+			hold.Visible = true
+			local word = hold:FindFirstChild("HoldWord")
+			local pad = hold:FindFirstChild("PadHost")
+			local side = math.max(12, math.floor(wh * 0.82 + 0.5))
+			if word and word:IsA("GuiObject") then
+				word.Size = UDim2.fromOffset(math.floor(side * 1.7 + 0.5), side)
+			end
+			if pad and pad:IsA("GuiObject") then
+				pad.Size = UDim2.fromOffset(side, side)
+			end
+		end
+	end
+	if bar.AnchorPoint.Y >= 0.5 then
+		hudAutoNext.Position = UDim2.new(pos.X.Scale, right, pos.Y.Scale, pos.Y.Offset - wh * 0.5)
+	else
+		hudAutoNext.Position = UDim2.new(pos.X.Scale, right, pos.Y.Scale, pos.Y.Offset + wh * 0.5)
+	end
+end
+
+function WaveSlot.autoNextUnlocked(): boolean
+	local attr = Players.LocalPlayer:GetAttribute("OceanTD_HighestWave")
+	local high = if typeof(attr) == "number" then math.floor(attr) else 0
+	if WaveSim.isRunning() then
+		high = math.max(high, WaveSim.getWaveIndex())
+	end
+	return high >= 11
+end
+
+local function placeNextWaveCircle()
+	if not hudNextWave or not hudWaveBar then
+		return
+	end
+	local bar = hudWaveBar
+	local pos = bar.Position
+	local wh = waveBarHeight()
+	local nextSize = math.floor(wh * 0.9 + 0.5)
+	hudNextWave.Size = UDim2.fromOffset(nextSize, nextSize)
+	hudNextWave.AnchorPoint = Vector2.new(0.5, 0.5)
+	if bar.AnchorPoint.Y >= 0.5 then
+		hudNextWave.Position = UDim2.new(pos.X.Scale, pos.X.Offset + wh * 0.5, pos.Y.Scale, pos.Y.Offset - wh * 0.5)
+	else
+		hudNextWave.Position = UDim2.new(pos.X.Scale, pos.X.Offset + wh * 0.5, pos.Y.Scale, pos.Y.Offset + wh * 0.5)
+	end
+end
+
+local function placeWaveDollarCircle()
+	if not hudWaveDollar or not hudWaveBar then
+		return
+	end
+	local bar = hudWaveBar
+	local pos = bar.Position
+	local size = bar.Size
+	local wh = waveBarHeight()
+	hudWaveDollar.Size = UDim2.fromOffset(wh, wh)
+	hudWaveDollar.AnchorPoint = Vector2.new(0.5, 0.5)
+	hudWaveDollar.ZIndex = 48
+	-- Sit fully inside the bar. Center was on the right edge, so half hung outside.
+	local insetX = pos.X.Offset + size.X.Offset - wh * 0.5
+	local insetScale = pos.X.Scale + size.X.Scale
+	if bar.AnchorPoint.Y >= 0.5 then
+		hudWaveDollar.Position = UDim2.new(insetScale, insetX, pos.Y.Scale, pos.Y.Offset - wh * 0.5)
+	else
+		hudWaveDollar.Position = UDim2.new(insetScale, insetX, pos.Y.Scale, pos.Y.Offset + wh * 0.5)
+	end
+end
+
 local function applyWaveHudBarsLayoutRight()
 	if not hudReefBar or not hudWaveBar then
 		return
@@ -1722,16 +2897,16 @@ local function applyWaveHudBarsLayoutRight()
 	hudWaveBar.AnchorPoint = Vector2.new(0, 0)
 	-- Clock left / upcoming teaser right, above the wave bar.
 	if hudTime then
-		hudTime.Size = UDim2.new(0.48, -4, 0, LINE_H)
+		hudTime.Size = UDim2.new(1 / 3, -4, 0, LINE_H)
 		hudTime.Position = UDim2.fromOffset(0, metaY)
 		hudTime.AnchorPoint = Vector2.new(0, 0)
 		hudTime.TextXAlignment = Enum.TextXAlignment.Left
 	end
 	if hudUpcoming then
-		hudUpcoming.Size = UDim2.new(0.48, -4, 0, LINE_H)
-		hudUpcoming.Position = UDim2.new(1, -2, 0, metaY)
-		hudUpcoming.AnchorPoint = Vector2.new(1, 0)
-		hudUpcoming.TextXAlignment = Enum.TextXAlignment.Right
+		hudUpcoming.Size = UDim2.new(1, -8, 0, LINE_H)
+		hudUpcoming.Position = UDim2.new(0.5, 0, 0, -4)
+		hudUpcoming.AnchorPoint = Vector2.new(0.5, 1)
+		hudUpcoming.TextXAlignment = Enum.TextXAlignment.Center
 		hudUpcoming.Visible = true
 	end
 	if hudFishNeed then
@@ -1748,53 +2923,60 @@ local function applyWaveHudBarsLayoutRight()
 		hudCritterBarsEye.Position = UDim2.new(0, 0, 0.5, 0)
 		hudCritterBarsEye.ZIndex = 31
 	end
-	if hudWaveLabel then
-		local pad = hudWaveLabel:FindFirstChildOfClass("UIPadding")
-		if pad then
-			-- NEXT WAVE is centered; clear insets so it isn't biased.
-			if feedCompleteUi then
-				pad.PaddingLeft = UDim.new(0, 0)
-				pad.PaddingRight = UDim.new(0, 0)
-			else
-				pad.PaddingLeft = UDim.new(0, wh + 6)
-				pad.PaddingRight = UDim.new(0, 8)
-			end
-		end
-	end
+	placeWaveTitle()
+	placeNextWaveCircle()
+	placeAutoNextButton()
+	placeWaveDollarCircle()
 end
 
--- Active layout: reef left of wave; wave is what we center on-screen (see layoutHudBottomRight).
+local function reefBarWidth(): number
+	-- Hug the label. A wide centered bar left a gap before the heart.
+	local textW = 0
+	if hudReefLabel then
+		local anc = UiPopupScale.ancestorScale(hudReefLabel)
+		if anc < 0.001 then
+			anc = 1
+		end
+		textW = hudReefLabel.TextBounds.X / anc
+	end
+	if textW < 40 then
+		textW = 156
+	end
+	return math.ceil(8 + textW + 4 + BAR_H)
+end
+
+-- Active layout: reef to the right of the hunger bar. Hunger bar width is unchanged.
 -- Bars bottom-aligned so reef stays put while Next Wave height animates upward.
 local function applyWaveHudBarsLayoutBottomRight()
 	if not hudReefBar or not hudWaveBar then
 		return
 	end
-	local reefW = WAVE_HUD_BOTTOM_BAR_W
+	local reefW = reefBarWidth()
 	local waveW = WAVE_HUD_BOTTOM_WAVE_BAR_W
 	local gap = WAVE_HUD_SIDE_GAP
 	local total = reefW + gap + waveW
 	local wh = waveBarHeight()
-	local waveLeft = (reefW + gap) / total
 	local waveFrac = waveW / total
-	-- Reef stays left-aligned to the wave HUD (immediate left neighbor).
-	hudReefBar.Size = UDim2.new(reefW / total, 0, 0, BAR_H)
-	hudReefBar.AnchorPoint = Vector2.new(0, 1)
-	hudReefBar.Position = UDim2.new(0, 0, 1, 0)
+	local reefLeft = (waveW + gap) / total
 	hudWaveBar.Size = UDim2.new(waveFrac, 0, 0, wh)
 	hudWaveBar.AnchorPoint = Vector2.new(0, 1)
-	hudWaveBar.Position = UDim2.new(waveLeft, 0, 1, 0)
-	-- Clock left / upcoming teaser right, above the wave bar.
+	hudWaveBar.Position = UDim2.new(0, 0, 1, 0)
+	hudReefBar.Size = UDim2.new(reefW / total, 0, 0, BAR_H)
+	hudReefBar.AnchorPoint = Vector2.new(0, 1)
+	hudReefBar.Position = UDim2.new(reefLeft, 0, 1, 0)
+	-- Clock stays above the hunger bar. Wave teaser sits above the reef bar.
 	if hudTime then
-		hudTime.Size = UDim2.new(waveFrac * 0.5, -4, 0, LINE_H)
+		hudTime.Size = UDim2.new(waveFrac / 3, -2, 0, LINE_H)
 		hudTime.AnchorPoint = Vector2.new(0, 1)
-		hudTime.Position = UDim2.new(waveLeft, 0, 1, -(wh + 4))
+		hudTime.Position = UDim2.new(0, 0, 1, -(wh + 4))
 		hudTime.TextXAlignment = Enum.TextXAlignment.Left
 	end
 	if hudUpcoming then
-		hudUpcoming.Size = UDim2.new(waveFrac * 0.5, -4, 0, LINE_H)
-		hudUpcoming.AnchorPoint = Vector2.new(1, 1)
-		hudUpcoming.Position = UDim2.new(1, 0, 1, -(wh + 4))
-		hudUpcoming.TextXAlignment = Enum.TextXAlignment.Right
+		local reefFrac = reefW / total
+		hudUpcoming.Size = UDim2.new(reefFrac, 12, 0, LINE_H)
+		hudUpcoming.AnchorPoint = Vector2.new(0.5, 1)
+		hudUpcoming.Position = UDim2.new(reefLeft + reefFrac * 0.5, 0, 1, -(BAR_H + 4))
+		hudUpcoming.TextXAlignment = Enum.TextXAlignment.Center
 		hudUpcoming.Visible = true
 	end
 	if hudFishNeed then
@@ -1808,18 +2990,10 @@ local function applyWaveHudBarsLayoutBottomRight()
 		hudCritterBarsEye.Position = UDim2.new(0, 0, 0.5, 0)
 		hudCritterBarsEye.ZIndex = 31
 	end
-	if hudWaveLabel then
-		local pad = hudWaveLabel:FindFirstChildOfClass("UIPadding")
-		if pad then
-			if feedCompleteUi then
-				pad.PaddingLeft = UDim.new(0, 0)
-				pad.PaddingRight = UDim.new(0, 0)
-			else
-				pad.PaddingLeft = UDim.new(0, wh + 6)
-				pad.PaddingRight = UDim.new(0, 8)
-			end
-		end
-	end
+	placeWaveTitle()
+	placeNextWaveCircle()
+	placeAutoNextButton()
+	placeWaveDollarCircle()
 end
 
 local function applyWaveHudBarsLayout()
@@ -1843,7 +3017,7 @@ local function layoutHudRight()
 	if scale > 1 then
 		designW = math.floor(designW * WAVE_HUD_WIDTH_MULT + 0.5)
 	end
-	-- reef + meta (clock/upcoming) + gap + wave
+	-- reef + one meta row (clock / wave / upcoming) + wave bar
 	local designH = BAR_H + REEF_ROW_GAP + LINE_H + 4 + waveBarHeight()
 	local w = math.floor(designW / scale + 0.5)
 	local h = designH
@@ -1860,15 +3034,15 @@ local function layoutHudBottomRight()
 		return
 	end
 	applyWaveHudScale(hudFrame)
-	local reefW = WAVE_HUD_BOTTOM_BAR_W
+	local reefW = reefBarWidth()
 	local waveW = WAVE_HUD_BOTTOM_WAVE_BAR_W
 	local gap = WAVE_HUD_SIDE_GAP
 	local total = reefW + gap + waveW
-	-- meta row (clock/upcoming) sits above the wave bar
+	-- clock, 🍴 Wave N, and upcoming share one row above the wave bar
 	local designH = LINE_H + 4 + waveBarHeight()
-	-- Same widths as before; pin the wave bar's center to screen center (reef stays on its left).
+	-- Hunger bar keeps its width. Its center stays on the screen center; reef sits to its right.
 	-- UIScale on the frame enlarges this design size on 720p+; mobile scale is 1.
-	local waveCenterFrac = (reefW + gap + waveW * 0.5) / total
+	local waveCenterFrac = (waveW * 0.5) / total
 	hudFrame.AnchorPoint = Vector2.new(waveCenterFrac, 1)
 	hudFrame.Size = UDim2.fromOffset(total, designH)
 	hudFrame.Position = UDim2.new(0.5, 0, 1, -WAVE_HUD_BOTTOM_PAD)
@@ -1890,6 +3064,19 @@ layoutHud = function()
 	end
 	if tempW100Btn and tempW100Btn.Visible then
 		layoutTempW100Button()
+	end
+	refreshCritterEmojisInWaveBar()
+	if hudNextWave and hudFrame and hudFrame.Visible and not nextPressAnimating and not feedCompleteUi then
+		local showNum = math.floor(os.clock() / 0.55) % 2 == 1
+		hudNextWave.BackgroundColor3 = NEXT_WAVE_BLUE
+		hudNextWave.Active = false
+		if showNum then
+			hudNextWave.Text = tostring(math.max(1, lastWaveIndex))
+			hudNextWave.TextSize = 16
+		else
+			hudNextWave.Text = "🌊"
+			hudNextWave.TextSize = 18
+		end
 	end
 end
 
@@ -2025,7 +3212,10 @@ setHudVisible = function(on: boolean)
 			ReefHealthBarFx.snapSizes(hudWaveFill, hudWaveTrail, 0, hudWaveTrailState)
 		end
 		if hudWaveLabel then
-			hudWaveLabel.Text = "🍴 Wave"
+			hudWaveLabel.Visible = false
+		end
+		if hudFeedRow then
+			paintFedForkRow()
 		end
 		if hudTime then
 			hudTime.Text = "⏱️00:00:00"
@@ -2042,7 +3232,7 @@ setHudVisible = function(on: boolean)
 		end
 		if hudBarHeart then
 			hudBarHeart.Visible = true
-			hudBarHeart.Text = "🐟:0"
+			hudBarHeart.Text = ""
 		end
 		if hudFinishHint then
 			hudFinishHint.Visible = false
@@ -2050,6 +3240,15 @@ setHudVisible = function(on: boolean)
 		if hudWaveHit then
 			hudWaveHit.Visible = false
 			hudWaveHit.Active = false
+		end
+		if hudNextWave then
+			hudNextWave.Visible = false
+			hudNextWave.Active = false
+			hudNextWave.Text = "NEXT\nWAVE"
+			local pop = hudNextWave:FindFirstChild("Pop")
+			if pop and pop:IsA("UIScale") then
+				pop.Scale = 1
+			end
 		end
 		if hudCritterBarsEye then
 			hudCritterBarsEye.Visible = false
@@ -2074,6 +3273,44 @@ local function syncWaveCamera(snap: WaveSim.HudSnapshot)
 		setWaveCameraActive(false)
 	else
 		clearWaveCameraOffset()
+	end
+end
+
+local function paintIdleNextButton(waveNum: number)
+	if not hudNextWave or nextPressAnimating then
+		return
+	end
+	local showNum = math.floor(os.clock() / 0.55) % 2 == 1
+	hudNextWave.Visible = true
+	hudNextWave.Active = false
+	hudNextWave.BackgroundColor3 = NEXT_WAVE_BLUE
+	if showNum then
+		hudNextWave.Text = tostring(math.max(1, waveNum))
+		hudNextWave.TextSize = 16
+	else
+		hudNextWave.Text = "🌊"
+		hudNextWave.TextSize = 18
+	end
+	local pop = hudNextWave:FindFirstChild("Pop")
+	if pop and pop:IsA("UIScale") then
+		pop.Scale = 1
+	end
+end
+
+function paintFedForkRow()
+	if not hudFeedRow then
+		return
+	end
+	local fed = math.max(0, lastFishFull)
+	local squad = lastFishTotal + lastCrabTotal + lastUrchinTotal
+	local unfed = math.max(0, squad - fed)
+	local fedLbl = hudFeedRow:FindFirstChild("Fed")
+	local unfedLbl = hudFeedRow:FindFirstChild("Unfed")
+	if fedLbl and fedLbl:IsA("TextLabel") then
+		fedLbl.Text = tostring(fed)
+	end
+	if unfedLbl and unfedLbl:IsA("TextLabel") then
+		unfedLbl.Text = tostring(unfed)
 	end
 end
 
@@ -2102,25 +3339,9 @@ local function updateHud(snap: WaveSim.HudSnapshot)
 	local complete = snap.feedComplete == true
 	local danger = snap.hungerDanger == true
 	if hudWaveLabel then
-		local pad = hudWaveLabel:FindFirstChildOfClass("UIPadding")
-		if complete then
-			hudWaveLabel.Font = UiTheme.Font
-			hudWaveLabel.TextXAlignment = Enum.TextXAlignment.Center
-			hudWaveLabel.Text = "NEXT WAVE"
-			if pad then
-				pad.PaddingLeft = UDim.new(0, 0)
-				pad.PaddingRight = UDim.new(0, 0)
-			end
-		else
-			hudWaveLabel.Font = UiTheme.Font
-			hudWaveLabel.TextXAlignment = Enum.TextXAlignment.Left
-			hudWaveLabel.Text = "🍴 Wave " .. tostring(snap.wave)
-			if pad then
-				pad.PaddingLeft = UDim.new(0, waveBarHeight() + 6)
-				pad.PaddingRight = UDim.new(0, 8)
-			end
-		end
+		hudWaveLabel.Visible = false
 	end
+	paintFedForkRow()
 	if complete ~= feedCompleteUi then
 		feedCompleteUi = complete
 		if complete then
@@ -2129,18 +3350,33 @@ local function updateHud(snap: WaveSim.HudSnapshot)
 			-- Happy emojis + $D stream + unlock sting when NEXT WAVE unlocks (not on button press).
 			playNextWaveUnlockSound()
 			local unlockEmojis = WaveSim.getFinishEmojis()
-			playFinishFirework(unlockEmojis)
-			WaveFeedPayout.playWaveClearStream()
+			local fedCircle = hudFeedRow and hudFeedRow:FindFirstChild("Fed")
+			playFinishFirework(unlockEmojis, if fedCircle and fedCircle:IsA("GuiObject") then fedCircle else nil, true)
 			if hudWaveHit then
-				hudWaveHit.Visible = true
-				hudWaveHit.Active = true
+				hudWaveHit.Visible = false
+				hudWaveHit.Active = false
+			end
+			if hudNextWave then
+				hudNextWave.Visible = true
+				hudNextWave.Active = not InventoryState.isOpen()
+				hudNextWave.Text = "NEXT\nWAVE"
+				hudNextWave.TextSize = 8
+				hudNextWave.BackgroundColor3 = BAR_FILL
 			end
 			startFinishFlash()
 			animateNextWaveUnlockPop()
+			if autoNextOn then
+				task.defer(function()
+					WaveSlot.tryFinishFromShortcut()
+				end)
+			end
 		else
 			if hudWaveHit then
 				hudWaveHit.Visible = false
 				hudWaveHit.Active = false
+			end
+			if hudNextWave and not nextPressAnimating then
+				paintIdleNextButton(math.max(1, lastWaveIndex))
 			end
 			stopFinishFlash()
 			restoreBarChrome()
@@ -2149,6 +3385,13 @@ local function updateHud(snap: WaveSim.HudSnapshot)
 				hungerDangerUi = true
 				startDangerFlash()
 			end
+		end
+	elseif hudNextWave and not nextPressAnimating then
+		if complete then
+			hudNextWave.Visible = true
+			hudNextWave.Active = not InventoryState.isOpen()
+		else
+			paintIdleNextButton(snap.wave)
 		end
 	end
 	refreshForkLabel()
@@ -2161,6 +3404,10 @@ local function updateHud(snap: WaveSim.HudSnapshot)
 		lastHungryMissToken = missTok
 	elseif missTok > lastHungryMissToken then
 		flashFillHurt()
+		local unfedCircle = hudFeedRow and hudFeedRow:FindFirstChild("Unfed")
+		if unfedCircle and unfedCircle:IsA("GuiObject") then
+			playFinishFirework({ "💔", "💀", "👎" }, unfedCircle)
+		end
 		lastHungryMissToken = missTok
 	else
 		lastHungryMissToken = missTok
@@ -2185,9 +3432,8 @@ local function updateHud(snap: WaveSim.HudSnapshot)
 		hudFishNeed.Visible = false
 	end
 	if hudCritterBarsEye then
-		hudCritterBarsEye.Visible = snap.running
-		hudCritterBarsEye.Active = snap.running
-		refreshCritterBarsEye()
+		hudCritterBarsEye.Visible = false
+		hudCritterBarsEye.Active = false
 	end
 end
 
@@ -2913,6 +4159,56 @@ function WaveSlot.mount(d: Deps)
 	end)
 
 	WaveSim.onHud(updateHud)
+	WaveFeedPayout.setGainListener(function(delta: number)
+		local host = hudWaveDollar
+		if not host or delta <= 0 then
+			return
+		end
+		local lbl = Instance.new("TextLabel")
+		lbl.Name = "_OceanTD_DollarGain"
+		lbl.BackgroundTransparency = 1
+		lbl.AnchorPoint = Vector2.new(0.5, 1)
+		lbl.Position = UDim2.fromScale(0.5, 0)
+		lbl.Size = UDim2.fromOffset(64, 20)
+		lbl.Font = UiTheme.Font
+		lbl.TextSize = 16
+		lbl.TextColor3 = Color3.fromRGB(230, 255, 236)
+		lbl.TextStrokeTransparency = 0.25
+		lbl.TextStrokeColor3 = Color3.new(0, 0, 0)
+		lbl.Text = "+" .. tostring(math.floor(delta + 0.5))
+		lbl.ZIndex = host.ZIndex + 4
+		lbl.Parent = host.Parent
+		local start = host.Position
+		lbl.Position = start
+		local pop = Instance.new("UIScale")
+		pop.Name = "Pop"
+		pop.Scale = 1
+		pop.Parent = lbl
+		local rise = TweenInfo.new(1.4, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+		TweenService:Create(lbl, rise, {
+			Position = UDim2.new(start.X.Scale, start.X.Offset, start.Y.Scale, start.Y.Offset - 32),
+			TextTransparency = 1,
+			TextStrokeTransparency = 1,
+		}):Play()
+		TweenService:Create(pop, rise, { Scale = 2 }):Play()
+		task.delay(1.45, function()
+			lbl:Destroy()
+		end)
+	end)
+	WaveFeedPayout.setDollarOrigin(function()
+		local host = hudWaveDollar
+		if not host or not host.Parent then
+			return nil
+		end
+		local pos = host.AbsolutePosition + host.AbsoluteSize * 0.5
+		return pos
+	end)
+	WaveSim.onNaturalWavePrepare(function()
+		WaveSlot.prepareAdvanceCeremony()
+	end)
+	WaveSim.onNaturalWaveAdvance(function()
+		WaveSlot.playAdvanceCeremony()
+	end)
 	WaveSim.onStopped(function(summary)
 		setWaveCameraActive(false)
 		applyIcon(false)

@@ -109,7 +109,7 @@ local INTRO_REEF_MAX = 10
 local INTRO_REEF_BAR_W = 260
 local INTRO_REEF_BAR_H = 26
 local INTRO_REEF_SLIDE_SEC = 0.55
-local INTRO_REEF_BG = Color3.fromRGB(0x00, 0x03, 0x29)
+local INTRO_REEF_BG = Color3.new(0, 0, 0)
 
 local host: Host? = nil
 local linesFolder: Folder? = nil
@@ -285,12 +285,32 @@ local function brokenHeartBurstDuration(): number
 	return (THUMB_BURST_COUNT - 1) * THUMB_BURST_SPAWN_GAP + 0.04 + THUMB_BURST_LIFE * 1.15
 end
 
+local function placeIntroReefHost()
+	local hostFr = introReefHost
+	if not hostFr then
+		return
+	end
+	local cam = Workspace.CurrentCamera
+	local vp = if cam then cam.ViewportSize else Vector2.new(1280, 720)
+	local scale = UiPopupScale.getHud()
+	local text = if introReefLabel then introReefLabel.Text else "🤍 Reef Health 10/10"
+	local bounds = game:GetService("TextService"):GetTextSize(text, 19, UiTheme.Font, Vector2.new(800, INTRO_REEF_BAR_H))
+	local reefW = math.ceil(8 + bounds.X + 4 + INTRO_REEF_BAR_H)
+	hostFr.Size = UDim2.fromOffset(reefW, INTRO_REEF_BAR_H)
+	-- Same slot as the in-wave reef bar: right of the centered hunger bar, bottom of the screen.
+	local waveW = math.floor(260 * 1.2 + 0.5)
+	local x = vp.X * 0.5 + (waveW * 0.5 + 10) * scale
+	hostFr.AnchorPoint = Vector2.new(0, 1)
+	hostFr.Position = UDim2.fromOffset(math.floor(x + 0.5), vp.Y - 10)
+end
+
 local function setIntroReefHealth(cur: number)
 	introReefHp = math.clamp(math.floor(cur + 0.5), 0, INTRO_REEF_MAX)
 	local frac = introReefHp / INTRO_REEF_MAX
 	if introReefLabel then
 		introReefLabel.Text = ("🤍 Reef Health %d/%d"):format(introReefHp, INTRO_REEF_MAX)
 	end
+	placeIntroReefHost()
 	if introReefFill then
 		local bar = introReefHost
 		ReefHealthBarFx.applyWithFly(introReefFill, introReefTrail, bar, frac, introReefTrailState, function()
@@ -338,7 +358,7 @@ local function showIntroReefBarFull()
 	local hostFr = Instance.new("Frame")
 	hostFr.Name = "Host"
 	hostFr.BackgroundTransparency = 1
-	hostFr.AnchorPoint = Vector2.new(0.5, 1)
+	hostFr.AnchorPoint = Vector2.new(0, 1)
 	hostFr.Position = UDim2.new(0.5, 0, 1, -10)
 	hostFr.Size = UDim2.fromOffset(INTRO_REEF_BAR_W, INTRO_REEF_BAR_H)
 	hostFr.Parent = sg
@@ -348,7 +368,7 @@ local function showIntroReefBarFull()
 	local reefBar = Instance.new("Frame")
 	reefBar.Name = "ReefProgress"
 	reefBar.BackgroundColor3 = INTRO_REEF_BG
-	reefBar.BackgroundTransparency = 0.5
+	reefBar.BackgroundTransparency = 0.15
 	reefBar.BorderSizePixel = 0
 	reefBar.Size = UDim2.fromScale(1, 1)
 	reefBar.ClipsDescendants = false
@@ -375,6 +395,7 @@ local function showIntroReefBarFull()
 	local reefFillCorner = Instance.new("UICorner")
 	reefFillCorner.CornerRadius = UDim.new(1, 0)
 	reefFillCorner.Parent = reefFill
+	ReefHealthBarFx.applyFillStyle(reefFill, 1)
 	introReefFill = reefFill
 
 	local reefLabel = Instance.new("TextLabel")
@@ -386,11 +407,40 @@ local function showIntroReefBarFull()
 	reefLabel.TextColor3 = Color3.new(1, 1, 1)
 	reefLabel.TextStrokeTransparency = 0.35
 	reefLabel.TextStrokeColor3 = Color3.new(0, 0, 0)
-	reefLabel.TextXAlignment = Enum.TextXAlignment.Center
+	reefLabel.TextXAlignment = Enum.TextXAlignment.Left
 	reefLabel.TextYAlignment = Enum.TextYAlignment.Center
 	reefLabel.ZIndex = 4
 	reefLabel.Parent = reefBar
+	local reefPad = Instance.new("UIPadding")
+	reefPad.PaddingLeft = UDim.new(0, 8)
+	reefPad.PaddingRight = UDim.new(0, INTRO_REEF_BAR_H + 4)
+	reefPad.Parent = reefLabel
 	introReefLabel = reefLabel
+
+	local plus = Instance.new("TextLabel")
+	plus.Name = "ReefPlus"
+	plus.AnchorPoint = Vector2.new(1, 0.5)
+	plus.Position = UDim2.new(1, 0, 0.5, 0)
+	plus.Size = UDim2.fromOffset(INTRO_REEF_BAR_H, INTRO_REEF_BAR_H)
+	plus.BackgroundColor3 = Color3.fromRGB(50, 230, 100)
+	plus.BackgroundTransparency = 0
+	plus.BorderSizePixel = 0
+	plus.Text = "+"
+	plus.Font = Enum.Font.SourceSansBold
+	plus.TextSize = 22
+	plus.TextColor3 = Color3.fromRGB(0, 40, 14)
+	plus.TextStrokeColor3 = Color3.fromRGB(12, 70, 28)
+	plus.TextStrokeTransparency = 0
+	plus.ZIndex = 6
+	plus.Parent = reefBar
+	local plusCorner = Instance.new("UICorner")
+	plusCorner.CornerRadius = UDim.new(1, 0)
+	plusCorner.Parent = plus
+	local plusStroke = Instance.new("UIStroke")
+	plusStroke.Color = Color3.fromRGB(12, 70, 28)
+	plusStroke.Thickness = 1.5
+	plusStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+	plusStroke.Parent = plus
 
 	setIntroReefHealth(INTRO_REEF_MAX)
 end

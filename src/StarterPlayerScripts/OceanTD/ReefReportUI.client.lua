@@ -40,6 +40,7 @@ local RelocateController = require(script.Parent:WaitForChild("RelocateControlle
 local RelocateMultiSelect = require(script.Parent:WaitForChild("RelocateMultiSelect"))
 local StoreUI = require(script.Parent:WaitForChild("StoreUI"))
 local SandDollarReportUI = require(script.Parent:WaitForChild("SandDollarReportUI"))
+local CoralBuckets = require(script.Parent:WaitForChild("WaveSimCoralBuckets"))
 
 local REPORT_OPEN_ATTR = "OceanTD_ReefReportOpen"
 local FORCE_CLOSE_ATTR = "OceanTD_ForceCloseReefReport"
@@ -85,6 +86,9 @@ local columnsHost: Frame? = nil
 local scoreLabel: TextLabel? = nil
 local helpBtn: GuiButton? = nil
 local dollarBtn: GuiButton? = nil
+local bucketDebugBtn: GuiButton? = nil
+local BUCKET_DEBUG_ON = Color3.fromRGB(14, 86, 38)
+local BUCKET_DEBUG_OFF = Color3.fromRGB(122, 28, 32)
 local helpGui: ScreenGui? = nil
 local helpPanel: Frame? = nil
 local helpCloseBtn: TextButton? = nil
@@ -1694,6 +1698,46 @@ local function refreshAllColumns()
 	refreshReefScore()
 end
 
+local function paintBucketDebugButton(btn: GuiButton)
+	btn.BackgroundColor3 = if CoralBuckets.isBucketDebugVisible() then BUCKET_DEBUG_ON else BUCKET_DEBUG_OFF
+end
+
+local function ensureBucketDebugButton(row: Instance): GuiButton
+	local existing = row:FindFirstChild("ReefScoreBucketDebug")
+	if existing then
+		existing:Destroy()
+	end
+	local btn = Instance.new("TextButton")
+	btn.Name = "ReefScoreBucketDebug"
+	btn.Text = "🧊"
+	btn.Font = Enum.Font.GothamBold
+	btn.TextScaled = true
+	btn.TextColor3 = Color3.fromRGB(235, 255, 240)
+	btn.BorderSizePixel = 0
+	btn.AutoButtonColor = true
+	btn.Selectable = true
+	btn.Size = UDim2.fromOffset(42, 34)
+	btn.LayoutOrder = 5
+	btn.ZIndex = 3
+	btn.Parent = row
+	local corner = Instance.new("UICorner")
+	corner.CornerRadius = UDim.new(1, 0)
+	corner.Parent = btn
+	local pad = Instance.new("UIPadding")
+	pad.PaddingTop = UDim.new(0.08, 0)
+	pad.PaddingBottom = UDim.new(0.08, 0)
+	pad.PaddingLeft = UDim.new(0.06, 0)
+	pad.PaddingRight = UDim.new(0.06, 0)
+	pad.Parent = btn
+	paintBucketDebugButton(btn)
+	btn.Activated:Connect(function()
+		CoralBuckets.setBucketDebugVisible(not CoralBuckets.isBucketDebugVisible())
+		paintBucketDebugButton(btn)
+	end)
+	bucketDebugBtn = btn
+	return btn
+end
+
 local function buildTitleRow(parent: Instance): Frame
 	local existing = parent:FindFirstChild("TitleRow")
 	if existing then
@@ -1715,6 +1759,10 @@ local function buildTitleRow(parent: Instance): Frame
 	local oldDollar = parent:FindFirstChild("ReefScoreDollar")
 	if oldDollar and oldDollar.Parent == parent then
 		oldDollar:Destroy()
+	end
+	local oldIce = parent:FindFirstChild("ReefScoreBucketDebug")
+	if oldIce and oldIce.Parent == parent then
+		oldIce:Destroy()
 	end
 
 	local row = Instance.new("Frame")
@@ -1827,6 +1875,7 @@ local function buildTitleRow(parent: Instance): Frame
 		SandDollarReportUI.open()
 	end)
 	dollarBtn = dollar
+	ensureBucketDebugButton(row)
 
 	refreshReefScore()
 	return row
@@ -1865,6 +1914,7 @@ local function ensureReportGui(): ScreenGui
 					buildTitleRow(root)
 				else
 					dollarBtn = dollar :: GuiButton
+					ensureBucketDebugButton(row)
 				end
 				refreshReefScore()
 			end

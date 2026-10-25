@@ -2,7 +2,7 @@
 --[[
 	Batches "hunger bar filled" events from WaveSim → server ReportFishFed.
 	Server decides $D (EarnMore stage). Client only reports fish count.
-	Juice: green "$D" (FredokaOne, thin white stroke) flies fish → $DCount.
+	Juice: the sand-dollar circle flies fish → $DCount.
 	Also: end-of-wave stream from Wave HUD bar → $DCount (1 badge per $D earned).
 ]]
 
@@ -26,11 +26,9 @@ local WaveSimConsts = require(script.Parent:WaitForChild("WaveSimConsts"))
 local WaveFeedPayout = {}
 
 local FLY_SEC = 0.55
-local FLY_TEXT = Color3.fromRGB(70, 255, 110) -- bright green fill
-local FLY_STROKE = Color3.fromRGB(0, 90, 20) -- dark green outer stroke
-local FLY_TEXT_SIZE = math.floor(26 * 1.5 + 0.5) -- 50% bigger than prior 26
-local FLY_LABEL_W = math.floor(56 * 1.5 + 0.5)
-local FLY_LABEL_H = math.floor(32 * 1.5 + 0.5)
+local FLY_CIRCLE = 52
+local FLY_CIRCLE_IMAGE = "rbxassetid://74290598144610"
+local FLY_CIRCLE_BG = Color3.fromRGB(6, 90, 38)
 local COUNT_NAME = Constants.SAND_DOLLARS_COUNT_NAME
 -- Wave-clear burst: clustered multi-flies (not single-file), short max when many.
 local STREAM_MIN_SEC = 0.55
@@ -40,7 +38,6 @@ local STREAM_FLY_SEC = 1.24 -- half prior speed (was 0.62)
 local STREAM_FLY_RATE_MIN = 0.82 -- per-$D duration mult (higher = slower)
 local STREAM_FLY_RATE_MAX = 1.18
 local STREAM_BATCH = 5 -- how many launch nearly together
-local STREAM_CLUSTER_PX = 22 -- spawn spread around HUD bar center
 local STREAM_ARC_SPREAD = 0.55 -- vary arc side/strength so paths don't stack
 -- Audible gap between coin pitches (visuals stay clustered; audio is one-per-$D).
 local STREAM_COIN_PITCH_MIN = 0.78
@@ -54,6 +51,8 @@ local SHOW_FISH_FLY = false
 local pending = 0
 local flushQueued = false
 local remote: RemoteEvent? = nil
+local gainListener: ((number) -> ())? = nil
+local dollarOriginFn: (() -> Vector2?)? = nil
 local overlay: ScreenGui? = nil
 local cachedCount: GuiObject? = nil
 local waveDollarsEarned = 0
@@ -120,13 +119,13 @@ local function getRemote(): RemoteEvent
 	return remote
 end
 
-local function flush()
+local function flushCount(n: number)
 	flushQueued = false
-	local n = pending
-	pending = 0
 	if n <= 0 then
 		return
 	end
+	-- Total HUD should tick up quietly. The +1 already played on the wave circle.
+	player:SetAttribute("OceanTD_DollarQuietGain", true)
 	local speed = 1
 	pcall(function()
 		local WaveSim = require(script.Parent:WaitForChild("WaveSim"))
@@ -142,6 +141,14 @@ local function flush()
 	end
 end
 
+function WaveFeedPayout.setGainListener(fn: (number) -> ())
+	gainListener = fn
+end
+
+function WaveFeedPayout.setDollarOrigin(fn: () -> Vector2?)
+	dollarOriginFn = fn
+end
+
 local function getOverlay(): ScreenGui
 	if overlay and overlay.Parent then
 		return overlay
@@ -149,6 +156,7 @@ local function getOverlay(): ScreenGui
 	local pg = player:WaitForChild("PlayerGui")
 	local existing = pg:FindFirstChild("OceanTD_SandDollarFly")
 	if existing and existing:IsA("ScreenGui") then
+		existing.DisplayOrder = 400
 		overlay = existing
 		return existing
 	end
@@ -156,7 +164,7 @@ local function getOverlay(): ScreenGui
 	sg.Name = "OceanTD_SandDollarFly"
 	sg.ResetOnSpawn = false
 	sg.IgnoreGuiInset = true
-	sg.DisplayOrder = 90
+	sg.DisplayOrder = 400 -- in front of the right HUD (250), under the wave-title overlays
 	sg.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 	sg.Parent = pg
 	overlay = sg
@@ -204,18 +212,29 @@ end
 
 local function countScreenCenter(): Vector2?
 	local count = getCountGui()
-	if not count then
+	if not count or count.AbsoluteSize.X < 2 then
+		cachedCount = nil
+		count = getCountGui()
+	end
+	if not count or count.AbsoluteSize.X < 2 then
 		return nil
 	end
-	-- AbsolutePosition is relative to the ScreenGui content origin. Our fly overlay
-	-- uses IgnoreGuiInset=true, so add inset when the HUD respects the top bar.
-	local pos = count.AbsolutePosition + count.AbsoluteSize * 0.5
-	local sg = count:FindFirstAncestorOfClass("ScreenGui")
-	if sg and sg.IgnoreGuiInset ~= true then
-		local inset = GuiService:GetGuiInset()
-		pos = Vector2.new(pos.X + inset.X, pos.Y + inset.Y)
+	return count.AbsolutePosition + count.AbsoluteSize * 0.5
+end
+
+local function flyHost(): ScreenGui?
+	local count = getCountGui()
+	local host = count and count:FindFirstAncestorOfClass("ScreenGui")
+	if host then
+		return host
 	end
-	return pos
+	return getOverlay()
+end
+
+-- Same space as the +1 fed fly: parent to the count's ScreenGui and subtract its origin.
+local function toHostLocal(host: ScreenGui, abs: Vector2): Vector2
+	local origin = host.AbsolutePosition
+	return Vector2.new(abs.X - origin.X, abs.Y - origin.Y)
 end
 
 local function punchCount()
@@ -235,17 +254,18 @@ local function punchCount()
 end
 
 local function flyDollarFromScreen(start: Vector2, flySec: number?, onLand: (() -> ())?, arcBias: number?, playCoin: boolean?)
-	local dest0 = countScreenCenter()
-	if not dest0 then
+	local destAbs = countScreenCenter()
+	if not destAbs then
 		if onLand then
 			onLand()
 		end
 		return
 	end
-
-	local dest = dest0
-	local mid = (start + dest) * 0.5
-	local delta = dest - start
+	local host = flyHost()
+	local from = toHostLocal(host, start)
+	local dest = toHostLocal(host, destAbs)
+	local mid = (from + dest) * 0.5
+	local delta = dest - from
 	-- Mild upward arc; endpoint stays locked to $DCount center.
 	-- arcBias (-1..1) fans control points so clustered flies don't share one path.
 	local bias = if typeof(arcBias) == "number" then math.clamp(arcBias, -1, 1) else 0
@@ -266,42 +286,47 @@ local function flyDollarFromScreen(start: Vector2, flySec: number?, onLand: (() 
 	local dur = if typeof(flySec) == "number" then math.max(0.25, flySec) else FLY_SEC
 	local wantCoin = playCoin == true
 
-	local sg = getOverlay()
-	local lbl = Instance.new("TextLabel")
-	lbl.Name = "FlyD"
-	lbl.BackgroundTransparency = 1
-	lbl.AnchorPoint = Vector2.new(0.5, 0.5)
-	lbl.Position = UDim2.fromOffset(start.X, start.Y)
-	lbl.Size = UDim2.fromOffset(FLY_LABEL_W, FLY_LABEL_H)
-	lbl.Font = UiTheme.Font
-	lbl.Text = "$D"
-	lbl.TextSize = FLY_TEXT_SIZE
-	lbl.TextColor3 = FLY_TEXT
-	lbl.TextStrokeTransparency = 1
-	lbl.ZIndex = 5
-	lbl.Parent = sg
-	local stroke = Instance.new("UIStroke")
-	stroke.Color = FLY_STROKE
-	stroke.Thickness = 2.2
-	stroke.LineJoinMode = Enum.LineJoinMode.Round
-	stroke.Parent = lbl
+	local sg = host
+	local disc = Instance.new("Frame")
+	disc.Name = "FlyD"
+	disc.BackgroundColor3 = FLY_CIRCLE_BG
+	disc.BorderSizePixel = 0
+	disc.AnchorPoint = Vector2.new(0.5, 0.5)
+	disc.Position = UDim2.fromOffset(from.X, from.Y)
+	local side = math.floor(FLY_CIRCLE * (0.9 + math.random() * 0.2) + 0.5)
+	disc.Size = UDim2.fromOffset(side, side)
+	disc.ZIndex = 200
+	disc.Parent = sg
+	local corner = Instance.new("UICorner")
+	corner.CornerRadius = UDim.new(1, 0)
+	corner.Parent = disc
+	local img = Instance.new("ImageLabel")
+	img.Name = "SandDollar"
+	img.BackgroundTransparency = 1
+	img.Size = UDim2.fromScale(1, 1)
+	img.Image = FLY_CIRCLE_IMAGE
+	img.ScaleType = Enum.ScaleType.Fit
+	img.ZIndex = 6
+	img.Parent = disc
+	local shrinkScale = Instance.new("UIScale")
+	shrinkScale.Scale = 1
+	shrinkScale.Parent = disc
 
 	local t0 = os.clock()
-	local shrink = math.floor(FLY_TEXT_SIZE * 0.23 + 0.5)
 	local conn: RBXScriptConnection? = nil
 	conn = RunService.RenderStepped:Connect(function()
-		if not lbl.Parent then
+		if not disc.Parent then
 			if conn then
 				conn:Disconnect()
 			end
 			return
 		end
-		local live = countScreenCenter()
-		if live then
-			dest = live
+		local liveAbs = countScreenCenter()
+		if liveAbs then
+			dest = toHostLocal(host, liveAbs)
 			-- Keep control point relative to the live endpoint so the arc doesn't drift.
-			mid = (start + dest) * 0.5
-			delta = dest - start
+			mid = (from + dest) * 0.5
+			delta = dest - from
 			len = math.max(40, delta.Magnitude)
 			arc = Vector2.new(-delta.Y, delta.X)
 			if arc.Magnitude > 1e-3 then
@@ -319,24 +344,25 @@ local function flyDollarFromScreen(start: Vector2, flySec: number?, onLand: (() 
 		local u = math.clamp((os.clock() - t0) / dur, 0, 1)
 		local e = u * u * (3 - 2 * u) -- smoothstep
 		local omt = 1 - e
-		local p = omt * omt * start + 2 * omt * e * ctrl + e * e * dest
-		lbl.Position = UDim2.fromOffset(p.X, p.Y)
-		lbl.TextSize = FLY_TEXT_SIZE - shrink * e
+		local p = omt * omt * from + 2 * omt * e * ctrl + e * e * dest
+		disc.Position = UDim2.fromOffset(p.X, p.Y)
+		shrinkScale.Scale = 1 - 0.23 * e
 		if u >= 1 then
 			if conn then
 				conn:Disconnect()
 			end
 			-- Snap exactly onto the counter before destroy.
-			local final = countScreenCenter()
-			if final then
-				lbl.Position = UDim2.fromOffset(final.X, final.Y)
+			local finalAbs = countScreenCenter()
+			if finalAbs then
+				local final = toHostLocal(host, finalAbs)
+				disc.Position = UDim2.fromOffset(final.X, final.Y)
 			end
 			punchCount()
 			-- Coin plink when this $D reaches the counter (not on launch, not food-hit).
 			if wantCoin then
 				playStreamCoinSound()
 			end
-			lbl:Destroy()
+			disc:Destroy()
 			if onLand then
 				onLand()
 			end
@@ -363,11 +389,6 @@ local function waveBarScreenCenter(): Vector2?
 		return nil
 	end
 	local pos = bar.AbsolutePosition + bar.AbsoluteSize * 0.5
-	local sg = bar:FindFirstAncestorOfClass("ScreenGui")
-	if sg and sg.IgnoreGuiInset ~= true then
-		local inset = GuiService:GetGuiInset()
-		pos = Vector2.new(pos.X + inset.X, pos.Y + inset.Y)
-	end
 	return pos
 end
 
@@ -389,20 +410,32 @@ function WaveFeedPayout.playWaveClearStreamAndWait(): boolean
 		return false
 	end
 	local n = math.floor(waveDollarsEarned)
-	if n <= 0 then
-		streamPlayedThisWave = true
-		return false
-	end
+	local reportN = pending
+	pending = 0
 	streamPlayedThisWave = true
 	waveDollarsEarned = 0
+	if n <= 0 then
+		flushCount(reportN)
+		return false
+	end
 	streamPitchCursor = STREAM_COIN_PITCH_MIN
 	-- Only cancel a previous stream when starting a new one (not on wave begin).
 	streamToken += 1
 	local my = streamToken
-	local start = waveBarScreenCenter()
+	local start: Vector2? = nil
+	if dollarOriginFn then
+		local okOrigin, pos = pcall(dollarOriginFn)
+		if okOrigin and typeof(pos) == "Vector2" then
+			start = pos
+		end
+	end
+	if not start then
+		start = waveBarScreenCenter()
+	end
 	if not start then
 		-- Fallback: still punch counter so the beat isn't silent.
 		punchCount()
+		flushCount(reportN)
 		return false
 	end
 	-- Clustered visual batches; coin plink fires when each $D lands on the counter.
@@ -431,11 +464,15 @@ function WaveFeedPayout.playWaveClearStreamAndWait(): boolean
 					remaining = 0
 					return
 				end
-				local ang = (slot / math.max(1, inBatch - 1) - 0.5) * math.pi * 0.85
-				local ring = STREAM_CLUSTER_PX * (0.55 + 0.45 * ((i % 3) / 2))
-				local jitter = Vector2.new(math.cos(ang) * ring, math.sin(ang) * ring * 0.55)
+				local from = start
+				if dollarOriginFn then
+					local okLive, live = pcall(dollarOriginFn)
+					if okLive and typeof(live) == "Vector2" then
+						from = live
+					end
+				end
 				local bias = ((slot / math.max(1, inBatch - 1)) * 2 - 1) * STREAM_ARC_SPREAD
-				flyDollarFromScreen(start + jitter, flySec, function()
+				flyDollarFromScreen(from, flySec, function()
 					remaining -= 1
 				end, bias, true)
 			end)
@@ -445,12 +482,77 @@ function WaveFeedPayout.playWaveClearStreamAndWait(): boolean
 	while remaining > 0 and my == streamToken and os.clock() < deadline do
 		task.wait()
 	end
+	flushCount(reportN)
 	return true
 end
 
 function WaveFeedPayout.playWaveClearStream()
+	if streamPlayedThisWave then
+		return
+	end
+	-- Snapshot on this thread so the next beginWave cannot drop the payout.
+	local n = math.floor(waveDollarsEarned)
+	local reportN = pending
+	pending = 0
+	streamPlayedThisWave = true
+	waveDollarsEarned = 0
+	if n <= 0 then
+		flushCount(reportN)
+		return
+	end
+	local start: Vector2? = nil
+	if dollarOriginFn then
+		local okOrigin, pos = pcall(dollarOriginFn)
+		if okOrigin and typeof(pos) == "Vector2" then
+			start = pos
+		end
+	end
+	if not start then
+		start = waveBarScreenCenter()
+	end
+	streamPitchCursor = STREAM_COIN_PITCH_MIN
+	streamToken += 1
+	local my = streamToken
 	task.spawn(function()
-		WaveFeedPayout.playWaveClearStreamAndWait()
+		if not start then
+			flushCount(reportN)
+			return
+		end
+		local duration = math.clamp(n * STREAM_PER_D_SEC, STREAM_MIN_SEC, STREAM_MAX_SEC)
+		local batches = math.max(1, math.ceil(n / STREAM_BATCH))
+		local batchGap = if batches > 1 then duration / (batches - 1) else 0
+		local launched = 0
+		for b = 1, batches do
+			local batchStart = (b - 1) * batchGap
+			local inBatch = math.min(STREAM_BATCH, n - launched)
+			for j = 1, inBatch do
+				launched += 1
+				local i = launched
+				local slot = j - 1
+				local intra = slot * 0.075
+				local rate = STREAM_FLY_RATE_MIN
+					+ (STREAM_FLY_RATE_MAX - STREAM_FLY_RATE_MIN)
+						* (0.5 + 0.5 * math.sin(i * 2.17 + slot * 0.91))
+				local flySec = STREAM_FLY_SEC * rate
+				task.delay(batchStart + intra, function()
+					if my ~= streamToken or not start then
+						return
+					end
+					local from = start
+					if dollarOriginFn then
+						local okLive, live = pcall(dollarOriginFn)
+						if okLive and typeof(live) == "Vector2" then
+							from = live
+						end
+					end
+					local bias = ((slot / math.max(1, inBatch - 1)) * 2 - 1) * STREAM_ARC_SPREAD
+					flyDollarFromScreen(from, flySec, nil, bias, true)
+				end)
+			end
+		end
+		local slowestFly = STREAM_FLY_SEC * STREAM_FLY_RATE_MAX
+		task.wait(duration + slowestFly + 0.15)
+		flushCount(reportN)
 	end)
 end
 
@@ -463,16 +565,15 @@ function WaveFeedPayout.noteFilled(worldPos: Vector3?)
 		return
 	end
 	pending += 1
-	waveDollarsEarned += dollarsPerFish()
-	-- Disabled: flies only from wave HUD stream (next-wave unlock). Keep call for easy restore.
+	local gain = dollarsPerFish()
+	waveDollarsEarned += gain
+	if gainListener then
+		gainListener(gain)
+	end
+	-- Hold the server grant until the wave-end fly reaches the total.
 	if SHOW_FISH_FLY and typeof(worldPos) == "Vector3" then
 		flyDollar(worldPos)
 	end
-	if flushQueued then
-		return
-	end
-	flushQueued = true
-	task.defer(flush)
 end
 
 -- —— Join-intro rating demo: 10× "$D" → bottom-left counter to $1,000 (visual only) ——

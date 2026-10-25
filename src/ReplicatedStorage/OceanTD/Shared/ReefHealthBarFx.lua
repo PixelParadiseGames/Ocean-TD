@@ -1,7 +1,8 @@
 --!strict
 --[[
 	Reef health bar polish:
-	- Main fill: green (full) → orange (half) → red (low)
+	- Main fill: bright red gradient at every health level
+	- Empty track: black, 15% transparent
 	- White trail scales down 1.25s after the main fill starts its shrink
 	- Optional 💔 flight from world heart → bar, then fill tweens down
 ]]
@@ -14,9 +15,8 @@ local Workspace = game:GetService("Workspace")
 
 local ReefHealthBarFx = {}
 
-local GREEN = Color3.fromRGB(0x00, 0xba, 0x03)
-local ORANGE = Color3.fromRGB(0xd6, 0x60, 0x00)
-local RED = Color3.fromRGB(0xcc, 0x0e, 0x00)
+local RED_TOP = Color3.fromRGB(255, 120, 100)
+local RED_BOT = Color3.fromRGB(255, 18, 18)
 local TRAIL_WHITE = Color3.fromRGB(255, 255, 255)
 local FILL_TWEEN_SEC = 0.4
 local TRAIL_BEHIND_SEC = 1.25
@@ -102,12 +102,29 @@ function ReefHealthBarFx.rockBar(bar: GuiObject?, state: State?, ampScale: numbe
 	end)
 end
 
-function ReefHealthBarFx.colorForFrac(frac: number): Color3
-	local t = math.clamp(frac, 0, 1)
-	if t >= 0.5 then
-		return ORANGE:Lerp(GREEN, (t - 0.5) * 2)
+function ReefHealthBarFx.colorForFrac(_frac: number): Color3
+	return RED_BOT
+end
+
+function ReefHealthBarFx.transparencyForFrac(_frac: number): number
+	return 0
+end
+
+-- Fill stays the same bright red gradient at every health level.
+-- The empty track behind it is the black 15% bar background.
+function ReefHealthBarFx.applyFillStyle(fill: Frame, _frac: number)
+	fill.BackgroundColor3 = RED_BOT
+	fill.BackgroundTransparency = 0
+	local grad = fill:FindFirstChild("ReefRedGradient")
+	if not (grad and grad:IsA("UIGradient")) then
+		grad = Instance.new("UIGradient")
+		grad.Name = "ReefRedGradient"
+		grad.Rotation = 90
+		grad.Parent = fill
 	end
-	return RED:Lerp(ORANGE, t * 2)
+	local g = grad :: UIGradient
+	g.Color = ColorSequence.new(RED_TOP, RED_BOT)
+	g.Transparency = NumberSequence.new(0)
 end
 
 function ReefHealthBarFx.ensureTrail(bar: Frame, zIndex: number): Frame
@@ -196,7 +213,7 @@ function ReefHealthBarFx.snap(fill: Frame, trail: Frame?, frac: number, state: S
 	state.pendingFrac = nil
 	state.flyBusy = false
 	fill.Size = UDim2.fromScale(f, 1)
-	fill.BackgroundColor3 = ReefHealthBarFx.colorForFrac(f)
+	ReefHealthBarFx.applyFillStyle(fill, f)
 	if trail then
 		trail.Size = UDim2.fromScale(f, 1)
 	end
@@ -220,7 +237,7 @@ function ReefHealthBarFx.tweenTo(fill: Frame, trail: Frame?, frac: number, state
 
 	local from = state.visualFrac
 	fill.Size = UDim2.fromScale(from, 1)
-	fill.BackgroundColor3 = ReefHealthBarFx.colorForFrac(from)
+	ReefHealthBarFx.applyFillStyle(fill, from)
 	local tw = TweenService:Create(
 		fill,
 		TweenInfo.new(FILL_TWEEN_SEC, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
@@ -241,7 +258,7 @@ function ReefHealthBarFx.tweenTo(fill: Frame, trail: Frame?, frac: number, state
 		end
 		local u = math.clamp((os.clock() - t0) / FILL_TWEEN_SEC, 0, 1)
 		local cur = from + (f - from) * u
-		fill.BackgroundColor3 = ReefHealthBarFx.colorForFrac(cur)
+		ReefHealthBarFx.applyFillStyle(fill, cur)
 		if u >= 1 then
 			if colorConn then
 				colorConn:Disconnect()
@@ -254,7 +271,7 @@ function ReefHealthBarFx.tweenTo(fill: Frame, trail: Frame?, frac: number, state
 			state.fillTween = nil
 			state.visualFrac = f
 			fill.Size = UDim2.fromScale(f, 1)
-			fill.BackgroundColor3 = ReefHealthBarFx.colorForFrac(f)
+			ReefHealthBarFx.applyFillStyle(fill, f)
 		end
 		if colorConn then
 			colorConn:Disconnect()
@@ -385,7 +402,7 @@ function ReefHealthBarFx.applyWithFly(
 		if math.abs(f - state.visualFrac) > 1e-4 then
 			ReefHealthBarFx.snap(fill, trail, f, state)
 		else
-			fill.BackgroundColor3 = ReefHealthBarFx.colorForFrac(state.visualFrac)
+			ReefHealthBarFx.applyFillStyle(fill, state.visualFrac)
 		end
 		return
 	end

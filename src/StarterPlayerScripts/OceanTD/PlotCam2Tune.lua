@@ -20,6 +20,7 @@ local FreeCamConfig = require(script.Parent:WaitForChild("FreeCamConfig"))
 local PlotCam2 = require(script.Parent:WaitForChild("PlotCam2"))
 local HideUiState = require(script.Parent:WaitForChild("HideUiState"))
 local InventoryState = require(script.Parent:WaitForChild("InventoryState"))
+local WaveSim = require(script.Parent:WaitForChild("WaveSim"))
 local UiIdleCycle = require(ReplicatedStorage:WaitForChild("OceanTD"):WaitForChild("Shared"):WaitForChild("UiIdleCycle"))
 
 local PlotCam2Tune = {}
@@ -67,6 +68,10 @@ local gui: ScreenGui? = nil
 local quickHolder: Frame? = nil
 local distMinusBtn: TextButton? = nil
 local distPlusBtn: TextButton? = nil
+local yawLeftBtn: TextButton? = nil
+local yawRightBtn: TextButton? = nil
+local ROT_WAVE = 10
+local rotUnlocked = false
 local zoomGlyphStop: (() -> ())? = nil
 local quickGrid: UIGridLayout? = nil
 local plotCamBtn: GuiObject? = nil
@@ -403,7 +408,14 @@ local function layoutQuickButtons()
 	local gap = QUICK_GAP / uiScale
 	local rowGap = QUICK_ROW_GAP / uiScale
 	local width = side * 2 + gap
-	local height = side * 2 + rowGap
+	local rows = if rotUnlocked then 2 else 1
+	local height = side * rows + (if rows > 1 then rowGap else 0)
+	if yawLeftBtn then
+		yawLeftBtn.Visible = rotUnlocked
+	end
+	if yawRightBtn then
+		yawRightBtn.Visible = rotUnlocked
+	end
 	holder.Size = UDim2.fromOffset(width, height)
 	holder.AnchorPoint = Vector2.new(0.5, 0)
 	-- Same parent as PlotCam — place just under its absolute bottom.
@@ -479,6 +491,10 @@ local function ensureQuickPad(): Frame?
 	end
 	wireQuick(yawLeft, "yawDeg", -YAW_STEP)
 	wireQuick(yawRight, "yawDeg", YAW_STEP)
+	yawLeftBtn = yawLeft
+	yawRightBtn = yawRight
+	yawLeft.Visible = rotUnlocked
+	yawRight.Visible = rotUnlocked
 	-- DistOff step scales with zoom: ~2% near max in, ~12% near max out.
 	offMinus.Activated:Connect(function()
 		local ok = PlotCam2.nudge("distOffset", PlotCam2.distOffsetZoomStep())
@@ -633,6 +649,32 @@ function PlotCam2Tune.setVisible(on: boolean)
 	syncQuickVisibility()
 end
 
+local function readLifetimeWave(): number
+	local attr = Players.LocalPlayer:GetAttribute(Constants.HIGHEST_WAVE_ATTR)
+	local high = if typeof(attr) == "number" then math.floor(attr) else 0
+	if WaveSim.isRunning() then
+		high = math.max(high, WaveSim.getWaveIndex())
+	end
+	return high
+end
+
+local function syncRotUnlock()
+	local nextOn = readLifetimeWave() >= ROT_WAVE
+	if nextOn == rotUnlocked then
+		return
+	end
+	rotUnlocked = nextOn
+	if yawLeftBtn then
+		yawLeftBtn.Visible = rotUnlocked
+	end
+	if yawRightBtn then
+		yawRightBtn.Visible = rotUnlocked
+	end
+	if quickHolder and quickHolder.Parent then
+		layoutQuickButtons()
+	end
+end
+
 playerGui:GetAttributeChangedSignal(FreeCamConfig.ATTR_CAROUSEL_COLLAPSED):Connect(function()
 	syncQuickVisibility()
 end)
@@ -642,6 +684,11 @@ playerGui:GetAttributeChangedSignal("OceanTD_StoreOpen"):Connect(syncQuickVisibi
 playerGui:GetAttributeChangedSignal("OceanTD_SkillsBubblesOpen"):Connect(syncQuickVisibility)
 playerGui:GetAttributeChangedSignal("OceanTD_ReefReportOpen"):Connect(syncQuickVisibility)
 playerGui:GetAttributeChangedSignal(Constants.HIDE_UI_ACTIVE_ATTR):Connect(syncQuickVisibility)
+Players.LocalPlayer:GetAttributeChangedSignal(Constants.HIGHEST_WAVE_ATTR):Connect(syncRotUnlock)
+WaveSim.onHud(function()
+	syncRotUnlock()
+end)
+syncRotUnlock()
 HideUiState.onChanged(syncQuickVisibility)
 InventoryState.onOpenChanged(function()
 	syncQuickVisibility()

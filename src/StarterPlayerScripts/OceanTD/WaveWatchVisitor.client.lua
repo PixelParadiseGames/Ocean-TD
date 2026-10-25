@@ -25,6 +25,8 @@ export type RosterEntry = {
 	size: Vector3,
 	ownerUserId: number,
 	ringCFrame: CFrame?,
+	stage8CFrame: CFrame?,
+	stage8Size: Vector3?,
 }
 
 local player = Players.LocalPlayer
@@ -34,8 +36,6 @@ local lastPushAtByPlot: { [string]: number } = {}
 local pendingKindByPlot: { [string]: string } = {}
 local standingPlotId: string? = nil
 local STALE_SEC = 8
--- Inflate footprint slightly so plot edges / spawn pads still count.
-local BOUNDS_PAD = 1.15
 
 local rosterRemote = Remotes.get("PlotRoster")
 local pushRemote = Remotes.get("WaveWatchPush")
@@ -63,6 +63,8 @@ local function applyRoster(payload: any)
 				size = entry.size,
 				ownerUserId = num(entry.ownerUserId, 0),
 				ringCFrame = if typeof(entry.ringCFrame) == "CFrame" then entry.ringCFrame else entry.cframe,
+				stage8CFrame = if typeof(entry.stage8CFrame) == "CFrame" then entry.stage8CFrame else nil,
+				stage8Size = if typeof(entry.stage8Size) == "Vector3" then entry.stage8Size else nil,
 			})
 		end
 	end
@@ -110,6 +112,10 @@ pushRemote.OnClientEvent:Connect(function(payload)
 		coralEpoch = num(payload.coralEpoch, 0),
 		kind = kind,
 		plotSizeStage = num(payload.plotSizeStage, 1),
+		seed = num(payload.seed, 0),
+		planT0 = num(payload.planT0, 0),
+		simClock = num(payload.simClock, 0),
+		visitBlob = if typeof(payload.visitBlob) == "string" then payload.visitBlob else "",
 	}
 	lastPushAtByPlot[plotId] = os.clock()
 	if kind == "coral" then
@@ -123,8 +129,16 @@ local function ownedPlotId(): string?
 end
 
 local function isInsidePadded(worldPos: Vector3, cf: CFrame, size: Vector3): boolean
-	local padded = Vector3.new(size.X * BOUNDS_PAD, size.Y, size.Z * BOUNDS_PAD)
+	local padded = Vector3.new(size.X * 1.02, size.Y, size.Z * 1.02)
 	return GridMath.isInsidePlotXZ(worldPos, cf, padded)
+end
+
+local function standBox(entry: RosterEntry): (CFrame, Vector3)
+	-- Stage 8 footprint, even when the host has not unlocked that plot size.
+	if entry.stage8CFrame and entry.stage8Size then
+		return entry.stage8CFrame, entry.stage8Size
+	end
+	return entry.cframe, entry.size
 end
 
 local function findStandingPlot(): RosterEntry?
@@ -140,7 +154,8 @@ local function findStandingPlot(): RosterEntry?
 	end
 	for _, entry in ipairs(roster) do
 		if entry.plotId ~= own and entry.ownerUserId > 0 then
-			if isInsidePadded(hrp.Position, entry.cframe, entry.size) then
+			local cf, size = standBox(entry)
+			if isInsidePadded(hrp.Position, cf, size) then
 				return entry
 			end
 		end
@@ -148,11 +163,14 @@ local function findStandingPlot(): RosterEntry?
 	-- Fallback: own ClientPlot bounds are known; for foreign plots use player attributes
 	-- only when roster has the plot but ownerUserId was 0 (stale) — refresh ownership from attrs.
 	for _, entry in ipairs(roster) do
-		if entry.plotId ~= own and isInsidePadded(hrp.Position, entry.cframe, entry.size) then
-			for _, plr in ipairs(Players:GetPlayers()) do
-				if plr ~= player and plr:GetAttribute(Constants.PLOT_ID_ATTR) == entry.plotId then
-					entry.ownerUserId = plr.UserId
-					return entry
+		if entry.plotId ~= own then
+			local cf, size = standBox(entry)
+			if isInsidePadded(hrp.Position, cf, size) then
+				for _, plr in ipairs(Players:GetPlayers()) do
+					if plr ~= player and plr:GetAttribute(Constants.PLOT_ID_ATTR) == entry.plotId then
+						entry.ownerUserId = plr.UserId
+						return entry
+					end
 				end
 			end
 		end

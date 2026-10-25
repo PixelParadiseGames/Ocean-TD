@@ -3371,7 +3371,7 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
 			return
 		end
 	end
-	-- Finish wave early: Enter, or gamepad R1 (bumper). R2 is camera zoom.
+	-- Finish wave early: Enter, or a tap of gamepad R1 (bumper). A short hold turns AUTO on.
 	if input.KeyCode == Enum.KeyCode.Return
 		or input.KeyCode == Enum.KeyCode.KeypadEnter
 	then
@@ -3384,9 +3384,10 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
 		and not RelocateController.isActive()
 		and not PlacementController.isActive()
 	then
-		if WaveSlot.tryFinishFromShortcut() then
-			return
+		if WaveSlot.armR1Hold then
+			WaveSlot.armR1Hold()
 		end
+		return
 	end
 	-- Save plots: V while backpack open (L3 is ContextAction — see L3_ACTION bind).
 	if input.KeyCode == Enum.KeyCode.V then
@@ -3591,6 +3592,15 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
 			return
 		end
 		toggleFromUser(false)
+	end
+end)
+
+UserInputService.InputEnded:Connect(function(input)
+	if input.KeyCode ~= Enum.KeyCode.ButtonR1 then
+		return
+	end
+	if WaveSlot.releaseR1 then
+		WaveSlot.releaseR1()
 	end
 end)
 

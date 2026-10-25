@@ -30,6 +30,7 @@ return {
 	SkillStages = require(oceanRoot:WaitForChild("Shared"):WaitForChild("SkillStages")),
 
 	PlacedCoralIndex = require(parent:WaitForChild("PlacedCoralIndex")),
+	InventoryState = require(parent:WaitForChild("InventoryState")),
 	WaveArrowPreview = require(parent:WaitForChild("WaveArrowPreview")),
 	WavePathLines = require(parent:WaitForChild("WavePathLines")),
 	SharkCam = require(parent:WaitForChild("SharkCam")),
@@ -41,6 +42,7 @@ return {
 	WaveStartVfx = require(parent:WaitForChild("WaveStartVfx")),
 	Wave1LeadArrow = require(parent:WaitForChild("Wave1LeadArrow")),
 	WaveFeedPayout = require(parent:WaitForChild("WaveFeedPayout")),
+	WaveVisitPlan = require(parent:WaitForChild("WaveVisitPlan")),
 	SkillPowerUpUI = require(parent:WaitForChild("SkillPowerUpUI")),
 	UrchinStingEffects = require(parent:WaitForChild("UrchinStingEffects")),
 	TutorialVo = require(parent:WaitForChild("TutorialVo")),

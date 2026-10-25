@@ -729,12 +729,31 @@ local ReloadTrialUI = (function()
 		return math.floor(hudTextSize() * 1.75 + 0.5)
 	end
 
-	-- Bottom-right corner, flush to the right edge.
+	-- Above the reef health bar, clear of the Wave:N ??? line. Bottom-right if the bar is not up.
+	local function dockRestPose(): (Vector2, UDim2, Enum.TextXAlignment)
+		local reef = playerGui:FindFirstChild("ReefProgress", true)
+		if reef and reef:IsA("GuiObject") and reef.AbsoluteSize.X > 8 then
+			local sg = reef:FindFirstAncestorOfClass("ScreenGui")
+			local top = reef.AbsolutePosition.Y
+			local midX = reef.AbsolutePosition.X + reef.AbsoluteSize.X * 0.5
+			if not sg or sg.IgnoreGuiInset ~= true then
+				local inset = GuiService:GetGuiInset()
+				top += inset.Y
+				midX += inset.X
+			end
+			local scale = UiPopupScale.getHud()
+			local y = top - (4 + 28 + 4) * scale
+			return Vector2.new(0.5, 1), UDim2.fromOffset(midX, y), Enum.TextXAlignment.Center
+		end
+		return Vector2.new(1, 1), UDim2.new(1, -4, 1, -10), Enum.TextXAlignment.Right
+	end
+
 	local function layoutHudRest(lab: TextLabel)
-		lab.AnchorPoint = Vector2.new(1, 1)
-		lab.Position = UDim2.new(1, -4, 1, -10)
+		local anchor, pos, align = dockRestPose()
+		lab.AnchorPoint = anchor
+		lab.Position = pos
 		lab.TextSize = hudTextSize()
-		lab.TextXAlignment = Enum.TextXAlignment.Right
+		lab.TextXAlignment = align
 		lab.TextYAlignment = Enum.TextYAlignment.Bottom
 	end
 
@@ -752,20 +771,18 @@ local ReloadTrialUI = (function()
 			st.dockTween = nil
 		end
 		st.introPhase = "tween"
-		-- Keep visual continuity: AP 1,1 at current bottom-right of the center label.
+		local anchor, pos, align = dockRestPose()
 		local absPos = lab.AbsolutePosition
 		local absSize = lab.AbsoluteSize
-		local brX = absPos.X + absSize.X
-		local brY = absPos.Y + absSize.Y
-		lab.AnchorPoint = Vector2.new(1, 1)
-		lab.Position = UDim2.fromOffset(brX, brY)
-		lab.TextXAlignment = Enum.TextXAlignment.Right
+		lab.AnchorPoint = anchor
+		lab.Position = UDim2.fromOffset(absPos.X + absSize.X * anchor.X, absPos.Y + absSize.Y * anchor.Y)
+		lab.TextXAlignment = align
 		lab.TextYAlignment = Enum.TextYAlignment.Bottom
 		local tw = TweenService:Create(
 			lab,
 			TweenInfo.new(DOCK_TWEEN_SEC, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
 			{
-				Position = UDim2.new(1, -4, 1, -10),
+				Position = pos,
 				TextSize = hudTextSize(),
 			}
 		)
@@ -4104,6 +4121,44 @@ local function unscaledCenter(gui: GuiObject): Vector2?
 	return Vector2.new(x + (0.5 - gui.AnchorPoint.X) * w, y + (0.5 - gui.AnchorPoint.Y) * h)
 end
 
+-- Close/back sits on the left HUD and was landing behind the $D total. Drop it just under that count.
+function SkillPowerUpUI.placeCloseBelowDollarCount()
+	if not popupOpen or not closeBtn or not closeBtn.Visible then
+		return
+	end
+	local left = playerGui:FindFirstChild("MobileLeftUI")
+	local count = left and left:FindFirstChild("$DCount", true)
+	if not count or not count:IsA("GuiObject") or not count.Visible then
+		return
+	end
+	if count.AbsoluteSize.Y < 2 or closeBtn.AbsoluteSize.Y < 2 then
+		return
+	end
+	local countLeft = count.AbsolutePosition.X
+	local countRight = countLeft + count.AbsoluteSize.X
+	local btnLeft = closeBtn.AbsolutePosition.X
+	local btnRight = btnLeft + closeBtn.AbsoluteSize.X
+	if btnRight <= countLeft or btnLeft >= countRight then
+		return
+	end
+	local gap = math.max(18, math.floor(count.AbsoluteSize.Y * 0.35 + 0.5))
+	local desiredTop = count.AbsolutePosition.Y + count.AbsoluteSize.Y + gap
+	if closeBtn.AbsolutePosition.Y >= desiredTop - 1 then
+		return
+	end
+	local parent = closeBtn.Parent
+	if not parent or not parent:IsA("GuiObject") then
+		return
+	end
+	local scale = UiPopupScale.ancestorScale(parent)
+	if scale < 0.001 then
+		scale = 1
+	end
+	local delta = (desiredTop - closeBtn.AbsolutePosition.Y) / scale
+	local pos = closeBtn.Position
+	closeBtn.Position = UDim2.new(pos.X.Scale, pos.X.Offset, pos.Y.Scale, pos.Y.Offset + delta)
+end
+
 -- Phone keeps the Studio layout. Larger screens pin the power-up circle to
 -- screen center (so it covers the Plot Size bubble) and grow it with the HUD.
 function layoutWidePowerUp()
@@ -4131,6 +4186,8 @@ function layoutWidePowerUp()
 				csc.Scale = 1
 			end
 		end
+		SkillPowerUpUI.placeCloseBelowDollarCount()
+		task.defer(SkillPowerUpUI.placeCloseBelowDollarCount)
 		return
 	end
 	local parent = template.Parent
@@ -4165,6 +4222,8 @@ function layoutWidePowerUp()
 		closeBtn.AnchorPoint = Vector2.new(0.5, 0.5)
 		closeBtn.Position = UDim2.fromOffset(cLocal.X, cLocal.Y)
 	end
+	SkillPowerUpUI.placeCloseBelowDollarCount()
+	task.defer(SkillPowerUpUI.placeCloseBelowDollarCount)
 end
 
 function SkillPowerUpUI.bind(mobileSkillsRoot: Instance)

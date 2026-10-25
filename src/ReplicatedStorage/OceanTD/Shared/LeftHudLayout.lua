@@ -141,7 +141,8 @@ function LeftHudLayout.revealSandDollarChrome(left: Instance)
 		table.insert(targets, dCount)
 	end
 	if dLabel then
-		table.insert(targets, dLabel)
+		-- Count sits by the store icon; the "$D" glyph beside it stays hidden.
+		dLabel.Visible = false
 	end
 	if row and row:IsA("GuiObject") then
 		table.insert(targets, row)

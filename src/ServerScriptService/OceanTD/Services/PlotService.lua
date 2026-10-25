@@ -340,6 +340,21 @@ function PlotService.isInsideOwnerPlot(player: Player, worldPos: Vector3): boole
 	return GridMath.isInsidePlotXZ(worldPos, slot.cframe, slot.size)
 end
 
+-- Stage box, even when the owner has not unlocked that plot size yet.
+function PlotService.isInsideStageBox(plotId: PlotId, worldPos: Vector3, stage: number): boolean
+	local slot = slotsById[plotId]
+	if not slot then
+		return false
+	end
+	local cf, size = PlotService.getStageWorldPose(slot, stage)
+	if not cf or not size then
+		cf = slot.cframe
+		size = slot.size
+	end
+	local padded = Vector3.new(size.X * 1.02, size.Y, size.Z * 1.02)
+	return GridMath.isInsidePlotXZ(worldPos, cf, padded)
+end
+
 function PlotService.getPlotOwner(plotId: PlotId): Player?
 	local slot = slotsById[plotId]
 	return if slot then slot.owner else nil
@@ -353,6 +368,8 @@ function PlotService.getRosterPayload(): {
 		ownerUserId: number,
 		previewUserId: number,
 		ringCFrame: CFrame,
+		stage8CFrame: CFrame,
+		stage8Size: Vector3,
 	}
 }
 	local out = {}
@@ -361,6 +378,7 @@ function PlotService.getRosterPayload(): {
 		local slot = slotsById[plotId]
 		if slot then
 			local previewId = previewUserByPlot[plotId]
+			local stage8Cf, stage8Size = PlotService.getStageWorldPose(slot, 8)
 			table.insert(out, {
 				plotId = plotId,
 				cframe = slot.cframe,
@@ -368,6 +386,8 @@ function PlotService.getRosterPayload(): {
 				ownerUserId = if slot.owner then slot.owner.UserId else 0,
 				previewUserId = if typeof(previewId) == "number" then previewId else 0,
 				ringCFrame = slot.ringCFrame,
+				stage8CFrame = stage8Cf or slot.cframe,
+				stage8Size = stage8Size or slot.size,
 			})
 		end
 	end

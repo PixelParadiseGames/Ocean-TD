@@ -25,6 +25,8 @@ local UiTheme = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiTheme")
 local SkillStages = require(oceanRoot:WaitForChild("Shared"):WaitForChild("SkillStages"))
 
 local WaveSim = require(script.Parent:WaitForChild("WaveSim"))
+local WaveGhostSim = require(script.Parent:WaitForChild("WaveGhostSim"))
+local WaveWatchMode = require(script.Parent:WaitForChild("WaveWatchMode"))
 local WaveSimConsts = require(script.Parent:WaitForChild("WaveSimConsts"))
 local SkillPowerUpUI = require(script.Parent:WaitForChild("SkillPowerUpUI"))
 local InventoryState = require(script.Parent:WaitForChild("InventoryState"))
@@ -784,7 +786,8 @@ local function flashScreenStatus(screenPos: Vector2, kind: "hit" | "fail", statu
 end
 
 local function tryFeedAtScreen(screenPos: Vector2, flashTip: boolean?, heldRepeat: boolean?): boolean
-	if not WaveSim.isRunning() then
+	local watching = WaveWatchMode.isWatching()
+	if not WaveSim.isRunning() and not watching then
 		return false
 	end
 	if InventoryState.isOpen() or PlacementController.isActive() or RelocateController.isActive() then
@@ -793,7 +796,9 @@ local function tryFeedAtScreen(screenPos: Vector2, flashTip: boolean?, heldRepea
 	if screenBlocked(screenPos) then
 		return false
 	end
-	local result = WaveSim.tryTapFeedAtScreen(screenPos)
+	local result = if watching
+		then WaveGhostSim.tryTapFeedAtScreen(screenPos)
+		else WaveSim.tryTapFeedAtScreen(screenPos)
 	local quietFail = heldRepeat == true and isFullAuto()
 	local function showResult(kind: "hit" | "fail", text: string)
 		if quietFail and kind == "fail" then

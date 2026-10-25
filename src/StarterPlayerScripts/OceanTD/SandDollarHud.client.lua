@@ -19,6 +19,7 @@ local LeftHudLayout = require(oceanRoot:WaitForChild("Shared"):WaitForChild("Lef
 local SandDollarProducts = require(oceanRoot:WaitForChild("Shared"):WaitForChild("SandDollarProducts"))
 local UiTheme = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiTheme"))
 local UiHaptics = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiHaptics"))
+local StoreUI = require(script.Parent:WaitForChild("StoreUI"))
 
 local ATTR = Constants.SAND_DOLLARS_ATTR
 local LABEL_NAME = Constants.SAND_DOLLARS_LABEL_NAME
@@ -85,7 +86,11 @@ local function applyText(amount: number)
 	end
 	textTarget.Text = formatCount(amount)
 	if amount > lastShown then
-		flashGain(amount - lastShown)
+		if player:GetAttribute("OceanTD_DollarQuietGain") == true then
+			player:SetAttribute("OceanTD_DollarQuietGain", nil)
+		else
+			flashGain(amount - lastShown)
+		end
 	end
 	lastShown = amount
 end
@@ -256,10 +261,17 @@ local function wireHost(obj: GuiObject)
 	end
 	applyText(readBalance())
 
+	local function openStore()
+		if shopGui then
+			closeShop()
+		end
+		StoreUI.init()
+		StoreUI.toggle()
+	end
 	if obj:IsA("GuiButton") then
-		if obj:GetAttribute("_OceanTD_DollarBound") ~= true then
-			obj:SetAttribute("_OceanTD_DollarBound", true)
-			obj.Activated:Connect(openShop)
+		if obj:GetAttribute("_OceanTD_DollarBound") ~= "store" then
+			obj:SetAttribute("_OceanTD_DollarBound", "store")
+			obj.Activated:Connect(openStore)
 		end
 	else
 		local existing = obj:FindFirstChild("_OceanTD_DollarHit")
@@ -274,7 +286,7 @@ local function wireHost(obj: GuiObject)
 		hit.Size = UDim2.fromScale(1, 1)
 		hit.ZIndex = obj.ZIndex + 5
 		hit.Parent = obj
-		hit.Activated:Connect(openShop)
+		hit.Activated:Connect(openStore)
 	end
 end
 

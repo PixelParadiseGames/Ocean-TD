@@ -1,8 +1,8 @@
 --!strict
 --[[
 	Wave-start callout:
-	1) Huge "Wave N" rises from bottom → center hold → flies down into the wave bar.
-	2) Critter emoji counts appear center-screen, then scale/fly into the wave bar.
+	1) Huge "Wave N" scales up from the Next button to top center, holds, then scales back down into that button.
+	2) Critter emoji counts are owned by the next-wave button reveal.
 ]]
 
 local Players = game:GetService("Players")
@@ -17,12 +17,11 @@ local UiTheme = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiTheme")
 local WaveStartVfx = {}
 
 local HOLD_SEC = 0.35
-local RISE_SEC = 0.45 -- bottom → center
-local FLY_SEC = 0.7 -- center → wave bar (bottom)
-local WHITE_SEC = 0.7 -- stay white this long after appear, then flip green
+local RISE_SEC = 0.45 -- Next button → top center
+local FLY_SEC = 0.7 -- top center → Next button
+local WAVE_BLUE = Color3.fromRGB(45, 145, 255)
 local CRITTER_HOLD_SEC = 1.55 -- center hold (+1s)
 local CRITTER_FLY_SEC = 1.15 -- smooth settle into wave bar
-local GREEN = Color3.fromRGB(40, 220, 90)
 local START_H_FRAC = 0.42 -- fraction of shorter viewport axis (height)
 local START_W_MULT = 2.6 -- width vs height for "Wave N"
 local CRITTER_H_FRAC = 0.16
@@ -321,51 +320,55 @@ function WaveStartVfx.play(wave: number, _startWorld: Vector3, critters: Critter
 		gui.Name = "OceanTD_WaveStart"
 		gui.ResetOnSpawn = false
 		gui.IgnoreGuiInset = true
-		gui.DisplayOrder = GUI_ORDER
+		gui.DisplayOrder = 4300
 		gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 		gui.Parent = pg
 		activeGui = gui
 
-		local bottomY = vp.Y + h * 0.55
-		local centerPos = Vector2.new(vp.X * 0.5, vp.Y * 0.5)
-		local startPos = Vector2.new(vp.X * 0.5, bottomY)
+		local function topCenter(vpSize: Vector2): Vector2
+			return Vector2.new(vpSize.X * 0.5, math.max(64, vpSize.Y * 0.16))
+		end
+		local function nextWaveOrigin(labelH: number): (Vector2, number)
+			local hud = findWaveHud(pg)
+			local btn = if hud then hud:FindFirstChild("NextWaveCircle", true) else nil
+			if btn and btn:IsA("GuiObject") and btn.AbsoluteSize.Y > 1 then
+				local s = math.clamp(btn.AbsoluteSize.Y / math.max(labelH, 1), 0.05, 0.55)
+				return overlayCenterOf(btn), s
+			end
+			local bar = findWaveBarTarget(pg)
+			if bar then
+				return bar, END_SCALE
+			end
+			local camNow = Workspace.CurrentCamera
+			local vpNow = if camNow then camNow.ViewportSize else vp
+			return Vector2.new(vpNow.X * 0.18, vpNow.Y * 0.86), END_SCALE
+		end
+		local centerPos = topCenter(vp)
+		local origin, startScale = nextWaveOrigin(h)
 
 		local label = Instance.new("TextLabel")
 		label.Name = "WaveLabel"
 		label.BackgroundTransparency = 1
 		label.AnchorPoint = Vector2.new(0.5, 0.5)
-		label.Position = UDim2.fromOffset(startPos.X, startPos.Y)
+		label.Position = UDim2.fromOffset(origin.X, origin.Y)
 		label.Size = UDim2.fromOffset(w, h)
 		label.Font = UiTheme.Font
-		label.Text = "Wave " .. tostring(math.max(1, math.floor(wave)))
-		label.TextColor3 = Color3.new(1, 1, 1)
+		label.Text = "🌊 Wave " .. tostring(math.max(1, math.floor(wave)))
+		label.TextColor3 = WAVE_BLUE
 		label.TextTransparency = 0
 		label.TextScaled = true
 		label.ZIndex = 10
 		label.Parent = gui
 
 		local stroke = Instance.new("UIStroke")
-		stroke.Color = Color3.new(0, 0, 0)
-		stroke.Thickness = 4
-		stroke.Transparency = 0.35
+		stroke.Color = Color3.new(1, 1, 1)
+		stroke.Thickness = 10
+		stroke.Transparency = 0
 		stroke.Parent = label
 
 		local scale = Instance.new("UIScale")
-		scale.Scale = 1
+		scale.Scale = startScale
 		scale.Parent = label
-
-		local appearedAt = os.clock()
-		local flippedGreen = false
-
-		local function tickColor()
-			if flippedGreen then
-				return
-			end
-			if os.clock() - appearedAt >= WHITE_SEC then
-				flippedGreen = true
-				label.TextColor3 = GREEN
-			end
-		end
 
 		local function easeInOut(u: number): number
 			return if u < 0.5
@@ -373,29 +376,31 @@ function WaveStartVfx.play(wave: number, _startWorld: Vector3, critters: Critter
 				else 1 - ((-2 * u + 2) ^ 5) / 2
 		end
 
-		-- Rise from bottom → center.
+		-- Scale up from the Next button to top center.
+		local fromPos = origin
+		local fromScale = startScale
 		local tRise = os.clock()
 		while os.clock() - tRise < RISE_SEC do
 			if my ~= token or not label.Parent then
 				return
 			end
-			tickColor()
 			local camNow = Workspace.CurrentCamera
 			if camNow then
 				local vpNow = camNow.ViewportSize
 				local hNow = math.max(70, math.min(vpNow.X, vpNow.Y) * START_H_FRAC)
 				local wNow = math.min(vpNow.X * 0.92, hNow * START_W_MULT)
 				label.Size = UDim2.fromOffset(wNow, hNow)
-				centerPos = Vector2.new(vpNow.X * 0.5, vpNow.Y * 0.5)
-				startPos = Vector2.new(vpNow.X * 0.5, vpNow.Y + hNow * 0.55)
+				centerPos = topCenter(vpNow)
 			end
 			local u = math.clamp((os.clock() - tRise) / RISE_SEC, 0, 1)
 			local a = easeInOut(u)
-			local x = startPos.X + (centerPos.X - startPos.X) * a
-			local y = startPos.Y + (centerPos.Y - startPos.Y) * a
+			local x = fromPos.X + (centerPos.X - fromPos.X) * a
+			local y = fromPos.Y + (centerPos.Y - fromPos.Y) * a
 			label.Position = UDim2.fromOffset(x, y)
+			scale.Scale = fromScale + (1 - fromScale) * a
 			RunService.RenderStepped:Wait()
 		end
+		scale.Scale = 1
 		label.Position = UDim2.fromOffset(centerPos.X, centerPos.Y)
 
 		-- Hold at center.
@@ -404,11 +409,10 @@ function WaveStartVfx.play(wave: number, _startWorld: Vector3, critters: Critter
 			if my ~= token or not label.Parent then
 				return
 			end
-			tickColor()
 			local camHold = Workspace.CurrentCamera
 			if camHold then
 				local vpHold = camHold.ViewportSize
-				centerPos = Vector2.new(vpHold.X * 0.5, vpHold.Y * 0.5)
+				centerPos = topCenter(vpHold)
 				label.Position = UDim2.fromOffset(centerPos.X, centerPos.Y)
 			end
 			RunService.RenderStepped:Wait()
@@ -417,32 +421,30 @@ function WaveStartVfx.play(wave: number, _startWorld: Vector3, critters: Critter
 			return
 		end
 
-		-- Drop down to wave bar / bottom of screen.
+		-- Scale back down into the Next button.
 		local from = centerPos
-		local lockedTarget = findWaveBarTarget(pg) or Vector2.new(vp.X * 0.5, vp.Y * 0.92)
 		local t0 = os.clock()
 		while os.clock() - t0 < FLY_SEC do
 			if my ~= token or not label.Parent then
 				return
 			end
-			tickColor()
 			local camNow = Workspace.CurrentCamera
 			if not camNow then
 				break
 			end
 			local vpNow = camNow.ViewportSize
-			local u = math.clamp((os.clock() - t0) / FLY_SEC, 0, 1)
-			local a = easeInOut(u)
-			lockedTarget = findWaveBarTarget(pg) or lockedTarget
-			local x = from.X + (lockedTarget.X - from.X) * a
-			local y = from.Y + (lockedTarget.Y - from.Y) * a
-			label.Position = UDim2.fromOffset(x, y)
-			scale.Scale = 1 + (END_SCALE - 1) * a
-			label.TextTransparency = a * 0.85
-			stroke.Transparency = 0.35 + 0.65 * a
 			local hNow = math.max(70, math.min(vpNow.X, vpNow.Y) * START_H_FRAC)
 			local wNow = math.min(vpNow.X * 0.92, hNow * START_W_MULT)
 			label.Size = UDim2.fromOffset(wNow, hNow)
+			local dest, destScale = nextWaveOrigin(hNow)
+			local u = math.clamp((os.clock() - t0) / FLY_SEC, 0, 1)
+			local a = easeInOut(u)
+			local x = from.X + (dest.X - from.X) * a
+			local y = from.Y + (dest.Y - from.Y) * a
+			label.Position = UDim2.fromOffset(x, y)
+			scale.Scale = 1 + (destScale - 1) * a
+			label.TextTransparency = a * 0.85
+			stroke.Transparency = 0.35 + 0.65 * a
 			RunService.RenderStepped:Wait()
 		end
 
@@ -453,12 +455,8 @@ function WaveStartVfx.play(wave: number, _startWorld: Vector3, critters: Critter
 			gui:Destroy()
 		end
 
-		if my ~= token then
-			return
-		end
-		if critters and (critters.fish > 0 or (critters.crabs or 0) > 0 or (critters.urchins or 0) > 0 or (critters.sharks or 0) > 0) then
-			playCritterIntro(my, pg, critters)
-		elseif pg.Parent then
+		-- The next-wave button reveal owns the critter counts now.
+		if pg.Parent then
 			pg:SetAttribute(CRITTER_BUSY_ATTR, false)
 		end
 	end)

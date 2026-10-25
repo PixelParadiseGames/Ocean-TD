@@ -24,6 +24,10 @@ export type WatchSnap = {
 	coralEpoch: number?,
 	kind: string?,
 	plotSizeStage: number?,
+	seed: number?,
+	planT0: number?,
+	simClock: number?,
+	visitBlob: string?,
 }
 
 local WaveWatchMode = {}

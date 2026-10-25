@@ -32,7 +32,7 @@ local C = {
 	TARGET_RANGE = TARGET_RANGE,
 	TARGET_RANGE_SQ = TARGET_RANGE * TARGET_RANGE,
 	-- Path-bucket targeting: corals only see fish in an arrival window along the route.
-	PATH_BUCKET_SIZE = 10, -- studs of path length per bucket
+	PATH_BUCKET_SIZE = 30, -- studs of path length per bucket
 	PATH_TARGET_LEAD_MAX = FISH_SPEED * FOOD_RISE_MAX + 12, -- fish this far before coral
 	PATH_TARGET_PAST = 32, -- was 8; fish that slip past still get fed
 	PATH_PROJECT_STEP = 4, -- studs between samples when projecting coral→path
@@ -44,8 +44,8 @@ local C = {
 	-- Prefer corals near the hungry fish front; rotate within the near-front pool for fairness.
 	COMBAT_FIRE_BUDGET = 96,
 	-- Feed mode: "volleys" | "lane_stock" | "path_fields"
-	-- lane_stock = Option 2 contested path capacity (perf + lane pressure).
-	FEED_MODE = "lane_stock",
+	-- path_fields = one shared serving per reload, spread along the covered path.
+	FEED_MODE = "path_fields",
 	-- Wave-start nest food: wait, then spawn orbs randomly across this window (avoids one-frame hitch).
 	AMMO_ARM_DELAY_SEC = 2,
 	AMMO_ARM_SPREAD_SEC = 3,
@@ -181,8 +181,8 @@ local C = {
 	TANG_YAW = math.rad(-90),
 	TANG_PITCH = 0,
 	TANG_ROLL = 0,
-	-- After wave 20: random 20–40% of Tang use WaveRoute.A2 instead of A.
-	FISH_A2_AFTER_WAVE = 20,
+	-- After wave 10: random 20–40% of Tang use WaveRoute.A2 instead of A.
+	FISH_A2_AFTER_WAVE = 10,
 	FISH_A2_FRAC_MIN = 0.20,
 	FISH_A2_FRAC_MAX = 0.40,
 	FISH_ROUTE_A2_NAME = "A2",

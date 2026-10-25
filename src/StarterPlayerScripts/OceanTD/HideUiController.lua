@@ -30,6 +30,8 @@ local WaveSim = require(script.Parent:WaitForChild("WaveSim"))
 
 local HideUiController = {}
 
+local EYE_UNLOCK_WAVE = 20
+local syncEyeUnlock: () -> ()
 local STUDIO_ANCHOR_NAME = "HideUI"
 local CONFIRM_GUI_NAME = "OceanTD_HideUiConfirm"
 local EYE_GLYPH_NAME = "_OceanTD_HideUiEye"
@@ -1269,14 +1271,56 @@ local function wireStudioHideUiButton(leftOpt: Instance?)
 	hideHitBtn = hit
 	refreshButtonVisual()
 	wireHideHover(hit)
+	syncEyeUnlock()
 	if not hit:GetAttribute("_OceanTD_HideUiWired") then
 		hit:SetAttribute("_OceanTD_HideUiWired", true)
 		hit.Activated:Connect(onHideUiPressed)
 	end
 end
 
+-- Account lifetime high (OceanTD_HighestWave), plus the live wave so it opens the moment they hit 20.
+local function lifetimeWave(): number
+	local attr = player:GetAttribute(Constants.HIGHEST_WAVE_ATTR)
+	local high = if typeof(attr) == "number" then math.floor(attr) else 0
+	if WaveSim.isRunning() then
+		high = math.max(high, WaveSim.getWaveIndex())
+	end
+	return high
+end
+
+local eyeUnlockShown = false
+
+function syncEyeUnlock()
+	if not hideAnchor then
+		return
+	end
+	local on = lifetimeWave() >= EYE_UNLOCK_WAVE
+	if not on then
+		hideAnchor.Visible = false
+		if hideHitBtn then
+			hideHitBtn.Visible = false
+		end
+		eyeUnlockShown = false
+		return
+	end
+	if eyeUnlockShown then
+		return
+	end
+	eyeUnlockShown = true
+	if not InventoryState.isOpen() then
+		hideAnchor.Visible = true
+		if hideHitBtn then
+			hideHitBtn.Visible = true
+		end
+	end
+end
+
 function HideUiController.init()
 	LeftHudLayout.watchMobileLeftUi(playerGui, wireStudioHideUiButton)
+	player:GetAttributeChangedSignal(Constants.HIGHEST_WAVE_ATTR):Connect(syncEyeUnlock)
+	WaveSim.onHud(function()
+		syncEyeUnlock()
+	end)
 	local lastUnlocked = HideUiState.isUnlocked()
 	HideUiState.onChanged(function()
 		if not HideUiState.isUnlocked() and HideUiState.isActive() then
@@ -1289,8 +1333,15 @@ function HideUiController.init()
 		end
 		refreshPickDebugStroke()
 	end)
-	InventoryState.onOpenChanged(function()
+	InventoryState.onOpenChanged(function(isOpen: boolean)
 		refreshPickDebugStroke()
+		if not isOpen and lifetimeWave() >= EYE_UNLOCK_WAVE and hideAnchor then
+			hideAnchor.Visible = true
+			if hideHitBtn then
+				hideHitBtn.Visible = true
+			end
+			eyeUnlockShown = true
+		end
 	end)
 	playerGui.ChildAdded:Connect(function(ch)
 		if not HideUiState.isActive() or animBusy then

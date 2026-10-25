@@ -13,10 +13,12 @@ local Remotes = require(oceanRoot:WaitForChild("Remotes"))
 
 local ClientPlot = require(script.Parent:WaitForChild("ClientPlot"))
 local WaveSim = require(script.Parent:WaitForChild("WaveSim"))
+local WaveGhostSim = require(script.Parent:WaitForChild("WaveGhostSim"))
 local SkillPowerUpUI = require(script.Parent:WaitForChild("SkillPowerUpUI"))
 
 local player = Players.LocalPlayer
 local pushRemote = Remotes.get("WaveWatchPush")
+local feedRemote = Remotes.get("WaveVisitFeed")
 
 local HEARTBEAT_SEC = 2
 local lastHbAt = 0
@@ -41,6 +43,7 @@ local function buildPayload(kind: string): any?
 		return nil
 	end
 	local snap = WaveSim.getHudSnapshot()
+	local sync = WaveSim.getVisitSync()
 	return {
 		kind = kind,
 		plotId = plotId,
@@ -62,6 +65,10 @@ local function buildPayload(kind: string): any?
 		hungryMissToken = snap.hungryMissToken,
 		coralEpoch = coralEpoch,
 		plotSizeStage = SkillPowerUpUI.getStage("PlotSize"),
+		seed = sync.seed,
+		planT0 = sync.planT0,
+		simClock = sync.simClock,
+		visitBlob = sync.blob,
 	}
 end
 
@@ -183,3 +190,19 @@ RunService.Heartbeat:Connect(function(dt)
 end)
 
 print("[WAVEWATCH] Host broadcaster ready")
+
+feedRemote.OnClientEvent:Connect(function(payload)
+	if typeof(payload) ~= "table" then
+		return
+	end
+	local plotId = payload.plotId
+	local fishId = tonumber(payload.fishId)
+	if typeof(plotId) ~= "string" or not fishId then
+		return
+	end
+	if plotId == ownedPlotId() then
+		WaveSim.applyVisitorTap(fishId)
+	else
+		WaveGhostSim.noteVisitorFeed(plotId, fishId)
+	end
+end)

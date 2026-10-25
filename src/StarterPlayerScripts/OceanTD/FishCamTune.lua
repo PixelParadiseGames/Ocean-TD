@@ -19,6 +19,7 @@ local Constants = require(ReplicatedStorage:WaitForChild("OceanTD"):WaitForChild
 local FreeCamConfig = require(script.Parent:WaitForChild("FreeCamConfig"))
 local HideUiState = require(script.Parent:WaitForChild("HideUiState"))
 local InventoryState = require(script.Parent:WaitForChild("InventoryState"))
+local WaveSim = require(script.Parent:WaitForChild("WaveSim"))
 local UiIdleCycle = require(ReplicatedStorage:WaitForChild("OceanTD"):WaitForChild("Shared"):WaitForChild("UiIdleCycle"))
 
 local FishCamTune = {}
@@ -35,6 +36,8 @@ local DEBUG_GUI_NAME = "OceanTD_FishCamDebug"
 local QUICK_SCALE = 0.52 * 1.15 -- +15% vs cam icon
 local QUICK_GAP = 6
 local QUICK_ROW_GAP = 6
+local FISH_QUICK_WAVE = 30
+local fishQuickUnlocked = false
 local BTN_BLACK = Color3.new(0, 0, 0)
 local BTN_GREEN = Color3.fromRGB(40, 220, 90)
 local BTN_POV_GREEN = Color3.fromRGB(28, 150, 68) -- slightly darker than pad green
@@ -657,8 +660,26 @@ local function syncQuickVisibility()
 		setQuickVisible(false)
 		return
 	end
-	setQuickVisible(visible and carouselCollapsedReady() and not hudBlocksQuick())
+	setQuickVisible(visible and fishQuickUnlocked and carouselCollapsedReady() and not hudBlocksQuick())
 	syncZoomGlyphs()
+end
+
+local function readLifetimeWave(): number
+	local attr = Players.LocalPlayer:GetAttribute(Constants.HIGHEST_WAVE_ATTR)
+	local high = if typeof(attr) == "number" then math.floor(attr) else 0
+	if WaveSim.isRunning() then
+		high = math.max(high, WaveSim.getWaveIndex())
+	end
+	return high
+end
+
+local function syncFishQuickUnlock()
+	local nextOn = readLifetimeWave() >= FISH_QUICK_WAVE
+	if nextOn == fishQuickUnlocked then
+		return
+	end
+	fishQuickUnlocked = nextOn
+	syncQuickVisibility()
 end
 
 function FishCamTune.setVisible(on: boolean)
@@ -678,6 +699,11 @@ end
 
 playerGui:GetAttributeChangedSignal(FreeCamConfig.ATTR_CAROUSEL_COLLAPSED):Connect(syncQuickVisibility)
 playerGui:GetAttributeChangedSignal(FreeCamConfig.ATTR_MODE):Connect(syncQuickVisibility)
+Players.LocalPlayer:GetAttributeChangedSignal(Constants.HIGHEST_WAVE_ATTR):Connect(syncFishQuickUnlock)
+WaveSim.onHud(function()
+	syncFishQuickUnlock()
+end)
+syncFishQuickUnlock()
 playerGui:GetAttributeChangedSignal("OceanTD_StoreOpen"):Connect(syncQuickVisibility)
 playerGui:GetAttributeChangedSignal("OceanTD_SkillsBubblesOpen"):Connect(syncQuickVisibility)
 playerGui:GetAttributeChangedSignal("OceanTD_ReefReportOpen"):Connect(syncQuickVisibility)

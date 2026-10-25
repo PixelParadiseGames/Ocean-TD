@@ -1,8 +1,9 @@
 --!strict
 --[[
 	Visitor spectate sim on a foreign plot.
-	Look/feel matches solo WaveSim (Tang, hunger bars, green arrows, Wave N, stagger)
-	but food is progress-driven pops (no targeting). Sparse host sync keeps it honest.
+	When the host sends a wave seed, fish distances come from that shared clock.
+	Food orbs are local. Hunger is corrected from the host's small state blob.
+	This sim does not scan coral.
 ]]
 
 local ContentProvider = game:GetService("ContentProvider")
@@ -26,6 +27,9 @@ local WaveShark = require(script.Parent:WaitForChild("WaveShark"))
 local WaveEndVfx = require(script.Parent:WaitForChild("WaveEndVfx"))
 local WaveStartVfx = require(script.Parent:WaitForChild("WaveStartVfx"))
 local C = require(script.Parent:WaitForChild("WaveSimConsts"))
+local WaveVisitPlan = require(script.Parent:WaitForChild("WaveVisitPlan"))
+local SkillPowerUpUI = require(script.Parent:WaitForChild("SkillPowerUpUI"))
+local Remotes = require(oceanRoot:WaitForChild("Remotes"))
 local UiPopupScale = require(oceanRoot:WaitForChild("Shared"):WaitForChild("UiPopupScale"))
 local WaveWatchMode = require(script.Parent:WaitForChild("WaveWatchMode"))
 
@@ -85,6 +89,10 @@ type GhostFish = {
 	stunSkullPart: BasePart?,
 	crabSprint: any?,
 	swayPhase: number?,
+	spawnClock: number?,
+	distBias: number?,
+	hungerHoldUntil: number?,
+	visitSlot: number?,
 }
 
 type ArrowPreview = { model: Instance, dist: number, spin: number, alive: boolean, path: any? }
@@ -118,6 +126,12 @@ local lastCoralEpoch = -1
 local fading = false
 local rng = Random.new()
 local simClock = 0
+local visitSync = false
+local visitSeed = 0
+local visitWave = -1
+local visitClockReady = false
+local lastVisitTap = 0
+local feedRemote = Remotes.get("WaveVisitFeed")
 local nextFishId = 1
 local greenArrowsTemplate: Instance? = nil
 local coralCache: { Vector3 } = {}
@@ -1433,12 +1447,174 @@ local function updateLod()
 	end
 end
 
+local function placeVisitAgent(agent: GhostFish, spec: WaveVisitPlan.Spec)
+	agent.id = spec.slot
+	agent.visitSlot = spec.slot
+	agent.spawnClock = spec.spawnAt
+	agent.distBias = 0
+	agent.lateral = spec.lateral
+	agent.vert = spec.vert
+	agent.bobAmp = spec.bobAmp
+	agent.bobFreq = spec.bobFreq
+	agent.bobPhase = spec.bobPhase
+	agent.wanderAmp = spec.wanderAmp
+	agent.wanderFreq = spec.wanderFreq
+	agent.wanderPhase = spec.wanderPhase
+	agent.speedPhase = spec.speedPhase
+	agent.speedFreq = spec.speedFreq
+	if agent.isShark then
+		agent.swayPhase = spec.bobPhase
+	end
+	agent.dist = WaveVisitPlan.closedDist(agent, simClock)
+end
+
+local function repositionVisit(agent: GhostFish)
+	if agent.isShark and pathDataShark then
+		local pos, tang = WaveShark.sample(pathDataShark, agent.dist)
+		setFishCFrame(agent, pos, tang, 1)
+		return
+	end
+	if isGroundCritter(agent) and agent.groundPath then
+		local pos, tang = WaveCrab.sample(agent.groundPath, agent.dist)
+		local world = fishWorldOffset(agent, pos, tang)
+		if agent.isUrchin then
+			world = WaveUrchin.worldOnGround(world, agent.lastWorld.Y, 1)
+		else
+			world = WaveCrab.worldOnGround(world, agent.lastWorld.Y, 1)
+		end
+		setFishCFrame(agent, world, tang, 1)
+		return
+	end
+	local path = agent.swimPath or pathData
+	if not path then
+		return
+	end
+	local pos, tang = samplePath(path, agent.dist)
+	setFishCFrame(agent, fishWorldOffset(agent, pos, tang), tang, 1)
+end
+
+local function spawnVisit(spec: WaveVisitPlan.Spec)
+	local agent: GhostFish? = nil
+	if spec.kind == "tang" then
+		local path = if spec.route == 2 then pathDataA2 else pathData
+		if not path then
+			return
+		end
+		if WaveVisitPlan.closedDist({ spawnClock = spec.spawnAt, speedFreq = spec.speedFreq, speedPhase = spec.speedPhase, isShark = false, isCrab = false, isUrchin = false }, simClock) >= path.totalLen then
+			return
+		end
+		nextFishId = spec.slot
+		agent = spawnFishAt(path, 0, waveIndex, 0)
+	elseif spec.kind == "crab" then
+		local path = if spec.route == 5 then pathDataGroundB else pathDataGroundA
+		if not path then
+			return
+		end
+		nextFishId = spec.slot
+		agent = spawnCrabAt(path, 0, waveIndex, 0)
+	elseif spec.kind == "urchin" then
+		local path = if spec.route == 5 then pathDataGroundB else pathDataGroundA
+		if not path then
+			return
+		end
+		nextFishId = spec.slot
+		agent = spawnUrchinAt(path, 0, waveIndex, 0)
+	elseif spec.kind == "shark" and pathDataShark then
+		if WaveShark.speed() * math.max(0, simClock - spec.spawnAt) >= pathDataShark.totalLen then
+			return
+		end
+		nextFishId = spec.slot
+		agent = spawnSharkAt(pathDataShark, 0, waveIndex, 0)
+	end
+	if not agent then
+		return
+	end
+	placeVisitAgent(agent, spec)
+	if agent.dist >= 0 then
+		repositionVisit(agent)
+	end
+end
+
+local function applyVisitBlob(blob: string?)
+	if typeof(blob) ~= "string" or blob == "" then
+		return
+	end
+	local now = os.clock()
+	for _, agent in ipairs(fishList) do
+		local slot = agent.visitSlot
+		if not slot then
+			continue
+		end
+		local hungerByte, hostDist = WaveVisitPlan.readSlot(blob, slot)
+		if hungerByte == nil or hostDist == nil or hungerByte == 0 then
+			continue
+		end
+		if hungerByte == 254 then
+			if not agent.finished then
+				agent.finished = true
+				local kind = if agent.isShark
+					then WaveEntityPool.FISH_SHARK
+					elseif agent.isCrab then WaveEntityPool.FISH_CRAB
+					elseif agent.isUrchin then WaveEntityPool.FISH_URCHIN
+					else WaveEntityPool.FISH_TANG
+				WaveEntityPool.releaseFish(kind, agent.model)
+			end
+			continue
+		end
+		local nextHunger = if hungerByte >= 255
+			then agent.maxHunger
+			else ((hungerByte - 1) / 251) * agent.maxHunger
+		local hold = agent.hungerHoldUntil or 0
+		if now > hold or nextHunger >= agent.hunger then
+			agent.hunger = nextHunger
+		end
+		local closed = WaveVisitPlan.closedDist(agent, simClock)
+		agent.distBias = hostDist - closed
+		refreshHungerVisual(agent)
+	end
+end
+
+local function lobVisitFood(target: GhostFish)
+	local folderNow = ensureFolder()
+	local part = Instance.new("Part")
+	part.Name = "VisitFood"
+	part.Shape = Enum.PartType.Ball
+	part.Size = Vector3.new(1.15, 1.15, 1.15)
+	part.Anchored = true
+	part.CanCollide = false
+	part.CanQuery = false
+	part.CanTouch = false
+	part.Material = Enum.Material.Neon
+	part.Color = Color3.fromRGB(255, 214, 80)
+	local start = target.root.Position + Vector3.new(0, 8, 0)
+	part.CFrame = CFrame.new(start)
+	part.Parent = folderNow
+	local tw = TweenService:Create(part, TweenInfo.new(0.35, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+		Position = target.root.Position,
+	})
+	tw:Play()
+	tw.Completed:Connect(function()
+		part:Destroy()
+	end)
+end
+
+local function noteVisitClock(hostClock: number)
+	if not visitClockReady then
+		simClock = hostClock
+		visitClockReady = true
+		return
+	end
+	if math.abs(simClock - hostClock) > 0.35 then
+		simClock = hostClock
+	end
+end
+
 local function tick(dt: number)
 	if fading or not pathData then
 		return
 	end
 	updateLod()
-	if lodFar then
+	if lodFar and not visitSync then
 		lodTickSkip = not lodTickSkip
 		if lodTickSkip then
 			return
@@ -1447,10 +1623,15 @@ local function tick(dt: number)
 	end
 
 	local simDt = dt * speedMult
-	simClock += simDt
+	if speedMult > 1e-6 then
+		simClock += simDt
+	end
+	if visitSync then
+		WaveVisitPlan.drain("ghost", simClock, spawnVisit)
+	end
 	tickArrowPreview(simDt)
 
-	if urchinSpawnQueue > 0 and WaveCrab.anyGroundPath(pathDataGroundA, pathDataGroundB) then
+	if not visitSync and urchinSpawnQueue > 0 and WaveCrab.anyGroundPath(pathDataGroundA, pathDataGroundB) then
 		urchinSpawnDelay -= simDt
 		if urchinSpawnDelay <= 0 then
 			local g = WaveCrab.pickGroundPath(pathDataGroundA, pathDataGroundB, rng)
@@ -1464,7 +1645,7 @@ local function tick(dt: number)
 		end
 	end
 
-	if waveSpawning and spawnQueue > 0 and pathData then
+	if not visitSync and waveSpawning and spawnQueue > 0 and pathData then
 		spawnDelay -= simDt
 		if spawnDelay <= 0 then
 			local first = spawnQueue == waveFishExpected
@@ -1488,7 +1669,7 @@ local function tick(dt: number)
 		end
 	end
 
-	if crabSpawnQueue > 0 and WaveCrab.anyGroundPath(pathDataGroundA, pathDataGroundB) then
+	if not visitSync and crabSpawnQueue > 0 and WaveCrab.anyGroundPath(pathDataGroundA, pathDataGroundB) then
 		crabSpawnDelay -= simDt
 		if crabSpawnDelay <= 0 then
 			local g = WaveCrab.pickGroundPath(pathDataGroundA, pathDataGroundB, rng)
@@ -1507,13 +1688,19 @@ local function tick(dt: number)
 		if agent.finished then
 			continue
 		end
+		if visitSync and agent.spawnClock then
+			local closed = WaveVisitPlan.closedDist(agent, simClock)
+			agent.dist = math.max(0, closed + (agent.distBias or 0))
+		end
 		if agent.isShark then
 			if not sharkPath then
 				agent.finished = true
 				WaveEntityPool.releaseFish(WaveEntityPool.FISH_SHARK, agent.model)
 				continue
 			end
-			agent.dist += WaveShark.speed() * simDt
+			if not (visitSync and agent.spawnClock) then
+				agent.dist += WaveShark.speed() * simDt
+			end
 			if agent.dist >= sharkPath.totalLen then
 				agent.finished = true
 				WaveEntityPool.releaseFish(WaveEntityPool.FISH_SHARK, agent.model)
@@ -1564,19 +1751,27 @@ local function tick(dt: number)
 				agent.pauseUntil = nil
 				if isCrab then
 					local sprint = agent.crabSprint
-					if sprint then
+					if sprint and not visitSync then
 						WaveCrab.tickSprint(sprint, simClock)
 					end
-					agent.dist += WaveCrab.speedNow(sprint, simClock) * simDt
-				else
+					if not (visitSync and agent.spawnClock) then
+						agent.dist += WaveCrab.speedNow(sprint, simClock) * simDt
+					end
+				elseif not (visitSync and agent.spawnClock) then
 					agent.dist += WaveUrchin.speedNow() * agent.speedPhase * simDt
 				end
 			end
 			if agent.dist >= ground.totalLen then
 				releaseGroundCritter(agent)
 			else
-				local pos, tang = WaveCrab.sample(ground, agent.dist)
-				local swimTang = stepSwimTang(agent, tang, simDt)
+			local pos, tang = WaveCrab.sample(ground, agent.dist)
+			if visitSync then
+				local side = Vector3.new(-tang.Z, 0, tang.X)
+				if side.Magnitude > 1e-4 then
+					pos = pos + side.Unit * agent.lateral
+				end
+			end
+			local swimTang = stepSwimTang(agent, tang, simDt)
 				pos = WaveCrab.worldOnGround(pos, agent.lastWorld.Y, simDt)
 				if paused then
 					WaveCrab.applyFightPose(
@@ -1595,7 +1790,7 @@ local function tick(dt: number)
 				else
 					setFishCFrame(agent, pos, swimTang, simDt)
 				end
-				if agent.hunger < agent.maxHunger and not paused then
+				if agent.hunger < agent.maxHunger and not paused and not visitSync then
 					local shell = agent.shellHitbox or agent.root
 					if shell then
 						if coralDirty or coralCachePlot ~= activePlotId then
@@ -1647,7 +1842,9 @@ local function tick(dt: number)
 			continue
 		end
 		local surge = 1 + C.FISH_SPEED_VAR * math.sin(simClock * agent.speedFreq + agent.speedPhase)
-		agent.dist += C.FISH_SPEED * surge * simDt
+		if not (visitSync and agent.spawnClock) then
+			agent.dist += C.FISH_SPEED * surge * simDt
+		end
 		if agent.dist >= path.totalLen then
 			agent.finished = true
 			WaveEntityPool.releaseFish(WaveEntityPool.FISH_TANG, agent.model)
@@ -1702,6 +1899,11 @@ local function hardClear()
 	urchinSpawnDelay = 0
 	startedThisWave = false
 	waveIndex = 0
+	visitSync = false
+	visitSeed = 0
+	visitWave = -1
+	visitClockReady = false
+	WaveVisitPlan.clear("ghost")
 end
 
 function WaveGhostSim.stop(fade: boolean?)
@@ -1731,6 +1933,11 @@ function WaveGhostSim.stop(fade: boolean?)
 	urchinSpawnQueue = 0
 	urchinSpawnDelay = 0
 	startedThisWave = false
+	visitSync = false
+	visitSeed = 0
+	visitWave = -1
+	visitClockReady = false
+	WaveVisitPlan.clear("ghost")
 	restoreGhostStunned(false)
 	if plotId then
 		WaveEndVfx.clearRouteEnd(plotId)
@@ -1773,6 +1980,39 @@ function WaveGhostSim.markCoralDirty()
 	coralDirty = true
 end
 
+local function adoptVisit(snap: WaveWatchMode.WatchSnap)
+	visitSync = true
+	speedMult = snap.speedMult
+	waveIndex = snap.wave
+	local seed = snap.seed or 0
+	local restarted = seed ~= visitSeed or snap.wave ~= visitWave
+	if restarted then
+		clearFish()
+		visitSeed = seed
+		visitWave = snap.wave
+		visitClockReady = false
+		WaveVisitPlan.begin("ghost", {
+			seed = seed,
+			wave = snap.wave,
+			t0 = snap.planT0 or 0,
+			hasA2 = pathDataA2 ~= nil,
+			hasGroundA = pathDataGroundA ~= nil,
+			hasGroundB = pathDataGroundB ~= nil,
+			hasShark = pathDataShark ~= nil,
+		})
+		waveSpawning = false
+		spawnQueue = 0
+		crabSpawnQueue = 0
+		urchinSpawnQueue = 0
+	end
+	noteVisitClock(snap.simClock or 0)
+	if restarted then
+		WaveVisitPlan.drain("ghost", simClock, spawnVisit)
+	end
+	applyVisitBlob(snap.visitBlob)
+	lastFeed = snap.feedProgress
+end
+
 function WaveGhostSim.apply(snap: WaveWatchMode.WatchSnap, plotCf: CFrame, kind: string?, plotSize: Vector3?, plotRingCf: CFrame?)
 	if not snap.running then
 		WaveGhostSim.stop(true)
@@ -1802,8 +2042,13 @@ function WaveGhostSim.apply(snap: WaveWatchMode.WatchSnap, plotCf: CFrame, kind:
 		lastMiss = snap.hungryMissToken
 		lastReef = snap.reefHealth
 		lastCoralEpoch = snap.coralEpoch or 0
-		waveIndex = snap.wave
-		-- Fresh join: full wave start if early, else lightweight snapshot.
+	waveIndex = snap.wave
+	if (snap.seed or 0) > 0 and typeof(snap.planT0) == "number" then
+		adoptVisit(snap)
+		ensureMoving()
+		return
+	end
+	-- Fresh join: full wave start if early, else lightweight snapshot.
 		if eventKind == "start" or eventKind == "next" or snap.feedProgress < 0.08 then
 			beginWaveFull(snap, pathData)
 		else
@@ -1816,6 +2061,20 @@ function WaveGhostSim.apply(snap: WaveWatchMode.WatchSnap, plotCf: CFrame, kind:
 
 	speedMult = snap.speedMult
 	activePlotCf = plotCf
+
+	if (snap.seed or 0) > 0 and typeof(snap.planT0) == "number" then
+		adoptVisit(snap)
+		if snap.hungryMissToken > lastMiss or (lastReef >= 0 and snap.reefHealth < lastReef) then
+			local endPos = (pathData :: PathData).endPos
+			WaveEndVfx.playReefHealthTicks(1, endPos, false)
+		end
+		lastMiss = snap.hungryMissToken
+		lastReef = snap.reefHealth
+		ensureMoving()
+		return
+	end
+
+	visitSync = false
 
 	if (snap.coralEpoch or 0) ~= lastCoralEpoch then
 		lastCoralEpoch = snap.coralEpoch or 0
@@ -1852,6 +2111,98 @@ function WaveGhostSim.apply(snap: WaveWatchMode.WatchSnap, plotCf: CFrame, kind:
 	lastReef = snap.reefHealth
 
 	ensureMoving()
+end
+
+function WaveGhostSim.noteVisitorFeed(plotId: string, fishId: number)
+	if not visitSync or activePlotId ~= plotId then
+		return
+	end
+	local slot = math.floor(fishId)
+	for _, agent in ipairs(fishList) do
+		if agent.visitSlot == slot and not agent.finished and agent.model.Parent then
+			agent.hunger = math.min(agent.maxHunger, agent.hunger + (C.DEFAULT_FOOD_FILL or 1))
+			agent.hungerHoldUntil = os.clock() + 1.6
+			refreshHungerVisual(agent)
+			lobVisitFood(agent)
+			return
+		end
+	end
+end
+
+function WaveGhostSim.tryTapFeedAtScreen(screenPos: Vector2): string
+	if not visitSync or fading or not activePlotId or speedMult <= 1e-6 then
+		return "blocked"
+	end
+	local now = os.clock()
+	local reloadStage = SkillPowerUpUI.getStage("ReloadSpeed")
+	local cd = SkillStages.reloadSpeedCooldownSec(reloadStage)
+	if cd > 0 and now - lastVisitTap < cd then
+		return "cooldown"
+	end
+	local cam = Workspace.CurrentCamera
+	if not cam then
+		return "blocked"
+	end
+	local baseRadius = C.TAP_FEED_RADIUS or 5
+	local radiusMult = if waveIndex <= 10
+		then (C.TAP_FEED_RADIUS_MULT_W1_10 or 1.716)
+		elseif waveIndex <= 20 then (C.TAP_FEED_RADIUS_MULT_W11_20 or 1.32)
+		elseif waveIndex <= 30 then (C.TAP_FEED_RADIUS_MULT_W21_30 or 1.1)
+		else 1
+	local radius = baseRadius * radiusMult
+	local sharkRadius = radius * (C.TAP_FEED_RADIUS_MULT_SHARK or 2)
+	local right = cam.CFrame.RightVector
+	local bestHungry: GhostFish? = nil
+	local bestHungryScore = math.huge
+	local bestFull: GhostFish? = nil
+	local bestFullScore = math.huge
+	for _, f in ipairs(fishList) do
+		if f.finished or not f.model.Parent or not f.visitSlot then
+			continue
+		end
+		local sp = cam:WorldToViewportPoint(f.root.Position)
+		if sp.Z <= 0 then
+			continue
+		end
+		local fishScreen = Vector2.new(sp.X, sp.Y)
+		local dPx = (fishScreen - screenPos).Magnitude
+		local useR = if f.isShark then sharkRadius else radius
+		local edgeSp = cam:WorldToViewportPoint(f.root.Position + right * useR)
+		local rPx = (Vector2.new(edgeSp.X, edgeSp.Y) - fishScreen).Magnitude
+		if rPx < 6 then
+			rPx = 6
+		end
+		if dPx > rPx then
+			continue
+		end
+		local hungry = f.hunger < f.maxHunger
+		if hungry then
+			if dPx < bestHungryScore then
+				bestHungryScore = dPx
+				bestHungry = f
+			end
+		elseif dPx < bestFullScore then
+			bestFullScore = dPx
+			bestFull = f
+		end
+	end
+	if bestHungry and bestHungry.visitSlot then
+		feedRemote:FireServer({
+			plotId = activePlotId,
+			fishId = bestHungry.visitSlot,
+		})
+		bestHungry.hunger = math.min(bestHungry.maxHunger, bestHungry.hunger + (C.DEFAULT_FOOD_FILL or 1))
+		bestHungry.hungerHoldUntil = now + 1.6
+		lastVisitTap = now
+		refreshHungerVisual(bestHungry)
+		lobVisitFood(bestHungry)
+		return "hit"
+	end
+	if bestFull then
+		return "full"
+	end
+	lastVisitTap = now
+	return "miss"
 end
 
 return WaveGhostSim
