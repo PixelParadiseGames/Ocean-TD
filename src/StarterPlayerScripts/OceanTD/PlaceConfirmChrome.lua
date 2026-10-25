@@ -95,6 +95,15 @@ function PlaceConfirmChrome.plantConfirmScreenCenter(
 	return Vector2.new(movePos.X, movePos.Y + topY)
 end
 
+-- screenPos is GetMouseLocation space (inset included). centerGui is WorldToViewportPoint (inset excluded).
+function PlaceConfirmChrome.isPointerOverScreenDisc(screenPos: Vector2, centerGui: Vector2, radiusPx: number): boolean
+	local inset = GuiService:GetGuiInset()
+	local c = Vector2.new(centerGui.X + inset.X, centerGui.Y + inset.Y)
+	local d = screenPos - c
+	local r = math.max(radiusPx, 8) + 6
+	return d.X * d.X + d.Y * d.Y <= r * r
+end
+
 function PlaceConfirmChrome.layoutBelowMoveIcon(
 	movePos: Vector2,
 	moveIconSize: number,

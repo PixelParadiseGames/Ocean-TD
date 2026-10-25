@@ -1539,6 +1539,7 @@ local function keepCameraFrozen()
 		or playerGui:GetAttribute("OceanTD_UrchinCamBusy") == true
 		or playerGui:GetAttribute("OceanTD_TangCamBusy") == true
 		or playerGui:GetAttribute("OceanTD_ReefDefeatCamBusy") == true
+		or playerGui:GetAttribute("OceanTD_HueCamBusy") == true
 	then
 		return
 	end
@@ -2992,7 +2993,15 @@ table.insert(inputConns, UserInputService.InputBegan:Connect(function(input, _pr
 		return
 	end
 
-	-- Gamepad placement: A plants. B does not deselect.
+	-- Confirm (including the hue close-up): Enter and A plant. B does not deselect.
+	if mode == MODE_CONFIRM and (
+		input.KeyCode == Enum.KeyCode.ButtonA
+		or input.KeyCode == Enum.KeyCode.Return
+		or input.KeyCode == Enum.KeyCode.KeypadEnter
+	) then
+		onCheck()
+		return
+	end
 	if gamepadPlacement then
 		if input.KeyCode == Enum.KeyCode.ButtonA then
 			onCheck()
@@ -3068,6 +3077,29 @@ table.insert(inputConns, UserInputService.InputBegan:Connect(function(input, _pr
 		if CamPinchZoom.isPinchOrMultiTouch() then
 			abortConfirmDragForPinch()
 			return
+		end
+		-- Close-up place zoom slides PLANT over the Plot Cam −/+ pads. Those pads
+		-- win the GUI hit and only zoom out, so the coral stays selected.
+		-- World-projected PLANT center is the real button; plant on that press.
+		if checkBtn and checkBtn.Visible then
+			local plantCenter = PlaceConfirmChrome.plantConfirmScreenCenter(chromeAdornee(), MOVE_ICON_SIZE, BTN_SIZE)
+			local plantRadius = PlaceConfirmChrome.placeConfirmBtnSize(BTN_SIZE) * 0.5
+			if plantCenter
+				and PlaceConfirmChrome.isPlausibleGuiPos(plantCenter)
+				and PlaceConfirmChrome.isPointerOverScreenDisc(screenPos, plantCenter, plantRadius)
+			then
+				playerGui:SetAttribute("OceanTD_PlantPressAt", os.clock())
+				confirmPressOrigin = nil
+				confirmDragging = false
+				aimFingerDown = false
+				placePointerHeld = false
+				chromeBtnPointerDown = false
+				chromePressTarget = nil
+				PlaceConfirmChrome.stopRotateHold()
+				PlaceSoftPlant.endZoomDrag()
+				onCheck()
+				return
+			end
 		end
 		-- Soft-plant drag from green move icon OR white pick ring (not mesh outside).
 		if PlacementController.isOverConfirmMoveHandle(screenPos) then

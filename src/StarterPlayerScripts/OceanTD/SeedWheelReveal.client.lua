@@ -32,6 +32,13 @@ local SeedWheelRevealApi = require(script.Parent:WaitForChild("SeedWheelRevealAp
 local JoinIntroGate = require(script.Parent:WaitForChild("JoinIntroGate"))
 
 local BASE_COLOR_PX = 65
+-- Hue circles are sized off the coral image: center 10% smaller, neighbors 20%, farther ones 30%.
+local HUE_CENTER_OF_CORAL = 0.9
+local HUE_NEAR_OF_CORAL = 0.8
+local HUE_FAR_OF_CORAL = 0.7
+local HUE_CENTER_SHIFT_FRAC = 0.8 -- of the middle hue circle width, to the right of the coral
+local PAINTBRUSH_ICON = "rbxassetid://81636797566300"
+local PAINTBRUSH_SCALE = 0.62
 local BASE_CORAL_FINAL_PX = 52
 local BAND_WIDTH_FRAC = 0.33
 local BAND_TOP_FRAC = 0.03 -- fallback when Slot4 screen pos unavailable
@@ -585,13 +592,7 @@ local function spawnCoralNameLabel(gui: ScreenGui, host: Frame, displayName: str
 end
 
 -- Squash → overshoot → settle (cartoony "pop" when the coral lands).
-local function hideCoralOuterStroke(coral: ImageLabel)
-	local ring = coral:FindFirstChild("InnerRing")
-	if ring then
-		ring:Destroy()
-	end
-end
-
+-- Outer stroke stays on for the whole pop and the hue spin after it.
 local function playCoralLandPop(coral: ImageLabel)
 	local pop = coral:FindFirstChild("PopScale")
 	if not pop or not pop:IsA("UIScale") then
@@ -611,7 +612,6 @@ local function playCoralLandPop(coral: ImageLabel)
 		if not coral.Parent or pop.Parent ~= coral then
 			return
 		end
-		hideCoralOuterStroke(coral)
 		local overshoot = TweenService:Create(pop, overshootInfo, { Scale = CORAL_POP_OVERSHOOT })
 		overshoot:Play()
 		overshoot.Completed:Once(function()
@@ -629,11 +629,28 @@ local function circleScaleAtOffset(offsetX: number, outerMinScale: number?, step
 	return if stepDist <= 1 then 1 - stepDist * 0.1 else math.max(outerMin, 0.9 - (stepDist - 1) * (0.9 - outerMin))
 end
 
-local function styleByOffset(guiObj: GuiObject, offsetX: number, _halfW: number, baseSize: number, outerMinScale: number?, stepPx: number)
-	local scale = circleScaleAtOffset(offsetX, outerMinScale, stepPx)
+-- Nearest wheel slot, so center / neighbors / outer hues stay three different sizes while spinning.
+local function hueFracOfCoral(offsetX: number, stepPx: number): number
+	local stepDist = math.abs(offsetX) / math.max(stepPx, 1)
+	local slot = math.floor(stepDist + 0.5)
+	if slot <= 0 then
+		return HUE_CENTER_OF_CORAL
+	elseif slot == 1 then
+		return HUE_NEAR_OF_CORAL
+	end
+	return HUE_FAR_OF_CORAL
+end
+
+local function hueDiameterPx(offsetX: number, coralSize: number, stepPx: number): number
+	return math.max(8, math.floor(coralSize * hueFracOfCoral(offsetX, stepPx) + 0.5))
+end
+
+local function styleByOffset(guiObj: GuiObject, offsetX: number, _halfW: number, baseSize: number, outerMinScale: number?, stepPx: number, hueOfCoral: boolean?)
+	local scale = if hueOfCoral then hueFracOfCoral(offsetX, stepPx) else circleScaleAtOffset(offsetX, outerMinScale, stepPx)
 	local stepDist = math.abs(offsetX) / stepPx
 	local trans = if stepDist <= 1 then stepDist * 0.26 else 0.26 + (stepDist - 1) * 0.42
-	guiObj.Size = UDim2.fromOffset(baseSize * scale, baseSize * scale)
+	local px = if hueOfCoral then hueDiameterPx(offsetX, baseSize, stepPx) else baseSize * scale
+	guiObj.Size = UDim2.fromOffset(px, px)
 	if guiObj:IsA("ImageLabel") then
 		guiObj.ImageTransparency = trans
 		guiObj.BackgroundTransparency = 1
@@ -749,7 +766,9 @@ local function runSpin(
 	outerMinScale: number?,
 	stepPx: number,
 	earlyLeadSec: number?,
-	onEarlyDone: (() -> ())?
+	onEarlyDone: (() -> ())?,
+	centerBiasX: number?,
+	hueOfCoral: boolean?
 )
 	local totalSteps = winnerIndex0
 	local t0 = os.clock()
@@ -759,17 +778,20 @@ local function runSpin(
 
 	local function layoutIcons(centerIndex: number)
 		local clipPad = wheelPx(BASE_STROKE_CLIP_PAD)
+		local bias = centerBiasX or 0
 		for i, img in ipairs(icons) do
 			local ox = (centerIndex - (i - 1)) * stepPx
-			img.Position = UDim2.new(0.5, ox, 0.5, 0)
-			local scale = circleScaleAtOffset(ox, outerMinScale, stepPx)
-			local radius = baseSize * scale * 0.5
+			local drawOx = ox + bias
+			img.Position = UDim2.new(0.5, drawOx, 0.5, 0)
+			local diameter = if hueOfCoral then hueDiameterPx(ox, baseSize, stepPx) else baseSize * circleScaleAtOffset(ox, outerMinScale, stepPx)
+			img.Size = UDim2.fromOffset(diameter, diameter)
+			local radius = diameter * 0.5
 			-- Hide once circle + UIStroke would extend past the band (prevents edge slivers).
-			if ox - radius - clipPad < -halfW or ox + radius + clipPad > halfW then
+			if drawOx - radius - clipPad < -halfW or drawOx + radius + clipPad > halfW then
 				img.Visible = false
 			else
 				img.Visible = true
-				styleByOffset(img, ox, halfW, baseSize, outerMinScale, stepPx)
+				styleByOffset(img, ox, halfW, baseSize, outerMinScale, stepPx, hueOfCoral)
 			end
 		end
 	end
@@ -1168,12 +1190,27 @@ playReveal = function(
 	local cam = workspace.CurrentCamera
 	local vp = if cam then cam.ViewportSize else Vector2.new(1280, 720)
 	local halfW = layoutBandForReveal(host, vp)
-	local colorPx = wheelPx(BASE_COLOR_PX, vp)
 	local coralPx = wheelPx(BASE_CORAL_FINAL_PX, vp)
+	local huePx = math.max(8, math.floor(coralPx * HUE_CENTER_OF_CORAL + 0.5))
+	local hueBias = math.floor(huePx * HUE_CENTER_SHIFT_FRAC + 0.5)
 	local stepPx = wheelPx(BASE_STEP_PX, vp)
+	local hueBrush: ImageLabel? = nil
+	local hueRing: Frame? = nil
+
+	local function clearHueBrush()
+		if hueBrush then
+			hueBrush:Destroy()
+			hueBrush = nil
+		end
+		if hueRing then
+			hueRing:Destroy()
+			hueRing = nil
+		end
+	end
 
 	local function bundleAndFly(colorWinner: Frame, coralWinner: ImageLabel, nameLabel: TextLabel?, amount: number)
-		local start = overlayScreenPoint(colorWinner)
+		clearHueBrush()
+		local start = overlayScreenPoint(coralWinner)
 
 		colorWinner.Visible = false
 		coralWinner.Visible = false
@@ -1182,7 +1219,7 @@ playReveal = function(
 		holder.Name = "SeedWheelBundle"
 		holder.BackgroundTransparency = 1
 		holder.AnchorPoint = Vector2.new(0.5, 0.5)
-		holder.Size = UDim2.fromOffset(colorPx, colorPx)
+		holder.Size = UDim2.fromOffset(huePx, huePx)
 		holder.Position = UDim2.fromOffset(start.X, start.Y)
 		holder.ZIndex = 50
 		holder.Parent = gui
@@ -1195,11 +1232,11 @@ playReveal = function(
 
 		coralWinner.Parent = holder
 		coralWinner.Position = UDim2.fromScale(0.5, 0.5)
-		coralWinner.Size = UDim2.fromScale(coralPx / colorPx, coralPx / colorPx)
+		coralWinner.Size = UDim2.fromScale(coralPx / huePx, coralPx / huePx)
 		coralWinner.ZIndex = 2
 		coralWinner.Visible = true
 
-		flyBundle(holder, start, itemId, token, amount, nameLabel, colorPx)
+		flyBundle(holder, start, itemId, token, amount, nameLabel, huePx)
 	end
 
 	-- 1) Coral spin first.
@@ -1252,6 +1289,10 @@ playReveal = function(
 
 		coralWinner.Position = UDim2.new(0.5, 0, 0.5, 0)
 		coralWinner.Size = UDim2.fromOffset(coralPx, coralPx)
+		local coralPop = coralWinner:FindFirstChild("PopScale")
+		if coralPop and coralPop:IsA("UIScale") then
+			coralPop.Scale = 1
+		end
 		coralWinner.ImageTransparency = 0
 		coralWinner.BackgroundTransparency = 1
 		coralWinner.ZIndex = Z_CORAL + 20
@@ -1262,17 +1303,53 @@ playReveal = function(
 		end
 		local nameLabel = spawnCoralNameLabel(gui, host, coralDisplayName(itemId))
 
-		-- 2) Color spin behind the parked coral.
+		-- 2) Hue spin, shifted right so it sits beside the parked coral.
 		local colorSeq = buildColorSequence(colorIndex)
 		local colorWinner0 = #colorSeq - 3
 		local colorIcons: { GuiObject } = {}
 		for i, idx in ipairs(colorSeq) do
-			local f = makeColorCircle(host, SeedWheel.colorForIndex(idx), Z_COLOR + i, colorPx, itemId, idx)
+			local f = makeColorCircle(host, SeedWheel.colorForIndex(idx), Z_COLOR + i, huePx, itemId, idx)
 			f.Visible = false
 			table.insert(colorIcons, f)
 		end
 
-		runSpin(host, halfW, colorIcons, colorWinner0, colorPx, pickSpinSec(SPIN_SEC, false), function()
+		local brush = Instance.new("ImageLabel")
+		brush.Name = "HuePaintbrush"
+		brush.BackgroundTransparency = 1
+		brush.BorderSizePixel = 0
+		brush.Image = PAINTBRUSH_ICON
+		brush.ScaleType = Enum.ScaleType.Fit
+		brush.AnchorPoint = Vector2.new(0.5, 0.5)
+		brush.Position = UDim2.new(0.5, hueBias, 0.5, 0)
+		local brushPx = math.floor(huePx * PAINTBRUSH_SCALE + 0.5)
+		brush.Size = UDim2.fromOffset(brushPx, brushPx)
+		brush.ZIndex = Z_CORAL + 16
+		brush.Active = false
+		brush.Parent = host
+		hueBrush = brush
+
+		-- Fixed white outline on the center hue slot. It does not travel with the spin.
+		local ring = Instance.new("Frame")
+		ring.Name = "HueCenterStroke"
+		ring.BackgroundTransparency = 1
+		ring.BorderSizePixel = 0
+		ring.AnchorPoint = Vector2.new(0.5, 0.5)
+		ring.Position = UDim2.new(0.5, hueBias, 0.5, 0)
+		ring.Size = UDim2.fromOffset(huePx, huePx)
+		ring.ZIndex = Z_CORAL + 14
+		ring.Active = false
+		ring.Parent = host
+		roundCorner(ring)
+		local ringStroke = Instance.new("UIStroke")
+		ringStroke.Color = Color3.new(1, 1, 1)
+		ringStroke.Transparency = 0
+		ringStroke.Thickness = UiViewportTags.coralSpinnerStrokeThickness() + 2
+		ringStroke.LineJoinMode = Enum.LineJoinMode.Round
+		ringStroke.BorderStrokePosition = Enum.BorderStrokePosition.Outer
+		ringStroke.Parent = ring
+		hueRing = ring
+
+		runSpin(host, halfW, colorIcons, colorWinner0, coralPx, pickSpinSec(SPIN_SEC, false), function()
 			local colorWinner = colorIcons[colorWinner0 + 1] :: Frame?
 			local colorLeft1 = if colorWinner0 >= 1 then colorIcons[colorWinner0] else nil
 			local colorLeft2 = if colorWinner0 >= 2 then colorIcons[colorWinner0 - 1] else nil
@@ -1284,6 +1361,7 @@ playReveal = function(
 				end
 			end
 			if not colorWinner then
+				clearHueBrush()
 				claim(itemId, token)
 				finishBusy()
 				return
@@ -1291,36 +1369,36 @@ playReveal = function(
 
 			UiHaptics.pulseTiny()
 
-			colorWinner.Position = UDim2.new(0.5, 0, 0.5, 0)
+			colorWinner.Position = UDim2.new(0.5, hueBias, 0.5, 0)
 			colorWinner.Visible = true
-			styleByOffset(colorWinner, 0, halfW, colorPx, OUTER_PEEK_SCALE_COLOR, stepPx)
+			styleByOffset(colorWinner, 0, halfW, coralPx, OUTER_PEEK_SCALE_COLOR, stepPx, true)
 			colorWinner.ZIndex = Z_COLOR
 			local stroke = colorWinner:FindFirstChildWhichIsA("UIStroke")
 			if stroke then
 				stroke.Transparency = 0.15
 			end
 			if colorLeft2 and colorLeft2:IsA("Frame") then
-				colorLeft2.Position = UDim2.new(0.5, -stepPx * 2, 0.5, 0)
+				colorLeft2.Position = UDim2.new(0.5, hueBias - stepPx * 2, 0.5, 0)
 				colorLeft2.Visible = true
-				styleByOffset(colorLeft2, -stepPx * 2, halfW, colorPx, OUTER_PEEK_SCALE_COLOR, stepPx)
+				styleByOffset(colorLeft2, -stepPx * 2, halfW, coralPx, OUTER_PEEK_SCALE_COLOR, stepPx, true)
 				colorLeft2.ZIndex = Z_COLOR + 4
 			end
 			if colorLeft1 and colorLeft1:IsA("Frame") then
-				colorLeft1.Position = UDim2.new(0.5, -stepPx, 0.5, 0)
+				colorLeft1.Position = UDim2.new(0.5, hueBias - stepPx, 0.5, 0)
 				colorLeft1.Visible = true
-				styleByOffset(colorLeft1, -stepPx, halfW, colorPx, OUTER_PEEK_SCALE_COLOR, stepPx)
+				styleByOffset(colorLeft1, -stepPx, halfW, coralPx, OUTER_PEEK_SCALE_COLOR, stepPx, true)
 				colorLeft1.ZIndex = Z_COLOR + 5
 			end
 			if colorPeek1 and colorPeek1:IsA("Frame") then
-				colorPeek1.Position = UDim2.new(0.5, stepPx, 0.5, 0)
+				colorPeek1.Position = UDim2.new(0.5, hueBias + stepPx, 0.5, 0)
 				colorPeek1.Visible = true
-				styleByOffset(colorPeek1, stepPx, halfW, colorPx, OUTER_PEEK_SCALE_COLOR, stepPx)
+				styleByOffset(colorPeek1, stepPx, halfW, coralPx, OUTER_PEEK_SCALE_COLOR, stepPx, true)
 				colorPeek1.ZIndex = Z_COLOR + 5
 			end
 			if colorPeek2 and colorPeek2:IsA("Frame") then
-				colorPeek2.Position = UDim2.new(0.5, stepPx * 2, 0.5, 0)
+				colorPeek2.Position = UDim2.new(0.5, hueBias + stepPx * 2, 0.5, 0)
 				colorPeek2.Visible = true
-				styleByOffset(colorPeek2, stepPx * 2, halfW, colorPx, OUTER_PEEK_SCALE_COLOR, stepPx)
+				styleByOffset(colorPeek2, stepPx * 2, halfW, coralPx, OUTER_PEEK_SCALE_COLOR, stepPx, true)
 				colorPeek2.ZIndex = Z_COLOR + 4
 			end
 
@@ -1344,7 +1422,7 @@ playReveal = function(
 				end
 				bundleAndFly(colorWinner, coralWinner, nameLabel, amount)
 			end, colorWasUnlocked)
-		end, OUTER_PEEK_SCALE_COLOR, stepPx)
+		end, OUTER_PEEK_SCALE_COLOR, stepPx, nil, nil, hueBias, true)
 	end, OUTER_PEEK_SCALE_CORAL, stepPx, CORAL_POP_LEAD_SEC, beginCoralLandPop)
 end
 

@@ -824,6 +824,11 @@ local function makeUi()
 	-- Same path as Enter → commit. Don't gate on fingerDown — rotate/drag flags
 	-- can linger a frame and block Confirm after yaw taps.
 	checkBtn.Activated:Connect(function()
+		-- Hue close-up sets busy for the whole zoom. Confirm still plants.
+		if cinematicHold then
+			cinematicHold = false
+			busy = false
+		end
 		if not active or busy then
 			return
 		end
@@ -2896,6 +2901,11 @@ function RelocateController.commit(opts: { silent: boolean? }?)
 		commitRecycle()
 		return
 	end
+	-- Hue / size close-up holds busy so the camera can play. Confirm must still plant.
+	if cinematicHold then
+		cinematicHold = false
+		busy = false
+	end
 	if busy then
 		return
 	end
@@ -3288,7 +3298,8 @@ table.insert(inputConns, UserInputService.InputBegan:Connect(function(input, _pr
 			end
 			return
 		end
-		if busy then
+		-- Hue close-up sets busy. A / Enter / PLANT still confirm; other input stays blocked.
+		if busy and not cinematicHold then
 			return
 		end
 		if input.KeyCode == Enum.KeyCode.ButtonR1 then
@@ -3324,6 +3335,20 @@ table.insert(inputConns, UserInputService.InputBegan:Connect(function(input, _pr
 			return
 		end
 		local screenPos = PlaceConfirmHitTest.pointerScreenPos(input)
+		if checkBtn and checkBtn.Visible and (not busy or cinematicHold) and not recyclePending then
+			local plantCenter = RelocateController.getConfirmScreenCenter()
+			local plantRadius = PlaceConfirmChrome.placeConfirmBtnSize(C.BTN_SIZE) * 0.5
+			if plantCenter and PlaceConfirmChrome.isPointerOverScreenDisc(screenPos, plantCenter, plantRadius) then
+				playerGui:SetAttribute("OceanTD_PlantPressAt", os.clock())
+				fingerDown = false
+				dragging = false
+				chromeBtnDown = false
+				chromePressTarget = nil
+				PlaceConfirmChrome.stopRotateHold()
+				RelocateController.commit()
+				return
+			end
+		end
 		-- World picks: GetMouseLocation tracks mouse and touch in viewport space.
 		-- Do not use PlaceConfirmHitTest's touch+inset for rays (that parks hits above the finger).
 		local pickPos = UserInputService:GetMouseLocation()

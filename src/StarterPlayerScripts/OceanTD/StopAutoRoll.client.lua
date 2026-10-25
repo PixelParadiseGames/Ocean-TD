@@ -193,6 +193,9 @@ end
 local function isGamepadMode(): boolean
 	local t = UserInputService:GetLastInputType()
 	return t == Enum.UserInputType.Gamepad1
+		or t == Enum.UserInputType.Gamepad2
+		or t == Enum.UserInputType.Gamepad3
+		or t == Enum.UserInputType.Gamepad4
 end
 
 local function refreshHelpTip()
@@ -200,6 +203,13 @@ local function refreshHelpTip()
 		return
 	end
 	local show = isGamepadMode() and not uiHidesRoll() and not presenting
+	-- Circle clips the bounding-box corner, which hid the badge on a joypad.
+	local host = helpTip.Parent
+	if host and host:IsA("GuiObject") then
+		host.ClipsDescendants = false
+	end
+	helpTip.AnchorPoint = Vector2.new(0.5, 0.5)
+	helpTip.Position = UDim2.fromScale(0.85, 0.15)
 	helpTip.Visible = show
 	helpLetter.Visible = show
 	if show then
@@ -1019,8 +1029,10 @@ local function ensureHelpTip(host: GuiObject)
 		tip.Name = HELP_TIP_NAME
 		tip.Parent = host
 	end
-	tip.AnchorPoint = Vector2.new(1, 0)
-	tip.Position = UDim2.new(1, 2, 0, -2)
+	tip.AnchorPoint = Vector2.new(0.5, 0.5)
+	-- On the circle's top-right rim (the square corner sits outside the disk).
+	tip.Position = UDim2.fromScale(0.85, 0.15)
+	host.ClipsDescendants = false
 	local tipScale = rollTipScale()
 	tip.Size = UDim2.fromScale(tipScale, tipScale)
 	tip.BackgroundColor3 = HELP_BLUE

@@ -496,12 +496,23 @@ local function ensureQuickPad(): Frame?
 	yawLeft.Visible = rotUnlocked
 	yawRight.Visible = rotUnlocked
 	-- DistOff step scales with zoom: ~2% near max in, ~12% near max out.
+	-- Same frame as a PLANT press that overlaps these pads: plant wins, don't also zoom.
+	local function plantPressOwnsPointer(): boolean
+		local stamp = playerGui:GetAttribute("OceanTD_PlantPressAt")
+		return typeof(stamp) == "number" and os.clock() - stamp < 0.3
+	end
 	offMinus.Activated:Connect(function()
+		if plantPressOwnsPointer() then
+			return
+		end
 		local ok = PlotCam2.nudge("distOffset", PlotCam2.distOffsetZoomStep())
 		flashQuickButton(offMinus, ok)
 		refreshReadout()
 	end)
 	offPlus.Activated:Connect(function()
+		if plantPressOwnsPointer() then
+			return
+		end
 		local ok = PlotCam2.nudge("distOffset", -PlotCam2.distOffsetZoomStep())
 		flashQuickButton(offPlus, ok)
 		refreshReadout()

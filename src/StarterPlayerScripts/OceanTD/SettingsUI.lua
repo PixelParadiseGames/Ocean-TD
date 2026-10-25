@@ -299,11 +299,15 @@ function refreshSettingsBGlyph()
 		pad.PaddingRight = UDim.new(0.1, 0)
 		pad.Parent = tip
 	end
-	-- Halfway between the first (too far) spot and the last (too tight) spot, and a bit smaller.
-	tip.AnchorPoint = Vector2.new(0, 0)
-	tip.Position = UDim2.new(1, -8, 1, -7)
+	-- Same overlap as the old bottom-right badge, hung off the top-right corner.
+	tip.AnchorPoint = Vector2.new(0, 1)
+	tip.Position = UDim2.new(1, -8, 0, 7)
 	tip.Size = UDim2.fromOffset(22, 22)
 	host.ClipsDescendants = false
+	local parent = host.Parent
+	if parent and parent:IsA("GuiObject") then
+		parent.ClipsDescendants = false
+	end
 	tip.Visible = settingsBShortcutOn()
 end
 
