@@ -2574,19 +2574,21 @@ InventoryState.setScrollCenterProvider(function(): Vector2?
 	return Vector2.new(pos.X + size.X * 0.5, pos.Y + size.Y * 0.5)
 end)
 
-InventoryState.setBackpackButtonScreenPosProvider(function(): Vector2?
+InventoryState.setBackpackButtonScreenPosProvider(function(ignoreAutoPlant: boolean?): Vector2?
 	-- Auto Plant ON → seed slide / plant orbs target the Auto Plant HUD circle.
-	local apOk, AutoPlantUI = pcall(function()
-		return require(script.Parent:WaitForChild("AutoPlantUI"))
-	end)
-	if apOk and AutoPlantUI and AutoPlantUI.isEnabled and AutoPlantUI.isEnabled() then
-		local hudOk, AutoPlantHudSlot = pcall(function()
-			return require(script.Parent:WaitForChild("AutoPlantHudSlot"))
+	if ignoreAutoPlant ~= true then
+		local apOk, AutoPlantUI = pcall(function()
+			return require(script.Parent:WaitForChild("AutoPlantUI"))
 		end)
-		if hudOk and AutoPlantHudSlot and AutoPlantHudSlot.getScreenCenter then
-			local c = AutoPlantHudSlot.getScreenCenter()
-			if typeof(c) == "Vector2" then
-				return c
+		if apOk and AutoPlantUI and AutoPlantUI.isEnabled and AutoPlantUI.isEnabled() then
+			local hudOk, AutoPlantHudSlot = pcall(function()
+				return require(script.Parent:WaitForChild("AutoPlantHudSlot"))
+			end)
+			if hudOk and AutoPlantHudSlot and AutoPlantHudSlot.getScreenCenter then
+				local c = AutoPlantHudSlot.getScreenCenter()
+				if typeof(c) == "Vector2" then
+					return c
+				end
 			end
 		end
 	end
@@ -3480,6 +3482,9 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
 	-- B closes backpack when in list select (placement/relocate own B while active).
 	-- B opens volume when the backpack and skills are closed, including during the intro.
 	if input.KeyCode == Enum.KeyCode.ButtonB then
+		if playerGui:GetAttribute("OceanTD_CommonHarvestPrompt") == true then
+			return
+		end
 		if PlacementController.isActive() or RelocateController.isActive() then
 			return
 		end

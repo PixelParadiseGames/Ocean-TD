@@ -59,6 +59,32 @@ local function ackedIndex(): number
 	return 0
 end
 
+local pendingWave = 0
+
+local function waveAck(): number
+	local ack = player:GetAttribute("OceanTD_WaveFunnelAck")
+	if typeof(ack) == "number" then
+		return ack
+	end
+	return 0
+end
+
+local function flushWave()
+	local ev = remote
+	if not ev or pendingWave <= waveAck() then
+		return
+	end
+	ev:FireServer("wave", tostring(pendingWave))
+end
+
+local function noteWave(wave: number)
+	local n = math.clamp(math.floor(wave), 0, FunnelCatalog.WAVE_MAX)
+	if n > pendingWave then
+		pendingWave = n
+		flushWave()
+	end
+end
+
 local function flush()
 	local ev = remote
 	if not ev then
@@ -146,13 +172,16 @@ function JoinFunnel.start()
 		local Remotes = require(oceanRoot:WaitForChild("Remotes"))
 		remote = Remotes.get("FunnelStep")
 		flush()
+		flushWave()
 	end)
 	player:GetAttributeChangedSignal("OceanTD_JoinFunnelAck"):Connect(flush)
 	player:GetAttributeChangedSignal("OceanTD_JoinFunnelFrozen"):Connect(flush)
+	player:GetAttributeChangedSignal("OceanTD_WaveFunnelAck"):Connect(flushWave)
 	task.spawn(function()
 		while player.Parent do
 			task.wait(2)
 			flush()
+			flushWave()
 		end
 	end)
 
@@ -210,6 +239,9 @@ function JoinFunnel.start()
 	WaveSim.onHud(function(snap)
 		if playerGui:GetAttribute("OceanTD_JoinIntroBusy") == true or WaveSim.isJoinIntroDemo() then
 			return
+		end
+		if snap.running and typeof(snap.wave) == "number" then
+			noteWave(snap.wave)
 		end
 		if snap.running and not wasRunning then
 			wasRunning = true

@@ -58,6 +58,9 @@ local hostButton: GuiButton? = nil
 local circle: GuiObject? = nil
 local stroke: UIStroke? = nil
 local label: TextLabel? = nil
+local failHintToken = 0
+local FAIL_HINT_SEC = 5
+local FAIL_HINT_NAME = "_OceanTD_AutoPlantFailHint"
 local idleStop: UiIdleCycle.StopFn? = nil
 local flashToken = 0
 local forcedHidden = false
@@ -508,6 +511,7 @@ local function restoreDockLayout()
 	h.Position = s3.Position
 	h.Size = s4.Size
 	h.ZIndex = s3.ZIndex
+	h.ClipsDescendants = false
 	local sc = h:FindFirstChild("_OceanTD_TutorialIntroScale")
 	if sc then
 		sc:Destroy()
@@ -852,6 +856,54 @@ function AutoPlantHudSlot.tryGamepadToggle(): boolean
 	return true
 end
 
+local function showAutoPlantFailHint(text: string)
+	local parent = host
+	if not parent then
+		return
+	end
+	parent.ClipsDescendants = false
+	failHintToken += 1
+	local token = failHintToken
+	local existing = parent:FindFirstChild(FAIL_HINT_NAME)
+	local hint: TextLabel
+	if existing and existing:IsA("TextLabel") then
+		hint = existing
+	else
+		if existing then
+			existing:Destroy()
+		end
+		hint = Instance.new("TextLabel")
+		hint.Name = FAIL_HINT_NAME
+		hint.BackgroundTransparency = 1
+		hint.AnchorPoint = Vector2.new(0.5, 0)
+		hint.Position = UDim2.new(0.5, 0, 1, 2)
+		hint.Size = UDim2.new(2.6, 0, 0.34, 0)
+		hint.Font = UiTheme.Font
+		hint.TextColor3 = Color3.new(1, 1, 1)
+		hint.TextScaled = true
+		hint.TextXAlignment = Enum.TextXAlignment.Center
+		hint.TextYAlignment = Enum.TextYAlignment.Center
+		hint.ZIndex = parent.ZIndex + 8
+		hint.Active = false
+		hint.Parent = parent
+		local outline = Instance.new("UIStroke")
+		outline.Color = Color3.new(0, 0, 0)
+		outline.Thickness = 1
+		outline.ApplyStrokeMode = Enum.ApplyStrokeMode.Contextual
+		outline.Parent = hint
+	end
+	hint.Text = text
+	hint.Visible = true
+	task.delay(FAIL_HINT_SEC, function()
+		if token ~= failHintToken then
+			return
+		end
+		if hint.Parent then
+			hint.Visible = false
+		end
+	end)
+end
+
 function AutoPlantHudSlot.mount(d: Deps)
 	deps = d
 	local quickbar = d.mainHUD:FindFirstChild("Quickbar")
@@ -959,6 +1011,7 @@ function AutoPlantHudSlot.mount(d: Deps)
 			startIdle()
 		end
 	end)
+	AutoPlantUI.onFailHint(showAutoPlantFailHint)
 	InventoryState.onOpenChanged(function()
 		AutoPlantHudSlot.syncVisibility()
 	end)

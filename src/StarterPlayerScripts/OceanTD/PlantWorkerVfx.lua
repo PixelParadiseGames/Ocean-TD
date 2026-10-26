@@ -1751,8 +1751,228 @@ function PlantWorkerVfx.playAt(worldPos: Vector3, opts: PlayOpts?): boolean
 	return true
 end
 
+local harvestDustHost: BasePart? = nil
+local harvestDustConn: RBXScriptConnection? = nil
+local tripRestore: (() -> ())? = nil
+
+local function stopHarvestDust()
+	if harvestDustConn then
+		harvestDustConn:Disconnect()
+		harvestDustConn = nil
+	end
+	destroyDust(harvestDustHost)
+	harvestDustHost = nil
+end
+
+-- Dig in place. No dash and no camera change. Dust puffs at the feet. Caller owns the hold timer.
+function PlantWorkerVfx.beginInPlaceDig(): boolean
+	if playerGui:GetAttribute(ATTR_BUSY) == true or playerGui:GetAttribute(ATTR_DIG_CAM) == true then
+		return false
+	end
+	local _, hum, root = getCharacterParts()
+	if not hum or not root then
+		return false
+	end
+	playToken += 1
+	ensureDigShovel()
+	startDig(hum, playToken)
+	stopHarvestDust()
+	local host, pe = makeDustHost(feetWorldPos(root.CFrame, hum))
+	harvestDustHost = host
+	pe:Emit(12)
+	local lastBucket = -1
+	harvestDustConn = RunService.Heartbeat:Connect(function()
+		if not root.Parent or not hum.Parent then
+			return
+		end
+		host.CFrame = CFrame.new(feetWorldPos(root.CFrame, hum))
+		local bucket = math.floor(os.clock() / (DIG_CYCLE_SEC * 0.5))
+		if bucket ~= lastBucket then
+			lastBucket = bucket
+			pe:Emit(8)
+		end
+	end)
+	startWorkSound()
+	return true
+end
+
+function PlantWorkerVfx.endInPlaceDig()
+	playToken += 1
+	stopDigTrack()
+	stopHarvestDust()
+	stopWorkSound(true)
+	releaseDigShovel()
+end
+
+-- Free cam: dash to the coral, dig (with dust), then dash back to the saved pose. No camera steal.
+function PlantWorkerVfx.playHarvestTrip(
+	worldPos: Vector3,
+	workSec: number,
+	onDigAlpha: (number) -> (),
+	onDone: () -> ()
+): boolean
+	if playerGui:GetAttribute(ATTR_BUSY) == true or playerGui:GetAttribute(ATTR_DIG_CAM) == true then
+		return false
+	end
+	local _, hum, root = getCharacterParts()
+	if not hum or not root or typeof(worldPos) ~= "Vector3" then
+		return false
+	end
+	playToken += 1
+	local token = playToken
+	stopDigTrack()
+	stopRunTrack()
+	stopHarvestDust()
+	local home = root.CFrame
+	local wasAnchored = root.Anchored
+	local savedWalk = hum.WalkSpeed
+	local savedJump = hum.JumpHeight
+	root.Anchored = true
+	root.AssemblyLinearVelocity = Vector3.zero
+	root.AssemblyAngularVelocity = Vector3.zero
+	hum.WalkSpeed = 0
+	hum.JumpHeight = 0
+	hum.AutoRotate = false
+	ensureDigShovel()
+	local startCF, goalCF = standCFrame(root.Position, worldPos, hum, nil)
+	root.CFrame = startCF
+	local phase = "dash"
+	local phaseT0 = os.clock()
+	local dustHost: BasePart? = nil
+	local dustPe: ParticleEmitter? = nil
+	local lastBucket = -1
+	startRunSound()
+	local runAnim = ensureRunTrack(hum)
+	if runAnim then
+		runAnim:Play(0.04, 1, RUN_PLAY_SPEED)
+	end
+	local digSec = if workSec > 0 then workSec else WORK_SEC
+
+	local function restoreBody()
+		tripRestore = nil
+		stopDigTrack()
+		stopRunTrack()
+		stopRunSound()
+		stopWorkSound(true)
+		destroyDust(dustHost)
+		dustHost = nil
+		releaseDigShovel()
+		if hum.Parent then
+			hum.WalkSpeed = savedWalk
+			hum.JumpHeight = savedJump
+			hum.AutoRotate = true
+		end
+		if root.Parent then
+			root.CFrame = home
+			root.Anchored = wasAnchored
+			root.AssemblyLinearVelocity = Vector3.zero
+			root.AssemblyAngularVelocity = Vector3.zero
+		end
+	end
+	tripRestore = restoreBody
+
+	RunService:BindToRenderStep(DASH_BIND_NAME, Enum.RenderPriority.Last.Value, function()
+		if token ~= playToken or not root.Parent or not hum.Parent then
+			pcall(function()
+				RunService:UnbindFromRenderStep(DASH_BIND_NAME)
+			end)
+			if token == playToken then
+				restoreBody()
+			end
+			return
+		end
+		local now = os.clock()
+		if phase == "dash" then
+			local u = math.clamp((now - phaseT0) / DASH_SEC, 0, 1)
+			local a = easeOutQuad(u)
+			local pos = startCF.Position:Lerp(goalCF.Position, a)
+			root.CFrame = lookFlat(pos, goalCF.Position, goalCF.LookVector)
+			if u >= 1 then
+				root.CFrame = goalCF
+				stopRunSound()
+				stopRunTrack()
+				phase = "dig"
+				phaseT0 = now
+				startDig(hum, token)
+				local host, pe = makeDustHost(feetWorldPos(goalCF, hum))
+				dustHost = host
+				dustPe = pe
+				pe:Emit(12)
+				startWorkSound()
+			end
+			return
+		end
+		if phase == "dig" then
+			local u = math.clamp((now - phaseT0) / digSec, 0, 1)
+			if dustHost and dustHost.Parent then
+				dustHost.CFrame = CFrame.new(feetWorldPos(goalCF, hum))
+			end
+			local bucket = math.floor((now - phaseT0) / (DIG_CYCLE_SEC * 0.5))
+			if dustPe and bucket ~= lastBucket then
+				lastBucket = bucket
+				dustPe:Emit(8)
+			end
+			onDigAlpha(u)
+			if u >= 1 then
+				stopDigTrack()
+				stopWorkSound(true)
+				destroyDust(dustHost)
+				dustHost = nil
+				phase = "return"
+				phaseT0 = now
+				startRunSound()
+				local backRun = ensureRunTrack(hum)
+				if backRun then
+					backRun:Play(0.04, 1, RUN_PLAY_SPEED)
+				end
+			end
+			return
+		end
+		local u = math.clamp((now - phaseT0) / DASH_SEC, 0, 1)
+		local a = easeOutQuad(u)
+		local pos = goalCF.Position:Lerp(home.Position, a)
+		root.CFrame = lookFlat(pos, home.Position, home.LookVector)
+		if u >= 1 then
+			root.CFrame = home
+			pcall(function()
+				RunService:UnbindFromRenderStep(DASH_BIND_NAME)
+			end)
+			restoreBody()
+			onDone()
+		end
+	end)
+	return true
+end
+
+function PlantWorkerVfx.cancelHarvestTrip()
+	playToken += 1
+	pcall(function()
+		RunService:UnbindFromRenderStep(DASH_BIND_NAME)
+	end)
+	local restore = tripRestore
+	tripRestore = nil
+	if restore then
+		restore()
+		return
+	end
+	stopDigTrack()
+	stopRunTrack()
+	stopRunSound()
+	stopWorkSound(true)
+	stopHarvestDust()
+	releaseDigShovel()
+end
+
 function PlantWorkerVfx.cancel()
 	playToken += 1
+	pcall(function()
+		RunService:UnbindFromRenderStep(DASH_BIND_NAME)
+	end)
+	local restore = tripRestore
+	tripRestore = nil
+	if restore then
+		restore()
+	end
 	stopDigTrack()
 	stopRunTrack()
 	stopRunSound()

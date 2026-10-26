@@ -2632,11 +2632,33 @@ local function hueCountTextSizes(): (number, number)
 end
 
 local function applyHueCountLabelSizing(countLbl: TextLabel)
-	local maxSz, minSz = hueCountTextSizes()
+	local _, minSz = hueCountTextSizes()
+	local parent = countLbl.Parent
+	local diameter = 36
+	if parent and parent:IsA("GuiObject") then
+		local d = math.min(parent.AbsoluteSize.X, parent.AbsoluteSize.Y)
+		if d > 8 then
+			diameter = d
+		end
+	end
+	-- TextScaled sizes to the circle height. Fredoka "10" is wider than "11", so the 0 gets clipped and only "1" shows.
+	-- Measure the real string and set TextSize so both digits stay inside the circle.
+	local avail = diameter * 0.72
+	local text = if countLbl.Text ~= "" then countLbl.Text else "0"
+	local size = math.floor(math.min(diameter * 0.46, 36) + 0.5)
+	while size > minSz do
+		local bounds = TextService:GetTextSize(text, size, countLbl.Font, Vector2.new(800, 800))
+		if bounds.X <= avail and bounds.Y <= avail then
+			break
+		end
+		size -= 1
+	end
+	countLbl.TextScaled = false
+	countLbl.TextSize = size
 	local limit = countLbl:FindFirstChildOfClass("UITextSizeConstraint")
 	if limit then
-		limit.MaxTextSize = maxSz
-		limit.MinTextSize = minSz
+		limit.MaxTextSize = size
+		limit.MinTextSize = size
 	end
 end
 
@@ -2719,13 +2741,13 @@ local function refreshColorSeedLabels()
 			lock.Visible = false
 		end
 		if countLbl then
-			applyHueCountLabelSizing(countLbl)
 			if isActive then
 				countLbl.Visible = false
 			else
 				countLbl.Visible = true
 				countLbl.Text = tostring(available)
 				countLbl.TextColor3 = seedCountLabelColor(idx)
+				applyHueCountLabelSizing(countLbl)
 			end
 		end
 		if btn then
@@ -4330,7 +4352,10 @@ function CoralInspectPanel.bind(panel: GuiObject, catalogFrame: GuiObject)
 		countLbl.Size = UDim2.fromScale(1, 1)
 		countLbl.Font = UiTheme.Font
 		countLbl.TextColor3 = seedCountLabelColor(sw.index)
-		countLbl.TextScaled = true
+		countLbl.TextScaled = false
+		countLbl.TextSize = 12
+		countLbl.TextXAlignment = Enum.TextXAlignment.Center
+		countLbl.TextYAlignment = Enum.TextYAlignment.Center
 		countLbl.Text = "0"
 		countLbl.ZIndex = 4
 		countLbl.Active = false
@@ -4341,10 +4366,10 @@ function CoralInspectPanel.bind(panel: GuiObject, catalogFrame: GuiObject)
 		countSizeLimit.MinTextSize = minSz
 		countSizeLimit.Parent = countLbl
 		local countPad = Instance.new("UIPadding")
-		countPad.PaddingTop = UDim.new(0.16, 0)
-		countPad.PaddingBottom = UDim.new(0.16, 0)
-		countPad.PaddingLeft = UDim.new(0.1, 0)
-		countPad.PaddingRight = UDim.new(0.1, 0)
+		countPad.PaddingTop = UDim.new(0.12, 0)
+		countPad.PaddingBottom = UDim.new(0.12, 0)
+		countPad.PaddingLeft = UDim.new(0.02, 0)
+		countPad.PaddingRight = UDim.new(0.02, 0)
 		countPad.Parent = countLbl
 		colorSwatchCounts[sw.index] = countLbl
 		local idx = sw.index
@@ -4428,6 +4453,9 @@ function CoralInspectPanel.bind(panel: GuiObject, catalogFrame: GuiObject)
 		diam = math.clamp(diam, 22, math.max(22, math.floor(viewH * 0.92)))
 		for _, btn in pairs(colorSwatchBtns) do
 			btn.Size = UDim2.fromOffset(diam, diam)
+		end
+		for _, countLbl in pairs(colorSwatchCounts) do
+			applyHueCountLabelSizing(countLbl)
 		end
 	end
 	scroll:GetPropertyChangedSignal("AbsoluteSize"):Connect(refreshColorSwatchSizes)

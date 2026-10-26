@@ -214,7 +214,7 @@ function AutoPlantService.getAddMaxCapacity(player: Player): number
 	return math.min(backpackSeedTotal(player), #collectFreeGridSpots(player), placeCapRoom(player))
 end
 
-function AutoPlantService.syncToClient(player: Player)
+function AutoPlantService.syncToClient(player: Player, failHint: string?)
 	local unlocked = AutoPlantService.isUnlocked(player)
 	if not unlocked and PersistenceService.isAutoPlantEnabled(player) then
 		-- Dropped below 3 on-plot corals — toggle turns off until they qualify again.
@@ -230,6 +230,29 @@ function AutoPlantService.syncToClient(player: Player)
 	local seeds = backpackSeedTotal(player)
 	local freeSpots = #collectFreeGridSpots(player)
 	local capRoom = placeCapRoom(player)
+	local autoPlantBlock: string? = nil
+	if enabled then
+		local plotId = PlotService.getOwnerPlotId(player)
+		local spots = if plotId then worldSpotsForPlayer(player) else {}
+		local spaced: { Vector3 } = {}
+		if plotId then
+			for _, worldPos in ipairs(spots) do
+				if isSpotFree(plotId, worldPos, 2.5) then
+					table.insert(spaced, worldPos)
+				end
+			end
+		end
+		if #spots == 0 or #spaced == 0 or not plotId then
+			autoPlantBlock = "GROW PLOT"
+		elseif capRoom <= 0 then
+			autoPlantBlock = "PLOT MAXED"
+		else
+			local pick = AutoPlantSpots.pickSpacedWorld(spaced, collectOccupiedWorld(plotId))
+			if not pick then
+				autoPlantBlock = "GROW PLOT"
+			end
+		end
+	end
 	Remotes.get("AutoPlantSync"):FireClient(player, {
 		unlocked = unlocked,
 		enabled = enabled,
@@ -240,6 +263,8 @@ function AutoPlantService.syncToClient(player: Player)
 		freeSpotCount = freeSpots,
 		placeCapRoom = capRoom,
 		addMaxCapacity = math.min(seeds, freeSpots, capRoom),
+		failHint = if failHint == "GROW PLOT" or failHint == "PLOT MAXED" then failHint else nil,
+		autoPlantBlock = autoPlantBlock,
 	})
 end
 
@@ -293,6 +318,8 @@ function AutoPlantService.tryPlaceGrantedSeed(player: Player, itemId: string, co
 	end
 	local spots = worldSpotsForPlayer(player)
 	if #spots == 0 then
+		PersistenceService.setAutoPlantEnabled(player, false)
+		AutoPlantService.syncToClient(player, "GROW PLOT")
 		return false
 	end
 	local free: { Vector3 } = {}
@@ -301,12 +328,21 @@ function AutoPlantService.tryPlaceGrantedSeed(player: Player, itemId: string, co
 			table.insert(free, worldPos)
 		end
 	end
+	if #free > 0 and placeCapRoom(player) <= 0 then
+		PersistenceService.setAutoPlantEnabled(player, false)
+		AutoPlantService.syncToClient(player, "PLOT MAXED")
+		return false
+	end
 	if #free == 0 then
+		PersistenceService.setAutoPlantEnabled(player, false)
+		AutoPlantService.syncToClient(player, "GROW PLOT")
 		return false
 	end
 	local occupied = collectOccupiedWorld(plotId)
 	local pick = AutoPlantSpots.pickSpacedWorld(free, occupied)
 	if not pick then
+		PersistenceService.setAutoPlantEnabled(player, false)
+		AutoPlantService.syncToClient(player, "GROW PLOT")
 		return false
 	end
 	local hue = PlotOutlineColors.clampCoralIndex(colorIndex)
@@ -329,6 +365,18 @@ function AutoPlantService.tryPlaceGrantedSeed(player: Player, itemId: string, co
 		})
 		AutoPlantService.syncToClient(player)
 		return true
+	end
+	local openSpots = #collectFreeGridSpots(player)
+	local hint: string? = nil
+	local code = result.errorCode
+	if code == "PlaceCap" then
+		hint = if openSpots > 0 then "PLOT MAXED" else "GROW PLOT"
+	elseif code == "SpotTaken" or code == "Reject" or code == "OutOfPlot" or code == "BadPlot" then
+		hint = if placeCapRoom(player) <= 0 and openSpots > 0 then "PLOT MAXED" else "GROW PLOT"
+	end
+	if hint then
+		PersistenceService.setAutoPlantEnabled(player, false)
+		AutoPlantService.syncToClient(player, hint)
 	end
 	return false
 end

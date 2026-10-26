@@ -1,18 +1,23 @@
 --!strict
 --[[
 	Local-only common-area coral. After join intro, plant one visual per frame
-	on a jittered 4-stud grid ahead of the player (not on any plot).
+	on a jittered 4-stud grid ahead of the player. Nothing is planted on a plot
+	or within 50 studs of any plot edge, including other players' plots.
 	Forward range is 20–400 studs while the follow camera is on. Once that band
 	cannot take another coral, planting also fills behind the player out to 200 studs.
-	Plot Cam instead rings the live plot: 50–150 studs outside the current edge,
-	then 100-stud steps outward until the pool is full, then it pauses.
-	Growing the plot removes common corals that fall inside the new footprint.
-	Gap is 5.6 studs, 2.8 on terrain Limestone. Terrain painted Rock is skipped.
+	Plot Cam rings the live plot, half as fast as follow cam. The first band is 50–150
+	studs outside the edge. Each minute spent filling the current band opens the next
+	100-stud ring. A column can hold a cave floor and the ground above it.
+	Growing a plot removes common corals that fall inside the new footprint or that 50-stud margin.
+	Gap is 5.6 studs, 6.72 on Sandstone, 2.8 on Limestone. Terrain painted Rock is skipped.
 
-	Pool cap 2000. Farthest / outside-radius corals return to the pool.
-	No seeds, no save, no replication. Pauses for backpack, skills, waves,
-	placement/relocate, and any camera that isn't follow-cam.
-	If FPS stays under 24, a once-per-second check recycles corals and skips planting.
+	Pool cap 5000. Healthy clients plant two corals per frame (twice the old one-per-frame rate).
+	FPS is sampled every 2 seconds from the planter heartbeat itself — no extra per-frame work.
+	Under ~22 FPS, growth turns off and corals are shed a couple per frame until the frame rate recovers.
+	Between that and a steady 48 FPS, the rate steps down so a weak device is not asked to create meshes every frame.
+	Pauses for backpack, skills, waves, placement/relocate, and any camera that isn't follow-cam.
+	Follow cam: hold E or X within 8 studs to dig a common coral into the ground. That grants one small
+	seed of its species and hue (same credit as a wheel win). The spot stays empty for 60 seconds.
 ]]
 
 local Players = game:GetService("Players")
@@ -48,9 +53,11 @@ local RECT_HALF_WIDTH = 70
 -- Keep corals inside the forward band (400 ahead, 70 to the side).
 local RADIUS = 420
 -- 30% tighter than the old 8-stud gap. Limestone packs at half of that so reefs fill in.
+-- Sandstone sits 20% farther apart (20% less dense).
 local MIN_SEP = 5.6
 local LIMESTONE_SEP = 2.8
-local POOL_MAX = 2000
+local SANDSTONE_SEP = MIN_SEP * 1.2
+local POOL_MAX = 5000
 local CELL = GridMath.CELL_SIZE
 local JITTER = 1.25
 local RAY_UP = 20
@@ -58,15 +65,28 @@ local RAY_LENGTH = 70
 local FLOOR_ABOVE = 12
 local FLOOR_BELOW = 32
 local MIN_NORMAL_Y = 0.4
-local FPS_MIN = 24
-local FPS_RECYCLE_BATCH = 24
+-- Two-second windows. Creating coral is the expensive part, so a slow device
+-- never pays that cost just to discover it is slow.
+local FPS_SAMPLE_SEC = 2
+local FPS_OFF = 22
+local FPS_TRICKLE = 32
+local FPS_FULL = 48
+local FULL_PER_FRAME = 2
+local TRICKLE_PER_SEC = 4
 local OUTSIDE_RECYCLE_BATCH = 4
 local RISE_SEC = TweenInfo.new(1.7, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 local PLOT_RISE_SEC = TweenInfo.new(5.1, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+-- Keep common coral this far outside every plot edge (own plot and other players).
+local PLOT_PAD = 50
 -- Plot Cam ring, measured from the current plot edge (not the center).
-local PLOT_EDGE_MIN = 50
+local PLOT_EDGE_MIN = PLOT_PAD
 local PLOT_BAND = 100
-local PLOT_MISS_EXPAND = 12
+local PLOT_EXPAND_SEC = 60
+-- Floors farther apart than this vertically can each hold a coral (cave and the ground above).
+local STACK_Y = 12
+local PLOT_RAY_UP = 320
+local PLOT_RAY_LENGTH = 640
+local PLOT_RAY_STEPS = 12
 
 type PlotBounds = { cframe: CFrame, size: Vector3 }
 type Plant = { part: BasePart, pos: Vector3, key: string, index: number }
@@ -76,12 +96,17 @@ local plants: { Plant } = {}
 local byKey: { [string]: Plant } = {}
 local plotBounds: { PlotBounds } = {}
 local speciesIds: { string } = {}
-local frameCount = 0
-local fpsWindowStart = os.clock()
-local lastFps = 60
+local frameAccum = 0
+local frameDt = 0
+local perfMode = "full" -- "full" | "reduced" | "trickle" | "off"
+local perfGoodWindows = 0
+local trickleBudget = 0
 local commonOrbArmed = false
 local plotOuter = PLOT_EDGE_MIN + PLOT_BAND
-local plotMisses = 0
+local plotFillAccum = 0
+local plotRateDebt = 0
+-- Harvested cells stay empty until this clock time so the planter does not refill them immediately.
+local harvestBlockedUntil: { [string]: number } = {}
 local seenPlotSpan = 0
 local growthEnabled = true
 
@@ -89,28 +114,91 @@ local folder = Instance.new("Folder")
 folder.Name = "OceanTD_CommonGrow"
 folder.Parent = Workspace
 
+local harvestedEvent = Instance.new("BindableEvent")
+harvestedEvent.Name = "OceanTD_Harvested"
+harvestedEvent.Parent = folder
+
 for _, def in ipairs(ItemCatalog.all()) do
 	if typeof(def.speciesId) == "string" and def.speciesId ~= "" then
 		table.insert(speciesIds, def.speciesId)
 	end
 end
 
--- One increment per frame. Read only from the 1s planter loop.
-RunService.Heartbeat:Connect(function()
-	frameCount += 1
-end)
-
-local function xzKey(gx: number, gz: number): string
-	return string.format("%d,%d", gx, gz)
+local function noteFrame(dt: number)
+	frameDt += dt
+	frameAccum += 1
+	if frameDt < FPS_SAMPLE_SEC then
+		return
+	end
+	local fps = frameAccum / frameDt
+	frameAccum = 0
+	frameDt = 0
+	if fps < FPS_OFF then
+		perfMode = "off"
+		perfGoodWindows = 0
+	elseif fps < FPS_TRICKLE then
+		perfGoodWindows = 0
+		perfMode = "trickle"
+	elseif fps < FPS_FULL then
+		perfGoodWindows = 0
+		if perfMode == "off" then
+			perfMode = "trickle"
+		else
+			perfMode = "reduced"
+		end
+	else
+		perfGoodWindows += 1
+		if perfMode == "off" or perfMode == "trickle" then
+			perfMode = "reduced"
+			perfGoodWindows = 0
+		elseif perfMode == "reduced" and perfGoodWindows >= 2 then
+			perfMode = "full"
+			perfGoodWindows = 0
+		end
+	end
 end
 
-local function tooClose(x: number, z: number, minSep: number): boolean
+-- Full: 2 per frame. Reduced: 1 per frame. Trickle: a few per second. Off: none.
+local function plantsThisFrame(dt: number): number
+	if perfMode == "off" then
+		return 0
+	elseif perfMode == "trickle" then
+		trickleBudget += dt * TRICKLE_PER_SEC
+		local n = math.floor(trickleBudget)
+		trickleBudget -= n
+		return n
+	elseif perfMode == "reduced" then
+		return 1
+	end
+	return FULL_PER_FRAME
+end
+
+local function bandKey(gx: number, gz: number, gy: number): string
+	return string.format("%d,%d,%d", gx, gz, gy)
+end
+
+local function yBand(y: number): number
+	return math.round(y / STACK_Y)
+end
+
+local function tooClose(x: number, z: number, minSep: number, y: number): boolean
 	local minSq = minSep * minSep
-	for _, plant in ipairs(plants) do
-		local dx = plant.pos.X - x
-		local dz = plant.pos.Z - z
-		if dx * dx + dz * dz < minSq then
-			return true
+	local gx = math.round(x / CELL)
+	local gz = math.round(z / CELL)
+	local reach = math.ceil(minSep / CELL) + 1
+	local gy = yBand(y)
+	for ix = gx - reach, gx + reach do
+		for iz = gz - reach, gz + reach do
+			for iy = gy - 1, gy + 1 do
+				local plant = byKey[bandKey(ix, iz, iy)]
+				if plant and math.abs(plant.pos.Y - y) <= STACK_Y then
+					local dx = plant.pos.X - x
+					local dz = plant.pos.Z - z
+					if dx * dx + dz * dz < minSq then
+						return true
+					end
+				end
+			end
 		end
 	end
 	return false
@@ -136,13 +224,17 @@ local function rememberRoster(payload: any)
 	end
 end
 
+local function paddedSize(size: Vector3): Vector3
+	return Vector3.new(size.X + PLOT_PAD * 2, size.Y, size.Z + PLOT_PAD * 2)
+end
+
 local function insideAnyPlot(worldPos: Vector3): boolean
 	local own = ClientPlot.get()
-	if own and GridMath.isInsidePlotXZ(worldPos, own.cframe, own.size) then
+	if own and GridMath.isInsidePlotXZ(worldPos, own.cframe, paddedSize(own.size)) then
 		return true
 	end
 	for _, bounds in ipairs(plotBounds) do
-		if GridMath.isInsidePlotXZ(worldPos, bounds.cframe, bounds.size) then
+		if GridMath.isInsidePlotXZ(worldPos, bounds.cframe, paddedSize(bounds.size)) then
 			return true
 		end
 	end
@@ -172,13 +264,23 @@ local function stripVisual(part: BasePart)
 end
 
 local function enableCollision(part: BasePart)
+	-- Anchor everything once the rise is done. Welded, unanchored Fire/Leather pieces
+	-- were popping out of view when the camera moved, and CanQuery made the camera
+	-- hide any solid coral sitting between the lens and the character.
 	local function solid(p: BasePart)
+		p.Anchored = true
 		p.CanCollide = true
-		p.CanQuery = true
+		p.CanQuery = false
+		p.CanTouch = false
+		p.LocalTransparencyModifier = 0
 	end
 	solid(part)
 	for _, d in ipairs(part:GetDescendants()) do
 		if d:IsA("BasePart") then
+			local weld = d:FindFirstChild("OceanTD_StemWeld")
+			if weld and weld:IsA("Weld") and weld.Part0 == part then
+				d.CFrame = part.CFrame * weld.C0
+			end
 			solid(d)
 		end
 	end
@@ -197,6 +299,17 @@ local function destroyPlant(plant: Plant)
 		plant.part:Destroy()
 	end
 end
+
+harvestedEvent.Event:Connect(function(key: any)
+	if typeof(key) ~= "string" then
+		return
+	end
+	harvestBlockedUntil[key] = os.clock() + 60
+	local plant = byKey[key]
+	if plant then
+		destroyPlant(plant)
+	end
+end)
 
 local function recycleFarthest(origin: Vector3, count: number, outsideOnly: boolean)
 	for _ = 1, count do
@@ -314,49 +427,114 @@ local function isCameraVolume(inst: Instance): boolean
 	return name == "skycam" or name == "skycamfocus" or string.find(name, "skycam", 1, true) ~= nil
 end
 
--- Start 20 studs up and step through ceilings until the floor under this XZ.
--- Terrain painted Rock is never a plant spot. The material is returned so
--- Limestone can use the tighter gap.
-local function floorAt(x: number, z: number, playerY: number): (Vector3?, Enum.Material?)
+-- Start above the column and step through ceilings. Follow cam keeps the floor
+-- near the player. Plot cam keeps every walkable floor, so a cave and the ground
+-- above it can both hold coral. Terrain painted Rock is never a plant spot.
+local function pierceColumn(x: number, z: number, originY: number, tall: boolean): { { pos: Vector3, mat: Enum.Material? } }
 	rayParams.FilterDescendantsInstances = rayFilter()
-	local y = playerY + RAY_UP
-	local remaining = RAY_LENGTH
-	for _ = 1, 8 do
+	local y = originY + (if tall then PLOT_RAY_UP else RAY_UP)
+	local remaining = if tall then PLOT_RAY_LENGTH else RAY_LENGTH
+	local steps = if tall then PLOT_RAY_STEPS else 8
+	local found: { { pos: Vector3, mat: Enum.Material? } } = {}
+	for _ = 1, steps do
 		if remaining < 1 then
-			return nil, nil
+			break
 		end
 		local hit = Workspace:Raycast(Vector3.new(x, y, z), Vector3.new(0, -remaining, 0), rayParams)
 		if not hit then
-			return nil, nil
+			break
 		end
 		local inst = hit.Instance
 		local skip = inst:IsA("BasePart") and isCameraVolume(inst)
-		local dy = hit.Position.Y - playerY
-		if not skip and hit.Normal.Y >= MIN_NORMAL_Y and dy <= FLOOR_ABOVE and dy >= -FLOOR_BELOW then
-			if inst == Workspace.Terrain and hit.Material == Enum.Material.Rock then
-				return nil, nil
-			end
-			if not insideAnyPlot(hit.Position) then
-				return hit.Position, if inst == Workspace.Terrain then hit.Material else nil
+		local dy = hit.Position.Y - originY
+		local inWindow = tall or (dy <= FLOOR_ABOVE and dy >= -FLOOR_BELOW)
+		local rock = inst == Workspace.Terrain and hit.Material == Enum.Material.Rock
+		local floor = not skip and hit.Normal.Y >= MIN_NORMAL_Y and inWindow
+		if floor and rock and not tall then
+			return {}
+		end
+		if floor and not rock and not insideAnyPlot(hit.Position) then
+			table.insert(found, {
+				pos = hit.Position,
+				mat = if inst == Workspace.Terrain then hit.Material else nil,
+			})
+			if not tall then
+				return found
 			end
 		end
 		local step = math.max(0.4, y - hit.Position.Y)
 		y = hit.Position.Y - 0.4
 		remaining -= step
 	end
-	return nil, nil
+	return found
 end
 
-local function claimFloor(x: number, z: number, surfaceY: number, key: string): (Vector3?, string?)
-	if insideAnyPlot(Vector3.new(x, surfaceY, z)) or tooClose(x, z, LIMESTONE_SEP) then
+local function floorAt(x: number, z: number, playerY: number): (Vector3?, Enum.Material?)
+	local found = pierceColumn(x, z, playerY, false)
+	local first = found[1]
+	if not first then
 		return nil, nil
 	end
-	local hitPos, floorMat = floorAt(x, z, surfaceY)
-	local gap = if floorMat == Enum.Material.Limestone then LIMESTONE_SEP else MIN_SEP
-	if not hitPos or insideAnyPlot(hitPos) or tooClose(hitPos.X, hitPos.Z, gap) then
+	return first.pos, first.mat
+end
+
+local function materialGap(mat: Enum.Material?): number
+	if mat == Enum.Material.Limestone then
+		return LIMESTONE_SEP
+	elseif mat == Enum.Material.Sandstone then
+		return SANDSTONE_SEP
+	end
+	return MIN_SEP
+end
+
+local function claimHit(hitPos: Vector3, floorMat: Enum.Material?): (Vector3?, string?)
+	local gap = materialGap(floorMat)
+	if tooClose(hitPos.X, hitPos.Z, gap, hitPos.Y) then
+		return nil, nil
+	end
+	local key = bandKey(math.round(hitPos.X / CELL), math.round(hitPos.Z / CELL), yBand(hitPos.Y))
+	local blockedUntil = harvestBlockedUntil[key]
+	if blockedUntil then
+		if os.clock() < blockedUntil then
+			return nil, nil
+		end
+		harvestBlockedUntil[key] = nil
+	end
+	if byKey[key] then
 		return nil, nil
 	end
 	return hitPos, key
+end
+
+local function claimFloor(x: number, z: number, surfaceY: number): (Vector3?, string?)
+	if insideAnyPlot(Vector3.new(x, surfaceY, z)) or tooClose(x, z, LIMESTONE_SEP, surfaceY) then
+		return nil, nil
+	end
+	local hitPos, floorMat = floorAt(x, z, surfaceY)
+	if not hitPos or insideAnyPlot(hitPos) then
+		return nil, nil
+	end
+	return claimHit(hitPos, floorMat)
+end
+
+-- Plot cam: try every floor in the column, starting at a random level so the
+-- cave and the ground above both fill instead of only the first hit.
+local function claimColumn(x: number, z: number, originY: number): (Vector3?, string?)
+	local floors = pierceColumn(x, z, originY, true)
+	if #floors == 0 then
+		return nil, nil
+	end
+	local start = rng:NextInteger(1, #floors)
+	for n = 0, #floors - 1 do
+		local floor = floors[(start + n - 1) % #floors + 1]
+		if floor and not insideAnyPlot(floor.pos) then
+			local hitPos, key = claimHit(floor.pos, floor.mat)
+			if hitPos and key then
+				return hitPos, key
+			end
+		end
+	end
+	return nil, nil
 end
 
 local function sampleBand(
@@ -376,12 +554,19 @@ local function sampleBand(
 		end
 		local gx = math.round(world.X / CELL)
 		local gz = math.round(world.Z / CELL)
-		local key = xzKey(gx, gz)
-		if byKey[key] then
+		local gy = yBand(playerPos.Y)
+		local taken = false
+		for iy = gy - 1, gy + 1 do
+			if byKey[bandKey(gx, gz, iy)] then
+				taken = true
+				break
+			end
+		end
+		if taken then
 			continue
 		end
 		local x, z = jitteredXZ(gx, gz)
-		local hitPos, hitKey = claimFloor(x, z, playerPos.Y, key)
+		local hitPos, hitKey = claimFloor(x, z, playerPos.Y)
 		if hitPos and hitKey then
 			return hitPos, hitKey
 		end
@@ -409,7 +594,7 @@ local function notePlotSpan(size: Vector3)
 	if span > seenPlotSpan + 1 then
 		seenPlotSpan = span
 		plotOuter = PLOT_EDGE_MIN + PLOT_BAND
-		plotMisses = 0
+		plotFillAccum = 0
 	end
 end
 
@@ -422,7 +607,7 @@ local function clearCommonsInsideOwnPlot()
 	local i = #plants
 	while i >= 1 do
 		local plant = plants[i]
-		if plant and GridMath.isInsidePlotXZ(plant.pos, own.cframe, own.size) then
+		if plant and insideAnyPlot(plant.pos) then
 			destroyPlant(plant)
 			if i > #plants then
 				i = #plants
@@ -442,7 +627,9 @@ local function playerPos(): Vector3?
 	return hrp.Position
 end
 
--- Ring outside the live plot edge. Inner band is 50–150, then +100 each time it fills.
+-- Ring outside the live plot edge. Starts at 50–150. After a minute filling
+-- that band, the next 100-stud ring opens. Each column can plant on a cave
+-- floor and on the ground above it.
 local function findPlotSpot(): (Vector3?, string?)
 	local own = ClientPlot.get()
 	local pos = playerPos()
@@ -468,12 +655,8 @@ local function findPlotSpot(): (Vector3?, string?)
 		end
 		local gx = math.round(world.X / CELL)
 		local gz = math.round(world.Z / CELL)
-		local key = xzKey(gx, gz)
-		if byKey[key] then
-			continue
-		end
 		local x, z = jitteredXZ(gx, gz)
-		local hitPos, hitKey = claimFloor(x, z, pos.Y, key)
+		local hitPos, hitKey = claimColumn(x, z, pos.Y)
 		if hitPos and hitKey then
 			return hitPos, hitKey
 		end
@@ -519,6 +702,9 @@ local function plantOne(playerPos: Vector3, flat: Vector3, flyOrb: boolean, pres
 	if not part then
 		return false
 	end
+	part:SetAttribute("OceanTD_HueIndex", hue)
+	part:SetAttribute("OceanTD_HarvestKey", key)
+	part:SetAttribute("OceanTD_PlantPos", hitPos)
 	stripVisual(part)
 	local finalCF = part.CFrame
 	local bury = part.Size.Y
@@ -565,18 +751,6 @@ local function releaseCommonOrb()
 	end
 	commonOrbArmed = false
 	HandOrb.disarm(0.15)
-end
-
-local function sampleFps(): number
-	local now = os.clock()
-	local dt = now - fpsWindowStart
-	if dt < 0.25 then
-		return lastFps
-	end
-	lastFps = frameCount / dt
-	frameCount = 0
-	fpsWindowStart = now
-	return lastFps
 end
 
 local GRID_GAP = 10
@@ -755,22 +929,24 @@ task.spawn(function()
 	end
 
 	local nextUpkeep = os.clock()
-	RunService.Heartbeat:Connect(function()
+	RunService.Heartbeat:Connect(function(dt: number)
+		noteFrame(dt)
 		local pos = playerPos()
-		local fps = sampleFps()
 		local now = os.clock()
 		if now >= nextUpkeep then
 			nextUpkeep = now + 1
-			if fps < FPS_MIN then
-				releaseCommonOrb()
-				if pos and not isPlotView() then
-					recycleFarthest(pos, FPS_RECYCLE_BATCH, false)
-				end
-			elseif pos and canPlant() and growthEnabled then
+			if perfMode ~= "off" and pos and canPlant() and growthEnabled and not isPlotView() then
 				recycleFarthest(pos, OUTSIDE_RECYCLE_BATCH, true)
 			end
 		end
-		if fps < FPS_MIN or not pos then
+		if perfMode == "off" then
+			releaseCommonOrb()
+			if pos and #plants > 0 then
+				recycleFarthest(pos, 2, false)
+			end
+			return
+		end
+		if not pos then
 			releaseCommonOrb()
 			return
 		end
@@ -781,25 +957,38 @@ task.spawn(function()
 			releaseCommonOrb()
 			return
 		end
+		local budget = plantsThisFrame(dt)
 		if isPlotView() then
 			clearCommonsInsideOwnPlot()
 			if commonPaused() or #plants >= POOL_MAX then
 				releaseCommonOrb()
 				return
 			end
+			plotFillAccum += dt
+			if plotFillAccum >= PLOT_EXPAND_SEC then
+				plotFillAccum -= PLOT_EXPAND_SEC
+				plotOuter += PLOT_BAND
+			end
+			plotRateDebt += budget * 0.5
+			local plotBudget = math.floor(plotRateDebt)
+			plotRateDebt -= plotBudget
+			budget = plotBudget
+			if budget <= 0 then
+				return
+			end
 			local own = ClientPlot.get()
 			if not own then
 				return
 			end
-			local hitPos, key = findPlotSpot()
-			if hitPos and key then
-				plotMisses = 0
-				plantOne(pos, Vector3.zAxis, false, hitPos, key)
-			else
-				plotMisses += 1
-				if plotMisses >= PLOT_MISS_EXPAND then
-					plotMisses = 0
-					plotOuter += PLOT_BAND
+			for _ = 1, budget do
+				if #plants >= POOL_MAX then
+					break
+				end
+				local hitPos, key = findPlotSpot()
+				if hitPos and key then
+					plantOne(pos, Vector3.zAxis, false, hitPos, key)
+				else
+					break
 				end
 			end
 			return
@@ -809,11 +998,21 @@ task.spawn(function()
 			releaseCommonOrb()
 			return
 		end
-		if #plants >= POOL_MAX then
-			recycleFarthest(pos, 1, false)
+		if budget <= 0 then
+			return
+		end
+		local room = POOL_MAX - #plants
+		if room < budget then
+			recycleFarthest(pos, budget - room, false)
 		end
 		local flat = facingFlat()
-		if flat then
+		if not flat then
+			return
+		end
+		for _ = 1, budget do
+			if #plants >= POOL_MAX then
+				break
+			end
 			plantOne(pos, flat, false)
 		end
 	end)

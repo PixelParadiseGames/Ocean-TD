@@ -44,6 +44,7 @@ local REMOTE_EVENTS = {
 	"AutoPlantAddMaxApplied",
 	"AutoPlantRevealCoral",
 	"FunnelStep",
+	"CommonHarvestCancel",
 }
 
 local REMOTE_FUNCTIONS = {
@@ -76,6 +77,8 @@ local REMOTE_FUNCTIONS = {
 	"RequestAutoPlantShuffle",
 	"RequestAutoPlantAddMax",
 	"RequestGetAutoPlantState",
+	"RequestBeginCommonHarvest",
+	"RequestClaimCommonHarvest",
 }
 
 local function getRoot(): Instance

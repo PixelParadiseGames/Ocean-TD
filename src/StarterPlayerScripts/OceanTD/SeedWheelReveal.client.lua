@@ -321,8 +321,8 @@ local function applySeedWheelDisplayOrder(gui: ScreenGui)
 	end
 end
 
-local function backpackOverlayCenter(): Vector2?
-	local c = InventoryState.getBackpackButtonScreenCenter()
+local function backpackOverlayCenter(ignoreAutoPlant: boolean?): Vector2?
+	local c = InventoryState.getBackpackButtonScreenCenter(ignoreAutoPlant)
 	if not c then
 		return nil
 	end
@@ -1050,6 +1050,19 @@ local function flyBundle(
 		local vp = if cam then cam.ViewportSize else Vector2.new(1280, 720)
 		target = Vector2.new(vp.X * 0.92, vp.Y * 0.12)
 	end
+	-- Plot can't take the seed: slide through Auto Plant and on to the backpack.
+	local passAutoPlant = false
+	local backpackTarget = target
+	local apOk, autoPlantUi = pcall(function()
+		return require(script.Parent:WaitForChild("AutoPlantUI"))
+	end)
+	if apOk and typeof(autoPlantUi) == "table" and autoPlantUi.seedShouldPassToBackpack and autoPlantUi.seedShouldPassToBackpack() then
+		local realBackpack = backpackOverlayCenter(true)
+		if realBackpack and (realBackpack - target).Magnitude > 8 then
+			passAutoPlant = true
+			backpackTarget = realBackpack
+		end
+	end
 
 	local gui = overlay
 	if not gui then
@@ -1091,12 +1104,34 @@ local function flyBundle(
 	placeCircle(colorCircle, colorCenter, colorPx, 50)
 	placeCircle(coralCircle, coralStart, coralPx, 60)
 
-	-- Coral slides through the color circle's center on its way to the backpack.
-	-- The color circle stays put until that crossing, then both share the rest.
-	local leg1 = (colorCenter - coralStart).Magnitude
-	local leg2 = (target - colorCenter).Magnitude
-	local pathLen = math.max(1, leg1 + leg2)
-	local crossEase = math.clamp(leg1 / pathLen, 0, 0.98)
+	-- Coral slides through the color circle's center. If Auto Plant can't place,
+	-- the pair continues through that button and finishes on the backpack.
+	local pathPoints: { Vector2 } = { coralStart, colorCenter }
+	if passAutoPlant then
+		table.insert(pathPoints, target)
+	end
+	table.insert(pathPoints, backpackTarget)
+	local segLens: { number } = {}
+	local pathLen = 0
+	for i = 1, #pathPoints - 1 do
+		local seg = (pathPoints[i + 1] - pathPoints[i]).Magnitude
+		segLens[i] = seg
+		pathLen += seg
+	end
+	pathLen = math.max(1, pathLen)
+	local crossEase = math.clamp(segLens[1] / pathLen, 0, 0.98)
+	local function pointAlong(e: number): Vector2
+		local dist = math.clamp(e, 0, 1) * pathLen
+		local walked = 0
+		for i, seg in ipairs(segLens) do
+			if dist <= walked + seg or i == #segLens then
+				local along = if seg <= 0 then 1 else math.clamp((dist - walked) / seg, 0, 1)
+				return pathPoints[i]:Lerp(pathPoints[i + 1], along)
+			end
+			walked += seg
+		end
+		return pathPoints[#pathPoints]
+	end
 
 	local t0 = os.clock()
 	local labelBelowOffset = coralPx * 0.5 + wheelPx(BASE_NAME_BELOW_PX)
@@ -1128,14 +1163,7 @@ local function flyBundle(
 		end
 		local u = math.clamp((os.clock() - t0) / FLY_SEC, 0, 1)
 		local e = u * u * (3 - 2 * u)
-		local coralPos: Vector2
-		if e >= crossEase then
-			local along = if crossEase >= 0.98 then 1 else (e - crossEase) / (1 - crossEase)
-			coralPos = colorCenter:Lerp(target, along)
-		else
-			local along = if crossEase <= 0 then 1 else e / crossEase
-			coralPos = coralStart:Lerp(colorCenter, along)
-		end
+		local coralPos = pointAlong(e)
 		local coralScale = 1 - e * 0.6
 		coralCircle.Position = UDim2.fromOffset(coralPos.X, coralPos.Y)
 		coralCircle.Size = UDim2.fromOffset(coralPx * coralScale, coralPx * coralScale)

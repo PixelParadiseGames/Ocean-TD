@@ -2,6 +2,7 @@
 -- Server-only AnalyticsService funnels.
 -- join_to_training: client reports steps in order, once per join.
 -- play_time: this visit, step n at minute 1+(n-1)*2, up to 90 steps.
+-- waves: this visit, wave 1 through wave 99, as soon as that wave is reached.
 
 local AnalyticsService = game:GetService("AnalyticsService")
 local HttpService = game:GetService("HttpService")
@@ -18,9 +19,11 @@ local FunnelService = {}
 type Session = {
 	joinId: string,
 	playId: string,
+	waveId: string,
 	joinedAt: number,
 	joinNext: number,
 	playNext: number,
+	waveNext: number,
 	frozen: boolean,
 }
 
@@ -69,9 +72,11 @@ local function beginSession(player: Player)
 	sessions[player] = {
 		joinId = HttpService:GenerateGUID(false),
 		playId = HttpService:GenerateGUID(false),
+		waveId = HttpService:GenerateGUID(false),
 		joinedAt = os.clock(),
 		joinNext = 1,
 		playNext = 1,
+		waveNext = 1,
 		frozen = false,
 	}
 end
@@ -95,6 +100,31 @@ local function fieldFor(stepId: string, raw: any): string?
 	return nil
 end
 
+local function logWave(player: Player, sess: Session, raw: any)
+	local n = tonumber(raw)
+	if n == nil then
+		return
+	end
+	local target = math.clamp(math.floor(n), 1, FunnelCatalog.WAVE_MAX)
+	if target < sess.waveNext then
+		return
+	end
+	local guard = 0
+	while sess.waveNext <= target do
+		local step = sess.waveNext
+		local sent = logStep(player, FunnelCatalog.WAVE_NAME, sess.waveId, step, FunnelCatalog.waveStepName(step), nil)
+		if not sent then
+			break
+		end
+		sess.waveNext = step + 1
+		guard += 1
+		if guard > FunnelCatalog.WAVE_MAX then
+			break
+		end
+	end
+	player:SetAttribute("OceanTD_WaveFunnelAck", sess.waveNext - 1)
+end
+
 local function onClientStep(player: Player, stepId: any, field: any)
 	if typeof(stepId) ~= "string" then
 		return
@@ -110,6 +140,10 @@ local function onClientStep(player: Player, stepId: any, field: any)
 	if stepId == "freeze" then
 		sess.frozen = true
 		player:SetAttribute("OceanTD_JoinFunnelFrozen", true)
+		return
+	end
+	if stepId == "wave" then
+		logWave(player, sess, field)
 		return
 	end
 	if sess.frozen then

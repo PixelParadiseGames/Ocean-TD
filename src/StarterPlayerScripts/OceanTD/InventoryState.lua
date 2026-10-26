@@ -268,15 +268,15 @@ function InventoryState.getScrollCenter(): Vector2?
 end
 
 -- Quickbar Slot4 (closed backpack button) — seed-wheel fly target.
-local backpackButtonScreenPosProvider: (() -> Vector2?)? = nil
+local backpackButtonScreenPosProvider: ((boolean?) -> Vector2?)? = nil
 
-function InventoryState.setBackpackButtonScreenPosProvider(provider: () -> Vector2?)
+function InventoryState.setBackpackButtonScreenPosProvider(provider: (boolean?) -> Vector2?)
 	backpackButtonScreenPosProvider = provider
 end
 
-function InventoryState.getBackpackButtonScreenCenter(): Vector2?
+function InventoryState.getBackpackButtonScreenCenter(ignoreAutoPlant: boolean?): Vector2?
 	if backpackButtonScreenPosProvider then
-		return backpackButtonScreenPosProvider()
+		return backpackButtonScreenPosProvider(ignoreAutoPlant)
 	end
 	return nil
 end

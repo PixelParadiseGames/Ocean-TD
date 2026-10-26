@@ -14,6 +14,7 @@ local HueSeeds = require(game:GetService("ReplicatedStorage"):WaitForChild("Ocea
 local HideUiUnlock = require(game:GetService("ReplicatedStorage"):WaitForChild("OceanTD"):WaitForChild("Shared"):WaitForChild("HideUiUnlock"))
 local SkillStages = require(game:GetService("ReplicatedStorage"):WaitForChild("OceanTD"):WaitForChild("Shared"):WaitForChild("SkillStages"))
 local SeedWheel = require(game:GetService("ReplicatedStorage"):WaitForChild("OceanTD"):WaitForChild("Shared"):WaitForChild("SeedWheel"))
+local HueRarity = require(game:GetService("ReplicatedStorage"):WaitForChild("OceanTD"):WaitForChild("Shared"):WaitForChild("HueRarity"))
 local ReefScore = require(game:GetService("ReplicatedStorage"):WaitForChild("OceanTD"):WaitForChild("Shared"):WaitForChild("ReefScore"))
 local IntroPad = require(game:GetService("ReplicatedStorage"):WaitForChild("OceanTD"):WaitForChild("Shared"):WaitForChild("IntroPad"))
 local EconomyStats = require(game:GetService("ReplicatedStorage"):WaitForChild("OceanTD"):WaitForChild("Shared"):WaitForChild("EconomyStats"))
@@ -636,6 +637,7 @@ function PersistenceService.init()
 	getStore()
 	log("Using DataStore", Constants.DATASTORE_NAME)
 	PersistenceService.initSeedWheel()
+	PersistenceService.initCommonHarvest()
 	-- Intro pad markers + occupancy (PlotService must be init'd — Bootstrap calls syncIntroPads).
 	local acc = 0
 	RunService.Heartbeat:Connect(function(dt)
@@ -1867,6 +1869,93 @@ function PersistenceService.claimSeedWheel(player: Player, itemId: any, token: a
 	end
 	fulfillSeedWheel(player, pending)
 	return true
+end
+
+-- Common-area harvest. Credits one hue the same way a wheel win does:
+-- HueSeeds.credit adds onto that color's count and leaves every other hue alone.
+local HARVEST_HOLD_SEC = 2.5
+local HARVEST_CLAIM_WINDOW_SEC = 20
+type HarvestPending = { itemId: string, colorIndex: number, at: number, gen: number }
+local harvestPending: { [number]: HarvestPending } = {}
+
+local function clearHarvestPending(userId: number)
+	harvestPending[userId] = nil
+end
+
+function PersistenceService.beginCommonHarvest(player: Player, itemId: any, colorIndex: any, generation: any): boolean
+	local profile = profiles[player]
+	if not profile or typeof(itemId) ~= "string" or not HueSeeds.isHueItem(itemId) then
+		return false
+	end
+	local idx = PlotOutlineColors.clampCoralIndex(colorIndex)
+	if HueRarity.oneIn(itemId, idx) == nil then
+		return false
+	end
+	local gen = if typeof(generation) == "number" then math.floor(generation) else 0
+	-- A new hold replaces a leftover one. An older cancel must not erase this hold.
+	harvestPending[player.UserId] = { itemId = itemId, colorIndex = idx, at = os.clock(), gen = gen }
+	return true
+end
+
+function PersistenceService.cancelCommonHarvest(player: Player, generation: any)
+	if not player then
+		return
+	end
+	local pending = harvestPending[player.UserId]
+	if not pending then
+		return
+	end
+	if typeof(generation) == "number" and pending.gen ~= math.floor(generation) then
+		return
+	end
+	clearHarvestPending(player.UserId)
+end
+
+function PersistenceService.claimCommonHarvest(player: Player, itemId: any, colorIndex: any, generation: any): boolean
+	local profile = profiles[player]
+	if not profile then
+		return false
+	end
+	local userId = player.UserId
+	local pending = harvestPending[userId]
+	if not pending or typeof(itemId) ~= "string" then
+		return false
+	end
+	local gen = if typeof(generation) == "number" then math.floor(generation) else pending.gen
+	if pending.gen ~= gen then
+		return false
+	end
+	clearHarvestPending(userId)
+	local elapsed = os.clock() - pending.at
+	if elapsed < HARVEST_HOLD_SEC or elapsed > HARVEST_CLAIM_WINDOW_SEC then
+		return false
+	end
+	local idx = PlotOutlineColors.clampCoralIndex(colorIndex)
+	if pending.itemId ~= itemId or pending.colorIndex ~= idx then
+		return false
+	end
+	-- One small seed. Size is upgraded later on the plot, same as a rolled seed.
+	PersistenceService.tryGrantHueSeed(player, itemId, idx, 1)
+	task.spawn(function()
+		PersistenceService.save(player)
+	end)
+	log("Common harvest", itemId, "hue", idx, "for", player.Name)
+	return true
+end
+
+function PersistenceService.initCommonHarvest()
+	Remotes.getFunction("RequestBeginCommonHarvest").OnServerInvoke = function(player: Player, itemId: any, colorIndex: any, generation: any): boolean
+		return PersistenceService.beginCommonHarvest(player, itemId, colorIndex, generation)
+	end
+	Remotes.getFunction("RequestClaimCommonHarvest").OnServerInvoke = function(player: Player, itemId: any, colorIndex: any, generation: any): boolean
+		return PersistenceService.claimCommonHarvest(player, itemId, colorIndex, generation)
+	end
+	Remotes.get("CommonHarvestCancel").OnServerEvent:Connect(function(player: Player, generation: any)
+		PersistenceService.cancelCommonHarvest(player, generation)
+	end)
+	Players.PlayerRemoving:Connect(function(player)
+		clearHarvestPending(player.UserId)
+	end)
 end
 
 function PersistenceService.initSeedWheel()

@@ -66,6 +66,7 @@ local unlocked = false
 local enabled = false
 local manualCount = 0
 local addMaxCapacity = 0
+local autoPlantBlock: string? = nil
 local addMaxCount = 0
 local cooldownEndsAt = 0
 local hostRow: Frame? = nil
@@ -106,6 +107,7 @@ local slideSfxActive = 0
 local shuffleIconShowDice = true
 local shuffleIconSwapToken = 0
 local stateChangedListeners: { () -> () } = {}
+local failHintListeners: { (string) -> () } = {}
 
 local confirmSound = Instance.new("Sound")
 confirmSound.Name = "OceanTD_AutoPlantShuffleConfirm"
@@ -521,12 +523,25 @@ local function applyState(payload: any)
 	if cap == cap and cap >= 0 then
 		addMaxCapacity = cap
 	end
+	if payload.freeSpotCount ~= nil or payload.placeCapRoom ~= nil or payload.autoPlantBlock ~= nil or payload.failHint ~= nil then
+		if payload.autoPlantBlock == "GROW PLOT" or payload.autoPlantBlock == "PLOT MAXED" then
+			autoPlantBlock = payload.autoPlantBlock
+		else
+			autoPlantBlock = nil
+		end
+	end
 	applyCooldownRemaining(payload.shuffleCooldownSec)
 	refreshToggleVisual()
 	refreshShuffleVisual()
 	refreshAddMaxVisual()
 	for _, cb in ipairs(stateChangedListeners) do
 		pcall(cb)
+	end
+	local hint = payload.failHint
+	if hint == "GROW PLOT" or hint == "PLOT MAXED" then
+		for _, cb in ipairs(failHintListeners) do
+			pcall(cb, hint)
+		end
 	end
 end
 
@@ -538,8 +553,16 @@ function AutoPlantUI.isEnabled(): boolean
 	return enabled
 end
 
+function AutoPlantUI.seedShouldPassToBackpack(): boolean
+	return enabled and (autoPlantBlock == "GROW PLOT" or autoPlantBlock == "PLOT MAXED")
+end
+
 function AutoPlantUI.onStateChanged(cb: () -> ())
 	table.insert(stateChangedListeners, cb)
+end
+
+function AutoPlantUI.onFailHint(cb: (string) -> ())
+	table.insert(failHintListeners, cb)
 end
 
 function AutoPlantUI.requestSetEnabled(want: boolean): boolean

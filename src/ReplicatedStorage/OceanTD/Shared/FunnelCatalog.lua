@@ -5,6 +5,8 @@ local FunnelCatalog = {}
 
 FunnelCatalog.JOIN_NAME = "join_to_training"
 FunnelCatalog.PLAY_NAME = "play_time"
+FunnelCatalog.WAVE_NAME = "waves"
+FunnelCatalog.WAVE_MAX = 99
 
 -- 1 min, 3 min, 5 min, ... through step 90 (179 min). Under the 100-step cap.
 FunnelCatalog.PLAY_STEP_COUNT = 90
@@ -51,6 +53,10 @@ end
 
 function FunnelCatalog.playStepName(step: number): string
 	return string.format("%d min", FunnelCatalog.playMinutes(step))
+end
+
+function FunnelCatalog.waveStepName(step: number): string
+	return string.format("wave %d", step)
 end
 
 return FunnelCatalog
