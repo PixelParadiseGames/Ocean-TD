@@ -425,6 +425,7 @@ game:BindToClose(function()
 end)
 
 print("[PLOT] OceanTD server bootstrap complete")
+require(script.Parent:WaitForChild("Services"):WaitForChild("BadgeAwards")).start()
 
 local requestPlace = Remotes.getFunction("RequestPlace")
 requestPlace.OnServerInvoke = function(player: Player, itemId: any, worldPos: any, diameter: any)

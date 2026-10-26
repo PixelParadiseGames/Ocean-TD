@@ -37,6 +37,7 @@ local REMOTE_EVENTS = {
 	"HideUiSync",
 	"JoinIntroSync",
 	"JoinIntroComplete",
+	"ReportManualPlantTraining",
 	"AutoPlantSync",
 	"AutoPlantPlaced",
 	"AutoPlantShuffleApplied",

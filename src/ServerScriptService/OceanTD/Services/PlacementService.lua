@@ -1555,6 +1555,13 @@ function PlacementService.place(
 	if opts.hideAwaitOrb == true then
 		PlacementService.hideVisualAwaitOrb(plotId, placeId)
 	end
+	if shouldConsume then
+		task.defer(function()
+			if player.Parent then
+				require(script.Parent:WaitForChild("BadgeAwards")).noteCoralPlanted(player)
+			end
+		end)
+	end
 	return {
 		ok = true,
 		worldPos = worldPos,

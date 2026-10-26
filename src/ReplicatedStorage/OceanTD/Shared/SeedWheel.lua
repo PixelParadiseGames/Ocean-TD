@@ -1,11 +1,12 @@
 --!strict
 --[[
 	Random coral seed pool + paint swatches for the prize-wheel grant UI.
-	Colors = PlotOutlineColors coral 1–14.
+	Colors follow HueRarity for the coral that was rolled.
 ]]
 
 local ItemCatalog = require(script.Parent:WaitForChild("ItemCatalog"))
 local PlotOutlineColors = require(script.Parent:WaitForChild("PlotOutlineColors"))
+local HueRarity = require(script.Parent:WaitForChild("HueRarity"))
 
 local SeedWheel = {}
 
@@ -39,9 +40,11 @@ function SeedWheel.pickRandom(rng: Random?): string
 	return POOL[r:NextInteger(1, #POOL)]
 end
 
-function SeedWheel.pickRandomColorIndex(rng: Random?): number
+function SeedWheel.pickRandomColorIndex(rng: Random?, itemId: string?): number
+	if typeof(itemId) == "string" and itemId ~= "" then
+		return HueRarity.roll(itemId, rng)
+	end
 	local r = rng or Random.new()
-	-- Uniform over coral paint indices 1–14.
 	return r:NextInteger(PlotOutlineColors.MIN_INDEX, PlotOutlineColors.CORAL_MAX_INDEX)
 end
 

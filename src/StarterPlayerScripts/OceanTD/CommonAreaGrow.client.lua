@@ -2,8 +2,11 @@
 --[[
 	Local-only common-area coral. After join intro, plant one visual per frame
 	on a jittered 4-stud grid ahead of the player (not on any plot).
-	Forward range is 20–400 studs. Once that band cannot take another coral,
-	planting also fills behind the player out to 200 studs.
+	Forward range is 20–400 studs while the follow camera is on. Once that band
+	cannot take another coral, planting also fills behind the player out to 200 studs.
+	Plot Cam instead rings the live plot: 50–150 studs outside the current edge,
+	then 100-stud steps outward until the pool is full, then it pauses.
+	Growing the plot removes common corals that fall inside the new footprint.
 	Gap is 5.6 studs, 2.8 on terrain Limestone. Terrain painted Rock is skipped.
 
 	Pool cap 2000. Farthest / outside-radius corals return to the pool.
@@ -24,6 +27,7 @@ local GridMath = require(oceanRoot:WaitForChild("Shared"):WaitForChild("GridMath
 local ItemCatalog = require(oceanRoot:WaitForChild("Shared"):WaitForChild("ItemCatalog"))
 local CoralVisual = require(oceanRoot:WaitForChild("Shared"):WaitForChild("CoralVisual"))
 local PlotOutlineColors = require(oceanRoot:WaitForChild("Shared"):WaitForChild("PlotOutlineColors"))
+local HueRarity = require(oceanRoot:WaitForChild("Shared"):WaitForChild("HueRarity"))
 
 local ClientPlot = require(script.Parent:WaitForChild("ClientPlot"))
 local InventoryState = require(script.Parent:WaitForChild("InventoryState"))
@@ -58,6 +62,11 @@ local FPS_MIN = 24
 local FPS_RECYCLE_BATCH = 24
 local OUTSIDE_RECYCLE_BATCH = 4
 local RISE_SEC = TweenInfo.new(1.7, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+local PLOT_RISE_SEC = TweenInfo.new(5.1, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+-- Plot Cam ring, measured from the current plot edge (not the center).
+local PLOT_EDGE_MIN = 50
+local PLOT_BAND = 100
+local PLOT_MISS_EXPAND = 12
 
 type PlotBounds = { cframe: CFrame, size: Vector3 }
 type Plant = { part: BasePart, pos: Vector3, key: string, index: number }
@@ -71,6 +80,10 @@ local frameCount = 0
 local fpsWindowStart = os.clock()
 local lastFps = 60
 local commonOrbArmed = false
+local plotOuter = PLOT_EDGE_MIN + PLOT_BAND
+local plotMisses = 0
+local seenPlotSpan = 0
+local growthEnabled = true
 
 local folder = Instance.new("Folder")
 folder.Name = "OceanTD_CommonGrow"
@@ -238,20 +251,32 @@ local function facingFlat(): Vector3?
 	return nil
 end
 
-local function canPlant(): boolean
+local function commonPaused(): boolean
 	if JoinIntroGate.isBusy() then
-		return false
-	end
-	if InventoryState.isOpen() then
-		return false
+		return true
 	end
 	if playerGui:GetAttribute("OceanTD_SkillsBubblesOpen") == true then
-		return false
+		return true
 	end
 	if WaveSim.isRunning() then
-		return false
+		return true
+	end
+	-- Backpack / build, plus place and relocate.
+	if InventoryState.isOpen() or InventoryState.isBuildModalBlocking() then
+		return true
 	end
 	if PlacementController.isActive() or RelocateController.isActive() then
+		return true
+	end
+	return false
+end
+
+local function isPlotView(): boolean
+	return playerGui:GetAttribute("OceanTD_CamCycleMode") == "plotcam"
+end
+
+local function canPlant(): boolean
+	if commonPaused() then
 		return false
 	end
 	local camMode = playerGui:GetAttribute("OceanTD_CamCycleMode")
@@ -322,6 +347,18 @@ local function floorAt(x: number, z: number, playerY: number): (Vector3?, Enum.M
 	return nil, nil
 end
 
+local function claimFloor(x: number, z: number, surfaceY: number, key: string): (Vector3?, string?)
+	if insideAnyPlot(Vector3.new(x, surfaceY, z)) or tooClose(x, z, LIMESTONE_SEP) then
+		return nil, nil
+	end
+	local hitPos, floorMat = floorAt(x, z, surfaceY)
+	local gap = if floorMat == Enum.Material.Limestone then LIMESTONE_SEP else MIN_SEP
+	if not hitPos or insideAnyPlot(hitPos) or tooClose(hitPos.X, hitPos.Z, gap) then
+		return nil, nil
+	end
+	return hitPos, key
+end
+
 local function sampleBand(
 	playerPos: Vector3,
 	flat: Vector3,
@@ -344,16 +381,10 @@ local function sampleBand(
 			continue
 		end
 		local x, z = jitteredXZ(gx, gz)
-		-- Tightest gap first so a Limestone spot is not rejected before the ray.
-		if insideAnyPlot(Vector3.new(x, playerPos.Y, z)) or tooClose(x, z, LIMESTONE_SEP) then
-			continue
+		local hitPos, hitKey = claimFloor(x, z, playerPos.Y, key)
+		if hitPos and hitKey then
+			return hitPos, hitKey
 		end
-		local hitPos, floorMat = floorAt(x, z, playerPos.Y)
-		local gap = if floorMat == Enum.Material.Limestone then LIMESTONE_SEP else MIN_SEP
-		if not hitPos or insideAnyPlot(hitPos) or tooClose(hitPos.X, hitPos.Z, gap) then
-			continue
-		end
-		return hitPos, key
 	end
 	return nil, nil
 end
@@ -367,11 +398,98 @@ local function findSpot(playerPos: Vector3, flat: Vector3): (Vector3?, string?)
 	return sampleBand(playerPos, flat, -BEHIND_MAX, -BEHIND_MIN, 16)
 end
 
-local function plantOne(playerPos: Vector3, flat: Vector3, flyOrb: boolean): boolean
+local function edgeDist(localX: number, localZ: number, halfX: number, halfZ: number): number
+	local dx = math.max(math.abs(localX) - halfX, 0)
+	local dz = math.max(math.abs(localZ) - halfZ, 0)
+	return math.sqrt(dx * dx + dz * dz)
+end
+
+local function notePlotSpan(size: Vector3)
+	local span = math.max(size.X, size.Z)
+	if span > seenPlotSpan + 1 then
+		seenPlotSpan = span
+		plotOuter = PLOT_EDGE_MIN + PLOT_BAND
+		plotMisses = 0
+	end
+end
+
+local function clearCommonsInsideOwnPlot()
+	local own = ClientPlot.get()
+	if not own then
+		return
+	end
+	notePlotSpan(own.size)
+	local i = #plants
+	while i >= 1 do
+		local plant = plants[i]
+		if plant and GridMath.isInsidePlotXZ(plant.pos, own.cframe, own.size) then
+			destroyPlant(plant)
+			if i > #plants then
+				i = #plants
+			end
+		else
+			i -= 1
+		end
+	end
+end
+
+local function playerPos(): Vector3?
+	local char = player.Character
+	local hrp = char and char:FindFirstChild("HumanoidRootPart") :: BasePart?
+	if not hrp then
+		return nil
+	end
+	return hrp.Position
+end
+
+-- Ring outside the live plot edge. Inner band is 50–150, then +100 each time it fills.
+local function findPlotSpot(): (Vector3?, string?)
+	local own = ClientPlot.get()
+	local pos = playerPos()
+	if not own or not pos then
+		return nil, nil
+	end
+	local halfX = own.size.X * 0.5
+	local halfZ = own.size.Z * 0.5
+	local inner = math.max(PLOT_EDGE_MIN, plotOuter - PLOT_BAND)
+	local outer = plotOuter
+	local reachX = halfX + outer
+	local reachZ = halfZ + outer
+	for _ = 1, 36 do
+		local lx = rng:NextNumber(-reachX, reachX)
+		local lz = rng:NextNumber(-reachZ, reachZ)
+		local dist = edgeDist(lx, lz, halfX, halfZ)
+		if dist < inner or dist > outer then
+			continue
+		end
+		local world = own.cframe:PointToWorldSpace(Vector3.new(lx, 0, lz))
+		if insideAnyPlot(world) then
+			continue
+		end
+		local gx = math.round(world.X / CELL)
+		local gz = math.round(world.Z / CELL)
+		local key = xzKey(gx, gz)
+		if byKey[key] then
+			continue
+		end
+		local x, z = jitteredXZ(gx, gz)
+		local hitPos, hitKey = claimFloor(x, z, pos.Y, key)
+		if hitPos and hitKey then
+			return hitPos, hitKey
+		end
+	end
+	return nil, nil
+end
+
+local function plantOne(playerPos: Vector3, flat: Vector3, flyOrb: boolean, presetHit: Vector3?, presetKey: string?): boolean
 	if #speciesIds == 0 then
 		return false
 	end
-	local hitPos, key = findSpot(playerPos, flat)
+	local hitPos = presetHit
+	local key = presetKey
+	if not hitPos or not key then
+		hitPos, key = findSpot(playerPos, flat)
+	end
 	if not hitPos or not key or byKey[key] then
 		return false
 	end
@@ -379,8 +497,8 @@ local function plantOne(playerPos: Vector3, flat: Vector3, flyOrb: boolean): boo
 	local roll = rng:NextNumber()
 	-- 50% small, 35% medium, 15% large.
 	local sizeClass = if roll < 0.5 then 1 elseif roll < 0.85 then 2 else 3
-	local hue = rng:NextInteger(PlotOutlineColors.MIN_INDEX, PlotOutlineColors.CORAL_MAX_INDEX)
-	local hue2 = rng:NextInteger(PlotOutlineColors.MIN_INDEX, PlotOutlineColors.CORAL_MAX_INDEX)
+	local hue = HueRarity.roll(speciesId, rng)
+	local hue2 = HueRarity.roll(speciesId, rng)
 	local opts: CoralVisual.VisualOptions = {
 		color = PlotOutlineColors.randomHueVariant(hue),
 		webColor = PlotOutlineColors.randomHueVariant(hue2),
@@ -417,7 +535,8 @@ local function plantOne(playerPos: Vector3, flat: Vector3, flyOrb: boolean): boo
 		end
 	end
 	part.Parent = folder
-	local rise = TweenService:Create(part, RISE_SEC, { CFrame = finalCF })
+	local riseInfo = if isPlotView() then PLOT_RISE_SEC else RISE_SEC
+	local rise = TweenService:Create(part, riseInfo, { CFrame = finalCF })
 	rise.Completed:Connect(function()
 		if part.Parent then
 			enableCollision(part)
@@ -460,14 +579,162 @@ local function sampleFps(): number
 	return lastFps
 end
 
-local function playerPos(): Vector3?
-	local char = player.Character
-	local hrp = char and char:FindFirstChild("HumanoidRootPart") :: BasePart?
-	if not hrp then
-		return nil
+local GRID_GAP = 10
+
+local function clearSessionCommons()
+	while #plants > 0 do
+		destroyPlant(plants[#plants])
 	end
-	return hrp.Position
 end
+
+local function registerResting(part: BasePart, hitPos: Vector3, key: string)
+	stripVisual(part)
+	part.Parent = folder
+	enableCollision(part)
+	local plant: Plant = { part = part, pos = hitPos, key = key, index = #plants + 1 }
+	plants[plant.index] = plant
+	byKey[key] = plant
+end
+
+-- One row per species, 10 studs apart. Closest coral is the species default, then hue 1..14.
+local function spawnHueGrid()
+	local pos = playerPos()
+	local flat = facingFlat()
+	if not pos or not flat or #speciesIds == 0 then
+		return
+	end
+	local right = Vector3.new(-flat.Z, 0, flat.X)
+	local nRows = #speciesIds
+	local dist = 20
+	for _ = 1, 80 do
+		local blocked = false
+		for row = 1, nRows do
+			local side = (row - 1 - (nRows - 1) / 2) * GRID_GAP
+			local world = pos + flat * dist + right * side
+			if insideAnyPlot(Vector3.new(world.X, pos.Y, world.Z)) then
+				blocked = true
+				break
+			end
+		end
+		if not blocked then
+			break
+		end
+		dist += GRID_GAP
+	end
+	for row = 1, nRows do
+		local speciesId = speciesIds[row]
+		local side = (row - 1 - (nRows - 1) / 2) * GRID_GAP
+		for col = 0, PlotOutlineColors.CORAL_MAX_INDEX do
+			local world = pos + flat * (dist + col * GRID_GAP) + right * side
+			local probe = Vector3.new(world.X, pos.Y, world.Z)
+			if insideAnyPlot(probe) then
+				continue
+			end
+			local hitPos = floorAt(world.X, world.Z, pos.Y)
+			local placePos = hitPos or probe
+			if insideAnyPlot(placePos) then
+				continue
+			end
+			local key = string.format("grid:%s:%d", speciesId, col)
+			local old = byKey[key]
+			if old then
+				destroyPlant(old)
+			end
+			local opts: CoralVisual.VisualOptions = {
+				sizeClass = 2,
+				variantIndex = 1,
+				scaleMult = 1,
+				facingYaw = 0,
+			}
+			if speciesId == "BrainCoral" then
+				opts.diameter = 4
+			elseif speciesId == "SeaFan" then
+				opts.scaleWidth = 1
+				opts.scaleHeight = 1
+			end
+			if col > 0 then
+				local hue = PlotOutlineColors.coralColor(col)
+				opts.color = hue
+				opts.webColor = hue
+			end
+			local part = CoralVisual.create(speciesId, placePos, opts)
+			if part then
+				registerResting(part, placePos, key)
+			end
+		end
+	end
+end
+
+local function isPlayerCam(): boolean
+	local camMode = playerGui:GetAttribute("OceanTD_CamCycleMode")
+	return camMode == nil or camMode == "off" or camMode == ""
+end
+
+local function mountTempTools()
+	local gui = Instance.new("ScreenGui")
+	gui.Name = "OceanTD_CommonGrowTemp"
+	gui.ResetOnSpawn = false
+	gui.DisplayOrder = 90
+	gui.Parent = playerGui
+
+	local stack = Instance.new("Frame")
+	stack.Name = "Stack"
+	stack.AnchorPoint = Vector2.new(0, 0.5)
+	stack.Position = UDim2.new(0, 12, 0.55, 0)
+	stack.Size = UDim2.fromOffset(168, 132)
+	stack.BackgroundTransparency = 1
+	stack.Parent = gui
+
+	local layout = Instance.new("UIListLayout")
+	layout.FillDirection = Enum.FillDirection.Vertical
+	layout.Padding = UDim.new(0, 6)
+	layout.SortOrder = Enum.SortOrder.LayoutOrder
+	layout.Parent = stack
+
+	local function makeButton(text: string, order: number): TextButton
+		local button = Instance.new("TextButton")
+		button.Name = text
+		button.LayoutOrder = order
+		button.Size = UDim2.new(1, 0, 0, 40)
+		button.BackgroundColor3 = Color3.fromRGB(28, 40, 52)
+		button.BorderSizePixel = 0
+		button.Font = Enum.Font.GothamBold
+		button.TextSize = 15
+		button.TextColor3 = Color3.new(1, 1, 1)
+		button.Text = text
+		button.AutoButtonColor = true
+		button.Parent = stack
+		local corner = Instance.new("UICorner")
+		corner.CornerRadius = UDim.new(0, 8)
+		corner.Parent = button
+		return button
+	end
+
+	local growthButton = makeButton("Coral Growth: On", 1)
+	growthButton.BackgroundColor3 = Color3.fromRGB(20, 110, 70)
+	local function refreshGrowthButton()
+		growthButton.Text = if growthEnabled then "Coral Growth: On" else "Coral Growth: Off"
+		growthButton.BackgroundColor3 = if growthEnabled
+			then Color3.fromRGB(20, 110, 70)
+			else Color3.fromRGB(120, 48, 42)
+	end
+	growthButton.Activated:Connect(function()
+		growthEnabled = not growthEnabled
+		refreshGrowthButton()
+	end)
+
+	local deleteButton = makeButton("Del Temp Coral", 2)
+	deleteButton.Activated:Connect(clearSessionCommons)
+
+	local gridButton = makeButton("Grid All", 3)
+	gridButton.Activated:Connect(spawnHueGrid)
+
+	RunService.Heartbeat:Connect(function()
+		gui.Enabled = isPlayerCam() and not commonPaused()
+	end)
+end
+
+mountTempTools()
 
 Remotes.get("PlotRoster").OnClientEvent:Connect(rememberRoster)
 
@@ -496,14 +763,49 @@ task.spawn(function()
 			nextUpkeep = now + 1
 			if fps < FPS_MIN then
 				releaseCommonOrb()
-				if pos then
+				if pos and not isPlotView() then
 					recycleFarthest(pos, FPS_RECYCLE_BATCH, false)
 				end
-			elseif pos and canPlant() then
+			elseif pos and canPlant() and growthEnabled then
 				recycleFarthest(pos, OUTSIDE_RECYCLE_BATCH, true)
 			end
 		end
-		if fps < FPS_MIN or not pos or not canPlant() then
+		if fps < FPS_MIN or not pos then
+			releaseCommonOrb()
+			return
+		end
+		if not growthEnabled then
+			if isPlotView() then
+				clearCommonsInsideOwnPlot()
+			end
+			releaseCommonOrb()
+			return
+		end
+		if isPlotView() then
+			clearCommonsInsideOwnPlot()
+			if commonPaused() or #plants >= POOL_MAX then
+				releaseCommonOrb()
+				return
+			end
+			local own = ClientPlot.get()
+			if not own then
+				return
+			end
+			local hitPos, key = findPlotSpot()
+			if hitPos and key then
+				plotMisses = 0
+				plantOne(pos, Vector3.zAxis, false, hitPos, key)
+			else
+				plotMisses += 1
+				if plotMisses >= PLOT_MISS_EXPAND then
+					plotMisses = 0
+					plotOuter += PLOT_BAND
+				end
+			end
+			return
+		end
+		clearCommonsInsideOwnPlot()
+		if not canPlant() then
 			releaseCommonOrb()
 			return
 		end

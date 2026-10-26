@@ -1660,6 +1660,15 @@ local function beginCamAfterManualPlant()
 	playerGui:SetAttribute("OceanTD_TutorialGateFreeCam", false)
 	-- Hint "cam" first so requestSetEnabled gates allow ON during manualPlant chapter.
 	playerGui:SetAttribute(HINT_ATTR, "cam")
+	if playerGui:GetAttribute("OceanTD_ManualPlantTrainingReported") ~= true then
+		playerGui:SetAttribute("OceanTD_ManualPlantTrainingReported", true)
+		task.defer(function()
+			pcall(function()
+				local Remotes = require(ReplicatedStorage:WaitForChild("OceanTD"):WaitForChild("Remotes"))
+				Remotes.get("ReportManualPlantTraining"):FireServer()
+			end)
+		end)
+	end
 	-- Manual plant turned Auto Plant off; restore ON after they finish and close backpack.
 	pcall(function()
 		local AutoPlantUI = require(script.Parent:WaitForChild("AutoPlantUI"))

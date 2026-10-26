@@ -39,6 +39,7 @@ local DISK_NAME = "_OceanTD_StopAutoRollDisk"
 local DICE_NAME = "_OceanTD_StopAutoRollDice"
 local CORAL_NAME = "_OceanTD_StopAutoRollCoral"
 local LABEL_NAME = "_OceanTD_StopAutoRollLabel"
+local HOLD_HINT_NAME = "_OceanTD_RollHoldHint"
 local HELP_TIP_NAME = "_OceanTD_RollHelpTip"
 local HELP_LETTER_NAME = "_OceanTD_HelpLetter"
 local KEEP_ROLLIN_GUI_NAME = "OceanTD_KeepRollin"
@@ -469,6 +470,50 @@ local function refreshKeepRollin()
 	startKeepRollinSlide()
 end
 
+local canStartAutoRoll: () -> boolean
+
+local function refreshHoldHint()
+	if not anchor then
+		return
+	end
+	local uses = math.max(0, math.floor(tonumber(player:GetAttribute("OceanTD_AutoRollUseCount")) or 0))
+	local show = anchor.Visible
+		and uses < 3
+		and canStartAutoRoll()
+		and label ~= nil
+		and label.Text == "ROLL"
+	local existing = anchor:FindFirstChild(HOLD_HINT_NAME)
+	local hint: TextLabel
+	if existing and existing:IsA("TextLabel") then
+		hint = existing
+	else
+		if existing then
+			existing:Destroy()
+		end
+		hint = Instance.new("TextLabel")
+		hint.Name = HOLD_HINT_NAME
+		hint.BackgroundTransparency = 1
+		hint.AnchorPoint = Vector2.new(0.5, 0)
+		hint.Position = UDim2.new(0.5, 0, 1, 2)
+		hint.Size = UDim2.new(1.8, 0, 0, LABEL_HEIGHT)
+		hint.Font = UiTheme.Font
+		hint.Text = "HOLD"
+		hint.TextColor3 = Color3.new(1, 1, 1)
+		hint.TextScaled = true
+		hint.TextXAlignment = Enum.TextXAlignment.Center
+		hint.ZIndex = anchor.ZIndex + 6
+		hint.Active = false
+		hint.Parent = anchor
+		local stroke = Instance.new("UIStroke")
+		stroke.Color = Color3.new(0, 0, 0)
+		stroke.Thickness = 1
+		stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Contextual
+		stroke.Parent = hint
+	end
+	anchor.ClipsDescendants = false
+	hint.Visible = show
+end
+
 local function refreshRollButtonVisibility()
 	if not anchor then
 		return
@@ -490,6 +535,7 @@ local function refreshRollButtonVisibility()
 	end
 	refreshHelpTip()
 	refreshKeepRollin()
+	refreshHoldHint()
 end
 
 local function buttonScreenCenter(): Vector2?
@@ -674,6 +720,7 @@ local function setRunningLabel(text: string)
 		label.TextTransparency = 0
 		label.TextColor3 = Color3.new(1, 1, 1)
 	end
+	refreshHoldHint()
 end
 
 local function clearCountClip()
@@ -862,6 +909,7 @@ local function applyVisualStopped()
 	end
 	refreshIconSwap()
 	refreshKeepRollin()
+	refreshHoldHint()
 end
 
 local function optimisticAutoRollBudget(): number?
@@ -1280,6 +1328,7 @@ local function ensureChrome(host: GuiObject)
 				and n ~= DICE_NAME
 				and n ~= CORAL_NAME
 				and n ~= LABEL_NAME
+				and n ~= HOLD_HINT_NAME
 				and n ~= HELP_TIP_NAME
 				and not ch:IsA("UICorner")
 				and not ch:IsA("UIStroke")
@@ -1444,7 +1493,7 @@ local function canAcceptGamepadRoll(): boolean
 	return true
 end
 
-local function canStartAutoRoll(): boolean
+function canStartAutoRoll(): boolean
 	local ok, ui = pcall(function()
 		return require(script.Parent:WaitForChild("SkillPowerUpUI"))
 	end)
@@ -1794,6 +1843,10 @@ playerGui:GetAttributeChangedSignal("OceanTD_JoinIntroBusy"):Connect(function()
 	refreshKeepRollin()
 end)
 playerGui:GetAttributeChangedSignal("OceanTD_SeedWheelBusy"):Connect(refreshRollButtonVisibility)
+player:GetAttributeChangedSignal("OceanTD_AutoRollUseCount"):Connect(refreshHoldHint)
+Remotes.get("SkillStagesSync").OnClientEvent:Connect(function()
+	task.defer(refreshHoldHint)
+end)
 InventoryState.onOpenChanged(function()
 	refreshRollButtonVisibility()
 end)

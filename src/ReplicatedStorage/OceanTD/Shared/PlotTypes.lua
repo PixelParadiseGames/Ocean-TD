@@ -113,6 +113,8 @@ export type PlayerProfile = {
 	-- Auto-plant: toggle (default off) unlocks after manualPlantCount >= 3.
 	autoPlantEnabled: boolean,
 	manualPlantCount: number,
+	-- Times the player turned Auto Roll on. HOLD hint hides after 3.
+	autoRollUseCount: number,
 }
 
 local Constants = require(script.Parent.Constants)
@@ -169,6 +171,7 @@ function PlotTypes.defaultProfile(): PlayerProfile
 		economyStats = EconomyStats.defaultPlayer(),
 		autoPlantEnabled = false,
 		manualPlantCount = 0,
+		autoRollUseCount = 0,
 	}
 end
 

@@ -535,6 +535,8 @@ local function sanitizeProfile(raw: any): PlayerProfile
 	profile.autoPlantEnabled = raw.autoPlantEnabled == true
 	local mpc = tonumber(raw.manualPlantCount)
 	profile.manualPlantCount = if mpc and mpc > 0 then math.floor(mpc) else 0
+	local arc = tonumber(raw.autoRollUseCount)
+	profile.autoRollUseCount = if arc and arc > 0 then math.floor(arc) else 0
 	local lifeEarn = tonumber(raw.lifetimeSandDollarsEarned)
 	profile.lifetimeSandDollarsEarned = if lifeEarn and lifeEarn > 0 then math.floor(lifeEarn) else 0
 	local lifePlay = tonumber(raw.lifetimePlaySec)
@@ -753,6 +755,7 @@ function PersistenceService.reportHighestWave(player: Player, wave: number): boo
 	end
 	profile.highestWave = w
 	player:SetAttribute(Constants.HIGHEST_WAVE_ATTR, w)
+	require(script.Parent:WaitForChild("BadgeAwards")).noteWave(player, w)
 	return true
 end
 
@@ -777,6 +780,7 @@ function PersistenceService.reportWaveRecords(
 		profile.highestWave = w
 		player:SetAttribute(Constants.HIGHEST_WAVE_ATTR, w)
 		changed.wave = true
+		require(script.Parent:WaitForChild("BadgeAwards")).noteWave(player, w)
 	end
 	if fed > (profile.highestFishFed or 0) then
 		profile.highestFishFed = fed
@@ -1610,6 +1614,18 @@ function PersistenceService.setAutoPlantEnabled(player: Player, enabled: boolean
 	end)
 end
 
+function PersistenceService.addAutoRollUse(player: Player): number
+	local profile = profiles[player]
+	if not profile then
+		return 0
+	end
+	local n = math.max(0, math.floor(tonumber(profile.autoRollUseCount) or 0)) + 1
+	profile.autoRollUseCount = n
+	player:SetAttribute("OceanTD_AutoRollUseCount", n)
+	PersistenceService.save(player)
+	return n
+end
+
 function PersistenceService.getManualPlantCount(player: Player): number
 	local profile = profiles[player]
 	if not profile then
@@ -1736,6 +1752,7 @@ function PersistenceService.setSeedWheelAutoRollEnabled(player: Player, enabled:
 		return
 	end
 	local userId = player.UserId
+	local wasOn = isSeedWheelAutoRollEnabled(userId)
 	local next = enabled == true
 	if next then
 		local budget = autoRollBudgetForPlayer(player)
@@ -1750,6 +1767,9 @@ function PersistenceService.setSeedWheelAutoRollEnabled(player: Player, enabled:
 	end
 	seedWheelAutoRollEnabled[userId] = next
 	Remotes.get("SeedWheelAutoRollSync"):FireClient(player, next, remainingWirePayload(userId))
+	if next and not wasOn then
+		require(script.Parent:WaitForChild("BadgeAwards")).noteAutoRollEnabled(player)
+	end
 	if next then
 		task.defer(function()
 			if player.Parent and isSeedWheelAutoRollEnabled(userId) and not seedWheelPending[userId] then
@@ -1801,7 +1821,7 @@ function PersistenceService.beginSeedWheelGrant(player: Player, amount: number?,
 	end
 	local add = math.max(1, math.floor(tonumber(amount) or 1))
 	local itemId = SeedWheel.pickRandom()
-	local colorIndex = SeedWheel.pickRandomColorIndex()
+	local colorIndex = SeedWheel.pickRandomColorIndex(nil, itemId)
 	seedWheelTokenSeq += 1
 	local token = seedWheelTokenSeq
 	seedWheelPending[userId] = {
@@ -2151,6 +2171,14 @@ function PersistenceService.allowIntentionalClear(userId: number)
 	intentionalClear[userId] = true
 end
 
+local function queueStoredBadges(player: Player)
+	task.defer(function()
+		if player.Parent then
+			require(script.Parent:WaitForChild("BadgeAwards")).grantStored(player)
+		end
+	end)
+end
+
 function PersistenceService.load(player: Player): PlayerProfile
 	local userId = player.UserId
 	local profile = PlotTypes.defaultProfile()
@@ -2165,6 +2193,7 @@ function PersistenceService.load(player: Player): PlayerProfile
 		loadFailed[player] = true
 		profiles[player] = profile
 		beginSandDollarSession(player)
+		queueStoredBadges(player)
 		log("Load fallback empty profile userId=", userId, "layout=0 — SAVES BLOCKED (protect $D)")
 		return profile
 	end
@@ -2173,6 +2202,7 @@ function PersistenceService.load(player: Player): PlayerProfile
 	if result == nil then
 		profiles[player] = profile
 		beginSandDollarSession(player)
+		queueStoredBadges(player)
 		log("Load new profile userId=", userId, "layout=0", "seeds=0")
 		return profile
 	end
@@ -2180,6 +2210,7 @@ function PersistenceService.load(player: Player): PlayerProfile
 	profile = sanitizeProfile(result)
 	profiles[player] = profile
 	beginSandDollarSession(player)
+	queueStoredBadges(player)
 	log(
 		"Load userId=",
 		userId,
@@ -2261,6 +2292,7 @@ function PersistenceService.save(player: Player, layoutOverride: { LayoutObject 
 		hasSeenJoinIntro = profile.hasSeenJoinIntro == true,
 		autoPlantEnabled = profile.autoPlantEnabled == true,
 		manualPlantCount = math.max(0, math.floor(tonumber(profile.manualPlantCount) or 0)),
+		autoRollUseCount = math.max(0, math.floor(tonumber(profile.autoRollUseCount) or 0)),
 		hasLostWaveRound = profile.hasLostWaveRound == true,
 		lifetimeSandDollarsEarned = math.max(0, math.floor(profile.lifetimeSandDollarsEarned or 0)),
 		lifetimePlaySec = math.max(0, math.floor(profile.lifetimePlaySec or 0)),
