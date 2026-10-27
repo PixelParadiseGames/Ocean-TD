@@ -214,7 +214,7 @@ function AutoPlantService.getAddMaxCapacity(player: Player): number
 	return math.min(backpackSeedTotal(player), #collectFreeGridSpots(player), placeCapRoom(player))
 end
 
-function AutoPlantService.syncToClient(player: Player, failHint: string?)
+function AutoPlantService.syncToClient(player: Player, failHint: string?, fromHarvest: boolean?)
 	local unlocked = AutoPlantService.isUnlocked(player)
 	if not unlocked and PersistenceService.isAutoPlantEnabled(player) then
 		-- Dropped below 3 on-plot corals — toggle turns off until they qualify again.
@@ -264,6 +264,7 @@ function AutoPlantService.syncToClient(player: Player, failHint: string?)
 		placeCapRoom = capRoom,
 		addMaxCapacity = math.min(seeds, freeSpots, capRoom),
 		failHint = if failHint == "GROW PLOT" or failHint == "PLOT MAXED" then failHint else nil,
+		fromHarvest = if fromHarvest == true then true else nil,
 		autoPlantBlock = autoPlantBlock,
 	})
 end
@@ -302,7 +303,8 @@ end
 
 -- After a seed grant would go to inventory: try place on a spaced empty spot.
 -- Returns true if the seed was consumed by a successful place.
-function AutoPlantService.tryPlaceGrantedSeed(player: Player, itemId: string, colorIndex: number): boolean
+function AutoPlantService.tryPlaceGrantedSeed(player: Player, itemId: string, colorIndex: number, paint: any?): boolean
+	local fromHarvest = typeof(paint) == "table" and paint.fromHarvest == true
 	if not PersistenceService.isAutoPlantEnabled(player) then
 		return false
 	end
@@ -319,7 +321,7 @@ function AutoPlantService.tryPlaceGrantedSeed(player: Player, itemId: string, co
 	local spots = worldSpotsForPlayer(player)
 	if #spots == 0 then
 		PersistenceService.setAutoPlantEnabled(player, false)
-		AutoPlantService.syncToClient(player, "GROW PLOT")
+		AutoPlantService.syncToClient(player, "GROW PLOT", fromHarvest)
 		return false
 	end
 	local free: { Vector3 } = {}
@@ -330,19 +332,19 @@ function AutoPlantService.tryPlaceGrantedSeed(player: Player, itemId: string, co
 	end
 	if #free > 0 and placeCapRoom(player) <= 0 then
 		PersistenceService.setAutoPlantEnabled(player, false)
-		AutoPlantService.syncToClient(player, "PLOT MAXED")
+		AutoPlantService.syncToClient(player, "PLOT MAXED", fromHarvest)
 		return false
 	end
 	if #free == 0 then
 		PersistenceService.setAutoPlantEnabled(player, false)
-		AutoPlantService.syncToClient(player, "GROW PLOT")
+		AutoPlantService.syncToClient(player, "GROW PLOT", fromHarvest)
 		return false
 	end
 	local occupied = collectOccupiedWorld(plotId)
 	local pick = AutoPlantSpots.pickSpacedWorld(free, occupied)
 	if not pick then
 		PersistenceService.setAutoPlantEnabled(player, false)
-		AutoPlantService.syncToClient(player, "GROW PLOT")
+		AutoPlantService.syncToClient(player, "GROW PLOT", fromHarvest)
 		return false
 	end
 	local hue = PlotOutlineColors.clampCoralIndex(colorIndex)
@@ -354,7 +356,24 @@ function AutoPlantService.tryPlaceGrantedSeed(player: Player, itemId: string, co
 		-- Apply the granted hue as paint (seedHue alone leaves species-default look).
 		local placeId = result.placeId
 		if typeof(placeId) == "string" and placeId ~= "" then
-			PlacementService.setCoralColor(player, placeId, hue, nil, nil, nil, nil, nil, nil, nil, true)
+			if fromHarvest and typeof(paint) == "table" then
+				PlacementService.setCoralColor(
+					player,
+					placeId,
+					hue,
+					paint.colorR,
+					paint.colorG,
+					paint.colorB,
+					paint.webColorIndex,
+					paint.webColorR,
+					paint.webColorG,
+					paint.webColorB,
+					true,
+					true
+				)
+			else
+				PlacementService.setCoralColor(player, placeId, hue, nil, nil, nil, nil, nil, nil, nil, true)
+			end
 		end
 		log("Auto-placed", itemId, "hue", hue, "for", player.Name)
 		Remotes.get("AutoPlantPlaced"):FireClient(player, {
@@ -362,6 +381,14 @@ function AutoPlantService.tryPlaceGrantedSeed(player: Player, itemId: string, co
 			colorIndex = hue,
 			worldPos = pick,
 			placeId = placeId,
+			fromHarvest = fromHarvest or nil,
+			colorR = if fromHarvest then paint.colorR else nil,
+			colorG = if fromHarvest then paint.colorG else nil,
+			colorB = if fromHarvest then paint.colorB else nil,
+			webColorIndex = if fromHarvest then paint.webColorIndex else nil,
+			webColorR = if fromHarvest then paint.webColorR else nil,
+			webColorG = if fromHarvest then paint.webColorG else nil,
+			webColorB = if fromHarvest then paint.webColorB else nil,
 		})
 		AutoPlantService.syncToClient(player)
 		return true
@@ -376,7 +403,7 @@ function AutoPlantService.tryPlaceGrantedSeed(player: Player, itemId: string, co
 	end
 	if hint then
 		PersistenceService.setAutoPlantEnabled(player, false)
-		AutoPlantService.syncToClient(player, hint)
+		AutoPlantService.syncToClient(player, hint, fromHarvest)
 	end
 	return false
 end

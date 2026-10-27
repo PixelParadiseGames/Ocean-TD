@@ -11,7 +11,7 @@ local SeedWheel = require(script.Parent:WaitForChild("SeedWheel"))
 local ColorUnlocks = {}
 
 ColorUnlocks.LOCK_ICON = "rbxassetid://136120555834466"
-ColorUnlocks.UNLOCK_COST = 10
+-- Hue seed prices live on HueRarity.seedCost (by rarity class).
 
 export type UnlockMap = { [string]: { [string]: boolean } }
 

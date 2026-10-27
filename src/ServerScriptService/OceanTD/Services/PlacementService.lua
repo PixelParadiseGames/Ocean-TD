@@ -3256,7 +3256,8 @@ function PlacementService.setCoralColor(
 	webColorR: number?,
 	webColorG: number?,
 	webColorB: number?,
-	skipCapCheck: boolean?
+	skipCapCheck: boolean?,
+	forceExactPaint: boolean?
 ): {
 	ok: boolean,
 	errorCode: string?,
@@ -3340,7 +3341,25 @@ function PlacementService.setCoralColor(
 	visual:SetAttribute("OceanTD_ColorIndex", idx)
 	local webPaint: Color3? = nil
 	local webIdx: number? = nil
-	if CoralVisual.isSeaFan(visual:GetAttribute("OceanTD_SpeciesId")) then
+	local speciesId = visual:GetAttribute("OceanTD_SpeciesId")
+	if forceExactPaint == true then
+		if typeof(webColorR) == "number" and typeof(webColorG) == "number" and typeof(webColorB) == "number" then
+			webPaint = Color3.new(
+				math.clamp(webColorR, 0, 1),
+				math.clamp(webColorG, 0, 1),
+				math.clamp(webColorB, 0, 1)
+			)
+		end
+		if typeof(webColorIndex) == "number" then
+			webIdx = PlotOutlineColors.clampCoralIndex(webColorIndex)
+		end
+		if CoralVisual.isDualColorMesh(speciesId) and webPaint then
+			CoralVisual.setRestColor(visual, paint, webPaint, webIdx)
+			GridService.setSeaFanExtras(plotId, gx, gy, gz, nil, nil, nil, webPaint.R, webPaint.G, webPaint.B)
+		else
+			CoralVisual.setRestColor(visual, paint)
+		end
+	elseif CoralVisual.isSeaFan(speciesId) then
 		-- Web always shares the stem swatch hue; shade may differ.
 		webIdx = idx
 		local base = PlotOutlineColors.coralColor(idx)

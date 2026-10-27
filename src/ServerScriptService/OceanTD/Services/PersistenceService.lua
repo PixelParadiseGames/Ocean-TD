@@ -1119,7 +1119,7 @@ function PersistenceService.tryUnlockCoralColor(player: Player, itemId: string, 
 			sandDollars = clampSandDollars(profile.currencies.sandDollars),
 		}
 	end
-	local cost = HueSeeds.SEED_COST
+	local cost = HueSeeds.seedCost(itemId, idx)
 	local cash = clampSandDollars(profile.currencies.sandDollars)
 	local freePad = IntroPad.isPlayerOnPad(player)
 	if not freePad and cash < cost then
@@ -1670,14 +1670,15 @@ function PersistenceService.tryGrantHueSeed(
 	player: Player,
 	itemId: string,
 	colorIndex: number,
-	amount: number?
+	amount: number?,
+	paint: any?
 )
 	local add = math.max(1, math.floor(tonumber(amount) or 1))
 	local hue = PlotOutlineColors.clampCoralIndex(colorIndex)
 	local AutoPlantService = require(script.Parent:WaitForChild("AutoPlantService"))
 	for _ = 1, add do
 		PersistenceService.creditHueSeed(player, itemId, hue, 1)
-		AutoPlantService.tryPlaceGrantedSeed(player, itemId, hue)
+		AutoPlantService.tryPlaceGrantedSeed(player, itemId, hue, paint)
 	end
 end
 
@@ -1911,7 +1912,40 @@ function PersistenceService.cancelCommonHarvest(player: Player, generation: any)
 	clearHarvestPending(player.UserId)
 end
 
-function PersistenceService.claimCommonHarvest(player: Player, itemId: any, colorIndex: any, generation: any): boolean
+local function channel01(v: any): number?
+	if typeof(v) ~= "number" or v ~= v then
+		return nil
+	end
+	return math.clamp(v, 0, 1)
+end
+
+local function sanitizeHarvestPaint(look: any): { [string]: any }?
+	if typeof(look) ~= "table" then
+		return nil
+	end
+	local paint: { [string]: any } = {}
+	local r, g, b = channel01(look.colorR), channel01(look.colorG), channel01(look.colorB)
+	if r and g and b then
+		paint.colorR = r
+		paint.colorG = g
+		paint.colorB = b
+	end
+	local wr, wg, wb = channel01(look.webColorR), channel01(look.webColorG), channel01(look.webColorB)
+	if wr and wg and wb then
+		paint.webColorR = wr
+		paint.webColorG = wg
+		paint.webColorB = wb
+	end
+	if typeof(look.webColorIndex) == "number" then
+		paint.webColorIndex = PlotOutlineColors.clampCoralIndex(look.webColorIndex)
+	end
+	if paint.colorR == nil and paint.webColorR == nil then
+		return nil
+	end
+	return paint
+end
+
+function PersistenceService.claimCommonHarvest(player: Player, itemId: any, colorIndex: any, generation: any, look: any): boolean
 	local profile = profiles[player]
 	if not profile then
 		return false
@@ -1934,8 +1968,10 @@ function PersistenceService.claimCommonHarvest(player: Player, itemId: any, colo
 	if pending.itemId ~= itemId or pending.colorIndex ~= idx then
 		return false
 	end
-	-- One small seed. Size is upgraded later on the plot, same as a rolled seed.
-	PersistenceService.tryGrantHueSeed(player, itemId, idx, 1)
+	-- One small seed. Auto Plant places this exact hue and accent, then plays the plot trip.
+	local paint = sanitizeHarvestPaint(look) or {}
+	paint.fromHarvest = true
+	PersistenceService.tryGrantHueSeed(player, itemId, idx, 1, paint)
 	task.spawn(function()
 		PersistenceService.save(player)
 	end)
@@ -1947,8 +1983,8 @@ function PersistenceService.initCommonHarvest()
 	Remotes.getFunction("RequestBeginCommonHarvest").OnServerInvoke = function(player: Player, itemId: any, colorIndex: any, generation: any): boolean
 		return PersistenceService.beginCommonHarvest(player, itemId, colorIndex, generation)
 	end
-	Remotes.getFunction("RequestClaimCommonHarvest").OnServerInvoke = function(player: Player, itemId: any, colorIndex: any, generation: any): boolean
-		return PersistenceService.claimCommonHarvest(player, itemId, colorIndex, generation)
+	Remotes.getFunction("RequestClaimCommonHarvest").OnServerInvoke = function(player: Player, itemId: any, colorIndex: any, generation: any, look: any): boolean
+		return PersistenceService.claimCommonHarvest(player, itemId, colorIndex, generation, look)
 	end
 	Remotes.get("CommonHarvestCancel").OnServerEvent:Connect(function(player: Player, generation: any)
 		PersistenceService.cancelCommonHarvest(player, generation)

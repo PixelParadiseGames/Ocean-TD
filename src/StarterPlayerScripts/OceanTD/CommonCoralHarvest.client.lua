@@ -10,6 +10,7 @@ local GuiService = game:GetService("GuiService")
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
 local SoundService = game:GetService("SoundService")
 local UserInputService = game:GetService("UserInputService")
 local Workspace = game:GetService("Workspace")
@@ -250,6 +251,18 @@ barFill.BorderSizePixel = 0
 barFill.Size = UDim2.fromScale(0, 1)
 barFill.Parent = barBack
 round(barFill)
+local barStroke = stroke(barBack, Color3.new(1, 1, 1), 1, 0)
+barStroke.BorderStrokePosition = Enum.BorderStrokePosition.Outer
+local barScale = Instance.new("UIScale")
+barScale.Name = "HoldBarScale"
+barScale.Scale = 1
+barScale.Parent = barBack
+local barPopped = false
+
+local hueOuterStroke: UIStroke? = nil
+local coralOuterStroke: UIStroke? = nil
+local hueOuterBase = 2
+local coralOuterBase = 2
 
 local function matchBarWidth()
 	local scale = rootScale.Scale
@@ -258,7 +271,7 @@ local function matchBarWidth()
 	end
 	local w = topRow.AbsoluteSize.X / scale
 	if w > 8 then
-		barBack.Size = UDim2.fromOffset(math.floor(w + 0.5), px(10))
+		barBack.Size = UDim2.fromOffset(math.floor(w + 0.5), px(20))
 	end
 end
 topRow:GetPropertyChangedSignal("AbsoluteSize"):Connect(matchBarWidth)
@@ -272,7 +285,7 @@ local function rebuildCircles(itemId: string, hueIndex: number)
 	local height = math.max(coralPx, huePx)
 	local color = SeedWheel.colorForIndex(hueIndex)
 	pair.Size = UDim2.fromOffset(width, height)
-	barBack.Size = UDim2.fromOffset(math.max(px(140), width), px(10))
+	barBack.Size = UDim2.fromOffset(math.max(px(140), width), px(20))
 	barFill.BackgroundColor3 = color
 
 	local hue = Instance.new("Frame")
@@ -298,6 +311,8 @@ local function rebuildCircles(itemId: string, hueIndex: number)
 	round(ring)
 	local ringStroke = stroke(ring, Color3.new(1, 1, 1), UiViewportTags.coralSpinnerStrokeThickness() + 2, 0)
 	ringStroke.BorderStrokePosition = Enum.BorderStrokePosition.Outer
+	hueOuterStroke = ringStroke
+	hueOuterBase = ringStroke.Thickness
 
 	local brush = Instance.new("ImageLabel")
 	brush.Name = "HuePaintbrush"
@@ -334,6 +349,19 @@ local function rebuildCircles(itemId: string, hueIndex: number)
 	inner.Parent = coral
 	round(inner)
 	stroke(inner, Color3.new(1, 1, 1), UiViewportTags.coralSpinnerStrokeThickness(), 0.5)
+	local coralRing = Instance.new("Frame")
+	coralRing.Name = "CoralOuterStroke"
+	coralRing.BackgroundTransparency = 1
+	coralRing.AnchorPoint = Vector2.new(0.5, 0.5)
+	coralRing.Position = coral.Position
+	coralRing.Size = UDim2.fromOffset(coralPx, coralPx)
+	coralRing.ZIndex = 7
+	coralRing.Parent = pair
+	round(coralRing)
+	local coralStroke = stroke(coralRing, Color3.new(1, 1, 1), UiViewportTags.coralSpinnerStrokeThickness() + 2, 0)
+	coralStroke.BorderStrokePosition = Enum.BorderStrokePosition.Outer
+	coralOuterStroke = coralStroke
+	coralOuterBase = coralStroke.Thickness
 
 	nameLabel.Text = if def then def.displayName else itemId
 	nameLabel.TextSize = px(22)
@@ -431,6 +459,31 @@ local function plantPos(part: BasePart): Vector3
 	return part.Position
 end
 
+local function readHarvestPaint(part: BasePart): { [string]: number }
+	local paint: { [string]: number } = {}
+	local r = part:GetAttribute("OceanTD_RestR")
+	local g = part:GetAttribute("OceanTD_RestG")
+	local b = part:GetAttribute("OceanTD_RestB")
+	if typeof(r) == "number" and typeof(g) == "number" and typeof(b) == "number" then
+		paint.colorR = r
+		paint.colorG = g
+		paint.colorB = b
+	end
+	local wr = part:GetAttribute("OceanTD_WebRestR")
+	local wg = part:GetAttribute("OceanTD_WebRestG")
+	local wb = part:GetAttribute("OceanTD_WebRestB")
+	if typeof(wr) == "number" and typeof(wg) == "number" and typeof(wb) == "number" then
+		paint.webColorR = wr
+		paint.webColorG = wg
+		paint.webColorB = wb
+	end
+	local webHue = part:GetAttribute("OceanTD_WebHueIndex")
+	if typeof(webHue) == "number" then
+		paint.webColorIndex = webHue
+	end
+	return paint
+end
+
 local function readHarvest(part: BasePart): (string?, number?)
 	local itemId = part:GetAttribute("OceanTD_ItemId")
 	if typeof(itemId) ~= "string" or itemId == "" then
@@ -499,10 +552,70 @@ local function screenOf(world: Vector3): (Vector2?, boolean)
 	return Vector2.new(v.X, v.Y), onScreen and v.Z > 0
 end
 
-local function hideCard()
-	gui.Enabled = false
+local function restoreCircleStrokes()
+	if hueOuterStroke then
+		hueOuterStroke.Thickness = hueOuterBase
+	end
+	if coralOuterStroke then
+		coralOuterStroke.Thickness = coralOuterBase
+	end
+end
+
+local function pulseCircleStrokes()
+	local wave = 0.5 + 0.5 * math.sin(os.clock() * math.pi * 5)
+	if hueOuterStroke then
+		hueOuterStroke.Thickness = hueOuterBase + wave * hueOuterBase
+	end
+	if coralOuterStroke then
+		coralOuterStroke.Thickness = coralOuterBase + wave * coralOuterBase
+	end
+end
+
+local function popHoldBar()
+	barBack.Visible = true
+	if barPopped then
+		return
+	end
+	barPopped = true
+	barFill.Size = UDim2.fromScale(0, 1)
+	barScale.Scale = 0.2
+	TweenService:Create(barScale, TweenInfo.new(0.22, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
+		Scale = 1,
+	}):Play()
+end
+
+local function setHoldFill(alpha: number)
+	popHoldBar()
+	barFill.Size = UDim2.fromScale(math.clamp(alpha, 0, 1), 1)
+end
+
+local function resetHoldBar()
+	barPopped = false
+	barScale.Scale = 1
 	barBack.Visible = false
 	barFill.Size = UDim2.fromScale(0, 1)
+	restoreCircleStrokes()
+end
+
+local function hideHoldChrome()
+	barBack.Visible = false
+	barPopped = false
+	barScale.Scale = 1
+	restoreCircleStrokes()
+	holdRow.Visible = false
+	for _, lbl in ipairs({ nameLabel, rarityLabel, holdWord }) do
+		lbl.TextTransparency = 1
+		local outline = lbl:FindFirstChildOfClass("UIStroke")
+		if outline then
+			outline.Transparency = 1
+			outline.Enabled = false
+		end
+	end
+end
+
+local function hideCard()
+	gui.Enabled = false
+	resetHoldBar()
 	rootScale.Scale = 0.5
 	root.AnchorPoint = Vector2.new(0.5, 0)
 	holdRow.Visible = true
@@ -657,8 +770,7 @@ local function cancelHold(restore: boolean)
 	restoreCollide()
 	holdAnchor = nil
 	table.clear(origins)
-	barBack.Visible = false
-	barFill.Size = UDim2.fromScale(0, 1)
+	resetHoldBar()
 end
 
 local function backpackPoint(): Vector2?
@@ -675,8 +787,7 @@ local function playPresent()
 	local token = presentToken
 	mode = "present"
 	gui.Enabled = true
-	holdRow.Visible = false
-	barBack.Visible = false
+	hideHoldChrome()
 	root.AnchorPoint = Vector2.new(0.5, 0.5)
 	local cam = Workspace.CurrentCamera
 	local vp = if cam then cam.ViewportSize else Vector2.new(1280, 720)
@@ -812,6 +923,10 @@ local function playPresent()
 		end
 		RunService.Heartbeat:Wait()
 	end
+	if presentToken ~= token then
+		dropFlown()
+		return
+	end
 	fadeText(1)
 	if coralCircle and coralCircle:IsA("GuiObject") then
 		park(coralCircle, meet, coralPxSize)
@@ -916,6 +1031,7 @@ local function finishHold()
 		return
 	end
 	local itemId, hue = readHarvest(part)
+	local paint = readHarvestPaint(part)
 	local key = part:GetAttribute("OceanTD_HarvestKey")
 	if not itemId or not hue or typeof(key) ~= "string" then
 		mode = "hold"
@@ -924,19 +1040,24 @@ local function finishHold()
 	end
 	mode = "claim"
 	applyDrop(1)
-	local ok = false
-	local invoked = pcall(function()
-		ok = Remotes.getFunction("RequestClaimCommonHarvest"):InvokeServer(itemId, hue, holdGen) == true
-	end)
+	hideHoldChrome()
 	local tripping = useTrip
 	useTrip = false
 	digAlpha = -1
 	holdLatched = false
+	-- Stop the dig bed before the server round-trip so the loop cannot start over.
 	if not tripping then
-		PlantWorkerVfx.endInPlaceDig()
+		PlantWorkerVfx.endInPlaceDig(true)
 	end
+	-- Circles start colliding immediately. The claim runs alongside that.
+	task.spawn(playPresent)
+	local ok = false
+	local invoked = pcall(function()
+		ok = Remotes.getFunction("RequestClaimCommonHarvest"):InvokeServer(itemId, hue, holdGen, paint) == true
+	end)
 	unlockMove()
 	if not invoked or not ok then
+		presentToken += 1
 		if tripping then
 			PlantWorkerVfx.cancelHarvestTrip()
 		end
@@ -945,8 +1066,7 @@ local function finishHold()
 		holdAnchor = nil
 		table.clear(origins)
 		mode = "show"
-		barBack.Visible = false
-		barFill.Size = UDim2.fromScale(0, 1)
+		hideCard()
 		return
 	end
 	table.clear(savedCollide)
@@ -960,7 +1080,6 @@ local function finishHold()
 		part:Destroy()
 	end
 	target = nil
-	task.spawn(playPresent)
 end
 
 local function beginHold(part: BasePart)
@@ -994,9 +1113,10 @@ local function beginHold(part: BasePart)
 		useTrip = true
 		digAlpha = -1
 		holdLatched = false
-		mode = "hold"
-		holdStart = os.clock()
-		local started = PlantWorkerVfx.playHarvestTrip(plantPos(part), HOLD_SEC, function(u: number)
+	mode = "hold"
+	holdStart = os.clock()
+	popHoldBar()
+	local started = PlantWorkerVfx.playHarvestTrip(plantPos(part), HOLD_SEC, function(u: number)
 			digAlpha = u
 		end, function() end)
 		if not started then
@@ -1017,6 +1137,7 @@ local function beginHold(part: BasePart)
 	end
 	mode = "hold"
 	holdStart = os.clock()
+	popHoldBar()
 	lockMove()
 end
 
@@ -1030,6 +1151,15 @@ local function pointOnChrome(screenPos: Vector3): boolean
 		and screenPos.Y >= origin.Y
 		and screenPos.X <= origin.X + size.X
 		and screenPos.Y <= origin.Y + size.Y
+end
+
+local function pressStartsHarvest(screenPos: Vector3, gameProcessed: boolean): boolean
+	if pointOnChrome(screenPos) then
+		return true
+	end
+	-- Free cam: the coral itself is not clickable (CanQuery is off). A click while the
+	-- card is up harvests that coral. HUD buttons still win because they mark the click processed.
+	return isFreeCam() and gui.Enabled and not gameProcessed
 end
 
 local function releaseHoldPointer(input: InputObject)
@@ -1051,8 +1181,9 @@ UserInputService.InputBegan:Connect(function(input, _processed)
 		return
 	end
 	if input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseButton1 then
-		-- Only a press that starts on the card. A finger already down that slides onto it does not count.
-		if pointOnChrome(input.Position) then
+		-- Follow cam: the press has to start on the card. Free cam also accepts a click
+		-- while that card is up, because the coral mesh cannot take the click.
+		if pressStartsHarvest(input.Position, _processed) then
 			holdPointer = input
 			pointerDown = true
 		end
@@ -1085,9 +1216,11 @@ RunService.Heartbeat:Connect(function(dt)
 		if useTrip then
 			local elapsed = os.clock() - holdStart
 			local digDone = digAlpha >= 1 or (digAlpha >= 0 and elapsed >= HOLD_SEC + 1.5)
+			pulseCircleStrokes()
+			setHoldFill(math.clamp(elapsed / HOLD_SEC, 0, 1))
 			if digDone then
 				applyDrop(1)
-				barFill.Size = UDim2.fromScale(1, 1)
+				setHoldFill(1)
 				placeHold(1)
 				finishHold()
 				return
@@ -1103,6 +1236,7 @@ RunService.Heartbeat:Connect(function(dt)
 			if digAlpha < 0 then
 				holdLatched = false
 				placeBelow(part)
+				setHoldFill(math.clamp(elapsed / HOLD_SEC, 0, 1))
 				return
 			end
 			if not holdLatched then
@@ -1110,7 +1244,6 @@ RunService.Heartbeat:Connect(function(dt)
 				cardFrom = cardCenter()
 			end
 			applyDrop(digAlpha)
-			barFill.Size = UDim2.fromScale(digAlpha, 1)
 			placeHold(digAlpha)
 			return
 		end
@@ -1130,8 +1263,9 @@ RunService.Heartbeat:Connect(function(dt)
 			return
 		end
 		local alpha = math.clamp((os.clock() - holdStart) / HOLD_SEC, 0, 1)
+		pulseCircleStrokes()
 		applyDrop(alpha)
-		barFill.Size = UDim2.fromScale(alpha, 1)
+		setHoldFill(alpha)
 		placeHold(alpha)
 		if alpha >= 1 then
 			finishHold()

@@ -55,33 +55,12 @@ local STAGE_INTRO_INFO = TweenInfo.new(STAGE_INTRO_SEC, Enum.EasingStyle.Back, E
 local INTRO_GREY = Color3.fromRGB(55, 55, 58)
 local INTRO_STROKE_WHITE = Color3.new(1, 1, 1)
 local UNLOCK_STROKE_THICKNESS = 2
-local UNLOCK_SOUND_ID = "rbxassetid://134583420216867"
-
-local unlockSound = Instance.new("Sound")
-unlockSound.Name = "OceanTD_SkillUnlock"
-unlockSound.SoundId = UNLOCK_SOUND_ID
-unlockSound.Volume = 1
-unlockSound.Parent = SoundService
 
 local stageIntroSfx = {
 	pop = "rbxassetid://5852470908", -- grey circle scale-in
 	check = "rbxassetid://138571475125488", -- N → check
 	lock = "rbxassetid://9126267639", -- N → lock
 }
-
-local function playUnlockSound()
-	local s = unlockSound:Clone()
-	s.Parent = SoundService
-	s:Play()
-	s.Ended:Connect(function()
-		s:Destroy()
-	end)
-	task.delay(4, function()
-		if s.Parent then
-			s:Destroy()
-		end
-	end)
-end
 
 -- stepIndex is 1-based within that SFX series (rising for pop/check, falling for lock).
 local function playStageIntroSfx(kind: "pop" | "check" | "lock", stepIndex: number)
@@ -632,6 +611,23 @@ end
 -- Purchase progress: highest unlocked stage.
 local function unlockedStage(skillId: string): number
 	return SkillStages.clampStageFor(skillId, unlockedMap[skillId])
+end
+
+-- While $D coins are in flight, keep the purchased stage painted as the red lock.
+local spendFlyHold: { skillId: string, stage: number }? = nil
+
+local function stagePopOwnsScale(gui: GuiObject): boolean
+	local untilClock = gui:GetAttribute("_OceanTD_PopUntil")
+	return typeof(untilClock) == "number" and os.clock() < untilClock
+end
+
+local function visualStageCaps(skillId: string, active: number, unlocked: number): (number, number)
+	local hold = spendFlyHold
+	if hold and hold.skillId == skillId then
+		local cap = math.max(SkillStages.MIN_STAGE, hold.stage - 1)
+		return math.min(active, cap), math.min(unlocked, cap)
+	end
+	return active, unlocked
 end
 
 -- Session-only Reload Speed stage-8 demo (IIFE keeps helpers out of main-chunk locals).
@@ -1836,18 +1832,27 @@ local function applyStudioStageResting(
 		leftoverStroke:Destroy()
 	end
 	local stageScale = ensureStageScale(sb)
+	local keepScale = stagePopOwnsScale(sb)
 	if nextUnlock and stageIndex == nextUnlock then
 		placeNextUnlockOn(sb, stageIndex)
-		stageScale.Scale = 1
+		if not keepScale then
+			stageScale.Scale = 1
+		end
 	elseif stageIndex > unlocked then
 		placeLockOn(sb)
-		stageScale.Scale = 1
+		if not keepScale then
+			stageScale.Scale = 1
+		end
 	elseif stageIndex == active then
 		paintStageCheckmarks(sb, "active")
-		stageScale.Scale = ACTIVE_STAGE_SCALE
+		if not keepScale then
+			stageScale.Scale = ACTIVE_STAGE_SCALE
+		end
 	else
 		paintStageCheckmarks(sb, "idle")
-		stageScale.Scale = 1
+		if not keepScale then
+			stageScale.Scale = 1
+		end
 	end
 end
 
@@ -2597,7 +2602,9 @@ local RHealthUI = (function()
 		local bubble = col.bubble
 		local check = col.check
 		-- Same size for active + idle — no +20% scale on Reef Health.
-		ensureStageScale(bubble).Scale = 1
+		if not stagePopOwnsScale(bubble) then
+			ensureStageScale(bubble).Scale = 1
+		end
 		local nextStroke = bubble:FindFirstChild("_OceanTD_NextUnlockStroke")
 		if nextStroke then
 			nextStroke:Destroy()
@@ -2641,7 +2648,9 @@ local RHealthUI = (function()
 			col.check.Visible = false
 			clearRHealthBubbleGradient(col.bubble)
 			col.bubble.BackgroundColor3 = BRIGHT_RED
-			ensureStageScale(col.bubble).Scale = 1
+			if not stagePopOwnsScale(col.bubble) then
+				ensureStageScale(col.bubble).Scale = 1
+			end
 			placeNextUnlockOn(col.bubble, stageIndex, {
 				lockOnly = true,
 				noRing = true,
@@ -2652,7 +2661,9 @@ local RHealthUI = (function()
 			clearRHealthBubbleGradient(col.bubble)
 			col.bubble.BackgroundColor3 = BRIGHT_RED
 			setRHealthCircleStroke(col.bubble, nil)
-			ensureStageScale(col.bubble).Scale = 1
+			if not stagePopOwnsScale(col.bubble) then
+				ensureStageScale(col.bubble).Scale = 1
+			end
 			placeLockOn(col.bubble)
 		elseif stageIndex == active then
 			paintRHealthBubble(col, "active")
@@ -3060,6 +3071,7 @@ local RHealthUI = (function()
 
 		local active = currentStage("RHealth")
 		local unlocked = unlockedStage("RHealth")
+		active, unlocked = visualStageCaps("RHealth", active, unlocked)
 		local nextS = SkillStages.nextStageFor("RHealth", unlocked)
 
 		for i, col in ipairs(rHealthCols) do
@@ -3176,6 +3188,7 @@ refreshTemplate = function()
 
 	local active = currentStage(activeSkillId)
 	local unlocked = unlockedStage(activeSkillId)
+	active, unlocked = visualStageCaps(activeSkillId, active, unlocked)
 	if unlockNameLbl then
 		unlockNameLbl.Text = string.gsub(def.displayName, "\n", " ")
 		-- Cache Studio defaults once so shorter skill titles stay unchanged.
@@ -3661,20 +3674,262 @@ local function showToast(msg: string)
 	end)
 end
 
+local function stageCircleFor(skillId: string, stage: number): GuiObject?
+	if skillId == "RHealth" and RHEALTH_LAYOUT_MODE == "LINE" then
+		local col = rHealthCols[stage]
+		if col then
+			return col.bubble
+		end
+	end
+	return stageButtons[stage]
+end
+
+local function popUnlockedStage(gui: GuiObject)
+	gui:SetAttribute("_OceanTD_PopUntil", os.clock() + 0.45)
+	local scale = ensureStageScale(gui)
+	local rest = scale.Scale
+	scale.Scale = math.max(0.55, rest * 0.72)
+	local up = TweenService:Create(
+		scale,
+		TweenInfo.new(0.14, Enum.EasingStyle.Back, Enum.EasingDirection.Out),
+		{ Scale = rest * 1.24 }
+	)
+	up.Completed:Connect(function(state)
+		if state ~= Enum.PlaybackState.Completed or not scale.Parent then
+			return
+		end
+		TweenService:Create(
+			scale,
+			TweenInfo.new(0.14, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+			{ Scale = rest }
+		):Play()
+	end)
+	up:Play()
+end
+
+local function playPrioritySfx(name: string, soundId: string, volume: number, pitch: number)
+	local AudioSettings = require(oceanRoot:WaitForChild("Shared"):WaitForChild("AudioSettings"))
+	AudioSettings.init()
+	local s = Instance.new("Sound")
+	s.Name = name
+	s.SoundId = soundId
+	s.Volume = volume
+	s.PlaybackSpeed = pitch
+	s.Parent = SoundService
+	AudioSettings.markPrioritySfx(s)
+	s:Play()
+	s.Ended:Once(function()
+		s:Destroy()
+	end)
+	task.delay(4, function()
+		if s.Parent then
+			s:Destroy()
+		end
+	end)
+end
+
+local function playUnlockCoin(step: number)
+	local pitch = math.clamp(0.9 + (step - 1) * 0.03, 0.88, 1.45)
+	playPrioritySfx("OceanTD_SkillUnlockCoin", "rbxassetid://138571475125488", 0.7, pitch)
+end
+
+local function playUnlockWow()
+	playPrioritySfx("OceanTD_SkillUnlockWow", "rbxassetid://109783075001296", 0.95, 1)
+end
+
+local UNLOCK_COIN_IMAGE = "rbxassetid://74290598144610"
+local UNLOCK_COIN_BG = Color3.fromRGB(6, 90, 38)
+
+local function coinCountForStage(stage: number): number
+	-- Stage 2 pays with 5 coins. Stage 8 pays with 30.
+	local t = math.clamp((stage - 2) / 6, 0, 1)
+	return math.clamp(math.floor(5 + t * 25 + 0.5), 5, 30)
+end
+
+-- Graphic $D circles from the wallet to the stage being purchased.
+-- onDone runs once, after every coin has landed.
+local function playUnlockSpendFly(target: GuiObject, stage: number, onDone: () -> ())
+	local count = coinCountForStage(stage)
+	local left = playerGui:FindFirstChild("MobileLeftUI")
+	local LeftHudLayout = require(oceanRoot:WaitForChild("Shared"):WaitForChild("LeftHudLayout"))
+	local dCount = if left then LeftHudLayout.findDCount(left) else nil
+	if not dCount or dCount.AbsoluteSize.X < 2 or not target.Parent or target.AbsoluteSize.X < 2 then
+		onDone()
+		return
+	end
+	local existing = playerGui:FindFirstChild("OceanTD_SkillUnlockCoins")
+	local host: ScreenGui
+	if existing and existing:IsA("ScreenGui") then
+		host = existing
+	else
+		if existing then
+			existing:Destroy()
+		end
+		local made = Instance.new("ScreenGui")
+		made.Name = "OceanTD_SkillUnlockCoins"
+		made.ResetOnSpawn = false
+		made.IgnoreGuiInset = true
+		made.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+		made.Parent = playerGui
+		host = made
+	end
+	host.DisplayOrder = 200000
+	local function toLocal(abs: Vector2): Vector2
+		local origin = host.AbsolutePosition
+		return Vector2.new(abs.X - origin.X, abs.Y - origin.Y)
+	end
+	local fromAbs = dCount.AbsolutePosition + dCount.AbsoluteSize * 0.5
+	local from = toLocal(fromAbs)
+	type Coin = {
+		disc: Frame,
+		scale: UIScale,
+		from: Vector2,
+		bias: number,
+		t0: number,
+		dur: number,
+		landed: boolean,
+		sounded: boolean,
+		step: number,
+	}
+	local coins: { Coin } = {}
+	local now = os.clock()
+	local launchSpan = 0.18 + math.clamp((count - 5) / 25, 0, 1) * 0.2
+	for i = 1, count do
+		local u = if count <= 1 then 0.5 else (i - 1) / (count - 1)
+		local side = 28 + (i % 5) * 3
+		local disc = Instance.new("Frame")
+		disc.Name = "UnlockD"
+		disc.BackgroundColor3 = UNLOCK_COIN_BG
+		disc.BorderSizePixel = 0
+		disc.AnchorPoint = Vector2.new(0.5, 0.5)
+		disc.Size = UDim2.fromOffset(side, side)
+		disc.Position = UDim2.fromOffset(from.X, from.Y)
+		disc.ZIndex = 5
+		disc.Active = false
+		disc.Visible = false
+		disc.Parent = host
+		local corner = Instance.new("UICorner")
+		corner.CornerRadius = UDim.new(1, 0)
+		corner.Parent = disc
+		local img = Instance.new("ImageLabel")
+		img.BackgroundTransparency = 1
+		img.Size = UDim2.fromScale(1, 1)
+		img.Image = UNLOCK_COIN_IMAGE
+		img.ScaleType = Enum.ScaleType.Fit
+		img.Active = false
+		img.Parent = disc
+		local sc = Instance.new("UIScale")
+		sc.Scale = 0.35
+		sc.Parent = disc
+		table.insert(coins, {
+			disc = disc,
+			scale = sc,
+			from = from,
+			bias = (u - 0.5) * 2,
+			t0 = now + u * launchSpan,
+			dur = 0.46 + u * 0.24,
+			landed = false,
+			sounded = false,
+			step = i,
+		})
+	end
+	local arrived = 0
+	local done = false
+	local conn: RBXScriptConnection? = nil
+	local function finish()
+		if done then
+			return
+		end
+		done = true
+		if conn then
+			conn:Disconnect()
+			conn = nil
+		end
+		for _, coin in ipairs(coins) do
+			if coin.disc.Parent then
+				coin.disc:Destroy()
+			end
+		end
+		onDone()
+	end
+	conn = RunService.RenderStepped:Connect(function()
+		if done then
+			return
+		end
+		if not host.Parent then
+			finish()
+			return
+		end
+		local destAbs = if target.Parent then target.AbsolutePosition + target.AbsoluteSize * 0.5 else fromAbs
+		local dest = toLocal(destAbs)
+		local tnow = os.clock()
+		local pending = false
+		for _, coin in ipairs(coins) do
+			if coin.landed then
+				continue
+			end
+			if tnow < coin.t0 then
+				pending = true
+				continue
+			end
+			coin.disc.Visible = true
+			if not coin.sounded then
+				coin.sounded = true
+				playUnlockCoin(coin.step)
+			end
+			local u = math.clamp((tnow - coin.t0) / coin.dur, 0, 1)
+			local e = u * u * (3 - 2 * u)
+			local delta = dest - coin.from
+			local mid = (coin.from + dest) * 0.5
+			local len = math.max(48, delta.Magnitude)
+			local perp = if delta.Magnitude > 1 then Vector2.new(-delta.Y, delta.X).Unit else Vector2.new(0, -1)
+			local ctrl = mid + perp * (len * (0.14 + 0.12 * math.abs(coin.bias)))
+			if delta.Magnitude > 1 then
+				ctrl += delta.Unit * (coin.bias * len * 0.05)
+			end
+			if ctrl.Y > mid.Y - 12 then
+				ctrl = Vector2.new(ctrl.X, mid.Y - 12 - math.abs(ctrl.Y - mid.Y))
+			end
+			local omt = 1 - e
+			local p = omt * omt * coin.from + 2 * omt * e * ctrl + e * e * dest
+			coin.disc.Position = UDim2.fromOffset(p.X, p.Y)
+			local grow = math.clamp(e / 0.2, 0, 1)
+			coin.scale.Scale = (0.4 + 0.6 * grow) * (1 - 0.32 * e)
+			if u >= 1 then
+				coin.landed = true
+				coin.disc:Destroy()
+				arrived += 1
+			else
+				pending = true
+			end
+		end
+		if not pending and arrived >= count then
+			finish()
+		end
+	end)
+end
+
 local function doUnlockRemote()
-	if not activeSkillId then
+	if spendFlyHold or not activeSkillId then
 		return
 	end
 	local skillId = activeSkillId
+	local buying = SkillStages.nextStageFor(skillId, unlockedStage(skillId))
+	if not buying then
+		showToast("Max Stage")
+		return
+	end
+	-- Hold the red lock across the server round-trip so sync cannot paint it green early.
+	spendFlyHold = { skillId = skillId, stage = buying }
 	local ok, result = pcall(function()
 		return unlockRf:InvokeServer(skillId)
 	end)
 	if not ok or typeof(result) ~= "table" then
+		spendFlyHold = nil
 		showToast("Unlock failed")
 		return
 	end
 	if result.ok == true then
-		playUnlockSound()
 		if skillId == "PlotSize" then
 			-- Lock before SkillStagesSync arrives (fires before PlotSizeChanged) so the heart
 			-- stays at the old route end until PlotSizeCinematic tweens it.
@@ -3687,10 +3942,10 @@ local function doUnlockRemote()
 			end
 		end
 		local newStage = SkillStages.clampStageFor(skillId, result.stage)
+		spendFlyHold = { skillId = skillId, stage = newStage }
 		unlockedMap[skillId] = newStage
 		activeMap[skillId] = newStage
 		hideConfirm()
-		refreshTemplate()
 		if skillId == "RHealth" then
 			local WaveSim = require(script.Parent:WaitForChild("WaveSim"))
 			WaveSim.applyReefHealthStage(newStage)
@@ -3699,33 +3954,49 @@ local function doUnlockRemote()
 			local WaveSim = require(script.Parent:WaitForChild("WaveSim"))
 			WaveSim.clampSpeedToMaxStep(SkillStages.waveSpeedMaxStep(newStage))
 		end
-		if skillId == "PlotSize" then
-			-- Pending BEFORE ForceClose so FreeCam stashes Plot Cam (Busy is set in play()).
-			playerGui:SetAttribute("OceanTD_PlotSizeCineSuppressTutorial", true)
-			playerGui:SetAttribute("OceanTD_PlotSizeCinePending", true)
-			local hint = playerGui:GetAttribute("OceanTD_RollFingerHint")
-			if hint == "plotSizeUpgrade" then
-				-- Hide finger + skills UI for the grow shot; restore CloseBTN finger after cine.
-				playerGui:SetAttribute("OceanTD_PendingClosePlotSizeHint", true)
-				playerGui:SetAttribute("OceanTD_RollFingerHint", false)
-				pcall(function()
-					require(script.Parent:WaitForChild("SkillsAvatarCam")).releaseForCinematic()
-				end)
-				playerGui:SetAttribute("OceanTD_ForceCloseSkills", os.clock())
-			else
-				-- Drop avatar-cam ownership before ForceClose so its restore tween can't fight the cinematic.
-				pcall(function()
-					require(script.Parent:WaitForChild("SkillsAvatarCam")).releaseForCinematic()
-				end)
-				-- ForceClose always tears down skills + powerup; avoid close() while open
-				-- so onClosed cannot race HUD restore mid-cinematic.
-				playerGui:SetAttribute("OceanTD_ForceCloseSkills", os.clock())
+		local function presentUnlock()
+			spendFlyHold = nil
+			if popupOpen and activeSkillId == skillId then
+				refreshTemplate()
+				local live = stageCircleFor(skillId, newStage)
+				if live and live.Parent then
+					popUnlockedStage(live)
+				end
 			end
+			playUnlockWow()
+			if skillId == "PlotSize" then
+				-- Let the green pop read, then start the grow shot.
+				task.delay(0.32, function()
+					playerGui:SetAttribute("OceanTD_PlotSizeCineSuppressTutorial", true)
+					playerGui:SetAttribute("OceanTD_PlotSizeCinePending", true)
+					local hint = playerGui:GetAttribute("OceanTD_RollFingerHint")
+					if hint == "plotSizeUpgrade" then
+						playerGui:SetAttribute("OceanTD_PendingClosePlotSizeHint", true)
+						playerGui:SetAttribute("OceanTD_RollFingerHint", false)
+						pcall(function()
+							require(script.Parent:WaitForChild("SkillsAvatarCam")).releaseForCinematic()
+						end)
+						playerGui:SetAttribute("OceanTD_ForceCloseSkills", os.clock())
+					else
+						pcall(function()
+							require(script.Parent:WaitForChild("SkillsAvatarCam")).releaseForCinematic()
+						end)
+						playerGui:SetAttribute("OceanTD_ForceCloseSkills", os.clock())
+					end
+				end)
+			else
+				SkillsBubbleSim.refreshStageLayouts()
+			end
+		end
+		local circle = stageCircleFor(skillId, newStage)
+		if circle and circle.Parent then
+			playUnlockSpendFly(circle, newStage, presentUnlock)
 		else
-			SkillsBubbleSim.refreshStageLayouts()
+			presentUnlock()
 		end
 		return
 	end
+	spendFlyHold = nil
 	local code = result.errorCode
 	if code == "CantAfford" then
 		showToast("Collect More $D")
@@ -3890,6 +4161,9 @@ function SkillPowerUpUI.getUnlockedStage(skillId: string): number
 end
 
 function SkillPowerUpUI.requestUnlockNext()
+	if spendFlyHold then
+		return
+	end
 	if not activeSkillId or not popupOpen then
 		return
 	end

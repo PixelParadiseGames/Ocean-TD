@@ -942,10 +942,11 @@ local function readDroneMoveWish(cf: CFrame): Vector3
 	if keysDown[Enum.KeyCode.D] then
 		wish += right
 	end
-	if keysDown[Enum.KeyCode.E] or keysDown[Enum.KeyCode.Space] then
+	-- E harvests and Q opens the backpack. Space / Ctrl still change height.
+	if keysDown[Enum.KeyCode.Space] then
 		wish += Vector3.yAxis
 	end
-	if keysDown[Enum.KeyCode.Q] or keysDown[Enum.KeyCode.LeftControl] then
+	if keysDown[Enum.KeyCode.LeftControl] then
 		wish -= Vector3.yAxis
 	end
 
@@ -1137,9 +1138,18 @@ local function applyLookDelta(dx: number, dy: number)
 	lookPitch = math.clamp(lookPitch - dy, -1.2, 1.2)
 end
 
+local function harvestPromptUp(): boolean
+	return mode == "dronecam" and playerGui:GetAttribute("OceanTD_CommonHarvestPrompt") == true
+end
+
 local function tickMouseDragLook()
 	-- GetMouseDelta is 0 with a free cursor — track screen position instead.
 	-- Never mix this with touch: emulated cursor coords fight the finger look.
+	-- Left click while a harvest card is up belongs to the hold, not the orbit.
+	if harvestPromptUp() and not UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton2) then
+		clearMouseLookDrag()
+		return
+	end
 	if not isFishCamLook() or not isMouseLookHeld() then
 		clearMouseLookDrag()
 		return
@@ -2590,6 +2600,9 @@ UserInputService.InputBegan:Connect(function(input, _gameProcessed)
 			or input.UserInputType == Enum.UserInputType.MouseButton2
 		)
 	then
+		if input.UserInputType == Enum.UserInputType.MouseButton1 and harvestPromptUp() then
+			return
+		end
 		local mousePos = mouseScreenPos()
 		if touchDownCount == 0
 			and not isOverCamCycleButton(input.Position)
@@ -2616,6 +2629,9 @@ UserInputService.InputBegan:Connect(function(input, _gameProcessed)
 	end
 	if input.UserInputType == Enum.UserInputType.Touch then
 		if isOverCamCycleButton(input.Position) then
+			return
+		end
+		if harvestPromptUp() then
 			return
 		end
 		local pos = Vector2.new(input.Position.X, input.Position.Y)

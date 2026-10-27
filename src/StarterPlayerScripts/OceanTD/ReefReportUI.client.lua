@@ -267,6 +267,14 @@ local function hideCartBtnContent(hide: boolean)
 		return
 	end
 	if hide then
+		-- A second hide while backpack is still open must not forget the saved glyphs.
+		if cartBtn:GetAttribute("_OceanTD_CartContentHidden") == true then
+			if cartBtn:IsA("ImageButton") or cartBtn:IsA("ImageLabel") then
+				(cartBtn :: ImageButton).ImageTransparency = 1
+			end
+			return
+		end
+		cartBtn:SetAttribute("_OceanTD_CartContentHidden", true)
 		table.clear(hiddenCartKids)
 		for _, ch in ipairs(cartBtn:GetChildren()) do
 			if ch:IsA("GuiObject")
@@ -293,6 +301,7 @@ local function hideCartBtnContent(hide: boolean)
 			(cartBtn :: ImageButton).ImageTransparency = 1
 		end
 	else
+		cartBtn:SetAttribute("_OceanTD_CartContentHidden", nil)
 		for _, ch in ipairs(hiddenCartKids) do
 			if ch.Parent
 				and ch.Name ~= "_OceanTD_TutorialLeftLock"
@@ -628,6 +637,9 @@ syncCartChrome = function()
 		ensureInfoChrome()
 	else
 		destroyInfoChrome(true)
+		if cartBtn then
+			cartBtn.Visible = true
+		end
 		forceCartHitLive(cartBtn)
 	end
 end

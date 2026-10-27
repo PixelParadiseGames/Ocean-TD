@@ -120,6 +120,29 @@ local digCamFollowConn: RBXScriptConnection? = nil
 local digCamPlantPos: Vector3? = nil
 local digHeldShovel = false
 
+type MoveRestore = {
+	hum: Humanoid,
+	walk: number,
+	jumpH: number,
+	jumpP: number,
+	auto: boolean,
+	platform: boolean,
+}
+local moveRestore: MoveRestore? = nil
+
+local function restoreMove()
+	local saved = moveRestore
+	moveRestore = nil
+	if not saved or not saved.hum.Parent then
+		return
+	end
+	saved.hum.WalkSpeed = if saved.walk > 0 then saved.walk else 16
+	saved.hum.JumpHeight = saved.jumpH
+	saved.hum.JumpPower = saved.jumpP
+	saved.hum.AutoRotate = saved.auto
+	saved.hum.PlatformStand = saved.platform
+end
+
 export type PlayOpts = {
 	coralPart: BasePart?,
 	onDone: (() -> ())?,
@@ -136,6 +159,12 @@ export type PlayOpts = {
 	bubbleScale: number?,
 	-- When false, skip the build-complete "wow" SFX (hearts still play).
 	playWow: boolean?,
+	-- Auto Plant: keep the dig animation, skip the dig bed and the wow.
+	silentWork: boolean?,
+	-- Harvest plant: take the camera even if a wave would normally leave it alone.
+	forceDigCam: boolean?,
+	-- After the dig, dash back to this pose and tween the camera home.
+	returnHome: CFrame?,
 }
 
 -- ADD MAX batch budgets: bubbles / hearts / wow SFX / dust / dig duration / volume.
@@ -191,6 +220,9 @@ end
 
 -- Auto Plant during a live wave: avatar still dashes/digs, but PlotCam stays player-owned.
 local function shouldSkipDigCam(opts: PlayOpts?): boolean
+	if opts and opts.forceDigCam == true then
+		return false
+	end
 	if opts and opts.skipDigCam == true then
 		return true
 	end
@@ -393,7 +425,7 @@ local function clearDigWeldsAndMotors()
 	table.clear(digDisabledMotors)
 end
 
-local function stopDigFallback()
+local function stopDigFallback(restoreAnimate: boolean?)
 	if digPreRenderConn then
 		digPreRenderConn:Disconnect()
 		digPreRenderConn = nil
@@ -409,17 +441,20 @@ local function stopDigFallback()
 		end)
 	end
 	clearDigWeldsAndMotors()
-	restoreDigAnimate()
+	-- Re-enabling Animate restarts that script, which kills the dash run and plays fall.
+	if restoreAnimate ~= false then
+		restoreDigAnimate()
+	end
 end
 
-local function stopDigTrack()
+local function stopDigTrack(restoreAnimate: boolean?)
 	local track = digTrack
 	if track then
 		pcall(function()
 			track:Stop(0)
 		end)
 	end
-	stopDigFallback()
+	stopDigFallback(restoreAnimate)
 end
 
 local function stopRunTrack()
@@ -946,6 +981,20 @@ local function ensureRunTrack(hum: Humanoid): AnimationTrack?
 	return track
 end
 
+local function playDashRun(hum: Humanoid, speed: number)
+	local track = ensureRunTrack(hum)
+	if not track then
+		return
+	end
+	track.Priority = Enum.AnimationPriority.Action4
+	if track.IsPlaying then
+		track:AdjustSpeed(speed)
+		track:AdjustWeight(1, 0.05)
+	else
+		track:Play(0.04, 1, speed)
+	end
+end
+
 -- Same dig path everywhere (Studio + published): weld limbs, motors off.
 -- KS / Transform / C0 alone were silent on live mobile while Studio KS looked fine.
 local function startDig(hum: Humanoid, token: number)
@@ -1159,6 +1208,8 @@ local function stopWorkSound(fadeOut: boolean)
 	if not s or not s.Parent then
 		return
 	end
+	-- Drop the loop first so a fade (or a late Stop) cannot restart the dig from the top.
+	s.Looped = false
 	if fadeOut then
 		fadeSoundTo(s, 0, WORK_FADE_OUT_SEC, true)
 	else
@@ -1431,7 +1482,9 @@ local function finish(
 	hrp: BasePart?,
 	wasAnchored: boolean,
 	dustHost: BasePart?,
-	onDone: (() -> ())?
+	onDone: (() -> ())?,
+	playWow: boolean?,
+	skipCamOut: boolean?
 )
 	if token ~= playToken then
 		return
@@ -1445,9 +1498,20 @@ local function finish(
 	releaseDigShovel()
 	if hrp and hrp.Parent then
 		hrp.Anchored = wasAnchored
-		burstHeartFirework(hrp.Position)
-	elseif digCamPlantPos then
-		burstHeartFirework(digCamPlantPos)
+		if skipCamOut ~= true then
+			burstHeartFirework(hrp.Position, playWow)
+		end
+	elseif skipCamOut ~= true and digCamPlantPos then
+		burstHeartFirework(digCamPlantPos, playWow)
+	end
+	restoreMove()
+	if skipCamOut == true then
+		restoreDigCamImmediate()
+		setBusy(false)
+		if onDone then
+			onDone()
+		end
+		return
 	end
 	local digTok = digCamToken
 	-- Hold on the dig close-up, then tween back to the prior view.
@@ -1481,7 +1545,8 @@ local function playAtPlantOnly(worldPos: Vector3, opts: PlayOpts?): boolean
 	local bubbleScale = if typeof(optBubble) == "number" and optBubble > 0
 		then optBubble
 		else batchBubbleScale
-	local playWow = if opts and opts.playWow == false then false else true
+	local playWow = if opts and (opts.playWow == false or opts.silentWork == true) then false else true
+	local silentWork = opts ~= nil and opts.silentWork == true
 	local hardBubbleCap = batchBubblesPerCoral
 	local function bubbles(n: number): number
 		return math.max(1, math.floor(n * bubbleScale + 0.5))
@@ -1524,7 +1589,7 @@ local function playAtPlantOnly(worldPos: Vector3, opts: PlayOpts?): boolean
 		spawnIceBubbles(worldPos, bubbles(6))
 	end
 	-- One shared work loop sound while any plant-only dig is active.
-	if plantOnlyBusy == 1 then
+	if plantOnlyBusy == 1 and not silentWork then
 		startWorkSound()
 	end
 
@@ -1606,6 +1671,14 @@ function PlantWorkerVfx.playAt(worldPos: Vector3, opts: PlayOpts?): boolean
 	end)
 	restoreCoralRise()
 
+	moveRestore = {
+		hum = hum,
+		walk = hum.WalkSpeed,
+		jumpH = hum.JumpHeight,
+		jumpP = hum.JumpPower,
+		auto = hum.AutoRotate,
+		platform = hum.PlatformStand,
+	}
 	local wasAnchored = hrp.Anchored
 	hrp.Anchored = true
 	hrp.AssemblyLinearVelocity = Vector3.zero
@@ -1636,6 +1709,11 @@ function PlantWorkerVfx.playAt(worldPos: Vector3, opts: PlayOpts?): boolean
 	local dashSec = DASH_SEC
 	local workSec = WORK_SEC
 	local forceAvatar = opts ~= nil and opts.forceAvatar == true
+	local playWowFlag = if opts and (opts.playWow == false or opts.silentWork == true) then false else true
+	local silentWork = opts ~= nil and opts.silentWork == true
+	local returnHome = if opts and typeof(opts.returnHome) == "CFrame" then opts.returnHome else nil
+	local returnFromPos = hrp.Position
+	local returnCamFrom: CFrame? = nil
 	local skipDigCam = shouldSkipDigCam(opts)
 	if opts and typeof(opts.dashSec) == "number" and opts.dashSec > 0 then
 		dashSec = opts.dashSec
@@ -1664,14 +1742,14 @@ function PlantWorkerVfx.playAt(worldPos: Vector3, opts: PlayOpts?): boolean
 			pcall(function()
 				RunService:UnbindFromRenderStep(DASH_BIND_NAME)
 			end)
-			finish(token, hrp, wasAnchored, dustHost, onDone)
+			finish(token, hrp, wasAnchored, dustHost, onDone, playWowFlag)
 			return
 		end
 		if not forceAvatar and not isWorkerCam() then
 			pcall(function()
 				RunService:UnbindFromRenderStep(DASH_BIND_NAME)
 			end)
-			finish(token, hrp, wasAnchored, dustHost, onDone)
+			finish(token, hrp, wasAnchored, dustHost, onDone, playWowFlag)
 			return
 		end
 
@@ -1714,7 +1792,34 @@ function PlantWorkerVfx.playAt(worldPos: Vector3, opts: PlayOpts?): boolean
 				dustPe = pe
 				pe:Emit(12)
 				spawnIceBubbles(feetWorldPos(base, hum), 6)
-				startWorkSound()
+				if not silentWork then
+					startWorkSound()
+				end
+			end
+			return
+		end
+
+		if phase == "return" and returnHome then
+			playDashRun(hum, RUN_PLAY_SPEED)
+			local u = math.clamp((now - phaseT0) / dashSec, 0, 1)
+			local a = easeOutQuad(u)
+			local flat = returnFromPos:Lerp(returnHome.Position, a)
+			local groundY = groundHipY(flat.X, flat.Z, returnHome.Position.Y, hum)
+			local dropU = math.clamp(u / 0.22, 0, 1)
+			local y = returnFromPos.Y + (groundY - returnFromPos.Y) * easeOutQuad(dropU)
+			local pos = Vector3.new(flat.X, y, flat.Z)
+			hrp.CFrame = lookFlat(pos, returnHome.Position, returnHome.LookVector)
+			local camNow = Workspace.CurrentCamera
+			if camNow and returnCamFrom and digCamSavedCf then
+				camNow.CameraType = Enum.CameraType.Scriptable
+				camNow.CFrame = returnCamFrom:Lerp(digCamSavedCf, a)
+			end
+			if u >= 1 then
+				hrp.CFrame = returnHome
+				pcall(function()
+					RunService:UnbindFromRenderStep(DASH_BIND_NAME)
+				end)
+				finish(token, hrp, wasAnchored, nil, onDone, false, true)
 			end
 			return
 		end
@@ -1742,10 +1847,28 @@ function PlantWorkerVfx.playAt(worldPos: Vector3, opts: PlayOpts?): boolean
 		end
 
 		if workU >= 1 then
+			if returnHome then
+				-- Leave Animate off so its fall pose does not replace the dash run.
+				stopDigTrack(false)
+				stopWorkSound(false)
+				destroyDust(dustHost)
+				dustHost = nil
+				burstHeartFirework(hrp.Position, playWowFlag)
+				phase = "return"
+				phaseT0 = now
+				returnFromPos = hrp.Position
+				stopDigCamFollow()
+				local camNow = Workspace.CurrentCamera
+				returnCamFrom = if camNow then camNow.CFrame else nil
+				hum.PlatformStand = true
+				startRunSound()
+				playDashRun(hum, RUN_PLAY_SPEED)
+				return
+			end
 			pcall(function()
 				RunService:UnbindFromRenderStep(DASH_BIND_NAME)
 			end)
-			finish(token, hrp, wasAnchored, dustHost, onDone)
+			finish(token, hrp, wasAnchored, dustHost, onDone, playWowFlag)
 		end
 	end)
 	return true
@@ -1796,11 +1919,12 @@ function PlantWorkerVfx.beginInPlaceDig(): boolean
 	return true
 end
 
-function PlantWorkerVfx.endInPlaceDig()
+function PlantWorkerVfx.endInPlaceDig(hardStopSound: boolean?)
 	playToken += 1
 	stopDigTrack()
 	stopHarvestDust()
-	stopWorkSound(true)
+	-- Success cuts the dig bed immediately. A fade lets the loop start over.
+	stopWorkSound(hardStopSound ~= true)
 	releaseDigShovel()
 end
 
@@ -1827,6 +1951,7 @@ function PlantWorkerVfx.playHarvestTrip(
 	local wasAnchored = root.Anchored
 	local savedWalk = hum.WalkSpeed
 	local savedJump = hum.JumpHeight
+	local savedPlatform = hum.PlatformStand
 	root.Anchored = true
 	root.AssemblyLinearVelocity = Vector3.zero
 	root.AssemblyAngularVelocity = Vector3.zero
@@ -1861,6 +1986,7 @@ function PlantWorkerVfx.playHarvestTrip(
 			hum.WalkSpeed = savedWalk
 			hum.JumpHeight = savedJump
 			hum.AutoRotate = true
+			hum.PlatformStand = savedPlatform
 		end
 		if root.Parent then
 			root.CFrame = home
@@ -1914,20 +2040,19 @@ function PlantWorkerVfx.playHarvestTrip(
 			end
 			onDigAlpha(u)
 			if u >= 1 then
-				stopDigTrack()
-				stopWorkSound(true)
+				stopDigTrack(false)
+				stopWorkSound(false)
 				destroyDust(dustHost)
 				dustHost = nil
 				phase = "return"
 				phaseT0 = now
+				hum.PlatformStand = true
 				startRunSound()
-				local backRun = ensureRunTrack(hum)
-				if backRun then
-					backRun:Play(0.04, 1, RUN_PLAY_SPEED)
-				end
+				playDashRun(hum, RUN_PLAY_SPEED)
 			end
 			return
 		end
+		playDashRun(hum, RUN_PLAY_SPEED)
 		local u = math.clamp((now - phaseT0) / DASH_SEC, 0, 1)
 		local a = easeOutQuad(u)
 		local pos = goalCF.Position:Lerp(home.Position, a)
@@ -1942,6 +2067,10 @@ function PlantWorkerVfx.playHarvestTrip(
 		end
 	end)
 	return true
+end
+
+function PlantWorkerVfx.harvestTripActive(): boolean
+	return tripRestore ~= nil
 end
 
 function PlantWorkerVfx.cancelHarvestTrip()
@@ -1996,6 +2125,7 @@ function PlantWorkerVfx.cancel()
 	if hrp then
 		hrp.Anchored = false
 	end
+	restoreMove()
 	setBusy(false)
 end
 

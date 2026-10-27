@@ -703,6 +703,7 @@ local function plantOne(playerPos: Vector3, flat: Vector3, flyOrb: boolean, pres
 		return false
 	end
 	part:SetAttribute("OceanTD_HueIndex", hue)
+	part:SetAttribute("OceanTD_WebHueIndex", hue2)
 	part:SetAttribute("OceanTD_HarvestKey", key)
 	part:SetAttribute("OceanTD_PlantPos", hitPos)
 	stripVisual(part)

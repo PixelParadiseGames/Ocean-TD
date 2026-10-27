@@ -184,6 +184,26 @@ function HueRarity.className(speciesId: string, colorIndex: number): string?
 	return nil
 end
 
+-- $D to buy one seed of this species and hue. Price follows the rarity class.
+local SEED_COST_BY_CLASS: { [string]: number } = {
+	Common = 1,
+	Uncommon = 2,
+	Rare = 5,
+	Epic = 10,
+	Legendary = 15,
+	Mythic = 20,
+	Extinct = 25,
+}
+
+function HueRarity.seedCost(speciesId: string, colorIndex: number): number
+	local className = HueRarity.className(speciesId, colorIndex)
+	local cost = if className then SEED_COST_BY_CLASS[className] else nil
+	if typeof(cost) ~= "number" then
+		return SEED_COST_BY_CLASS.Common
+	end
+	return cost
+end
+
 function HueRarity.roll(speciesId: string, rng: Random?): number
 	local r = rng or Random.new()
 	local tableForSpecies = BY_SPECIES[speciesId]

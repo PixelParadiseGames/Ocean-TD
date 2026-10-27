@@ -2955,7 +2955,7 @@ local function tryUnlockColorConfirm()
 	if typeof(itemId) ~= "string" or typeof(idx) ~= "number" then
 		return
 	end
-	local cost = HueSeeds.SEED_COST
+	local cost = HueSeeds.seedCost(itemId, idx)
 	local cash = tonumber(player:GetAttribute(Constants.SAND_DOLLARS_ATTR)) or 0
 	if cash < cost then
 		showToast("Collect More $D")
@@ -2980,7 +2980,7 @@ local function tryUnlockColorConfirm()
 end
 
 local function showConfirmColorUnlock(itemId: string, colorIndex: number)
-	local cost = HueSeeds.SEED_COST
+	local cost = HueSeeds.seedCost(itemId, colorIndex)
 	hideConfirm()
 	confirmUnlockTarget = nil
 	confirmColorItemId = itemId

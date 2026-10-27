@@ -46,6 +46,13 @@ local INCREASE_STROKE_FLASH = Color3.fromRGB(255, 40, 40) -- bright red during b
 local INCREASE_BTN_SIZE = Vector2.new(220, 44)
 local INCREASE_HOLD_SCALE = 1.25
 local INCREASE_HOLD_SEC = 5
+local HARVEST_CTA_SEC = 6
+local HARVEST_CTA_ATTR = "OceanTD_HarvestAutoPlantCta"
+local HARVEST_CTA_AT_ATTR = "OceanTD_HarvestAutoPlantCtaAt"
+local PLOT_SIZE_TEXT = "Increase Plot Size"
+local PLOT_BLUE = Color3.fromRGB(70, 160, 255)
+local PLOT_BLUE_DARK = Color3.fromRGB(18, 48, 120)
+local PLOT_STROKE = Color3.fromRGB(170, 220, 255)
 local PLANT_PULSE_SCALE = 1.12
 local PLANT_PULSE_SEC = 0.55
 local plantPulseToken = 0
@@ -211,6 +218,60 @@ increaseScale.Scale = 1
 increaseScale.Parent = increaseBtn
 local increaseFlashToken = 0
 
+-- Harvest auto-plant off: no open plot spots, place cap still has room.
+local plotSizeBtn = Instance.new("TextButton")
+plotSizeBtn.Name = "IncreasePlotSize"
+plotSizeBtn.AnchorPoint = Vector2.new(0.5, 1)
+plotSizeBtn.Position = UDim2.new(0.5, 0, 1, -28)
+plotSizeBtn.Size = UDim2.fromOffset(INCREASE_BTN_SIZE.X, INCREASE_BTN_SIZE.Y)
+plotSizeBtn.BackgroundColor3 = Color3.new(1, 1, 1)
+plotSizeBtn.BorderSizePixel = 0
+plotSizeBtn.Text = ""
+plotSizeBtn.AutoButtonColor = true
+plotSizeBtn.Active = true
+plotSizeBtn.Interactable = true
+plotSizeBtn.Visible = false
+plotSizeBtn.Parent = btnSg
+local plotCorner = Instance.new("UICorner")
+plotCorner.CornerRadius = UDim.new(0, 8)
+plotCorner.Parent = plotSizeBtn
+local plotGrad = Instance.new("UIGradient")
+plotGrad.Color = ColorSequence.new({
+	ColorSequenceKeypoint.new(0, PLOT_BLUE),
+	ColorSequenceKeypoint.new(1, PLOT_BLUE_DARK),
+})
+plotGrad.Rotation = 90
+plotGrad.Parent = plotSizeBtn
+local plotStroke = Instance.new("UIStroke")
+plotStroke.Thickness = 2.5
+plotStroke.Color = PLOT_STROKE
+plotStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+plotStroke.Parent = plotSizeBtn
+local plotPad = Instance.new("UIPadding")
+plotPad.PaddingTop = UDim.new(0.08, 0)
+plotPad.PaddingBottom = UDim.new(0.08, 0)
+plotPad.PaddingLeft = UDim.new(0.08, 0)
+plotPad.PaddingRight = UDim.new(0.08, 0)
+plotPad.Parent = plotSizeBtn
+local plotLbl = Instance.new("TextLabel")
+plotLbl.Name = "Label"
+plotLbl.BackgroundTransparency = 1
+plotLbl.Size = UDim2.fromScale(1, 1)
+plotLbl.Font = UiTheme.Font
+plotLbl.Text = PLOT_SIZE_TEXT
+plotLbl.TextColor3 = Color3.new(1, 1, 1)
+plotLbl.TextScaled = true
+plotLbl.ZIndex = 2
+plotLbl.Active = false
+plotLbl.Interactable = false
+plotLbl.Parent = plotSizeBtn
+local plotSizeScale = Instance.new("UIScale")
+plotSizeScale.Scale = 1
+plotSizeScale.Parent = plotSizeBtn
+
+local harvestCtaKind: string? = nil
+local harvestCtaUntil = 0
+
 local function placeMax(): number
 	return SkillStages.placeMoreMaxAtStage(SkillPowerUpUI.getStage("PlaceMore"))
 end
@@ -221,6 +282,8 @@ local function flashIncreaseMaxPlanted()
 	btnSg.Enabled = true
 	plusBtn.Visible = false
 	plusBtn.Active = false
+	plotSizeBtn.Visible = false
+	plotSizeBtn.Active = false
 	increaseBtn.Visible = true
 	increaseBtn.Active = true
 	pcall(function()
@@ -341,6 +404,28 @@ local function openPlaceMoreSkill()
 	playerGui:SetAttribute("OceanTD_ForceOpenSkills", os.clock())
 end
 
+local function openPlotSizeSkill()
+	UiHaptics.pulseShort()
+	playerGui:SetAttribute("OceanTD_ForceOpenSkillId", "PlotSize")
+	playerGui:SetAttribute("OceanTD_ForceOpenSkills", os.clock())
+end
+
+local function harvestCtaActive(): string?
+	if harvestCtaKind == nil or os.clock() >= harvestCtaUntil then
+		return nil
+	end
+	return harvestCtaKind
+end
+
+local function hidePlotSizeBtn()
+	plotSizeBtn.Visible = false
+	plotSizeBtn.Active = false
+	plotSizeScale.Scale = 1
+	pcall(function()
+		(plotSizeBtn :: any).Interactable = false
+	end)
+end
+
 local function applyCountLabelLayout(plantHint: boolean)
 	if plantHint then
 		countLabel.AnchorPoint = Vector2.new(0.5, 1)
@@ -372,6 +457,7 @@ local function refreshVisible()
 		btnSg.Enabled = false
 		plusBtn.Visible = false
 		increaseBtn.Visible = false
+		hidePlotSizeBtn()
 		if not plantPulseActive then
 			plantPulseActive = true
 			startPlantPulse()
@@ -382,6 +468,42 @@ local function refreshVisible()
 		plantPulseActive = false
 		stopPlantPulse()
 	end
+
+	local cta = harvestCtaActive()
+	if cta and not chromeBlocked() and not joinIntroHidesPlaceMore() then
+		textSg.Enabled = false
+		btnSg.Enabled = true
+		plusBtn.Visible = false
+		plusBtn.Active = false
+		if cta == "PlotSize" then
+			increaseBtn.Visible = false
+			increaseBtn.Active = false
+			plotSizeBtn.Visible = true
+			plotSizeBtn.Active = true
+			plotSizeScale.Scale = INCREASE_HOLD_SCALE
+			pcall(function()
+				local p: any = plusBtn
+				local i: any = increaseBtn
+				local g: any = plotSizeBtn
+				p.Interactable = false
+				i.Interactable = false
+				g.Interactable = true
+			end)
+		else
+			hidePlotSizeBtn()
+			increaseBtn.Visible = true
+			increaseBtn.Active = true
+			increaseScale.Scale = INCREASE_HOLD_SCALE
+			pcall(function()
+				local p: any = plusBtn
+				local i: any = increaseBtn
+				p.Interactable = false
+				i.Interactable = true
+			end)
+		end
+		return
+	end
+	hidePlotSizeBtn()
 
 	if not InventoryState.isOpen() or chromeBlocked() or joinIntroHidesPlaceMore() then
 		textSg.Enabled = false
@@ -453,6 +575,29 @@ end
 
 plusBtn.Activated:Connect(openPlaceMoreSkill)
 increaseBtn.Activated:Connect(openPlaceMoreSkill)
+plotSizeBtn.Activated:Connect(openPlotSizeSkill)
+
+playerGui:GetAttributeChangedSignal(HARVEST_CTA_AT_ATTR):Connect(function()
+	local kind = playerGui:GetAttribute(HARVEST_CTA_ATTR)
+	local at = playerGui:GetAttribute(HARVEST_CTA_AT_ATTR)
+	if (kind ~= "PlaceMore" and kind ~= "PlotSize") or typeof(at) ~= "number" then
+		return
+	end
+	harvestCtaKind = kind
+	harvestCtaUntil = os.clock() + HARVEST_CTA_SEC
+	local myUntil = harvestCtaUntil
+	UiHaptics.pulseShort()
+	refreshVisible()
+	task.delay(HARVEST_CTA_SEC, function()
+		if harvestCtaUntil ~= myUntil then
+			return
+		end
+		harvestCtaKind = nil
+		increaseScale.Scale = 1
+		plotSizeScale.Scale = 1
+		refreshVisible()
+	end)
+end)
 
 PlacedCoralIndex.ensure()
 PlacedCoralIndex.onChanged(function()
@@ -494,7 +639,7 @@ end)
 task.spawn(function()
 	while true do
 		task.wait(0.5)
-		if InventoryState.isOpen() or shouldShowPlantHint() or textSg.Enabled or btnSg.Enabled then
+		if InventoryState.isOpen() or shouldShowPlantHint() or textSg.Enabled or btnSg.Enabled or harvestCtaActive() then
 			refreshVisible()
 		end
 	end

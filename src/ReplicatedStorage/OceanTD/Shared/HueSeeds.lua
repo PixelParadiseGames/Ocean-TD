@@ -7,12 +7,16 @@
 local ItemCatalog = require(script.Parent:WaitForChild("ItemCatalog"))
 local PlotOutlineColors = require(script.Parent:WaitForChild("PlotOutlineColors"))
 local ColorUnlocks = require(script.Parent:WaitForChild("ColorUnlocks"))
+local HueRarity = require(script.Parent:WaitForChild("HueRarity"))
 
 local HueSeeds = {}
 
 export type HueInventory = { [string]: { [string]: number } }
 
-HueSeeds.SEED_COST = ColorUnlocks.UNLOCK_COST
+-- Price is per rarity class. See HueRarity.seedCost.
+function HueSeeds.seedCost(itemId: string, colorIndex: number): number
+	return HueRarity.seedCost(itemId, colorIndex)
+end
 
 local function indexKey(colorIndex: number): string
 	return tostring(PlotOutlineColors.clampCoralIndex(colorIndex))

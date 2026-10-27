@@ -107,7 +107,10 @@ local slideSfxActive = 0
 local shuffleIconShowDice = true
 local shuffleIconSwapToken = 0
 local stateChangedListeners: { () -> () } = {}
-local failHintListeners: { (string) -> () } = {}
+local autoTurnedOnListeners: { () -> () } = {}
+local sawAutoPlantState = false
+local userToggleInFlight = false
+local failHintListeners: { (string, boolean?, number?) -> () } = {}
 
 local confirmSound = Instance.new("Sound")
 confirmSound.Name = "OceanTD_AutoPlantShuffleConfirm"
@@ -514,7 +517,15 @@ local function applyState(payload: any)
 		return
 	end
 	unlocked = payload.unlocked == true
+	local wasEnabled = enabled
 	enabled = payload.enabled == true
+	-- Join sync is not a turn-off. A button press sets userToggleInFlight before the server echo.
+	if wasEnabled and not enabled and sawAutoPlantState and not userToggleInFlight then
+		for _, cb in ipairs(autoTurnedOnListeners) do
+			pcall(cb)
+		end
+	end
+	sawAutoPlantState = true
 	manualCount = math.max(
 		0,
 		math.floor(tonumber(payload.plotCoralCount) or tonumber(payload.manualPlantCount) or 0)
@@ -539,8 +550,10 @@ local function applyState(payload: any)
 	end
 	local hint = payload.failHint
 	if hint == "GROW PLOT" or hint == "PLOT MAXED" then
+		local room = math.floor(tonumber(payload.placeCapRoom) or 0)
+		local fromHarvest = payload.fromHarvest == true
 		for _, cb in ipairs(failHintListeners) do
-			pcall(cb, hint)
+			pcall(cb, hint, fromHarvest, room)
 		end
 	end
 end
@@ -561,7 +574,11 @@ function AutoPlantUI.onStateChanged(cb: () -> ())
 	table.insert(stateChangedListeners, cb)
 end
 
-function AutoPlantUI.onFailHint(cb: (string) -> ())
+function AutoPlantUI.onAutoTurnedOff(cb: () -> ())
+	table.insert(autoTurnedOnListeners, cb)
+end
+
+function AutoPlantUI.onFailHint(cb: (string, boolean?, number?) -> ())
 	table.insert(failHintListeners, cb)
 end
 
@@ -618,8 +635,12 @@ function AutoPlantUI.requestToggle(): boolean
 			return false
 		end
 	end
+	userToggleInFlight = true
 	local ok, result = pcall(function()
 		return Remotes.getFunction("RequestSetAutoPlant"):InvokeServer(not enabled)
+	end)
+	task.defer(function()
+		userToggleInFlight = false
 	end)
 	if ok and typeof(result) == "table" and result.ok then
 		enabled = result.enabled == true
@@ -1675,6 +1696,8 @@ local function playOrbArrive(payload: any, opts: {
 				PlantWorkerVfx.playAt(worldPos, {
 					coralPart = part,
 					skipAvatar = skipAvatar,
+					silentWork = true,
+					playWow = false,
 					onDone = if opts then opts.onDone else nil,
 				})
 			end)
@@ -1682,7 +1705,55 @@ local function playOrbArrive(payload: any, opts: {
 	end)
 end
 
+local function playHarvestPlotPlant(payload: any)
+	local worldPos = payload.worldPos
+	local placeId = payload.placeId
+	if typeof(worldPos) ~= "Vector3" then
+		return
+	end
+	local PlantWorkerVfx = require(script.Parent:WaitForChild("PlantWorkerVfx"))
+	local RelocatePickHover = require(script.Parent:WaitForChild("RelocatePickHover"))
+	local t0 = os.clock()
+	while PlantWorkerVfx.harvestTripActive() and os.clock() - t0 < 5 do
+		task.wait()
+	end
+	local coral: BasePart? = nil
+	if typeof(placeId) == "string" then
+		for _ = 1, 45 do
+			coral = RelocatePickHover.findByPlaceId(placeId)
+			if coral and coral.Parent then
+				break
+			end
+			task.wait()
+		end
+	end
+	if coral and typeof(payload.colorR) == "number" and typeof(payload.colorG) == "number" and typeof(payload.colorB) == "number" then
+		local CoralVisual = require(oceanRoot:WaitForChild("Shared"):WaitForChild("CoralVisual"))
+		local paint = Color3.new(payload.colorR, payload.colorG, payload.colorB)
+		local web: Color3? = nil
+		if typeof(payload.webColorR) == "number" and typeof(payload.webColorG) == "number" and typeof(payload.webColorB) == "number" then
+			web = Color3.new(payload.webColorR, payload.webColorG, payload.webColorB)
+		end
+		CoralVisual.setRestColor(coral, paint, web, payload.webColorIndex)
+	end
+	local character = player.Character
+	local root = character and character:FindFirstChild("HumanoidRootPart")
+	local home = if root and root:IsA("BasePart") then root.CFrame else nil
+	PlantWorkerVfx.playAt(worldPos, {
+		coralPart = coral,
+		forceAvatar = true,
+		forceDigCam = true,
+		returnHome = home,
+		silentWork = false,
+		playWow = true,
+	})
+end
+
 local function playAutoPlantArrive(payload: any)
+	if typeof(payload) == "table" and payload.fromHarvest == true then
+		task.spawn(playHarvestPlotPlant, payload)
+		return
+	end
 	local tutorialAuto = playerGui:GetAttribute("OceanTD_TutorialChapter") == "autoPlant"
 	playOrbArrive(payload, {
 		onDone = if tutorialAuto

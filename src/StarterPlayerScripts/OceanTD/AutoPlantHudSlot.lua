@@ -752,6 +752,71 @@ function AutoPlantHudSlot.getScreenCenter(): Vector2?
 	return Vector2.new(pos.X + size.X * 0.5, pos.Y + size.Y * 0.5)
 end
 
+-- Red rings grow out of the button when the game turns Auto Plant off by itself.
+function AutoPlantHudSlot.playAutoOnRings()
+	local h = host
+	local center = AutoPlantHudSlot.getScreenCenter()
+	if not h or not center then
+		return
+	end
+	local pg = deps and deps.playerGui
+	if not pg then
+		return
+	end
+	local gui = pg:FindFirstChild("OceanTD_AutoPlantOnRings")
+	if not gui or not gui:IsA("ScreenGui") then
+		local made = Instance.new("ScreenGui")
+		made.Name = "OceanTD_AutoPlantOnRings"
+		made.ResetOnSpawn = false
+		made.IgnoreGuiInset = false
+		made.DisplayOrder = 90
+		made.Parent = pg
+		gui = made
+	end
+	local size = h.AbsoluteSize
+	local growSec = 1.4
+	local growInfo = TweenInfo.new(growSec, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+	local fadeInfo = TweenInfo.new(growSec * 0.5, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+	for i = 1, 3 do
+		task.delay((i - 1) * 0.16, function()
+			if not gui or not gui.Parent then
+				return
+			end
+			local ring = Instance.new("Frame")
+			ring.Name = "Ring"
+			ring.AnchorPoint = Vector2.new(0.5, 0.5)
+			ring.Position = UDim2.fromOffset(center.X, center.Y)
+			ring.Size = UDim2.fromOffset(size.X, size.Y)
+			ring.BackgroundTransparency = 1
+			ring.BorderSizePixel = 0
+			ring.ZIndex = 2
+			ring.Parent = gui
+			local corner = Instance.new("UICorner")
+			corner.CornerRadius = UDim.new(1, 0)
+			corner.Parent = ring
+			local stroke = Instance.new("UIStroke")
+			stroke.Color = Color3.fromRGB(255, 36, 42)
+			stroke.Thickness = 5
+			stroke.Transparency = 0.05
+			stroke.Parent = ring
+			local sc = Instance.new("UIScale")
+			sc.Scale = 1
+			sc.Parent = ring
+			TweenService:Create(sc, growInfo, { Scale = 10 }):Play()
+			task.delay(growSec * 0.5, function()
+				if not stroke.Parent then
+					return
+				end
+				local fade = TweenService:Create(stroke, fadeInfo, { Transparency = 1 })
+				fade.Completed:Once(function()
+					ring:Destroy()
+				end)
+				fade:Play()
+			end)
+		end)
+	end
+end
+
 -- Brief bright-green pop when a seed orb / slide lands on this button.
 function AutoPlantHudSlot.flashArrive()
 	if not circle or not host or not host.Visible then
@@ -1005,13 +1070,15 @@ function AutoPlantHudSlot.mount(d: Deps)
 		end)
 	end
 
+	AutoPlantUI.onAutoTurnedOff(function()
+		AutoPlantHudSlot.playAutoOnRings()
+	end)
 	AutoPlantUI.onStateChanged(function()
 		if host and host.Visible then
 			-- Keep idle running; refresh colors / current frame text.
 			startIdle()
 		end
 	end)
-	AutoPlantUI.onFailHint(showAutoPlantFailHint)
 	InventoryState.onOpenChanged(function()
 		AutoPlantHudSlot.syncVisibility()
 	end)
@@ -1022,6 +1089,21 @@ function AutoPlantHudSlot.mount(d: Deps)
 		AutoPlantHudSlot.syncVisibility()
 	end)
 	local pg = d.playerGui
+	AutoPlantUI.onFailHint(function(hint: string, fromHarvest: boolean?, placeCapRoom: number?)
+		showAutoPlantFailHint(hint)
+		if fromHarvest ~= true then
+			return
+		end
+		-- Place cap full → Increase Max Planted. Open plot spots gone, cap still has room → Plot Size.
+		local kind = "PlaceMore"
+		if hint == "GROW PLOT" and (placeCapRoom or 0) > 0 then
+			kind = "PlotSize"
+		elseif hint ~= "PLOT MAXED" and hint ~= "GROW PLOT" then
+			return
+		end
+		pg:SetAttribute("OceanTD_HarvestAutoPlantCta", kind)
+		pg:SetAttribute("OceanTD_HarvestAutoPlantCtaAt", os.clock())
+	end)
 	pg:GetAttributeChangedSignal("OceanTD_SkillsBubblesOpen"):Connect(function()
 		AutoPlantHudSlot.syncVisibility()
 	end)

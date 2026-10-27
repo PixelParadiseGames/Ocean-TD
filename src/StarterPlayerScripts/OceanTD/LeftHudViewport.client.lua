@@ -701,6 +701,14 @@ end
 
 task.spawn(function()
 	playerGui:WaitForChild("MobileLeftUI", 60)
+	LeftHudLayout.watchMobileLeftUi(playerGui, function(leftNow: Instance)
+		LeftHudLayout.hardenScreenGui(leftNow)
+		applyLeftHud()
+	end)
+	player.CharacterAdded:Connect(function()
+		task.defer(applyLeftHud)
+		task.delay(0.4, applyLeftHud)
+	end)
 	bindCamera(Workspace.CurrentCamera)
 	Workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function()
 		bindCamera(Workspace.CurrentCamera)
@@ -741,9 +749,11 @@ task.spawn(function()
 		end
 		hideLooseDollarGlyphs(left)
 		if snap.running == true then
+			applyLeftHud()
 			local dCount = LeftHudLayout.findDCount(left)
 			if dCount then
 				dCount.Visible = true
+				dCount.BackgroundColor3 = DARK_GREEN
 			end
 		end
 	end)

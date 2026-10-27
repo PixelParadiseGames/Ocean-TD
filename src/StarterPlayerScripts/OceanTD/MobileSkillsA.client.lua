@@ -714,6 +714,52 @@ task.spawn(function()
 		startClosePulse()
 	end
 
+	local function pickSkillsPanel(): Instance?
+		local fallback: Instance? = nil
+		for _, ch in ipairs(playerGui:GetChildren()) do
+			if ch.Name == "MobileSkillsA" then
+				if ch:FindFirstChild("dPad", true) then
+					return ch
+				end
+				fallback = ch
+			end
+		end
+		if panel.Parent then
+			return panel
+		end
+		return fallback
+	end
+
+	local function adoptSkillsPanel(nextPanel: Instance)
+		if nextPanel == panel then
+			LeftHudLayout.hardenScreenGui(nextPanel)
+			return
+		end
+		if panel.Parent and panel ~= nextPanel and panel:IsA("ScreenGui") then
+			(panel :: ScreenGui).Enabled = false
+		end
+		panel = nextPanel
+		panelGui = if panel:IsA("ScreenGui") then panel else ancestorScreenGui(panel)
+		LeftHudLayout.hardenScreenGui(panel)
+		if panel:IsA("ScreenGui") then
+			(panel :: ScreenGui).IgnoreGuiInset = true
+			pcall(function()
+				(panel :: any).ScreenInsets = Enum.ScreenInsets.None
+			end)
+		end
+		bindSkillsViewportScale(panel)
+		SkillPowerUpUI.bind(panel)
+	end
+
+	local function ensureLiveSkillsPanel()
+		local live = pickSkillsPanel()
+		if live and live ~= panel then
+			adoptSkillsPanel(live)
+		else
+			LeftHudLayout.hardenScreenGui(panel)
+		end
+	end
+
 	local function ensureSkillsCloseViable()
 		local left = playerGui:FindFirstChild("MobileLeftUI")
 		local dPad = left and left:FindFirstChild("dPad")
@@ -743,6 +789,10 @@ task.spawn(function()
 		open = want
 		openToken += 1
 		local myToken = openToken
+		if want then
+			-- Respawn can replace MobileSkillsA. Bubbles, veil, and dPad live on the new copy.
+			ensureLiveSkillsPanel()
+		end
 
 		if want and leftGui and panelGui then
 			-- Bubbles under left HUD (Skills close must stay clickable), above seed wheel.
@@ -767,6 +817,16 @@ task.spawn(function()
 				(panel :: GuiObject).Visible = true
 			end
 			SkillsBubbleSim.start(panel)
+			if not SkillsBubbleSim.isRunning() then
+				ensureLiveSkillsPanel()
+				if panel:FindFirstChild("dPad", true) then
+					if panel:IsA("ScreenGui") then
+						(panel :: ScreenGui).Enabled = true
+					end
+					SkillsBubbleSim.preHide(panel)
+					SkillsBubbleSim.start(panel)
+				end
+			end
 			if isGamepadMode() and SkillsBubbleSim.isRunning() then
 				SkillsBubbleSim.setGamepadFocus(1)
 			end
@@ -1029,6 +1089,16 @@ task.spawn(function()
 	LeftHudLayout.watchMobileLeftUi(playerGui, function()
 		rebindSkillsChrome()
 	end)
+	playerGui.ChildAdded:Connect(function(ch)
+		if ch.Name ~= "MobileSkillsA" then
+			return
+		end
+		task.defer(function()
+			if ch.Parent then
+				adoptSkillsPanel(ch)
+			end
+		end)
+	end)
 	task.spawn(function()
 		while true do
 			task.wait(2)
@@ -1037,6 +1107,10 @@ task.spawn(function()
 				and skillsBtn:FindFirstChild("_OceanTD_SkillsHit")
 			if not hitOk then
 				rebindSkillsChrome()
+			end
+			local live = pickSkillsPanel()
+			if live and live ~= panel and not open then
+				adoptSkillsPanel(live)
 			end
 		end
 	end)
